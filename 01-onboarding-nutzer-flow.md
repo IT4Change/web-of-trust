@@ -12,7 +12,7 @@ flowchart TD
     How -->|Selbstständig| Solo["Erstellt ID alleine"]
     
     Invited --> Verify["Gegenseitige Verifizierung"]
-    Verify --> Connected["Vernetzt - Sieht Content"]
+    Verify --> Connected["Sofort vernetzt - Sieht Content"]
     
     Solo --> Alone["Hat ID aber leeres Netzwerk"]
     Alone --> Later["Muss später Menschen treffen"]
@@ -84,7 +84,6 @@ sequenceDiagram
 
     Note over A,B: Ben ist im Netzwerk!
     Note over B: Sieht Annas Content - Kann eigenen Content teilen
-    Note over A: Kann Content mit Ben teilen - Sieht Bens Content
 ```
 
 ## Variante: Selbstständiges Onboarding
@@ -405,26 +404,33 @@ sequenceDiagram
 
 ```mermaid
 flowchart TD
-    Start(["Onboarding startet"]) --> Step1["App installiert"]
-    Step1 --> Step2["Profil angelegt"]
-    Step2 --> Step3["ID generiert"]
-    Step3 --> Step4["Recovery-Phrase angezeigt"]
-    Step4 --> Step5["Quiz bestanden"]
-    Step5 --> Step6["Verifizierung"]
+    subgraph Safe["Abbruch OK"]
+        Step1["1. App installiert"]
+        Step2["2. Profil angelegt"]
+    end
     
-    Step1 -->|Abbruch| Cancel1["Kein Problem"]
-    Step2 -->|Abbruch| Cancel2["Profil verworfen"]
+    subgraph Blocked["Abbruch BLOCKIERT"]
+        Step3["3. ID generiert"]
+        Step4["4. Recovery-Phrase"]
+        Step5["5. Quiz"]
+    end
     
-    Step3 -->|Abbruch| Cancel3["KRITISCH - ID existiert aber Phrase nicht angezeigt"]
+    subgraph CanContinue["Abbruch OK - Später fortfahren"]
+        Step6["6. Verifizierung"]
+    end
     
-    Step4 -->|Abbruch| Cancel4["KRITISCH - Phrase angezeigt, Quiz nicht bestanden"]
+    Step1 --> Step2 --> Step3 --> Step4 --> Step5 --> Step6 --> Done(["Fertig"])
     
-    Step5 -->|Abbruch| Cancel5["ID und Backup bestätigt - OK"]
-    Step6 -->|Abbruch| Cancel6["Status Pending - OK"]
-    
-    style Cancel3 fill:#FFB6C1
-    style Cancel4 fill:#FFB6C1
+    style Safe fill:#E4FFE4
+    style Blocked fill:#FFE4E4
+    style CanContinue fill:#E4F4FF
 ```
+
+| Phase | Was passiert bei Abbruch? |
+|-------|---------------------------|
+| 1-2 | Kein Problem, nichts gespeichert |
+| 3-5 | **Blockiert!** App lässt nicht schließen bis Quiz bestanden |
+| 6 | OK - ID und Backup gesichert, nur noch nicht vernetzt |
 
 **Wichtig:** 
 - Nach Schritt 3 (ID generiert) blockiert die App das Schließen/Zurückgehen

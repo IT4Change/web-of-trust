@@ -319,35 +319,64 @@ flowchart LR
 ### Onboarding-Abbruch
 
 ```mermaid
-stateDiagram-v2
-    [*] --> NotStarted
+flowchart TD
+    subgraph Safe["Abbruch OK - Kein Problem"]
+        S1["1. App installieren"]
+        S2["2. Profil eingeben"]
+    end
     
-    NotStarted --> AppInstalled: App installieren
-    AppInstalled --> ProfileEntered: Profil eingeben
-    ProfileEntered --> KeysGenerated: Keys generieren
-    KeysGenerated --> MnemonicShown: Mnemonic anzeigen
-    MnemonicShown --> QuizPassed: Quiz bestehen
-    QuizPassed --> VerificationDone: Verifizierung
-    VerificationDone --> [*]: Fertig
+    subgraph Blocked["Abbruch BLOCKIERT"]
+        S3["3. Keys generieren"]
+        S4["4. Mnemonic anzeigen"]
+        S5["5. Quiz"]
+    end
     
-    NotStarted --> [*]: Abbruch OK
-    AppInstalled --> [*]: Abbruch OK
-    ProfileEntered --> [*]: Abbruch OK
+    subgraph Ready["Abbruch OK - Kann später fortfahren"]
+        S6["6. Verifizierung"]
+    end
     
-    KeysGenerated --> BLOCKED: Abbruch blockiert
-    MnemonicShown --> BLOCKED: Abbruch blockiert
+    S1 --> S2 --> S3 --> S4 --> S5 --> S6 --> Done(["Fertig"])
     
-    state BLOCKED {
-        [*] --> MustComplete
-        MustComplete: Navigation blockiert bis Quiz bestanden
-    }
-    
-    QuizPassed --> PartialSetup: Abbruch OK
-    state PartialSetup {
-        [*] --> HasID
-        HasID: ID und Backup verifiziert
-    }
+    style Safe fill:#E4FFE4,stroke:#00AA00
+    style Blocked fill:#FFE4E4,stroke:#FF0000
+    style Ready fill:#E4F4FF,stroke:#0066AA
 ```
+
+### Abbruch-Zustände erklärt
+
+| Phase | Abbruch möglich? | Was passiert? |
+|-------|------------------|---------------|
+| **1-2: App & Profil** | ✅ Ja | Nichts gespeichert, Neustart jederzeit |
+| **3-5: Keys bis Quiz** | ❌ Nein, blockiert | Keys existieren aber Recovery nicht gesichert = gefährlich |
+| **6: Verifizierung** | ✅ Ja | ID + Backup vorhanden, nur noch nicht vernetzt |
+
+### Nach Abbruch in Phase 6 ("PartialSetup")
+
+Der Nutzer hat:
+- ✅ Eigene ID (funktionsfähig)
+- ✅ Private Key (sicher gespeichert)  
+- ✅ Recovery-Phrase (Quiz bestanden = nachweislich gesichert)
+- ❌ Noch keine Kontakte
+
+**Was die App zeigt:**
+
+```
+┌─────────────────────────────────┐
+│                                 │
+│   👋 Willkommen zurück!         │
+│                                 │
+│   Du hast noch keine Kontakte.  │
+│                                 │
+│   Triff jemanden mit Web of     │
+│   Trust oder lade jemanden ein. │
+│                                 │
+│   [ QR-Code zeigen ]            │
+│   [ QR-Code scannen ]           │
+│                                 │
+└─────────────────────────────────┘
+```
+
+Der Nutzer kann jederzeit weitermachen - es ist kein Problem, nur "unfertig".
 
 ### Quiz-Ablauf im Detail
 
