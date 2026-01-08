@@ -1,8 +1,8 @@
 import { UserCheck, Share2, Award, ArrowRight } from 'lucide-react'
 
 const problems = [
-  { before: 'Globale Plattformen, lokale Einsamkeit', after: 'Menschen im echten Leben zusammenbringen' },
-  { before: 'Daten bei Konzernen', after: 'Daten bei dir' },
+  { before: 'Social Media bindet unsere Aufmerksamkeit', after: 'Menschen im echten Leben zusammenbringen' },
+  { before: 'Deine Daten liegen bei Konzernen', after: 'Deine Daten liegen bei dir' },
   { before: 'Vertrauen durch Sternebewertungen', after: 'Vertrauen durch persönliche Begegnungen' },
   { before: 'Account-Erstellung alleine am Bildschirm', after: 'Onboarding durch einen Menschen' },
   { before: 'Abhängigkeit von Servern', after: 'Funktioniert offline' },

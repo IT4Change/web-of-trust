@@ -64,7 +64,7 @@ export default function Hero() {
               Mehr erfahren
             </a>
             <a
-              href="https://github.com/IT4Change/web-of-trust"
+              href="https://github.com/antontranelis/web-of-trust-concept"
               target="_blank"
               rel="noopener noreferrer"
               className="btn-secondary"

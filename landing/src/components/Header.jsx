@@ -40,7 +40,7 @@ export default function Header() {
               </a>
             ))}
             <a
-              href="https://github.com/IT4Change/web-of-trust"
+              href="https://github.com/antontranelis/web-of-trust-concept"
               target="_blank"
               rel="noopener noreferrer"
               className="btn-primary text-sm py-2"
@@ -73,7 +73,7 @@ export default function Header() {
                 </a>
               ))}
               <a
-                href="https://github.com/IT4Change/web-of-trust"
+                href="https://github.com/antontranelis/web-of-trust-concept"
                 target="_blank"
                 rel="noopener noreferrer"
                 className="btn-primary text-sm py-2 text-center"

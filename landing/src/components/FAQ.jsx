@@ -147,7 +147,7 @@ export default function FAQ() {
             Noch mehr Fragen?
           </p>
           <a
-            href="https://github.com/IT4Change/web-of-trust/issues"
+            href="https://github.com/antontranelis/web-of-trust-concept/issues"
             target="_blank"
             rel="noopener noreferrer"
             className="btn-secondary"

@@ -3,13 +3,13 @@ import { Github, FileText, MessageCircle, Heart } from 'lucide-react'
 const links = {
   projekt: [
     { label: 'Konzept', href: 'https://github.com/antontranelis/web-of-trust-concept' },
-    { label: 'Prototyp', href: 'https://github.com/IT4Change/web-of-trust' },
+    { label: 'Prototyp', href: 'https://github.com/antontranelis/web-of-trust-concept' },
     { label: 'Spezifikation', href: 'https://github.com/antontranelis/web-of-trust-concept' },
   ],
   mitmachen: [
-    { label: 'GitHub Issues', href: 'https://github.com/IT4Change/web-of-trust/issues' },
-    { label: 'Feedback geben', href: 'https://github.com/IT4Change/web-of-trust/discussions' },
-    { label: 'Code beitragen', href: 'https://github.com/IT4Change/web-of-trust/pulls' },
+    { label: 'GitHub Issues', href: 'https://github.com/antontranelis/web-of-trust-concept/issues' },
+    { label: 'Feedback geben', href: 'https://github.com/antontranelis/web-of-trust-concept/discussions' },
+    { label: 'Code beitragen', href: 'https://github.com/antontranelis/web-of-trust-concept/pulls' },
   ],
 }
 
@@ -27,7 +27,7 @@ export default function Footer() {
           </p>
           <div className="flex flex-col sm:flex-row items-center justify-center gap-4">
             <a
-              href="https://github.com/IT4Change/web-of-trust"
+              href="https://github.com/antontranelis/web-of-trust-concept"
               target="_blank"
               rel="noopener noreferrer"
               className="inline-flex items-center gap-2 px-6 py-3 bg-white text-slate-900 font-medium rounded-lg hover:bg-slate-100 transition-colors"
