@@ -1,4 +1,4 @@
-import { ArrowDown, Users, Shield, Sparkles } from 'lucide-react'
+import { ArrowDown, Users, Shield, Sparkles, Plane } from 'lucide-react'
 
 export default function Hero() {
   return (
@@ -89,8 +89,8 @@ export default function Hero() {
             </div>
             <div className="flex items-center justify-center gap-3 text-slate-600">
               <div className="w-10 h-10 rounded-full bg-accent-100 flex items-center justify-center">
-                <svg className="w-5 h-5 text-accent-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                  <path d="M12 2v6m0 8v6M2 12h6m8 0h6" />
+                <svg className="w-5 h-5 text-accent-600" viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M22 16v-2l-8.5-5V3.5c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5V9L2 14v2l8.5-2.5V19L8 20.5V22l4-1 4 1v-1.5L13.5 19v-5.5L22 16z" />
                 </svg>
               </div>
               <span className="font-medium">Funktioniert offline</span>

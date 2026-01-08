@@ -16,16 +16,16 @@ export default function Header() {
       <nav className="section-container">
         <div className="flex items-center justify-between h-16">
           {/* Logo */}
-          <a href="#" className="flex items-center gap-2">
-            <div className="w-8 h-8 bg-primary-600 rounded-lg flex items-center justify-center">
-              <svg viewBox="0 0 24 24" className="w-5 h-5 text-white" fill="none" stroke="currentColor" strokeWidth="2">
-                <circle cx="8" cy="8" r="2" />
-                <circle cx="16" cy="8" r="2" />
-                <circle cx="12" cy="16" r="2" />
-                <path d="M8 8L16 8M8 8L12 16M16 8L12 16" />
+          <a href="#" className="flex items-center gap-3">
+            <div className="w-10 h-10 bg-primary-600 rounded-xl flex items-center justify-center">
+              <svg viewBox="0 0 24 24" className="w-10 h-10 text-white rotate-12" fill="currentColor" stroke="currentColor" strokeWidth="1">
+                <circle cx="7" cy="8" r="2" />
+                <circle cx="17" cy="8" r="2" />
+                <circle cx="12" cy="17" r="2" />
+                <path d="M7 8L17 8M7 8L12 17M17 8L12 17" strokeWidth="1.5" fill="none" />
               </svg>
             </div>
-            <span className="font-semibold text-slate-900">Web of Trust</span>
+            <span className="font-bold text-lg text-slate-900">Web of Trust</span>
           </a>
 
           {/* Desktop Navigation */}
