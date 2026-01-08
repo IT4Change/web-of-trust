@@ -70,7 +70,7 @@ export default function ProblemSolution() {
 
         {/* Problem/Solution Comparison */}
         <div className="mb-20">
-          <div className="grid md:grid-cols-2 gap-4 max-w-4xl mx-auto">
+          <div className="grid grid-cols-2 gap-4 max-w-4xl mx-auto">
             <div className="text-center md:text-right">
               <h3 className="text-sm font-semibold text-slate-400 uppercase tracking-wider mb-4">Heute</h3>
             </div>
@@ -81,12 +81,12 @@ export default function ProblemSolution() {
 
           <div className="space-y-3 max-w-4xl mx-auto">
             {problems.map((item, index) => (
-              <div key={index} className="grid md:grid-cols-2 gap-4 items-center">
-                <div className="bg-slate-100 rounded-lg p-4 text-center md:text-right">
-                  <span className="text-slate-500">{item.before}</span>
+              <div key={index} className="grid grid-cols-2 gap-4 items-center">
+                <div className="bg-slate-100 rounded-lg p-3 md:p-4 text-center md:text-right">
+                  <span className="text-slate-500 text-sm md:text-base">{item.before}</span>
                 </div>
-                <div className="bg-secondary-50 rounded-lg p-4 text-center md:text-left border border-secondary-200">
-                  <span className="text-secondary-700 font-medium">{item.after}</span>
+                <div className="bg-secondary-50 rounded-lg p-3 md:p-4 text-center md:text-left border border-secondary-200">
+                  <span className="text-secondary-700 font-medium text-sm md:text-base">{item.after}</span>
                 </div>
               </div>
             ))}

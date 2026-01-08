@@ -14,7 +14,7 @@ const steps = [
     icon: CheckCircle2,
     title: 'Identität bestätigen',
     description: 'Ben bestätigt: "Ich habe Anna persönlich getroffen."',
-    detail: 'Diese Verifizierung wird kryptographisch signiert. Sie ist der Anker für alle weiteren Interaktionen.',
+    detail: 'Diese Verifizierung wird kryptographisch signiert und gleichzeitig werden Schlüssel getauscht.',
     color: 'primary',
   },
   {
