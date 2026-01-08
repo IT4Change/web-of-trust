@@ -2,8 +2,6 @@
 
 > Dezentrales Vertrauensnetzwerk für lokale Gemeinschaften
 
-**Status:** Erprobungsphase / Forschungsprototyp
-
 ---
 
 ## Übersicht
