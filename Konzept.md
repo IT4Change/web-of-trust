@@ -8,7 +8,7 @@
 
 ## Vision
 
-Menschen vernetzen sich wieder lokal - basierend auf echten Begegnungen statt Algorithmen. Ein Netzwerk, das nur wächst, wenn Menschen sich im echten Leben treffen und füreinander bürgen.
+Menschen vernetzen sich wieder lokal - basierend auf echten Begegnungen statt Algorithmen. Ein Netzwerk, das nur wächst, wenn Menschen sich im echten Leben treffen, kooperieren und gegenseitig vertrauen.
 
 ---
 
