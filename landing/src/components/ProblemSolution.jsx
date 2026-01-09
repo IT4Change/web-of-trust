@@ -1,7 +1,7 @@
 import { UserCheck, Share2, Award, ArrowRight } from 'lucide-react'
 
 const problems = [
-  { before: 'Social Media bindet Aufmerksamkeit', after: 'Im echten Leben zusammenkommen' },
+  { before: 'Social Media bindet Aufmerksamkeit', after: 'Im echten Leben verbinden' },
   { before: 'Deine Daten liegen bei Konzernen', after: 'Deine Daten liegen bei dir' },
   { before: 'Vertrauen durch Likes und Sterne', after: 'Vertrauen durch echte Begegnungen' },
   { before: 'Account-Erstellung alleine am Bildschirm', after: 'Onboarding durch Freunde in einer Kette' },
