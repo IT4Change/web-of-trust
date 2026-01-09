@@ -26,7 +26,7 @@ const pillars = [
   {
     icon: Award,
     title: 'Attestieren',
-    description: 'Sozialkapital durch echte Taten aufbauen',
+    description: 'Reputation durch echte Taten aufbauen',
     color: 'accent',
     detail: 'Bestätige was andere getan haben. Diese Attestationen bauen über Zeit sichtbares Vertrauen auf.'
   },
@@ -108,7 +108,7 @@ export default function ProblemSolution() {
                 <div key={index} className="relative">
                   {/* Connector Arrow (except last) */}
                   {index < pillars.length - 1 && (
-                    <div className="hidden md:block absolute top-1/4 -right-4 z-10">
+                    <div className="hidden md:block absolute top-1/2 -translate-y-1/2 -right-4 translate-x-1/2 z-10">
                       <ArrowRight className="text-slate-300" size={24} />
                     </div>
                   )}

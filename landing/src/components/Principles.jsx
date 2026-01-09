@@ -41,9 +41,9 @@ const principles = [
 
 const notFeatures = [
   { icon: Ban, text: 'Kein Social Media zum Scrollen' },
-  { icon: Ban, text: 'Keine Blockchain oder Krypto-Token' },
   { icon: Ban, text: 'Keine Werbung oder Tracking' },
   { icon: Ban, text: 'Keine Algorithmen die entscheiden was du siehst' },
+  { icon: Ban, text: 'Keine Blockchain oder Crypto-Token' },
 ]
 
 const colorClasses = {

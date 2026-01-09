@@ -3,7 +3,7 @@ import { Flower2, Wrench, Code2, Users } from 'lucide-react'
 const personas = [
   {
     icon: Flower2,
-    emoji: '🌱',
+    image: '/farmer.svg',
     name: 'Hanna (62)',
     role: 'Die Gärtnerin',
     background: 'Aktiv im Gemeinschaftsgarten, nicht technikaffin, nutzt hauptsächlich WhatsApp.',
@@ -17,7 +17,7 @@ const personas = [
   },
   {
     icon: Wrench,
-    emoji: '🔧',
+    image: '/maker.svg',
     name: 'Alexander (34)',
     role: 'Der Macher',
     background: 'Kann alles reparieren, kennt viele Leute, organisiert Nachbarschaftshilfe.',
@@ -31,7 +31,7 @@ const personas = [
   },
   {
     icon: Code2,
-    emoji: '🎓',
+    image: '/lena.svg',
     name: 'Lena (28)',
     role: 'Die Skeptikerin',
     background: 'Softwareentwicklerin, Privacy-bewusst, hat schon viele "dezentrale" Projekte scheitern sehen.',
@@ -45,7 +45,7 @@ const personas = [
   },
   {
     icon: Users,
-    emoji: '👨‍👩‍👧',
+    image: '/family.svg',
     name: 'Familie Kowalski',
     role: 'Die Neuzugezogenen',
     background: 'Neu in der Stadt, kennen niemanden, wollen Anschluss finden.',
@@ -114,8 +114,12 @@ export default function Personas() {
               <div key={index} className={`card border ${colors.border}`}>
                 {/* Header */}
                 <div className="flex items-start gap-4 mb-6">
-                  <div className={`w-16 h-16 ${colors.bg} rounded-2xl flex items-center justify-center text-3xl`}>
-                    {persona.emoji}
+                  <div className={`w-16 h-16 ${colors.bg} rounded-2xl flex items-center justify-center overflow-hidden`}>
+                    {persona.image ? (
+                      <img src={persona.image} alt={persona.name} className="w-12 h-12 object-contain" />
+                    ) : (
+                      <span className="text-5xl">{persona.emoji}</span>
+                    )}
                   </div>
                   <div>
                     <h3 className="text-xl font-bold text-slate-900">

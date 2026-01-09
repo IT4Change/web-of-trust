@@ -7,7 +7,7 @@ const faqs = [
     questions: [
       {
         q: 'Was unterscheidet das von WhatsApp-Gruppen?',
-        a: 'Deine Daten liegen bei dir, nicht bei Meta. Alles funktioniert offline. Attestationen bauen sichtbares "Sozialkapital" auf. Kein Gruppen-Chaos mit 200 ungelesenen Nachrichten.',
+        a: 'Deine Daten liegen bei dir, nicht bei Meta. Alles funktioniert offline. Attestationen bauen sichtbare Reputation auf. Kein Gruppen-Chaos mit 200 ungelesenen Nachrichten.',
       },
       {
         q: 'Warum muss ich jemanden persönlich treffen?',

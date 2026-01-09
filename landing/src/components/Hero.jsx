@@ -74,7 +74,7 @@ export default function Hero() {
           </div>
 
           {/* Key Points */}
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-16">
             <div className="flex items-center justify-center gap-3 text-slate-600">
               <div className="w-10 h-10 rounded-full bg-primary-100 flex items-center justify-center">
                 <Users size={20} className="text-primary-600" />
@@ -99,7 +99,7 @@ export default function Hero() {
         </div>
 
         {/* Scroll Indicator */}
-        <div className="absolute bottom-8 left-1/2 -translate-x-1/2 animate-bounce">
+        <div className="absolute bottom-6 left-1/2 -translate-x-1/2 animate-bounce">
           <a href="#konzept" className="text-slate-400 hover:text-primary-600 transition-colors">
             <ArrowDown size={24} />
           </a>

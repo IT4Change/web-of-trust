@@ -68,7 +68,7 @@ Detaillierte Prozessbeschreibungen aus Nutzer- und technischer Perspektive.
 ┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
 │   VERIFIZIEREN  │ ──► │   KOOPERIEREN   │ ──► │   ATTESTIEREN   │
 │                 │     │                 │     │                 │
-│ Identität durch │     │ Verschlüsselte  │     │ Sozialkapital   │
+│ Identität durch │     │ Verschlüsselte  │     │ Reputation      │
 │ persönliches    │     │ Inhalte teilen  │     │ durch echte     │
 │ Treffen         │     │ (Kalender,      │     │ Taten aufbauen  │
 │ bestätigen      │     │ Karte, Projekte)│     │                 │
