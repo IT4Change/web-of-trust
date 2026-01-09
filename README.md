@@ -8,7 +8,6 @@ Das Web of Trust vernetzt Menschen, die sich im echten Leben treffen, kooperiere
 
 | Dokument | Beschreibung |
 | -------- | ------------ |
-| [Konzept](Konzept.md) | Vision, Personas, FAQ |
 | [Glossar](GLOSSAR.md) | Begriffsdefinitionen |
 
 ### Flows
