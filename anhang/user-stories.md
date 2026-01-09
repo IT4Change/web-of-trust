@@ -61,32 +61,4 @@ Vollständige Liste der User Stories für Web of Trust.
 
 ---
 
-## User Story Map
-
-```
-                    Onboarding  →  Verifizieren  →  Content teilen  →  Attestieren
-                         │              │                │                 │
-Must                 O-01, O-02      O-03            C-01, C-03        A-01, A-02, A-03
-                         │              │                │                 │
-Should                  O-04           -             C-02, C-04         A-04, A-05
-                         │              │                │                 │
-Could                   O-05           -             C-05, C-06            -
-```
-
----
-
-## Sicherheit (übergreifend)
-
-```
-                    Recovery  →  Multi-Device  →  Export
-                        │            │             │
-Must                S-01, S-02       -             -
-                        │            │             │
-Should                  -            -           S-03
-                        │            │             │
-Could                   -        S-04, S-05        -
-```
-
----
-
 *Siehe auch: [Personas](personas.md) für Nutzerprofile*
