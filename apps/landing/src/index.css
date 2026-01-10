@@ -1,8 +1,5 @@
 @import "tailwindcss";
-@import "@real-life-stack/toolkit/styles/globals.css";
-
-/* Scan toolkit components for Tailwind classes */
-@source "../../../../real-life-stack/packages/toolkit/src/**/*.{ts,tsx}";
+@import "./toolkit/globals.css";
 
 @custom-variant dark (&:is(.dark *));
 
