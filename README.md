@@ -2,53 +2,26 @@
 
 Das Web of Trust vernetzt Menschen, die sich im echten Leben treffen, kooperieren und gegenseitig vertrauen.
 
-## Monorepo-Struktur
+## Konzept
 
 ```text
-web-of-trust/
-├── packages/
-│   └── wot-core/          # @web-of-trust/core - npm Package
-├── apps/
-│   ├── demo/              # Demo-Anwendung (React 19)
-│   └── landing/           # Landing Page
-└── docs/                  # Protokoll-Spezifikation
+┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
+│   VERIFIZIEREN  │ ──► │   KOOPERIEREN   │ ──► │   ATTESTIEREN   │
+│                 │     │                 │     │                 │
+│ Identität durch │     │ Verschlüsselte  │     │ Reputation      │
+│ persönliches    │     │ Inhalte teilen  │     │ durch echte     │
+│ Treffen         │     │ (Kalender,      │     │ Taten aufbauen  │
+│ bestätigen      │     │ Karte, Projekte)│     │                 │
+└─────────────────┘     └─────────────────┘     └─────────────────┘
 ```
 
-## Schnellstart
+**Verifizieren ≠ Vertrauen**
 
-```bash
-# Dependencies installieren
-pnpm install
+Die Verifizierung bestätigt nur: "Das ist wirklich diese Person." Das eigentliche Vertrauen entsteht durch Attestationen über Zeit.
 
-# Demo starten
-pnpm dev:demo
+---
 
-# Landing Page starten
-pnpm dev:landing
-
-# wot-core bauen
-pnpm build:core
-```
-
-## @web-of-trust/core
-
-Das Core-Package exportiert:
-
-```typescript
-// Types
-import type { Identity, Contact, Verification, Attestation } from '@web-of-trust/core'
-
-// Adapter Interfaces
-import type { StorageAdapter, CryptoAdapter, SyncAdapter } from '@web-of-trust/core'
-
-// Crypto Utilities
-import { createDid, signJws, verifyJws } from '@web-of-trust/core'
-
-// Adapter Implementations
-import { WebCryptoAdapter, LocalStorageAdapter, NoOpSyncAdapter } from '@web-of-trust/core'
-```
-
-## Dokumentation
+## Spezifikation
 
 ### Einstieg
 
@@ -107,22 +80,53 @@ Detaillierte Prozessbeschreibungen aus Nutzer- und technischer Perspektive.
 
 ---
 
-## Konzept
+## Entwicklung
+
+### Monorepo-Struktur
 
 ```text
-┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
-│   VERIFIZIEREN  │ ──► │   KOOPERIEREN   │ ──► │   ATTESTIEREN   │
-│                 │     │                 │     │                 │
-│ Identität durch │     │ Verschlüsselte  │     │ Reputation      │
-│ persönliches    │     │ Inhalte teilen  │     │ durch echte     │
-│ Treffen         │     │ (Kalender,      │     │ Taten aufbauen  │
-│ bestätigen      │     │ Karte, Projekte)│     │                 │
-└─────────────────┘     └─────────────────┘     └─────────────────┘
+web-of-trust/
+├── packages/
+│   └── wot-core/          # @web-of-trust/core - npm Package
+├── apps/
+│   ├── demo/              # Demo-Anwendung (React 19)
+│   └── landing/           # Landing Page
+└── docs/                  # Protokoll-Spezifikation
 ```
 
-**Verifizieren ≠ Vertrauen**
+### Schnellstart
 
-Die Verifizierung bestätigt nur: "Das ist wirklich diese Person." Das eigentliche Vertrauen entsteht durch Attestationen über Zeit.
+```bash
+# Dependencies installieren
+pnpm install
+
+# Demo starten
+pnpm dev:demo
+
+# Landing Page starten
+pnpm dev:landing
+
+# wot-core bauen
+pnpm build:core
+```
+
+### @web-of-trust/core
+
+Das Core-Package exportiert:
+
+```typescript
+// Types
+import type { Identity, Contact, Verification, Attestation } from '@web-of-trust/core'
+
+// Adapter Interfaces
+import type { StorageAdapter, CryptoAdapter, SyncAdapter } from '@web-of-trust/core'
+
+// Crypto Utilities
+import { createDid, signJws, verifyJws } from '@web-of-trust/core'
+
+// Adapter Implementations
+import { WebCryptoAdapter, LocalStorageAdapter, NoOpSyncAdapter } from '@web-of-trust/core'
+```
 
 ---
 

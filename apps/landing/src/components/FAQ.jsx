@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { ChevronDown, ChevronUp } from 'lucide-react'
+import { Card, Button } from '@real-life-stack/toolkit'
 
 const faqs = [
   {
@@ -74,21 +75,21 @@ const faqs = [
 
 function FAQItem({ question, answer, isOpen, onClick }) {
   return (
-    <div className="border-b border-slate-200 last:border-b-0">
+    <div className="border-b border-border last:border-b-0">
       <button
         className="w-full py-5 flex items-center justify-between text-left"
         onClick={onClick}
       >
-        <span className="font-medium text-slate-900 pr-4">{question}</span>
+        <span className="font-medium text-foreground pr-4">{question}</span>
         {isOpen ? (
-          <ChevronUp className="flex-shrink-0 text-primary-600" size={20} />
+          <ChevronUp className="shrink-0 text-primary" size={20} />
         ) : (
-          <ChevronDown className="flex-shrink-0 text-slate-400" size={20} />
+          <ChevronDown className="shrink-0 text-muted-foreground" size={20} />
         )}
       </button>
       {isOpen && (
         <div className="pb-5 pr-8">
-          <p className="text-slate-600">{answer}</p>
+          <p className="text-muted-foreground">{answer}</p>
         </div>
       )}
     </div>
@@ -107,14 +108,14 @@ export default function FAQ() {
   }
 
   return (
-    <section id="faq" className="section-padding bg-white">
-      <div className="section-container">
+    <section id="faq" className="py-16 md:py-24 bg-background">
+      <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8">
         {/* Section Header */}
         <div className="text-center mb-16">
-          <h2 className="heading-2 text-slate-900 mb-4">
+          <h2 className="text-3xl md:text-4xl font-bold tracking-tight text-foreground mb-4">
             Häufig gestellte Fragen
           </h2>
-          <p className="text-body max-w-2xl mx-auto">
+          <p className="text-lg text-muted-foreground leading-relaxed max-w-2xl mx-auto">
             Antworten auf die wichtigsten Fragen zum Web of Trust.
           </p>
         </div>
@@ -123,10 +124,10 @@ export default function FAQ() {
         <div className="max-w-3xl mx-auto">
           {faqs.map((category, categoryIndex) => (
             <div key={categoryIndex} className="mb-10 last:mb-0">
-              <h3 className="text-sm font-semibold text-primary-600 uppercase tracking-wider mb-4">
+              <h3 className="text-sm font-semibold text-primary uppercase tracking-wider mb-4">
                 {category.category}
               </h3>
-              <div className="card">
+              <Card className="px-6 gap-0">
                 {category.questions.map((item, questionIndex) => (
                   <FAQItem
                     key={questionIndex}
@@ -136,24 +137,25 @@ export default function FAQ() {
                     onClick={() => toggleItem(categoryIndex, questionIndex)}
                   />
                 ))}
-              </div>
+              </Card>
             </div>
           ))}
         </div>
 
         {/* More Questions */}
         <div className="mt-12 text-center">
-          <p className="text-slate-600 mb-4">
+          <p className="text-muted-foreground mb-4">
             Noch mehr Fragen?
           </p>
-          <a
-            href="https://github.com/antontranelis/web-of-trust-concept/issues"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="btn-secondary"
-          >
-            Auf GitHub stellen
-          </a>
+          <Button asChild variant="outline">
+            <a
+              href="https://github.com/antontranelis/web-of-trust-concept/issues"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              Auf GitHub stellen
+            </a>
+          </Button>
         </div>
       </div>
     </section>

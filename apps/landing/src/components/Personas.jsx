@@ -1,4 +1,5 @@
 import { Flower2, Wrench, Code2, Users } from 'lucide-react'
+import { Card } from '@real-life-stack/toolkit'
 
 const personas = [
   {
@@ -61,45 +62,45 @@ const personas = [
 
 const colorClasses = {
   green: {
-    bg: 'bg-green-100',
-    text: 'text-green-600',
-    border: 'border-green-200',
-    badge: 'bg-green-50 text-green-700',
-    dot: 'bg-green-500',
+    bg: 'bg-secondary/10',
+    text: 'text-secondary',
+    border: 'border-secondary/20',
+    badge: 'bg-secondary/5 text-secondary',
+    dot: 'bg-secondary',
   },
   orange: {
-    bg: 'bg-orange-100',
-    text: 'text-orange-600',
-    border: 'border-orange-200',
-    badge: 'bg-orange-50 text-orange-700',
-    dot: 'bg-orange-500',
+    bg: 'bg-warning/10',
+    text: 'text-warning',
+    border: 'border-warning/20',
+    badge: 'bg-warning/10 text-warning',
+    dot: 'bg-warning',
   },
   blue: {
-    bg: 'bg-blue-100',
-    text: 'text-blue-600',
-    border: 'border-blue-200',
-    badge: 'bg-blue-50 text-blue-700',
-    dot: 'bg-blue-500',
+    bg: 'bg-primary/10',
+    text: 'text-primary',
+    border: 'border-primary/20',
+    badge: 'bg-primary/5 text-primary',
+    dot: 'bg-primary',
   },
   purple: {
-    bg: 'bg-purple-100',
-    text: 'text-purple-600',
-    border: 'border-purple-200',
-    badge: 'bg-purple-50 text-purple-700',
-    dot: 'bg-purple-500',
+    bg: 'bg-pink/10',
+    text: 'text-pink',
+    border: 'border-pink/20',
+    badge: 'bg-pink/10 text-pink',
+    dot: 'bg-pink',
   },
 }
 
 export default function Personas() {
   return (
-    <section id="personas" className="section-padding bg-white">
-      <div className="section-container">
+    <section id="personas" className="py-16 md:py-24 bg-background">
+      <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8">
         {/* Section Header */}
         <div className="text-center mb-16">
-          <h2 className="heading-2 text-slate-900 mb-4">
+          <h2 className="text-3xl md:text-4xl font-bold tracking-tight text-foreground mb-4">
             Für wen ist das Web of Trust?
           </h2>
-          <p className="text-body max-w-2xl mx-auto">
+          <p className="text-lg text-muted-foreground leading-relaxed max-w-2xl mx-auto">
             Menschen aus lokalen Gemeinschaften, die echte Verbindungen aufbauen wollen.
           </p>
         </div>
@@ -111,7 +112,7 @@ export default function Personas() {
             const Icon = persona.icon
 
             return (
-              <div key={index} className={`card border ${colors.border}`}>
+              <Card key={index} className={`px-6 gap-0 ${colors.border}`}>
                 {/* Header */}
                 <div className="flex items-start gap-4 mb-6">
                   <div className={`w-16 h-16 ${colors.bg} rounded-2xl flex items-center justify-center overflow-hidden`}>
@@ -122,7 +123,7 @@ export default function Personas() {
                     )}
                   </div>
                   <div>
-                    <h3 className="text-xl font-bold text-slate-900">
+                    <h3 className="text-xl font-bold text-foreground">
                       {persona.name}
                     </h3>
                     <span className={`inline-block px-3 py-1 rounded-full text-sm font-medium ${colors.badge} mt-1`}>
@@ -132,18 +133,18 @@ export default function Personas() {
                 </div>
 
                 {/* Background */}
-                <p className="text-slate-600 mb-4">
+                <p className="text-muted-foreground mb-4">
                   {persona.background}
                 </p>
 
                 {/* Needs */}
                 <div className="mb-4">
-                  <h4 className="text-sm font-semibold text-slate-400 uppercase tracking-wider mb-2">
+                  <h4 className="text-sm font-semibold text-muted-foreground/70 uppercase tracking-wider mb-2">
                     Bedürfnisse
                   </h4>
                   <ul className="space-y-1">
                     {persona.needs.map((need, needIndex) => (
-                      <li key={needIndex} className="flex items-center gap-2 text-slate-600">
+                      <li key={needIndex} className="flex items-center gap-2 text-muted-foreground">
                         <span className={`w-1.5 h-1.5 rounded-full ${colors.dot}`} />
                         {need}
                       </li>
@@ -156,18 +157,18 @@ export default function Personas() {
                   <h4 className={`text-sm font-semibold ${colors.text} mb-2`}>
                     Wie Web of Trust hilft
                   </h4>
-                  <p className="text-slate-700 text-sm">
+                  <p className="text-foreground/80 text-sm">
                     {persona.howItHelps}
                   </p>
                 </div>
-              </div>
+              </Card>
             )
           })}
         </div>
 
         {/* Note */}
         <div className="mt-12 text-center">
-          <p className="text-slate-500 text-sm max-w-xl mx-auto">
+          <p className="text-muted-foreground text-sm max-w-xl mx-auto">
             Das Netzwerk wächst nur durch echte Begegnungen - das dauert, aber das ist der Punkt.
             Keine Masseneinladungen, keine Fake-Accounts.
           </p>

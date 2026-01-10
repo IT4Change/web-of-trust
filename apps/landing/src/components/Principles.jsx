@@ -1,4 +1,5 @@
 import { Lock, Users, WifiOff, Github, Ban, Database, Key, RefreshCw } from 'lucide-react'
+import { Card } from '@real-life-stack/toolkit'
 
 const principles = [
   {
@@ -48,33 +49,33 @@ const notFeatures = [
 
 const colorClasses = {
   primary: {
-    bg: 'bg-primary-100',
-    text: 'text-primary-600',
+    bg: 'bg-primary/10',
+    text: 'text-primary',
   },
   secondary: {
-    bg: 'bg-secondary-100',
-    text: 'text-secondary-600',
+    bg: 'bg-secondary/10',
+    text: 'text-secondary',
   },
   accent: {
-    bg: 'bg-accent-100',
-    text: 'text-accent-600',
+    bg: 'bg-warning/10',
+    text: 'text-warning',
   },
   slate: {
-    bg: 'bg-slate-100',
-    text: 'text-slate-600',
+    bg: 'bg-muted',
+    text: 'text-muted-foreground',
   },
 }
 
 export default function Principles() {
   return (
-    <section className="section-padding bg-slate-50">
-      <div className="section-container">
+    <section className="py-16 md:py-24 bg-muted">
+      <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8">
         {/* Section Header */}
         <div className="text-center mb-16">
-          <h2 className="heading-2 text-slate-900 mb-4">
+          <h2 className="text-3xl md:text-4xl font-bold tracking-tight text-foreground mb-4">
             Unsere Prinzipien
           </h2>
-          <p className="text-body max-w-2xl mx-auto">
+          <p className="text-lg text-muted-foreground leading-relaxed max-w-2xl mx-auto">
             Was das Web of Trust ausmacht - und was es bewusst nicht ist.
           </p>
         </div>
@@ -86,34 +87,34 @@ export default function Principles() {
             const Icon = principle.icon
 
             return (
-              <div key={index} className="card">
+              <Card key={index} className="px-6 gap-0">
                 <div className={`w-12 h-12 ${colors.bg} rounded-xl flex items-center justify-center mb-4`}>
                   <Icon className={colors.text} size={24} />
                 </div>
-                <h3 className="text-lg font-semibold text-slate-900 mb-2">
+                <h3 className="text-lg font-semibold text-foreground mb-2">
                   {principle.title}
                 </h3>
-                <p className="text-slate-600 text-sm">
+                <p className="text-muted-foreground text-sm">
                   {principle.description}
                 </p>
-              </div>
+              </Card>
             )
           })}
         </div>
 
         {/* What It's Not */}
         <div className="max-w-3xl mx-auto">
-          <div className="bg-slate-900 rounded-2xl p-8 text-white">
+          <div className="bg-foreground rounded-2xl p-8 text-background">
             <h3 className="text-xl font-bold mb-6 text-center">
-              Was Web of Trust <span className="text-red-400">nicht</span> ist
+              Was Web of Trust <span className="text-destructive">nicht</span> ist
             </h3>
             <div className="grid sm:grid-cols-2 gap-4">
               {notFeatures.map((item, index) => {
                 const Icon = item.icon
                 return (
                   <div key={index} className="flex items-center gap-3">
-                    <Icon className="text-red-400 flex-shrink-0" size={20} />
-                    <span className="text-slate-300">{item.text}</span>
+                    <Icon className="text-destructive flex-shrink-0" size={20} />
+                    <span className="text-background/70">{item.text}</span>
                   </div>
                 )
               })}
@@ -123,7 +124,7 @@ export default function Principles() {
 
         {/* Bottom Note */}
         <div className="mt-12 text-center">
-          <div className="inline-flex items-center gap-2 text-slate-500">
+          <div className="inline-flex items-center gap-2 text-muted-foreground">
             <RefreshCw size={16} />
             <span className="text-sm">
               Dies ist ein Forschungsprojekt - wir lernen und verbessern kontinuierlich

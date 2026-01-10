@@ -1,4 +1,5 @@
 import { UserCheck, Share2, Award, ArrowRight } from 'lucide-react'
+import { Card } from '@real-life-stack/toolkit'
 
 const problems = [
   { before: 'Social Media bindet Aufmerksamkeit', after: 'Im echten Leben verbinden' },
@@ -34,35 +35,35 @@ const pillars = [
 
 const colorClasses = {
   primary: {
-    bg: 'bg-primary-100',
-    text: 'text-primary-600',
-    border: 'border-primary-200',
-    gradient: 'from-primary-500 to-primary-600',
+    bg: 'bg-primary/10',
+    text: 'text-primary',
+    border: 'border-primary/20',
+    gradient: 'from-primary to-primary/80',
   },
   secondary: {
-    bg: 'bg-secondary-100',
-    text: 'text-secondary-600',
-    border: 'border-secondary-200',
-    gradient: 'from-secondary-500 to-secondary-600',
+    bg: 'bg-secondary/10',
+    text: 'text-secondary',
+    border: 'border-secondary/20',
+    gradient: 'from-secondary to-secondary/80',
   },
   accent: {
-    bg: 'bg-accent-100',
-    text: 'text-accent-600',
-    border: 'border-accent-200',
-    gradient: 'from-accent-500 to-accent-600',
+    bg: 'bg-warning/10',
+    text: 'text-warning',
+    border: 'border-warning/20',
+    gradient: 'from-warning to-warning/80',
   },
 }
 
 export default function ProblemSolution() {
   return (
-    <section id="konzept" className="section-padding bg-white">
-      <div className="section-container">
+    <section id="konzept" className="py-16 md:py-24 bg-background">
+      <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8">
         {/* Section Header */}
         <div className="text-center mb-16">
-          <h2 className="heading-2 text-slate-900 mb-4">
+          <h2 className="text-3xl md:text-4xl font-bold tracking-tight text-foreground mb-4">
             Ein anderer Ansatz
           </h2>
-          <p className="text-body max-w-2xl mx-auto">
+          <p className="text-lg text-muted-foreground leading-relaxed max-w-2xl mx-auto">
             Wir setzen auf lokale Gemeinschaften statt globaler Plattformen.
             Statt Algorithmen bauen wir auf echte Begegnungen.
           </p>
@@ -72,21 +73,21 @@ export default function ProblemSolution() {
         <div className="mb-20">
           <div className="grid grid-cols-2 gap-4 max-w-4xl mx-auto">
             <div className="text-center md:text-right">
-              <h3 className="text-sm font-semibold text-slate-400 uppercase tracking-wider mb-4">Heute</h3>
+              <h3 className="text-sm font-semibold text-muted-foreground/70 uppercase tracking-wider mb-4">Heute</h3>
             </div>
             <div className="text-center md:text-left">
-              <h3 className="text-sm font-semibold text-secondary-600 uppercase tracking-wider mb-4">Besser</h3>
+              <h3 className="text-sm font-semibold text-secondary uppercase tracking-wider mb-4">Besser</h3>
             </div>
           </div>
 
           <div className="space-y-3 max-w-4xl mx-auto">
             {problems.map((item, index) => (
               <div key={index} className="grid grid-cols-2 gap-4 items-center">
-                <div className="bg-slate-100 rounded-lg p-3 md:p-4 text-center md:text-right">
-                  <span className="text-slate-500 text-sm md:text-base">{item.before}</span>
+                <div className="bg-muted rounded-lg p-3 md:p-4 text-center md:text-right">
+                  <span className="text-muted-foreground text-sm md:text-base">{item.before}</span>
                 </div>
-                <div className="bg-secondary-50 rounded-lg p-3 md:p-4 text-center md:text-left border border-secondary-200">
-                  <span className="text-secondary-700 font-medium text-sm md:text-base">{item.after}</span>
+                <div className="bg-secondary/5 rounded-lg p-3 md:p-4 text-center md:text-left border border-secondary/20">
+                  <span className="text-secondary font-medium text-sm md:text-base">{item.after}</span>
                 </div>
               </div>
             ))}
@@ -95,7 +96,7 @@ export default function ProblemSolution() {
 
         {/* Three Pillars */}
         <div className="mb-12">
-          <h3 className="heading-3 text-center text-slate-900 mb-12">
+          <h3 className="text-xl md:text-2xl font-semibold text-center text-foreground mb-12">
             Die drei Säulen
           </h3>
 
@@ -109,24 +110,24 @@ export default function ProblemSolution() {
                   {/* Connector Arrow (except last) */}
                   {index < pillars.length - 1 && (
                     <div className="hidden md:block absolute top-1/2 -translate-y-1/2 -right-4 translate-x-1/2 z-10">
-                      <ArrowRight className="text-slate-300" size={24} />
+                      <ArrowRight className="text-muted-foreground/30" size={24} />
                     </div>
                   )}
 
-                  <div className={`card border ${colors.border} h-full`}>
+                  <Card className={`px-6 gap-0 ${colors.border} h-full`}>
                     <div className={`w-14 h-14 ${colors.bg} rounded-xl flex items-center justify-center mb-4`}>
                       <Icon className={colors.text} size={28} />
                     </div>
-                    <h4 className="text-xl font-semibold text-slate-900 mb-2">
+                    <h4 className="text-xl font-semibold text-foreground mb-2">
                       {pillar.title}
                     </h4>
                     <p className={`${colors.text} font-medium mb-3`}>
                       {pillar.description}
                     </p>
-                    <p className="text-slate-600 text-sm">
+                    <p className="text-muted-foreground text-sm">
                       {pillar.detail}
                     </p>
-                  </div>
+                  </Card>
                 </div>
               )
             })}
@@ -135,11 +136,11 @@ export default function ProblemSolution() {
 
         {/* Important Note */}
         <div className="max-w-2xl mx-auto">
-          <div className="bg-primary-50 border border-primary-200 rounded-xl p-6 text-center">
-            <h4 className="font-semibold text-primary-900 mb-2">
+          <div className="bg-primary/5 border border-primary/20 rounded-xl p-6 text-center">
+            <h4 className="font-semibold text-primary mb-2">
               Verifizieren ≠ Vertrauen
             </h4>
-            <p className="text-primary-700">
+            <p className="text-primary/80">
               Die Verifizierung bestätigt nur: "Das ist wirklich diese Person."
               Das eigentliche Vertrauen entsteht durch Attestationen über Zeit.
             </p>
