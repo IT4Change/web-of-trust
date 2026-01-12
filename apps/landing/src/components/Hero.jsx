@@ -15,7 +15,7 @@ export default function Hero() {
 
           {/* Main Headline */}
           <h1 className="text-4xl md:text-5xl lg:text-6xl font-bold tracking-tight text-foreground mb-6">
-            Vertrauen entsteht durch{' '}
+            Vertrauen durch{' '}
             <span className="text-primary">echte Begegnungen</span>
           </h1>
 

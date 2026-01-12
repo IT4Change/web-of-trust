@@ -73,8 +73,7 @@ export default function Principles() {
         {/* Section Header */}
         <div className="text-center mb-16">
           <h2 className="text-3xl md:text-4xl font-bold tracking-tight text-foreground mb-4">
-            Unsere Prinzipien
-          </h2>
+            Die Prinzipien          </h2>
           <p className="text-lg text-muted-foreground leading-relaxed max-w-2xl mx-auto">
             Was das Web of Trust ausmacht - und was es bewusst nicht ist.
           </p>
