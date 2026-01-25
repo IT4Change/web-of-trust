@@ -44,7 +44,24 @@ export function AudienceProvider({ children }) {
   useEffect(() => {
     localStorage.setItem('wot-audience', audience)
     document.documentElement.dataset.audience = audience
-  }, [audience])
+
+    // Update URL when audience changes (only if enabled)
+    if (isEnabled) {
+      const url = new URL(window.location.href)
+      if (audience === 'default') {
+        // Remove audience param, keep ?personas if it was there
+        url.searchParams.delete('audience')
+        if (!url.searchParams.has('personas')) {
+          url.searchParams.set('personas', '')
+        }
+      } else {
+        // Set audience param, remove ?personas
+        url.searchParams.delete('personas')
+        url.searchParams.set('audience', audience)
+      }
+      window.history.replaceState({}, '', url.toString())
+    }
+  }, [audience, isEnabled])
 
   // Get content for current audience, fallback to default
   const getContent = (key) => {
