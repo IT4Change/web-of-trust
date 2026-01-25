@@ -1,51 +1,6 @@
 import { Lock, Users, WifiOff, Github, Ban, Database, Key, RefreshCw } from 'lucide-react'
 import { Card } from '@real-life-stack/toolkit'
-
-const principles = [
-  {
-    icon: Lock,
-    title: 'Daten bei dir',
-    description: 'Alle deine Daten liegen verschlüsselt auf deinem Gerät. Nur Leute die du verifiziert hast können sie entschlüsseln.',
-    color: 'primary',
-  },
-  {
-    icon: Users,
-    title: 'Echte Begegnungen',
-    description: 'Jede Beziehung im Netzwerk basiert auf einer persönlichen Begegnung. Das verhindert Fake-Accounts und Spam.',
-    color: 'secondary',
-  },
-  {
-    icon: WifiOff,
-    title: 'Funktioniert offline',
-    description: 'Content erstellen, Leute verifizieren, Attestationen vergeben - alles geht auch ohne Internet. Sync erfolgt später.',
-    color: 'accent',
-  },
-  {
-    icon: Github,
-    title: 'Open Source',
-    description: 'Der gesamte Code ist öffentlich. Du kannst prüfen wie es funktioniert und sogar selbst beitragen.',
-    color: 'slate',
-  },
-  {
-    icon: Key,
-    title: 'Du hast den Schlüssel',
-    description: 'Deine kryptographische Identität gehört dir. Mit der Recovery-Phrase kannst du sie jederzeit wiederherstellen.',
-    color: 'primary',
-  },
-  {
-    icon: Database,
-    title: 'Daten exportierbar',
-    description: 'Kein Vendor-Lock-in. Du kannst alle deine Daten jederzeit exportieren und mitnehmen.',
-    color: 'secondary',
-  },
-]
-
-const notFeatures = [
-  { icon: Ban, text: 'Kein Social Media zum Scrollen' },
-  { icon: Ban, text: 'Keine Werbung oder Tracking' },
-  { icon: Ban, text: 'Keine Algorithmen die entscheiden was du siehst' },
-  { icon: Ban, text: 'Keine Blockchain oder Crypto-Token' },
-]
+import { useLanguage } from '../i18n/LanguageContext'
 
 const colorClasses = {
   primary: {
@@ -67,15 +22,64 @@ const colorClasses = {
 }
 
 export default function Principles() {
+  const { t } = useLanguage()
+
+  const principles = [
+    {
+      icon: Lock,
+      title: t.principles.items[0].title,
+      description: t.principles.items[0].description,
+      color: 'primary',
+    },
+    {
+      icon: Users,
+      title: t.principles.items[1].title,
+      description: t.principles.items[1].description,
+      color: 'secondary',
+    },
+    {
+      icon: WifiOff,
+      title: t.principles.items[2].title,
+      description: t.principles.items[2].description,
+      color: 'accent',
+    },
+    {
+      icon: Github,
+      title: t.principles.items[3].title,
+      description: t.principles.items[3].description,
+      color: 'slate',
+    },
+    {
+      icon: Key,
+      title: t.principles.items[4].title,
+      description: t.principles.items[4].description,
+      color: 'primary',
+    },
+    {
+      icon: Database,
+      title: t.principles.items[5].title,
+      description: t.principles.items[5].description,
+      color: 'secondary',
+    },
+  ]
+
+  const notFeatures = [
+    { icon: Ban, text: t.principles.notFeatures[0] },
+    { icon: Ban, text: t.principles.notFeatures[1] },
+    { icon: Ban, text: t.principles.notFeatures[2] },
+    { icon: Ban, text: t.principles.notFeatures[3] },
+  ]
+
   return (
     <section className="py-16 md:py-24 bg-muted">
       <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8">
         {/* Section Header */}
         <div className="text-center mb-16">
           <h2 className="text-3xl md:text-4xl font-bold tracking-tight text-foreground mb-4">
-            Die Prinzipien          </h2>
+            {t.principles.title}
+          </h2>
           <p className="text-lg text-muted-foreground leading-relaxed max-w-2xl mx-auto">
-            Was das Web of Trust ausmacht - und was es bewusst nicht ist.
+            {t.principles.subtitle}
           </p>
         </div>
 
@@ -105,7 +109,7 @@ export default function Principles() {
         <div className="max-w-3xl mx-auto">
           <div className="bg-foreground rounded-2xl p-8 text-background">
             <h3 className="text-xl font-bold mb-6 text-center">
-              Was Web of Trust <span className="text-destructive">nicht</span> ist
+              {t.principles.notTitle.prefix} <span className="text-destructive">{t.principles.notTitle.highlight}</span> {t.principles.notTitle.suffix}
             </h3>
             <div className="grid sm:grid-cols-2 gap-4">
               {notFeatures.map((item, index) => {
@@ -126,7 +130,7 @@ export default function Principles() {
           <div className="inline-flex items-center gap-2 text-muted-foreground">
             <RefreshCw size={16} />
             <span className="text-sm">
-              Dies ist ein Forschungsprojekt - wir lernen und verbessern kontinuierlich
+              {t.principles.note}
             </span>
           </div>
         </div>

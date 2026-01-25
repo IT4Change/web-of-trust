@@ -2,6 +2,7 @@ import Header from './components/Header'
 import Hero from './components/Hero'
 import ProblemSolution from './components/ProblemSolution'
 import HowItWorks from './components/HowItWorks'
+import Apps from './components/Apps'
 import Personas from './components/Personas'
 import Principles from './components/Principles'
 import FAQ from './components/FAQ'
@@ -15,6 +16,7 @@ function App() {
         <Hero />
         <ProblemSolution />
         <HowItWorks />
+        <Apps />
         <Personas />
         <Principles />
         <FAQ />

@@ -1,31 +1,34 @@
 import { FileText, Heart } from 'lucide-react'
 import { Button } from '@real-life-stack/toolkit'
 import GitHubIcon from './icons/GitHubIcon'
-
-const links = {
-  projekt: [
-    { label: 'Konzept', href: 'https://github.com/antontranelis/web-of-trust-concept' },
-    { label: 'Prototyp', href: 'https://github.com/antontranelis/web-of-trust-concept' },
-    { label: 'Spezifikation', href: 'https://github.com/antontranelis/web-of-trust-concept' },
-  ],
-  mitmachen: [
-    { label: 'GitHub Issues', href: 'https://github.com/antontranelis/web-of-trust-concept/issues' },
-    { label: 'Feedback geben', href: 'https://github.com/antontranelis/web-of-trust-concept/discussions' },
-    { label: 'Code beitragen', href: 'https://github.com/antontranelis/web-of-trust-concept/pulls' },
-  ],
-}
+import { useLanguage } from '../i18n/LanguageContext'
 
 export default function Footer() {
+  const { t } = useLanguage()
+
+  const links = {
+    projekt: [
+      { label: t.footer.links.project.concept, href: 'https://github.com/antontranelis/web-of-trust-concept' },
+      { label: t.footer.links.project.prototype, href: 'https://github.com/antontranelis/web-of-trust-concept' },
+      { label: t.footer.links.project.specification, href: 'https://github.com/antontranelis/web-of-trust-concept' },
+    ],
+    mitmachen: [
+      { label: t.footer.links.contribute.issues, href: 'https://github.com/antontranelis/web-of-trust-concept/issues' },
+      { label: t.footer.links.contribute.feedback, href: 'https://github.com/antontranelis/web-of-trust-concept/discussions' },
+      { label: t.footer.links.contribute.code, href: 'https://github.com/antontranelis/web-of-trust-concept/pulls' },
+    ],
+  }
+
   return (
     <footer className="bg-foreground text-background">
       {/* CTA Section */}
       <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-16">
         <div className="text-center max-w-2xl mx-auto">
           <h2 className="text-3xl font-bold mb-4">
-            Bereit für echte Verbindungen?
+            {t.footer.cta.title}
           </h2>
           <p className="text-background/60 mb-8">
-            Wir suchen Gemeinschaften die es ausprobieren wollen, Feedback zu UX und Konzept, und Entwickler die mitbauen wollen.
+            {t.footer.cta.subtitle}
           </p>
           <div className="flex flex-col sm:flex-row items-center justify-center gap-4">
             <Button asChild variant="outline" size="lg" className="border-background bg-background text-foreground hover:bg-background/90">
@@ -35,7 +38,7 @@ export default function Footer() {
                 rel="noopener noreferrer"
               >
                 <GitHubIcon />
-                Auf GitHub ansehen
+                {t.footer.cta.github}
               </a>
             </Button>
             <Button asChild variant="outline" size="lg" className="border-background/30 bg-transparent text-background hover:bg-background/10">
@@ -45,7 +48,7 @@ export default function Footer() {
                 rel="noopener noreferrer"
               >
                 <FileText />
-                Spezifikation lesen
+                {t.footer.cta.spec}
               </a>
             </Button>
           </div>
@@ -70,14 +73,13 @@ export default function Footer() {
                 <span className="font-bold text-lg">Web of Trust</span>
               </div>
               <p className="text-background/60 text-sm max-w-md">
-                Dezentrales Vertrauensnetzwerk für lokale Gemeinschaften.
-                Ein Forschungsprojekt das echte Begegnungen über Algorithmen stellt.
+                {t.footer.description}
               </p>
             </div>
 
             {/* Project Links */}
             <div>
-              <h3 className="font-semibold text-background mb-4">Projekt</h3>
+              <h3 className="font-semibold text-background mb-4">{t.footer.projectTitle}</h3>
               <ul className="space-y-2">
                 {links.projekt.map((link, index) => (
                   <li key={index}>
@@ -96,7 +98,7 @@ export default function Footer() {
 
             {/* Mitmachen Links */}
             <div>
-              <h3 className="font-semibold text-background mb-4">Mitmachen</h3>
+              <h3 className="font-semibold text-background mb-4">{t.footer.contributeTitle}</h3>
               <ul className="space-y-2">
                 {links.mitmachen.map((link, index) => (
                   <li key={index}>
@@ -121,10 +123,10 @@ export default function Footer() {
         <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
           <div className="flex flex-col md:flex-row items-center justify-between gap-4">
             <p className="text-background/50 text-sm">
-              Open Source unter MIT Lizenz
+              {t.footer.license}
             </p>
             <p className="text-background/50 text-sm flex items-center gap-1">
-              Gemacht mit <Heart size={14} className="text-destructive" /> für lokale Gemeinschaften
+              {t.footer.madeWith.prefix} <Heart size={14} className="text-destructive" /> {t.footer.madeWith.suffix}
             </p>
           </div>
         </div>

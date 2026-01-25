@@ -1,64 +1,6 @@
 import { Flower2, Wrench, Code2, Users } from 'lucide-react'
 import { Card } from '@real-life-stack/toolkit'
-
-const personas = [
-  {
-    icon: Flower2,
-    image: '/farmer.svg',
-    name: 'Hanna (62)',
-    role: 'Die Gärtnerin',
-    background: 'Aktiv im Gemeinschaftsgarten, nicht technikaffin, nutzt hauptsächlich WhatsApp.',
-    needs: [
-      'Wissen wer wann gießt',
-      'Neue Helfer finden',
-      'Sich nicht mit Technik beschäftigen müssen',
-    ],
-    howItHelps: 'Ihr Nachbar Tom richtet die App ein und verifiziert sie. Sie sieht den Gartenkalender und kann mit einem Tipp "Danke" sagen - das wird zur Attestation.',
-    color: 'green',
-  },
-  {
-    icon: Wrench,
-    image: '/maker.svg',
-    name: 'Alexander (34)',
-    role: 'Der Macher',
-    background: 'Kann alles reparieren, kennt viele Leute, organisiert Nachbarschaftshilfe.',
-    needs: [
-      'Überblick wer was kann',
-      'Anfragen koordinieren',
-      'Kein WhatsApp-Gruppen-Chaos',
-    ],
-    howItHelps: 'Verifiziert aktiv neue Leute bei Treffen. Erstellt Attestationen: "Kann Fahrräder", "Kann Elektrik". Sieht auf der Karte wer was anbietet.',
-    color: 'orange',
-  },
-  {
-    icon: Code2,
-    image: '/lena.svg',
-    name: 'Lena (28)',
-    role: 'Die Skeptikerin',
-    background: 'Softwareentwicklerin, Privacy-bewusst, hat schon viele "dezentrale" Projekte scheitern sehen.',
-    needs: [
-      'Verstehen wie es technisch funktioniert',
-      'Sicher sein dass Daten verschlüsselt sind',
-      'Kein Vendor-Lock-in',
-    ],
-    howItHelps: 'Open Source - kann den Code prüfen. E2E-Verschlüsselung mit lokalen Schlüsseln. Alle Daten exportierbar.',
-    color: 'blue',
-  },
-  {
-    icon: Users,
-    image: '/family.svg',
-    name: 'Familie Kowalski',
-    role: 'Die Neuzugezogenen',
-    background: 'Neu in der Stadt, kennen niemanden, wollen Anschluss finden.',
-    needs: [
-      'Nachbarn kennenlernen',
-      'Vertrauenswürdige Angebote finden',
-      'Teil einer Gemeinschaft werden',
-    ],
-    howItHelps: 'Beim Straßenfest erste Verifizierungen. Sehen sofort wer schon Attestationen hat. Können selbst Attestationen sammeln.',
-    color: 'purple',
-  },
-]
+import { useLanguage } from '../i18n/LanguageContext'
 
 const colorClasses = {
   green: {
@@ -92,16 +34,61 @@ const colorClasses = {
 }
 
 export default function Personas() {
+  const { t } = useLanguage()
+
+  const personas = [
+    {
+      icon: Flower2,
+      image: '/farmer.svg',
+      name: t.personas.items[0].name,
+      role: t.personas.items[0].role,
+      background: t.personas.items[0].background,
+      needs: t.personas.items[0].needs,
+      howItHelps: t.personas.items[0].howItHelps,
+      color: 'green',
+    },
+    {
+      icon: Wrench,
+      image: '/maker.svg',
+      name: t.personas.items[1].name,
+      role: t.personas.items[1].role,
+      background: t.personas.items[1].background,
+      needs: t.personas.items[1].needs,
+      howItHelps: t.personas.items[1].howItHelps,
+      color: 'orange',
+    },
+    {
+      icon: Code2,
+      image: '/lena.svg',
+      name: t.personas.items[2].name,
+      role: t.personas.items[2].role,
+      background: t.personas.items[2].background,
+      needs: t.personas.items[2].needs,
+      howItHelps: t.personas.items[2].howItHelps,
+      color: 'blue',
+    },
+    {
+      icon: Users,
+      image: '/family.svg',
+      name: t.personas.items[3].name,
+      role: t.personas.items[3].role,
+      background: t.personas.items[3].background,
+      needs: t.personas.items[3].needs,
+      howItHelps: t.personas.items[3].howItHelps,
+      color: 'purple',
+    },
+  ]
+
   return (
     <section id="personas" className="py-16 md:py-24 bg-background">
       <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8">
         {/* Section Header */}
         <div className="text-center mb-16">
           <h2 className="text-3xl md:text-4xl font-bold tracking-tight text-foreground mb-4">
-            Für wen ist das Web of Trust?
+            {t.personas.title}
           </h2>
           <p className="text-lg text-muted-foreground leading-relaxed max-w-2xl mx-auto">
-            Menschen aus lokalen Gemeinschaften, die echte Verbindungen aufbauen wollen.
+            {t.personas.subtitle}
           </p>
         </div>
 
@@ -109,7 +96,6 @@ export default function Personas() {
         <div className="grid md:grid-cols-2 gap-8">
           {personas.map((persona, index) => {
             const colors = colorClasses[persona.color]
-            const Icon = persona.icon
 
             return (
               <Card key={index} className={`px-6 gap-0 ${colors.border}`}>
@@ -140,7 +126,7 @@ export default function Personas() {
                 {/* Needs */}
                 <div className="mb-4">
                   <h4 className="text-sm font-semibold text-muted-foreground/70 uppercase tracking-wider mb-2">
-                    Bedürfnisse
+                    {t.personas.needsLabel}
                   </h4>
                   <ul className="space-y-1">
                     {persona.needs.map((need, needIndex) => (
@@ -155,7 +141,7 @@ export default function Personas() {
                 {/* How It Helps */}
                 <div className={`${colors.bg} rounded-xl p-4`}>
                   <h4 className={`text-sm font-semibold ${colors.text} mb-2`}>
-                    Wie Web of Trust hilft
+                    {t.personas.howItHelpsLabel}
                   </h4>
                   <p className="text-foreground/80 text-sm">
                     {persona.howItHelps}
@@ -169,8 +155,7 @@ export default function Personas() {
         {/* Note */}
         <div className="mt-12 text-center">
           <p className="text-muted-foreground text-sm max-w-xl mx-auto">
-            Das Netzwerk wächst nur durch echte Begegnungen - das dauert, aber das ist der Punkt.
-            Keine Masseneinladungen, keine Fake-Accounts.
+            {t.personas.note}
           </p>
         </div>
       </div>

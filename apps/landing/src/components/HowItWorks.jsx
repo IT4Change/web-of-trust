@@ -1,40 +1,6 @@
 import { QrCode, Eye, BadgeCheck, CheckCircle2 } from 'lucide-react'
 import { Card } from '@real-life-stack/toolkit'
-
-const steps = [
-  {
-    number: '01',
-    icon: QrCode,
-    title: 'QR-Code scannen',
-    description: 'Anna und Ben treffen sich. Ben scannt Annas QR-Code mit der App.',
-    detail: 'Der QR-Code enthält Annas öffentlichen Schlüssel. Bens App erstellt automatisch seine eigene Identität.',
-    color: 'primary',
-  },
-  {
-    number: '02',
-    icon: CheckCircle2,
-    title: 'Identität bestätigen',
-    description: 'Ben bestätigt: "Ich habe Anna persönlich getroffen."',
-    detail: 'Diese Verifizierung wird kryptographisch signiert und gleichzeitig werden Schlüssel getauscht.',
-    color: 'primary',
-  },
-  {
-    number: '03',
-    icon: Eye,
-    title: 'Content sehen',
-    description: 'Ben kann jetzt Annas geteilte Inhalte sehen.',
-    detail: 'Kalender, Karten-Markierungen, Projekte - alles was Anna mit ihren Kontakten teilt, wird für Ben entschlüsselbar.',
-    color: 'secondary',
-  },
-  {
-    number: '04',
-    icon: BadgeCheck,
-    title: 'Attestation erstellen',
-    description: 'Nach gemeinsamer Arbeit: Anna attestiert Bens Hilfe.',
-    detail: '"Ben hat 3 Stunden im Garten geholfen" - diese signierte Aussage wird Teil von Bens Profil.',
-    color: 'accent',
-  },
-]
+import { useLanguage } from '../i18n/LanguageContext'
 
 const colorClasses = {
   primary: {
@@ -58,16 +24,53 @@ const colorClasses = {
 }
 
 export default function HowItWorks() {
+  const { t } = useLanguage()
+
+  const steps = [
+    {
+      number: '01',
+      icon: QrCode,
+      title: t.howItWorks.steps[0].title,
+      description: t.howItWorks.steps[0].description,
+      detail: t.howItWorks.steps[0].detail,
+      color: 'primary',
+    },
+    {
+      number: '02',
+      icon: CheckCircle2,
+      title: t.howItWorks.steps[1].title,
+      description: t.howItWorks.steps[1].description,
+      detail: t.howItWorks.steps[1].detail,
+      color: 'primary',
+    },
+    {
+      number: '03',
+      icon: Eye,
+      title: t.howItWorks.steps[2].title,
+      description: t.howItWorks.steps[2].description,
+      detail: t.howItWorks.steps[2].detail,
+      color: 'secondary',
+    },
+    {
+      number: '04',
+      icon: BadgeCheck,
+      title: t.howItWorks.steps[3].title,
+      description: t.howItWorks.steps[3].description,
+      detail: t.howItWorks.steps[3].detail,
+      color: 'accent',
+    },
+  ]
+
   return (
     <section id="how-it-works" className="py-16 md:py-24 bg-muted">
       <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8">
         {/* Section Header */}
         <div className="text-center mb-16">
           <h2 className="text-3xl md:text-4xl font-bold tracking-tight text-foreground mb-4">
-            So funktioniert's
+            {t.howItWorks.title}
           </h2>
           <p className="text-lg text-muted-foreground leading-relaxed max-w-2xl mx-auto">
-            Vom ersten Treffen bis zur ersten Attestation - der Weg ins Netzwerk.
+            {t.howItWorks.subtitle}
           </p>
         </div>
 
@@ -90,7 +93,7 @@ export default function HowItWorks() {
 
                     <Card className="px-6 gap-0 pt-14!">
                       <span className={`text-sm font-bold ${colors.text}`}>
-                        Schritt {step.number}
+                        {t.howItWorks.step} {step.number}
                       </span>
                       <h3 className="text-xl font-semibold text-foreground mt-1 mb-3">
                         {step.title}
@@ -112,11 +115,10 @@ export default function HowItWorks() {
         <div className="max-w-2xl mx-auto mt-12">
           <div className="bg-gradient-to-r from-primary to-secondary rounded-2xl p-8 text-primary-foreground text-center">
             <h3 className="text-2xl font-bold mb-3">
-              Das Ergebnis
+              {t.howItWorks.result.title}
             </h3>
             <p className="text-primary-foreground/80">
-              Ein wachsendes Netzwerk aus echten Beziehungen. Jede Verbindung basiert auf einer persönlichen Begegnung.
-              Jede Attestation auf einer echten Tat.
+              {t.howItWorks.result.text}
             </p>
           </div>
         </div>

@@ -1,37 +1,6 @@
 import { UserCheck, Share2, Award, ArrowRight } from 'lucide-react'
 import { Card } from '@real-life-stack/toolkit'
-
-const problems = [
-  { before: 'Social Media bindet Aufmerksamkeit', after: 'Im echten Leben verbinden' },
-  { before: 'Deine Daten liegen bei Konzernen', after: 'Deine Daten liegen bei dir' },
-  { before: 'Vertrauen durch Likes und Sterne', after: 'Vertrauen durch echte Begegnungen' },
-  { before: 'Account-Erstellung alleine am Bildschirm', after: 'Onboarding durch Freunde in einer Kette' },
-  { before: 'Abhängig von Servern und Empfang', after: 'Funktioniert auch ohne Internet' },
-]
-
-const pillars = [
-  {
-    icon: UserCheck,
-    title: 'Verifizieren',
-    description: 'Identität durch persönliches Treffen bestätigen',
-    color: 'primary',
-    detail: 'Jede Beziehung beginnt mit einer echten Begegnung. Durch QR-Code-Scan bestätigst du: "Das ist wirklich diese Person."'
-  },
-  {
-    icon: Share2,
-    title: 'Kooperieren',
-    description: 'Verschlüsselte Inhalte teilen',
-    color: 'secondary',
-    detail: 'Teile Kalender, Orte und Projekte mit deinem Netzwerk. Alles Ende-zu-Ende verschlüsselt.'
-  },
-  {
-    icon: Award,
-    title: 'Attestieren',
-    description: 'Reputation durch echte Taten aufbauen',
-    color: 'accent',
-    detail: 'Bestätige was andere getan haben. Diese Attestationen bauen über Zeit sichtbares Vertrauen auf.'
-  },
-]
+import { useLanguage } from '../i18n/LanguageContext'
 
 const colorClasses = {
   primary: {
@@ -55,17 +24,50 @@ const colorClasses = {
 }
 
 export default function ProblemSolution() {
+  const { t } = useLanguage()
+
+  const problems = [
+    { before: t.problemSolution.problems[0].before, after: t.problemSolution.problems[0].after },
+    { before: t.problemSolution.problems[1].before, after: t.problemSolution.problems[1].after },
+    { before: t.problemSolution.problems[2].before, after: t.problemSolution.problems[2].after },
+    { before: t.problemSolution.problems[3].before, after: t.problemSolution.problems[3].after },
+    { before: t.problemSolution.problems[4].before, after: t.problemSolution.problems[4].after },
+  ]
+
+  const pillars = [
+    {
+      icon: UserCheck,
+      title: t.problemSolution.pillars[0].title,
+      description: t.problemSolution.pillars[0].description,
+      color: 'primary',
+      detail: t.problemSolution.pillars[0].detail,
+    },
+    {
+      icon: Share2,
+      title: t.problemSolution.pillars[1].title,
+      description: t.problemSolution.pillars[1].description,
+      color: 'secondary',
+      detail: t.problemSolution.pillars[1].detail,
+    },
+    {
+      icon: Award,
+      title: t.problemSolution.pillars[2].title,
+      description: t.problemSolution.pillars[2].description,
+      color: 'accent',
+      detail: t.problemSolution.pillars[2].detail,
+    },
+  ]
+
   return (
     <section id="konzept" className="py-16 md:py-24 bg-background">
       <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8">
         {/* Section Header */}
         <div className="text-center mb-16">
           <h2 className="text-3xl md:text-4xl font-bold tracking-tight text-foreground mb-4">
-            Ein anderer Ansatz
+            {t.problemSolution.title}
           </h2>
           <p className="text-lg text-muted-foreground leading-relaxed max-w-2xl mx-auto">
-            Wir setzen auf lokale Gemeinschaften statt globaler Plattformen.
-            Statt Algorithmen bauen wir auf echte Begegnungen.
+            {t.problemSolution.subtitle}
           </p>
         </div>
 
@@ -73,10 +75,10 @@ export default function ProblemSolution() {
         <div className="mb-20">
           <div className="grid grid-cols-2 gap-4 max-w-4xl mx-auto">
             <div className="text-center md:text-right">
-              <h3 className="text-sm font-semibold text-muted-foreground/70 uppercase tracking-wider mb-4">Heute</h3>
+              <h3 className="text-sm font-semibold text-muted-foreground/70 uppercase tracking-wider mb-4">{t.problemSolution.today}</h3>
             </div>
             <div className="text-center md:text-left">
-              <h3 className="text-sm font-semibold text-secondary uppercase tracking-wider mb-4">Besser</h3>
+              <h3 className="text-sm font-semibold text-secondary uppercase tracking-wider mb-4">{t.problemSolution.better}</h3>
             </div>
           </div>
 
@@ -97,7 +99,7 @@ export default function ProblemSolution() {
         {/* Three Pillars */}
         <div className="mb-12">
           <h3 className="text-xl md:text-2xl font-semibold text-center text-foreground mb-12">
-            Die drei Säulen
+            {t.problemSolution.pillarsTitle}
           </h3>
 
           <div className="grid md:grid-cols-3 gap-8">
@@ -138,11 +140,10 @@ export default function ProblemSolution() {
         <div className="max-w-2xl mx-auto">
           <div className="bg-primary/5 border border-primary/20 rounded-xl p-6 text-center">
             <h4 className="font-semibold text-primary mb-2">
-              Verifizieren ≠ Vertrauen
+              {t.problemSolution.note.title}
             </h4>
             <p className="text-primary/80">
-              Die Verifizierung bestätigt nur: "Das ist wirklich diese Person."
-              Das eigentliche Vertrauen entsteht durch Attestationen über Zeit.
+              {t.problemSolution.note.text}
             </p>
           </div>
         </div>

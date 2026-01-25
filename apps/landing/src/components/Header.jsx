@@ -1,17 +1,39 @@
-import { Menu, X } from 'lucide-react'
-import { useState } from 'react'
+import { Menu, X, ChevronDown } from 'lucide-react'
+import { useState, useRef, useEffect } from 'react'
 import { Button } from '@real-life-stack/toolkit'
 import GitHubIcon from './icons/GitHubIcon'
-
-const navItems = [
-  { label: 'Konzept', href: '#konzept' },
-  { label: 'So funktioniert\'s', href: '#how-it-works' },
-  { label: 'Anwendungen', href: '#personas' },
-  { label: 'FAQ', href: '#faq' },
-]
+import { useLanguage, SUPPORTED_LANGUAGES } from '../i18n/LanguageContext'
 
 export default function Header() {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
+  const [langDropdownOpen, setLangDropdownOpen] = useState(false)
+  const dropdownRef = useRef(null)
+  const { language, setLanguage, t } = useLanguage()
+
+  const currentLang = SUPPORTED_LANGUAGES.find(l => l.code === language)
+
+  const navItems = [
+    { label: t.nav.concept, href: '#konzept' },
+    { label: t.nav.howItWorks, href: '#how-it-works' },
+    { label: t.nav.apps, href: '#apps' },
+    { label: t.nav.faq, href: '#faq' },
+  ]
+
+  // Close dropdown when clicking outside
+  useEffect(() => {
+    function handleClickOutside(event) {
+      if (dropdownRef.current && !dropdownRef.current.contains(event.target)) {
+        setLangDropdownOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside)
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [])
+
+  const handleLanguageSelect = (code) => {
+    setLanguage(code)
+    setLangDropdownOpen(false)
+  }
 
   return (
     <header className="fixed top-0 left-0 right-0 z-50 bg-background/80 backdrop-blur-md border-b border-border">
@@ -41,6 +63,35 @@ export default function Header() {
                 {item.label}
               </a>
             ))}
+
+            {/* Language Dropdown */}
+            <div className="relative" ref={dropdownRef}>
+              <button
+                onClick={() => setLangDropdownOpen(!langDropdownOpen)}
+                className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-muted-foreground hover:text-primary transition-colors rounded-md hover:bg-muted"
+              >
+                <span>{currentLang?.flag} {currentLang?.code.toUpperCase()}</span>
+                <ChevronDown size={14} className={`transition-transform ${langDropdownOpen ? 'rotate-180' : ''}`} />
+              </button>
+
+              {langDropdownOpen && (
+                <div className="absolute right-0 mt-2 w-40 bg-background border border-border rounded-lg shadow-lg py-1 z-50">
+                  {SUPPORTED_LANGUAGES.map((lang) => (
+                    <button
+                      key={lang.code}
+                      onClick={() => handleLanguageSelect(lang.code)}
+                      className={`w-full px-4 py-2 text-left text-sm flex items-center gap-2 hover:bg-muted transition-colors ${
+                        language === lang.code ? 'text-primary font-medium' : 'text-muted-foreground'
+                      }`}
+                    >
+                      <span>{lang.flag}</span>
+                      <span>{lang.label}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+
             <Button asChild size="default">
               <a
                 href="https://github.com/antontranelis/web-of-trust-concept"
@@ -76,7 +127,34 @@ export default function Header() {
                   {item.label}
                 </a>
               ))}
-              <Button asChild className="w-full">
+
+              {/* Mobile Language Select */}
+              <div className="border-t border-border pt-4">
+                <p className="text-xs text-muted-foreground uppercase tracking-wider mb-2 px-1">
+                  {language === 'de' ? 'Sprache' : 'Language'}
+                </p>
+                <div className="flex gap-2">
+                  {SUPPORTED_LANGUAGES.map((lang) => (
+                    <button
+                      key={lang.code}
+                      onClick={() => {
+                        setLanguage(lang.code)
+                        setMobileMenuOpen(false)
+                      }}
+                      className={`flex-1 px-4 py-2 text-sm rounded-md flex items-center justify-center gap-2 transition-colors ${
+                        language === lang.code
+                          ? 'bg-primary text-primary-foreground'
+                          : 'bg-muted text-muted-foreground hover:bg-muted/80'
+                      }`}
+                    >
+                      <span>{lang.flag}</span>
+                      <span>{lang.label}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <Button asChild className="w-full mt-2">
                 <a
                   href="https://github.com/antontranelis/web-of-trust-concept"
                   target="_blank"
