@@ -33,9 +33,13 @@ sequenceDiagram
     rect rgb(230, 255, 230)
         Note over A,B: Verbindung hergestellt
         Note over A: Ben ist jetzt in Meine Kontakte
+        Note over A: Bens Verifizierung erscheint in Annas Profil
         Note over B: Anna ist jetzt in Meine Kontakte
+        Note over B: Annas Verifizierung erscheint in Bens Profil
     end
 ```
+
+> **Hinweis:** Die Verifizierungen werden beim Empfänger gespeichert. In Annas Profil steht "Verifiziert von: Ben". In Bens Profil steht "Verifiziert von: Anna".
 
 ## Variante: Nur einseitige Verifizierung - Pending
 

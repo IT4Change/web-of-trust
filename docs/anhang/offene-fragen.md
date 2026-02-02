@@ -39,6 +39,25 @@
 |-------|--------------|------------|
 | Kann ich für ausgeblendete Kontakte attestieren? | **Ja** | Attestation = Aussage über Vergangenheit |
 
+### Empfänger-Prinzip (Speicherort von Verifizierungen/Attestationen)
+
+| Frage | Entscheidung | Begründung |
+|-------|--------------|------------|
+| Wo werden Verifizierungen/Attestationen gespeichert? | **Beim Empfänger (`to`)** | Datenhoheit, keine Schreibkonflikte |
+| Kann der Empfänger Attestationen ausblenden? | **Ja (`hidden=true`)** | Kontrolle über eigenes Profil |
+| Kann der Empfänger Verifizierungen ausblenden? | **Nein** | Steuern Kontakt-Status |
+
+**Vorteile:**
+- Empfänger kontrolliert, was über ihn veröffentlicht wird
+- Keine CRDT-Konflikte (jeder schreibt nur bei sich)
+- Attestationen können ausgeblendet, aber nicht gelöscht werden
+- Sender speichert nur Public Keys (für E2E-Verschlüsselung)
+
+**Konsequenzen:**
+- Mein Profil zeigt, wer **mich** verifiziert hat (nicht wen ich verifiziert habe)
+- Attestationen werden als "Geschenk" empfangen und beim Empfänger gespeichert
+- Hidden-Flag nur für Attestationen (Verifizierungen steuern Kontakt-Status)
+
 ### Recovery-Phrase
 
 | Frage | Entscheidung | Begründung |
@@ -82,6 +101,7 @@ Ablauf:
 | Frage | Kontext | Vorschlag |
 |-------|---------|-----------|
 | Multi-Device ohne Recovery? | Nutzer will 2. Gerät ohne Phrase eintippen | **Vorerst nein** - Key-Schutz hat Priorität |
+| Wo liegen öffentliche Profile? | Abruf von Profilen per DID | **Tendenz:** Sync-Server; föderiert nicht ausgeschlossen |
 
 ### Konzeptionell
 
@@ -121,6 +141,13 @@ Ablauf:
 ---
 
 ## Entscheidungslog
+
+### 2025-02-02
+
+1. **Empfänger-Prinzip**: Verifizierungen und Attestationen werden beim Empfänger (`to`) gespeichert
+2. **Attestationen ausblendbar**: Empfänger kann `hidden=true` setzen (aber nicht löschen)
+3. **Verifizierungen nicht ausblendbar**: Steuern Kontakt-Status
+4. **Kontakt-Status vereinfacht**: Nur `pending` und `active` (Ausblenden via Auto-Gruppe `excludedMembers`)
 
 ### 2025-01-08
 

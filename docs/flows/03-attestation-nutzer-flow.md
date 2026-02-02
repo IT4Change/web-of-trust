@@ -351,17 +351,19 @@ sequenceDiagram
 ```mermaid
 flowchart TD
     A["Attestation erstellt"] --> B{"Was passiert?"}
-    
+
     B --> C["Kann NICHT gelöscht werden"]
     B --> D["Kann NICHT bearbeitet werden"]
     B --> E["Kann NICHT widerrufen werden"]
-    
+
     C --> F["Attestation bleibt für immer"]
     D --> F
     E --> F
-    
-    F --> G["Bei Problemen: Neue Attestation erstellen oder Kontakt ausblenden"]
+
+    F --> G["Aber: Empfänger kann sie ausblenden"]
 ```
+
+> **Neu:** Der Empfänger kann unerwünschte Attestationen **ausblenden** (hidden=true). Sie bleiben gespeichert, sind aber nicht öffentlich sichtbar.
 
 ### Warum nicht löschbar?
 
@@ -381,24 +383,28 @@ Wenn jemand etwas Falsches attestiert hat:
 
 ## Sichtbarkeit von Attestationen
 
+Mit dem **Empfänger-Prinzip** wird die Attestation bei Ben gespeichert – er kontrolliert die Sichtbarkeit:
+
 ```mermaid
 flowchart TD
-    A["Anna erstellt Attestation für Ben"] --> B{"Wer sieht sie?"}
-    
-    B --> C["Ben sieht sie immer"]
-    B --> D["Annas Kontakte sehen sie"]
-    B --> E["Bens Kontakte sehen sie"]
-    
-    D --> F["Wenn Anna in deren Netzwerk"]
-    E --> G["Immer, als Teil von Bens Profil"]
+    A["Anna erstellt Attestation für Ben"] --> B["Attestation wird bei Ben gespeichert"]
+
+    B --> C{"Ben kann entscheiden"}
+
+    C --> D["Sichtbar lassen (Standard)"]
+    C --> E["Ausblenden (hidden=true)"]
+
+    D --> F["Bens Kontakte sehen sie in seinem Profil"]
+    E --> G["Nur Ben selbst sieht sie"]
 ```
 
 ### Sichtbarkeits-Matrix
 
 | Betrachter | Sieht Attestation? | Warum? |
 |------------|-------------------|--------|
-| Ben (Empfänger) | ✅ Ja | Ist sein Profil |
-| Anna (Ersteller) | ✅ Ja | Hat sie erstellt |
-| Annas Kontakte | ✅ Ja | Annas Content |
-| Bens Kontakte | ✅ Ja | Teil von Bens Profil |
-| Fremde | ❌ Nein | Nicht im Netzwerk |
+| Ben (Empfänger) | ✅ Immer | Ist sein Profil, er kontrolliert Sichtbarkeit |
+| Bens Kontakte | ✅ Wenn nicht hidden | Teil von Bens Profil |
+| Anna (Ersteller) | ✅ Wenn Ben's Kontakt | Sieht Ben's Profil |
+| Fremde | ❌ Nein | Nicht in Ben's Netzwerk |
+
+> **Hinweis:** Ben kann unerwünschte Attestationen ausblenden, aber nicht löschen. Die Signatur von Anna bleibt gültig.

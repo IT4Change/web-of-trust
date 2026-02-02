@@ -12,13 +12,17 @@ Eine **signierte Aussage** einer Person über eine andere Person. Attestationen 
 
 **Beispiel:** "Ben hat 3 Stunden im Gemeinschaftsgarten geholfen"
 
+**Empfänger-Prinzip:** Die Attestation wird beim **Empfänger** (`to`) gespeichert, nicht beim Ersteller (`from`).
+
 **Eigenschaften:**
 - Immer von einem Nutzer (nicht von einer Gruppe)
+- Wird beim Empfänger gespeichert
 - Kann im Kontext einer Gruppe stehen
-- Unveränderlich und nicht löschbar
-- Kryptographisch signiert
+- Unveränderlich (Inhalt nicht änderbar)
+- Empfänger kann ausblenden (`hidden=true`), aber nicht löschen
+- Kryptographisch signiert vom Ersteller
 
-Siehe auch: [Verifizierung](#verifizierung)
+Siehe auch: [Verifizierung](#verifizierung), [Empfänger-Prinzip](#empfänger-prinzip)
 
 ### Auto-Gruppe
 
@@ -26,7 +30,8 @@ Eine implizite Gruppe, die automatisch alle aktiven Kontakte eines Nutzers enth�
 
 **Eigenschaften:**
 - Genau eine pro Nutzer
-- Enthält nur Kontakte mit Status "active"
+- `activeMembers`: Kontakte mit Status "active", die nicht ausgeblendet sind
+- `excludedMembers`: Ausgeblendete Kontakte (bleiben "active", aber nicht in der Gruppe)
 - Group Key wird rotiert wenn Kontakte hinzukommen oder ausgeblendet werden
 
 ---
@@ -47,7 +52,8 @@ Eine Person, die ein Nutzer verifiziert hat. Kontakte haben einen Status:
 | ------ | ------------ |
 | pending | Einseitig verifiziert, wartet auf Gegenseite |
 | active | Beidseitig verifiziert, in Auto-Gruppe |
-| hidden | Ausgeblendet, nicht mehr in Auto-Gruppe |
+
+> **Hinweis:** Das Ausblenden erfolgt über `excludedMembers` in der Auto-Gruppe, nicht über den Kontakt-Status. Ein ausgeblendeter Kontakt bleibt `active`.
 
 ### Content (Inhalt)
 
@@ -89,6 +95,21 @@ Verschlüsselung, bei der nur Sender und Empfänger die Nachricht lesen können.
 ### Ed25519
 
 Ein Algorithmus für digitale Signaturen, der im Web of Trust für die Schlüsselerzeugung verwendet wird. Bietet hohe Sicherheit bei kurzen Schlüssellängen (32 Bytes).
+
+### Empfänger-Prinzip
+
+Ein Kernprinzip des Web of Trust: **Verifizierungen und Attestationen werden beim Empfänger (`to`) gespeichert**, nicht beim Ersteller (`from`).
+
+**Vorteile:**
+- Empfänger kontrolliert, was über ihn veröffentlicht wird
+- Keine Schreibkonflikte (jeder schreibt nur in seinen eigenen Datenspeicher)
+- Attestationen können ausgeblendet werden (`hidden=true`)
+
+**Beispiel:**
+- Anna verifiziert Ben → Verification wird bei **Ben** gespeichert
+- Ben attestiert Anna → Attestation wird bei **Anna** gespeichert
+
+Siehe auch: [Attestation](#attestation), [Verifizierung](#verifizierung)
 
 ---
 
@@ -251,6 +272,8 @@ Ein Schlagwort, das einer Attestation zugeordnet wird, um sie kategorisierbar un
 
 Die gegenseitige Bestätigung der Identität durch persönliches Treffen. Bestätigt nur "Das ist wirklich diese Person" - nicht mehr.
 
+**Empfänger-Prinzip:** Die Verifizierung wird beim **Empfänger** (`to`) gespeichert, nicht beim Ersteller (`from`).
+
 **Unterschied zu Attestation:**
 
 | Verifizierung | Attestation |
@@ -258,6 +281,9 @@ Die gegenseitige Bestätigung der Identität durch persönliches Treffen. Bestä
 | "Ich habe diese Person getroffen" | "Diese Person hat X getan" |
 | Identitätsbestätigung | Vertrauensaufbau |
 | Einmalig pro Kontakt | Beliebig viele möglich |
+| Kann nicht ausgeblendet werden | Empfänger kann ausblenden |
+
+Siehe auch: [Attestation](#attestation), [Empfänger-Prinzip](#empfänger-prinzip)
 
 ---
 

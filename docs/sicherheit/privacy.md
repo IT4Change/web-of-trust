@@ -124,9 +124,32 @@ flowchart TD
 |----------|-----------|-----------|
 | Profil | Ja | Lokal + Server |
 | Items | Ja (Soft Delete) | Lokal, Server-Markierung |
-| Kontakte | Ausblenden | Verifizierung bleibt |
-| Verifizierungen | Nein | Immutable by design |
-| Attestationen | Nein | Immutable by design |
+| Kontakte | Ausblenden | Via Auto-Gruppe excludedMembers |
+| Verifizierungen | Nein | Immutable, beim Empfänger gespeichert |
+| Attestationen | Ausblendbar | Empfänger kann `hidden=true` setzen |
+
+### Empfänger-Prinzip und Datenhoheit
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                                                             │
+│  Design-Entscheidung: Empfänger-Prinzip                     │
+│                                                             │
+│  Verifizierungen und Attestationen werden beim              │
+│  EMPFÄNGER (to) gespeichert, nicht beim Sender (from).      │
+│                                                             │
+│  Vorteile:                                                  │
+│  • Empfänger kontrolliert, was über ihn veröffentlicht wird │
+│  • Keine Schreibkonflikte (jeder schreibt nur bei sich)     │
+│  • Attestationen können ausgeblendet werden (hidden=true)   │
+│                                                             │
+│  Einschränkungen:                                           │
+│  • Verifizierungen können nicht ausgeblendet werden         │
+│    (steuern Kontakt-Status)                                 │
+│  • Attestationen können nicht gelöscht werden, nur hidden   │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
+```
 
 ### Warum Verifizierungen/Attestationen nicht löschbar
 
@@ -135,18 +158,16 @@ flowchart TD
 │                                                             │
 │  Design-Entscheidung:                                       │
 │                                                             │
-│  Verifizierungen und Attestationen sind Aussagen über       │
-│  die Vergangenheit:                                         │
+│  Verifizierungen und Attestationen sind signierte Aussagen  │
+│  über die Vergangenheit:                                    │
 │                                                             │
 │  "Ich habe Anna am 05.01.2025 getroffen"                    │
 │  "Ben hat mir beim Umzug geholfen"                          │
 │                                                             │
 │  Diese Fakten können nicht "ungeschehen" gemacht werden.    │
 │                                                             │
-│  Löschbarkeit würde:                                        │
-│  • Manipulation ermöglichen                                 │
-│  • Vertrauen untergraben                                    │
-│  • System-Integrität gefährden                              │
+│  Aber: Der Empfänger kann Attestationen AUSBLENDEN          │
+│  (hidden=true) - sie sind dann nur für ihn selbst sichtbar. │
 │                                                             │
 └─────────────────────────────────────────────────────────────┘
 ```

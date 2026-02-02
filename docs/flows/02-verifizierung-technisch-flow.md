@@ -14,24 +14,36 @@ erDiagram
         string photo "Optional"
         string bio "Optional"
     }
-    
+
     CONTACT {
         string did PK "DID des Kontakts"
         string publicKey "Kontakts Public Key"
-        string status "pending oder active oder hidden"
+        string status "pending oder active"
         datetime verifiedAt
-        string verificationSig "Eigene Signatur"
     }
-    
+
+    VERIFICATION {
+        string id PK "URN"
+        string from "Signiert von"
+        string to "Gespeichert bei"
+        datetime timestamp
+        string proof "Ed25519 Signatur"
+    }
+
     AUTO_GROUP {
         string groupKey "Symmetrischer Schlüssel"
+        array activeMembers "DIDs"
+        array excludedMembers "Ausgeblendete DIDs"
         datetime lastRotation
     }
-    
+
     USER ||--o{ CONTACT : "hat"
+    USER ||--o{ VERIFICATION : "empfängt (to)"
     USER ||--|| AUTO_GROUP : "hat genau eine"
     AUTO_GROUP ||--o{ CONTACT : "enthält aktive"
 ```
+
+> **Empfänger-Prinzip:** Verifizierungen werden beim Empfänger (`to`) gespeichert. Ben verifiziert Anna → Verification liegt bei **Anna**.
 
 ## QR-Code Struktur
 
@@ -83,10 +95,10 @@ sequenceDiagram
     A_UI->>A_App: showQRCode()
     A_App->>A_App: generateQR(did, publicKey)
     A_App->>A_UI: Display QR
-    
+
     B_UI->>B_App: scanQR()
     B_App->>B_App: parseQR() gibt did, publicKey
-    
+
     alt Online
         B_App->>Sync: fetchProfile(did)
         Sync->>B_App: name, photo, bio, signature
@@ -96,65 +108,85 @@ sequenceDiagram
         B_App->>B_App: computeIDHash(did)
         B_App->>B_UI: Zeige ID-Pruefwert
     end
-    
+
     B_UI->>B_App: confirmIdentity()
-    
-    B_App->>B_App: createVerification(anna.did)
-    Note over B_App: Verification Dokument erstellt
+
+    B_App->>B_App: createVerification(from=ben, to=anna)
+    Note over B_App: Verification fuer Anna erstellt
     B_App->>B_App: saveContact(anna, pending)
-    
+
     Note over A_UI,B_UI: Phase 2 - Anna verifiziert Ben
 
     B_UI->>B_App: showQRCode()
     B_App->>B_UI: Display QR
-    
+
     A_UI->>A_App: scanQR()
     A_App->>A_App: parseQR() gibt did, publicKey
     A_App->>A_UI: Zeige Profil plus X Kontakte kennen Ben
-    
+
     A_UI->>A_App: confirmIdentity()
-    A_App->>A_App: createVerification(ben.did)
-    A_App->>A_App: saveContact(ben, active)
-    A_App->>A_App: addToAutoGroup(ben)
-    A_App->>A_App: reencryptItemsForNewContact(ben)
-    
+    A_App->>A_App: createVerification(from=anna, to=ben)
+    A_App->>A_App: saveContact(ben, pending)
+
     Note over A_UI,B_UI: Phase 3 - Sync und Finalisierung
 
-    A_App->>Sync: pushVerification()
-    A_App->>Sync: pushReencryptedItemKeys()
+    A_App->>Sync: pushVerification(to=ben)
+    Note over A_App: Verification wird bei Ben gespeichert
+    B_App->>Sync: pushVerification(to=anna)
+    Note over B_App: Verification wird bei Anna gespeichert
+
+    Sync->>A_App: pullUpdates()
+    A_App->>A_App: receiveVerification(from=ben)
+    A_App->>A_App: updateContact(ben, active)
+    A_App->>A_App: addToAutoGroup(ben)
+    A_App->>A_App: reencryptItemsForNewContact(ben)
+
     Sync->>B_App: pullUpdates()
+    B_App->>B_App: receiveVerification(from=anna)
     B_App->>B_App: updateContact(anna, active)
     B_App->>B_App: addToAutoGroup(anna)
     B_App->>B_App: reencryptItemsForNewContact(anna)
-    B_App->>Sync: pushReencryptedItemKeys()
 ```
+
+> **Hinweis:** Die Verification wird an den Empfänger (`to`) gesendet und bei diesem gespeichert. Ben's Verification für Anna landet bei Anna, Anna's Verification für Ben landet bei Ben.
 
 ## Detailflow: Verifizierung erstellen
 
 ```mermaid
 flowchart TD
     Start(["Nutzer tippt Identitaet bestaetigen"]) --> CreateVerif["createVerification()"]
-    
-    CreateVerif --> BuildPayload["Baue Payload: type, from, to, timestamp"]
-    
+
+    CreateVerif --> BuildPayload["Baue Payload: type, from=ich, to=kontakt, timestamp"]
+
     BuildPayload --> Sign["Signiere mit privateKey"]
-    
-    Sign --> Store["Speichere lokal: Contact + Verification"]
-    
-    Store --> CheckMutual{"Gegenseitige Verifizierung vorhanden?"}
-    
+
+    Sign --> StoreContact["Speichere Contact lokal (Public Key)"]
+
+    StoreContact --> Queue["Verification in Sync-Queue fuer Empfaenger"]
+
+    Queue --> End(["Fertig - warte auf Empfang der Gegen-Verification"])
+```
+
+```mermaid
+flowchart TD
+    Start(["Verification empfangen"]) --> Verify["Pruefe Signatur mit from-PublicKey"]
+
+    Verify --> Store["Speichere Verification lokal"]
+
+    Store --> CheckMutual{"Gegenseitige Verifizierung?"}
+
     CheckMutual -->|Ja| Activate["Status = active"]
     Activate --> AddGroup["Zu Auto-Gruppe hinzufuegen"]
     AddGroup --> Reencrypt["Item Keys neu verschluesseln"]
-    Reencrypt --> Queue["In Sync-Queue"]
-    
+    Reencrypt --> End(["Fertig"])
+
     CheckMutual -->|Nein| Pending["Status = pending"]
-    Pending --> Queue
-    
-    Queue --> End(["Fertig"])
+    Pending --> End
 ```
 
 **Voraussetzung:** Nutzer hat bereits eine ID (siehe Flow 01: Onboarding).
+
+> **Zwei Phasen:** (1) Erstellen und Senden der Verification an den Empfänger, (2) Empfangen und Verarbeiten der Gegen-Verification.
 
 ## Detailflow: Item Keys neu verschlüsseln
 
@@ -228,24 +260,18 @@ sequenceDiagram
 ```mermaid
 stateDiagram-v2
     [*] --> Pending: Einseitig verifiziert
-    
+
     Pending --> Active: Gegenseite verifiziert zurueck
     Pending --> [*]: Timeout oder Abbruch
-    
-    Active --> Hidden: Nutzer blendet aus
-    
-    Hidden --> Active: Nutzer macht rueckgaengig
-    
+
     state Active {
         [*] --> InAutoGroup
         InAutoGroup: In Auto-Gruppe
+        InAutoGroup --> Excluded: In excludedMembers
+        Excluded --> InAutoGroup: Aus excludedMembers entfernt
+        Excluded: Ausgeblendet (nicht in Auto-Gruppe)
     }
-    
-    state Hidden {
-        [*] --> OutOfAutoGroup
-        OutOfAutoGroup: Aus Auto-Gruppe entfernt
-    }
-    
+
     state Pending {
         [*] --> WaitingForMutual
         WaitingForMutual: Wartet auf Gegenseite
@@ -258,11 +284,15 @@ stateDiagram-v2
 |--------|----------------|---------------|-------------------|
 | Pending | Nein | Nein | Nein |
 | Active | Ja | Ja (neuen) | Ja |
-| Hidden | Nein | Nein (neuen) | Nein, alte noch lesbar |
+| Active + excluded | Nein | Nein (neuen) | Nein, alte noch lesbar |
+
+> **Hinweis:** Das Ausblenden erfolgt über `excludedMembers` in der Auto-Gruppe, nicht über den Kontakt-Status. Ein ausgeblendeter Kontakt bleibt `active`.
 
 ## Datenstrukturen
 
 ### Verification Document
+
+Wird beim **Empfänger** (`to`) gespeichert:
 
 ```json
 {
@@ -280,7 +310,14 @@ stateDiagram-v2
 }
 ```
 
+| Feld | Beschreibung |
+|------|--------------|
+| `from` | Wer hat verifiziert (signiert) |
+| `to` | Wer wurde verifiziert (Speicherort) |
+
 ### Contact Record (lokal)
+
+Der Sender speichert nur den **Public Key** des Kontakts (für E2E-Verschlüsselung):
 
 ```json
 {
@@ -288,11 +325,11 @@ stateDiagram-v2
   "publicKey": "ed25519:base64...",
   "name": "Ben Schmidt",
   "status": "active",
-  "verifiedAt": "2025-01-08T14:30:00Z",
-  "myVerification": "urn:uuid:123e4567-...",
-  "theirVerification": "urn:uuid:789abcde-..."
+  "verifiedAt": "2025-01-08T14:30:00Z"
 }
 ```
+
+> **Hinweis:** Die Verification-IDs (`myVerification`, `theirVerification`) werden nicht mehr benötigt, da die Verifications beim jeweiligen Empfänger liegen.
 
 ### Auto-Group (lokal)
 
@@ -301,9 +338,12 @@ stateDiagram-v2
   "id": "urn:uuid:autogroup-anna",
   "type": "AutoContactGroup",
   "groupKey": "aes256:encrypted_with_own_pubkey...",
-  "members": [
+  "activeMembers": [
     "did:wot:ben456",
     "did:wot:carla789"
+  ],
+  "excludedMembers": [
+    "did:wot:max123"
   ],
   "lastKeyRotation": "2025-01-08T14:30:00Z"
 }

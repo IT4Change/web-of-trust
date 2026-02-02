@@ -8,6 +8,7 @@
 |----------|--------------|
 | [Entitäten](entitaeten.md) | Vollständiges ER-Diagramm aller Entitäten |
 | [did:key Verwendung](did-key-usage.md) | Wie `did:key` im System genutzt wird |
+| [Graph und Sichtbarkeit](graph-und-sichtbarkeit.md) | Wie das Netzwerk aus lokalen Perspektiven entsteht |
 | [JSON-Schemas](json-schemas/) | Maschinenlesbare Schemas zur Validierung |
 
 ---
@@ -16,18 +17,19 @@
 
 ```mermaid
 erDiagram
-    IDENTITY ||--o{ CONTACT : "verifiziert"
-    IDENTITY ||--o{ ATTESTATION : "erstellt"
+    IDENTITY ||--o{ CONTACT : "hat"
+    IDENTITY ||--o{ VERIFICATION : "empfängt"
+    IDENTITY ||--o{ ATTESTATION : "empfängt"
     IDENTITY ||--o{ ITEM : "besitzt"
     IDENTITY ||--o{ GROUP : "ist Mitglied"
-
-    CONTACT ||--o{ ATTESTATION : "erhält"
 
     GROUP ||--o{ ITEM : "enthält"
     GROUP ||--o{ IDENTITY : "hat Mitglieder"
 
     ITEM ||--o{ ITEM_KEY : "verschlüsselt mit"
 ```
+
+> **Empfänger-Prinzip:** Verifizierungen und Attestationen werden beim **Empfänger** (`to`) gespeichert, nicht beim Ersteller (`from`).
 
 ---
 
@@ -48,31 +50,32 @@ Die eigene digitale Identität des Nutzers.
 
 ### Contact (Verifizierter Kontakt)
 
-Ein gegenseitig verifizierter Kontakt.
+Ein Kontakt mit Public Key für E2E-Verschlüsselung.
 
 | Feld | Typ | Beschreibung |
 |------|-----|--------------|
 | did | `did:key` | DID des Kontakts |
-| publicKey | Ed25519 | Öffentlicher Schlüssel |
+| publicKey | Ed25519 | Öffentlicher Schlüssel (für Verschlüsselung) |
 | name | String | Anzeigename |
-| status | Enum | `pending`, `active`, `hidden` |
+| status | Enum | `pending`, `active` |
 | verifiedAt | DateTime | Zeitpunkt der gegenseitigen Verifizierung |
-| myVerification | URN | Referenz auf meine Verifizierung |
-| theirVerification | URN | Referenz auf deren Verifizierung |
+
+> **Hinweis:** Der Sender speichert nur Public Keys. Die Verifizierungen selbst liegen beim jeweiligen Empfänger.
 
 ### Attestation
 
-Eine signierte Aussage über einen Kontakt.
+Eine signierte Aussage über einen Kontakt (wird beim Empfänger gespeichert).
 
 | Feld | Typ | Beschreibung |
 |------|-----|--------------|
 | id | URN | Eindeutige ID |
-| from | `did:key` | Ersteller |
-| to | `did:key` | Empfänger |
+| from | `did:key` | Wer hat signiert |
+| to | `did:key` | Empfänger (Speicherort) |
 | claim | String | Die Aussage |
 | tags | String[] | Kategorisierung |
+| hidden | Boolean | Empfänger kann ausblenden (Default: false) |
 | createdAt | DateTime | Erstellungszeitpunkt |
-| proof | Signature | Ed25519-Signatur |
+| proof | Signature | Ed25519-Signatur von `from` |
 
 ### Item (Content-Eintrag)
 
@@ -114,28 +117,37 @@ Die implizite Gruppe aller aktiven Kontakte.
 │                                         │
 │  Auto-Gruppe (implizit)                 │
 │                                         │
-│  Mitglieder = alle Kontakte mit         │
-│               status = "active"         │
+│  activeMembers = Kontakte mit           │
+│                  status = "active"      │
+│                  NICHT in excludedMembers│
+│                                         │
+│  excludedMembers = Ausgeblendete        │
+│                    Kontakte (bleiben    │
+│                    active, aber nicht   │
+│                    in der Gruppe)       │
 │                                         │
 │  Wird automatisch aktualisiert bei:     │
 │  • Neue Verifizierung → hinzufügen      │
-│  • Kontakt ausblenden → entfernen       │
-│  • Kontakt wiederherstellen → hinzufügen│
+│  • Kontakt ausblenden → excludedMembers │
+│  • Wiederherstellen → aus excluded      │
 │                                         │
 └─────────────────────────────────────────┘
 ```
 
-### Verification (Gegenseitige Verifizierung)
+### Verification (Verifizierung)
 
-Besteht aus zwei Einzelverifizierungen.
+Wird beim **Empfänger** gespeichert.
 
 ```mermaid
 flowchart LR
-    A[Anna] -->|"signiert"| V1[Verification A→B]
-    B[Ben] -->|"signiert"| V2[Verification B→A]
+    A[Anna] -->|"signiert für Ben"| V1[Verification A→B]
+    V1 -->|"gespeichert bei"| B[Ben]
 
-    V1 & V2 -->|"zusammen"| MV[Gegenseitige Verifizierung]
+    B -->|"signiert für Anna"| V2[Verification B→A]
+    V2 -->|"gespeichert bei"| A[Anna]
 ```
+
+Erst wenn beide Verifications existieren, ist der Kontakt `active`.
 
 ---
 
@@ -154,4 +166,5 @@ Maschinenlesbare Schemas für Validierung:
 
 - [Entitäten im Detail](entitaeten.md) - Vollständiges ER-Diagramm mit Beziehungen
 - [did:key Verwendung](did-key-usage.md) - Wie DIDs generiert und verwendet werden
+- [Graph und Sichtbarkeit](graph-und-sichtbarkeit.md) - Lokaler Graph, Datenhoheit, gemeinsame Kontakte
 - [Verschlüsselung](../protokolle/verschluesselung.md) - Wie Items verschlüsselt werden

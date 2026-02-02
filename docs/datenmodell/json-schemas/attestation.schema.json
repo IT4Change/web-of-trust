@@ -19,12 +19,12 @@
     "from": {
       "type": "string",
       "pattern": "^did:key:z[1-9A-HJ-NP-Za-km-z]+$",
-      "description": "DID des Erstellers"
+      "description": "DID des Signierenden (wer attestiert)"
     },
     "to": {
       "type": "string",
       "pattern": "^did:key:z[1-9A-HJ-NP-Za-km-z]+$",
-      "description": "DID des Empfängers"
+      "description": "DID des Empfängers (Speicherort der Attestation)"
     },
     "claim": {
       "type": "string",
@@ -48,6 +48,11 @@
       "type": "string",
       "format": "date-time",
       "description": "Erstellungszeitpunkt (ISO 8601)"
+    },
+    "hidden": {
+      "type": "boolean",
+      "default": false,
+      "description": "Wenn true, ist die Attestation nicht öffentlich sichtbar (nur Empfänger kann ändern)"
     },
     "proof": {
       "type": "object",
@@ -85,6 +90,7 @@
       "claim": "Hat 3 Stunden im Gemeinschaftsgarten geholfen",
       "tags": ["garten", "helfen", "gemeinschaft"],
       "createdAt": "2025-01-08T14:00:00Z",
+      "hidden": false,
       "proof": {
         "type": "Ed25519Signature2020",
         "created": "2025-01-08T14:00:00Z",

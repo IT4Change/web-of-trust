@@ -25,25 +25,25 @@ erDiagram
         datetime verifiedAt
         urn myVerification FK
         urn theirVerification FK
-        datetime statusChangedAt
     }
 
     VERIFICATION {
         urn id PK
-        did_key from FK
-        did_key to FK
+        did_key from FK "Signiert von"
+        did_key to FK "Gespeichert bei"
         datetime timestamp
         bytes proof
     }
 
     ATTESTATION {
         urn id PK
-        did_key from FK
-        did_key to FK
+        did_key from FK "Signiert von"
+        did_key to FK "Gespeichert bei"
         string claim
         array tags
         datetime createdAt
         bytes proof
+        boolean hidden "Opt-out durch Empfänger"
     }
 
     ITEM {
@@ -92,6 +92,44 @@ erDiagram
 
     IDENTITY ||--|| AUTO_GROUP : "hat"
 ```
+
+---
+
+## Empfänger-Prinzip
+
+> **Kernprinzip:** Verifizierungen und Attestationen werden beim **Empfänger** (`to`) gespeichert, nicht beim Ersteller (`from`).
+
+### Warum?
+
+1. **Datenhoheit:** Der Empfänger kontrolliert, was über ihn veröffentlicht wird
+2. **Keine Konflikte:** Jeder schreibt nur in seinen eigenen Datenspeicher
+3. **Geschenk-Semantik:** Eine Attestation ist wie ein Geschenk – der Empfänger erhält sie
+
+### Wie funktioniert es?
+
+```mermaid
+sequenceDiagram
+    participant A as Anna (from)
+    participant B as Ben (to)
+
+    A->>A: Erstellt & signiert Attestation
+    A->>B: Sendet signierte Attestation
+    B->>B: Speichert in eigenem Datenspeicher
+    B->>B: Optional: Setzt hidden=true
+```
+
+### Felder erklärt
+
+| Feld | Bedeutung |
+|------|-----------|
+| `from` | Wer hat signiert? (Ersteller, besitzt Private Key) |
+| `to` | Wer speichert? (Empfänger, kontrolliert Sichtbarkeit) |
+| `proof` | Signatur von `from` – beweist Authentizität |
+| `hidden` | Nur bei Attestation: Empfänger kann ausblenden |
+
+### Was der Ersteller behält
+
+Der Ersteller (`from`) speichert nur die **Public Keys** seiner Kontakte – für die E2E-Verschlüsselung. Die Verifizierungen und Attestationen selbst liegen beim Empfänger.
 
 ---
 
@@ -157,8 +195,7 @@ Ein anderer Nutzer, mit dem eine Verifizierung besteht.
   "status": "active",
   "verifiedAt": "2025-01-05T10:05:00Z",
   "myVerification": "urn:uuid:550e8400-e29b-41d4-a716-446655440000",
-  "theirVerification": "urn:uuid:6fa459ea-ee8a-3ca4-894e-db77e160355e",
-  "statusChangedAt": "2025-01-05T10:05:00Z"
+  "theirVerification": "urn:uuid:6fa459ea-ee8a-3ca4-894e-db77e160355e"
 }
 ```
 
@@ -168,21 +205,30 @@ Ein anderer Nutzer, mit dem eine Verifizierung besteht.
 stateDiagram-v2
     [*] --> pending: Einseitig verifiziert
     pending --> active: Gegenseitig verifiziert
-    active --> hidden: Ausblenden
-    hidden --> active: Wiederherstellen
 ```
 
 | Status | Bedeutung |
 |--------|-----------|
 | `pending` | Nur eine Seite hat verifiziert |
-| `active` | Gegenseitig verifiziert, in Auto-Gruppe |
-| `hidden` | Ausgeblendet, nicht in Auto-Gruppe |
+| `active` | Gegenseitig verifiziert |
+
+> **Hinweis:** Das Ausblenden von Kontakten erfolgt über die `excludedMembers`-Liste der Auto-Gruppe, nicht über den Kontakt-Status. Ein ausgeschlossener Kontakt bleibt `active`, ist aber nicht in der Auto-Gruppe.
 
 ---
 
 ## Verification (Verifizierung)
 
 Eine kryptografisch signierte Aussage "Ich habe diese Person getroffen".
+
+> **Hinweis:** Eine Verification ist strukturell eine spezielle Form von Attestation mit implizitem Claim "Ich habe diese Person getroffen". Sie wird jedoch separat behandelt, da sie den Kontakt-Status steuert (pending → active).
+
+### Speicherort
+
+Die Verification wird beim **Empfänger** (`to`) gespeichert:
+
+- Anna erstellt Verification für Ben → wird bei **Ben** gespeichert
+- Ben erstellt Verification für Anna → wird bei **Anna** gespeichert
+- Beide sehen die jeweils empfangene Verification in ihrem Profil
 
 ### Schema
 
@@ -201,17 +247,35 @@ Eine kryptografisch signierte Aussage "Ich habe diese Person getroffen".
 }
 ```
 
+### Felder
+
+| Feld | Typ | Beschreibung |
+|------|-----|--------------|
+| `from` | `did:key` | Wer hat verifiziert (Signatur-Ersteller) |
+| `to` | `did:key` | Wer wurde verifiziert (Speicherort) |
+| `timestamp` | DateTime | Zeitpunkt der Verifizierung |
+| `proof` | Object | Ed25519 Signatur von `from` |
+
 ### Eigenschaften
 
 - **Unveränderlich:** Einmal erstellt, nie geändert
 - **Unidirektional:** A→B und B→A sind separate Verifizierungen
 - **Gegenseitigkeit:** Erst wenn beide existieren, ist der Kontakt "aktiv"
+- **Immer sichtbar:** Kann nicht ausgeblendet werden (steuert Kontakt-Status)
 
 ---
 
 ## Attestation
 
 Eine signierte Aussage über einen Kontakt.
+
+### Speicherort
+
+Die Attestation wird beim **Empfänger** (`to`) gespeichert:
+
+- Anna schreibt Attestation für Ben → wird bei **Ben** gespeichert
+- Ben kontrolliert die Sichtbarkeit (kann `hidden: true` setzen)
+- Andere sehen Bens Attestationen, wenn sie sein Profil abrufen
 
 ### Schema
 
@@ -224,6 +288,7 @@ Eine signierte Aussage über einen Kontakt.
   "claim": "Hat 3 Stunden im Gemeinschaftsgarten geholfen",
   "tags": ["garten", "helfen", "gemeinschaft"],
   "createdAt": "2025-01-08T14:00:00Z",
+  "hidden": false,
   "proof": {
     "type": "Ed25519Signature2020",
     "verificationMethod": "did:key:z6Mkf5rGMoatrSj1f...",
@@ -232,13 +297,35 @@ Eine signierte Aussage über einen Kontakt.
 }
 ```
 
+### Felder
+
+| Feld | Typ | Required | Beschreibung |
+|------|-----|----------|--------------|
+| `from` | `did:key` | Ja | Wer hat attestiert (Signatur-Ersteller) |
+| `to` | `did:key` | Ja | Wer erhält die Attestation (Speicherort) |
+| `claim` | String | Ja | Freitext-Aussage (5-500 Zeichen) |
+| `tags` | Array | Nein | Schlagwörter (max 5) |
+| `createdAt` | DateTime | Ja | Erstellungszeitpunkt |
+| `hidden` | Boolean | Nein | Wenn true, nicht öffentlich sichtbar (Default: false) |
+| `proof` | Object | Ja | Ed25519 Signatur von `from` |
+
+### Sichtbarkeit
+
+| `hidden` | Wer sieht die Attestation? |
+|----------|----------------------------|
+| `false` (Default) | Alle, die das Profil abrufen |
+| `true` | Nur der Empfänger selbst |
+
+> **Hinweis:** Der Empfänger kann eine Attestation ausblenden, aber nicht löschen. Die Signatur bleibt gültig.
+
 ### Regeln
 
 | Regel | Beschreibung |
 |-------|--------------|
 | Nur für Kontakte | Attestation nur für verifizierte Kontakte möglich |
 | Keine Selbst-Attestation | `from` und `to` müssen unterschiedlich sein |
-| Unveränderlich | Einmal erstellt, nie geändert oder gelöscht |
+| Unveränderlich | Claim, tags, proof können nie geändert werden |
+| Ausblendbar | Nur `hidden` kann vom Empfänger geändert werden |
 | Unabhängig von Status | Auch für ausgeblendete Kontakte erstellbar |
 
 ---

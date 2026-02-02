@@ -11,34 +11,38 @@ erDiagram
         string publicKey
         string name
     }
-    
+
     ATTESTATION {
         string id PK "UUID"
-        string fromDid FK "Ersteller"
-        string toDid FK "Empfänger"
+        string fromDid FK "Signiert von"
+        string toDid FK "Gespeichert bei"
         string claim "Freitext"
         string contextGroupId FK "Optional"
         datetime createdAt
-        string signature
+        boolean hidden "Opt-out durch Empfaenger"
+        string proof "Ed25519 Signatur"
     }
-    
+
     TAG {
         string id PK
         string name
     }
-    
+
     GROUP {
         string did PK
         string name
     }
-    
-    USER ||--o{ ATTESTATION : "erstellt"
-    USER ||--o{ ATTESTATION : "empfängt"
+
+    USER ||--o{ ATTESTATION : "empfaengt (to)"
     ATTESTATION }o--o{ TAG : "hat"
     ATTESTATION }o--o| GROUP : "im Kontext von"
 ```
 
+> **Empfänger-Prinzip:** Attestationen werden beim Empfänger (`to`) gespeichert. Anna attestiert Ben → Attestation liegt bei **Ben**.
+
 ## Attestation-Dokument Struktur
+
+Wird beim **Empfänger** (`to`) gespeichert:
 
 ```json
 {
@@ -51,6 +55,7 @@ erDiagram
   "tags": ["garten", "helfen"],
   "context": "did:wot:group:gemeinschaftsgarten",
   "createdAt": "2025-01-08T14:32:00Z",
+  "hidden": false,
   "proof": {
     "type": "Ed25519Signature2020",
     "verificationMethod": "did:wot:anna123#key-1",
@@ -60,34 +65,38 @@ erDiagram
 }
 ```
 
+| Feld | Beschreibung |
+|------|--------------|
+| `from` | Wer hat attestiert (signiert) |
+| `to` | Wer erhält die Attestation (Speicherort) |
+| `hidden` | Empfänger kann ausblenden (Default: false) |
+
 ## Hauptflow: Attestation erstellen
 
 ```mermaid
 flowchart TD
     Start(["Nutzer tippt Attestation erstellen"]) --> CheckContact{"Kontakt verifiziert?"}
-    
-    CheckContact -->|Nein| Error["Fehler: Nur für verifizierte Kontakte"]
+
+    CheckContact -->|Nein| Error["Fehler: Nur fuer verifizierte Kontakte"]
     CheckContact -->|Ja| ShowForm["Zeige Formular"]
-    
+
     ShowForm --> Input["Nutzer gibt ein: Claim, Tags, Gruppe"]
-    
+
     Input --> Validate{"Eingaben valide?"}
-    
+
     Validate -->|Nein| ShowForm
-    Validate -->|Ja| BuildDoc["Baue Attestation-Dokument"]
-    
+    Validate -->|Ja| BuildDoc["Baue Attestation-Dokument (from=ich, to=kontakt)"]
+
     BuildDoc --> Sign["Signiere mit Private Key"]
-    
-    Sign --> Store["Speichere lokal"]
-    
-    Store --> Encrypt["Verschluessele fuer Empfaenger und eigene Kontakte"]
-    
-    Encrypt --> Queue["In Sync-Queue"]
-    
+
+    Sign --> Queue["Sende an Empfaenger (to)"]
+
     Queue --> Notify["Erstelle Benachrichtigung fuer Empfaenger"]
-    
+
     Notify --> Done(["Fertig"])
 ```
+
+> **Hinweis:** Die Attestation wird direkt an den Empfänger gesendet und dort gespeichert. Der Sender behält keine lokale Kopie.
 
 ## Sequenzdiagramm: Attestation erstellen und verteilen
 
@@ -95,40 +104,38 @@ flowchart TD
 sequenceDiagram
     participant A_UI as Anna UI
     participant A_App as Anna App
-    participant A_Store as Anna Local Store
     participant Sync as Sync Server
     participant B_App as Ben App
+    participant B_Store as Ben Local Store
     participant B_UI as Ben UI
 
     A_UI->>A_App: openAttestationForm(ben.did)
     A_App->>A_App: checkContactStatus(ben.did)
     A_App->>A_UI: showForm()
-    
+
     A_UI->>A_App: submitAttestation(claim, tags, group)
-    
+
     A_App->>A_App: validateInput()
-    A_App->>A_App: buildAttestationDoc()
+    A_App->>A_App: buildAttestationDoc(from=anna, to=ben)
     Note over A_App: id, from, to, claim, tags, context, createdAt
-    
+
     A_App->>A_App: signAttestation(privateKey)
     Note over A_App: Fuegt proof-Objekt hinzu
-    
-    A_App->>A_Store: saveAttestation(doc)
-    
-    A_App->>A_App: encryptForRecipients()
-    Note over A_App: Verschluesselt fuer Ben und alle eigenen Kontakte
-    
-    A_App->>Sync: pushAttestation(encryptedDoc)
-    
+
+    A_App->>Sync: pushAttestation(to=ben)
+    Note over A_App: Attestation wird an Ben gesendet
+
     A_App->>A_UI: showSuccess()
-    
+
     Sync->>B_App: notifyNewAttestation()
     B_App->>Sync: pullAttestation()
-    B_App->>B_App: decryptAttestation()
     B_App->>B_App: verifySignature(anna.publicKey)
-    B_App->>B_App: storeAttestation()
+    B_App->>B_Store: storeAttestation(hidden=false)
+    Note over B_Store: Ben speichert die Attestation
     B_App->>B_UI: showNotification()
 ```
+
+> **Empfänger-Prinzip:** Anna sendet die Attestation an Ben. Ben speichert sie in seinem Datenspeicher und kontrolliert die Sichtbarkeit (`hidden`).
 
 ## Detailflow: Signatur erstellen
 
@@ -188,45 +195,62 @@ flowchart TD
 
 ### Wer bekommt die Attestation?
 
+Mit dem Empfänger-Prinzip ist die Verteilung einfacher:
+
 ```mermaid
 flowchart TD
-    A["Anna erstellt Attestation fuer Ben"] --> Encrypt["Verschluessele Attestation"]
-    
-    Encrypt --> E1["Mit Bens Public Key"]
-    Encrypt --> E2["Mit eigenem Public Key"]
-    Encrypt --> E3["Mit Public Keys aller eigenen Kontakte"]
-    
-    E1 --> Store["Speichere verschluesselte Versionen"]
-    E2 --> Store
-    E3 --> Store
-    
-    Store --> Sync["Sync zum Server"]
-    
-    Sync --> Pull1["Ben pullt seine Version"]
-    Sync --> Pull2["Annas Kontakte pullen ihre Versionen"]
+    A["Anna erstellt Attestation fuer Ben"] --> Sign["Signiere mit Annas Private Key"]
+
+    Sign --> Encrypt["Verschluessele mit Bens Public Key"]
+
+    Encrypt --> Send["Sende an Ben"]
+
+    Send --> BenReceives["Ben empfaengt und speichert"]
+
+    BenReceives --> BenShares["Ben teilt mit seiner Auto-Gruppe"]
 ```
 
-### Item-Key Verschluesselung
+### Sichtbarkeit nach Empfang
 
-Attestationen nutzen das gleiche Verschluesselungsschema wie andere Items:
+Ben kontrolliert, wer die Attestation sieht:
+
+```mermaid
+flowchart TD
+    Receive["Ben empfaengt Attestation"] --> Store["Speichere lokal"]
+
+    Store --> Default["hidden=false (Standard)"]
+
+    Default --> Share["Teile mit Auto-Gruppe"]
+
+    Share --> Visible["Sichtbar in Bens Profil"]
+
+    Store --> Hide["Ben setzt hidden=true"]
+
+    Hide --> Private["Nur Ben sieht die Attestation"]
+```
+
+### Item-Key Verschluesselung (beim Empfänger)
+
+Nachdem Ben die Attestation empfangen hat, teilt er sie mit seiner Auto-Gruppe:
 
 ```mermaid
 flowchart LR
-    Attestation["Attestation Klartext"] --> SymKey["Generiere Item Key AES-256"]
-    
-    SymKey --> EncContent["Verschluessele Attestation mit Item Key"]
-    
-    SymKey --> EncKey1["Verschluessele Item Key mit Ben PK"]
-    SymKey --> EncKey2["Verschluessele Item Key mit Anna PK"]
-    SymKey --> EncKey3["Verschluessele Item Key mit Kontakt1 PK"]
+    Attestation["Attestation bei Ben"] --> SymKey["Generiere Item Key AES-256"]
+
+    SymKey --> EncContent["Verschluessele Attestation"]
+
+    SymKey --> EncKey1["Item Key fuer Ben selbst"]
+    SymKey --> EncKey2["Item Key fuer Bens Kontakt 1"]
+    SymKey --> EncKey3["Item Key fuer Bens Kontakt 2"]
     SymKey --> EncKeyN["..."]
-    
-    EncContent --> Store["Speichere"]
+
+    EncContent --> Store["In Bens Sync-Queue"]
     EncKey1 --> Store
     EncKey2 --> Store
     EncKey3 --> Store
-    EncKeyN --> Store
 ```
+
+> **Hinweis:** Die Verschlüsselung erfolgt beim Empfänger (Ben), nicht beim Sender (Anna). Ben entscheidet, mit wem er die Attestation teilt.
 
 ## Tags und Suche
 

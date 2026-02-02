@@ -19,12 +19,12 @@
     "from": {
       "type": "string",
       "pattern": "^did:key:z[1-9A-HJ-NP-Za-km-z]+$",
-      "description": "DID des Verifizierenden"
+      "description": "DID des Signierenden (wer verifiziert)"
     },
     "to": {
       "type": "string",
       "pattern": "^did:key:z[1-9A-HJ-NP-Za-km-z]+$",
-      "description": "DID des Verifizierten"
+      "description": "DID des Empfängers (Speicherort der Verification)"
     },
     "timestamp": {
       "type": "string",

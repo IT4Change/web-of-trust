@@ -72,14 +72,16 @@ flowchart TD
 
 ### CRDT-Typen im System
 
-| Datentyp | CRDT-Strategie |
-|----------|----------------|
-| Profil-Felder | LWW-Register (Last Writer Wins) |
-| Kontakt-Liste | LWW-Map + Tombstones |
-| Items | LWW-Register + Soft Delete |
-| Attestationen | Add-only Set (unveränderlich) |
-| Verifizierungen | Add-only Set (unveränderlich) |
-| Gruppen-Membership | LWW-Map |
+| Datentyp | CRDT-Strategie | Speicherort |
+|----------|----------------|-------------|
+| Profil-Felder | LWW-Register (Last Writer Wins) | Beim Nutzer selbst |
+| Kontakt-Liste | LWW-Map + Tombstones | Beim Nutzer selbst |
+| Items | LWW-Register + Soft Delete | Beim Besitzer |
+| Attestationen | Add-only Set (nur `hidden` ist LWW) | **Beim Empfänger (`to`)** |
+| Verifizierungen | Add-only Set (unveränderlich) | **Beim Empfänger (`to`)** |
+| Gruppen-Membership | LWW-Map | Beim Admin/Gruppe |
+
+> **Empfänger-Prinzip:** Verifizierungen und Attestationen werden beim Empfänger (`to`) gespeichert. Das vereinfacht die CRDT-Konfliktauflösung, da jeder nur in seinen eigenen Datenspeicher schreibt.
 
 ---
 

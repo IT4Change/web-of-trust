@@ -52,6 +52,7 @@ Detaillierte Prozessbeschreibungen aus Nutzer- und technischer Perspektive.
 | -------- | ------------ |
 | [Entitäten](docs/datenmodell/entitaeten.md) | User, Contact, Item, Group, Attestation |
 | [did:key Verwendung](docs/datenmodell/did-key-usage.md) | Wie dezentrale Identifier genutzt werden |
+| [Graph und Sichtbarkeit](docs/datenmodell/graph-und-sichtbarkeit.md) | Lokaler Graph, Datenhoheit, gemeinsame Kontakte |
 | [JSON Schemas](docs/datenmodell/json-schemas/) | Maschinenlesbare Schemas |
 
 ### Protokolle
