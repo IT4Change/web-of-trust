@@ -4,7 +4,7 @@ import { AttestationList, CreateAttestation, ImportAttestation } from '../compon
 import { useContacts } from '../hooks'
 
 function AttestationsIndex() {
-  const { verifiedContacts } = useContacts()
+  const { activeContacts } = useContacts()
 
   return (
     <div className="space-y-6">
@@ -18,7 +18,7 @@ function AttestationsIndex() {
             <Download size={16} />
             Importieren
           </Link>
-          {verifiedContacts.length > 0 && (
+          {activeContacts.length > 0 && (
             <Link
               to="/attestations/new"
               className="flex items-center gap-2 px-4 py-2 bg-primary-600 text-white text-sm font-medium rounded-lg hover:bg-primary-700 transition-colors"

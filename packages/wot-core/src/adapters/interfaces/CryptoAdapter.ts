@@ -1,5 +1,20 @@
 import type { KeyPair } from '../../types'
 
+/**
+ * Encrypted payload structure for E2E encryption
+ */
+export interface EncryptedPayload {
+  ciphertext: Uint8Array
+  nonce: Uint8Array
+  ephemeralPublicKey?: Uint8Array
+}
+
+/**
+ * Crypto adapter interface for all cryptographic operations.
+ *
+ * Framework-agnostic: Can be implemented with Web Crypto API,
+ * noble/ed25519, libsodium, or any other crypto library.
+ */
 export interface CryptoAdapter {
   // Key Management
   generateKeyPair(): Promise<KeyPair>
@@ -8,15 +23,24 @@ export interface CryptoAdapter {
   exportPublicKey(publicKey: CryptoKey): Promise<string>
   importPublicKey(exported: string): Promise<CryptoKey>
 
-  // DID
+  // Mnemonic / Recovery
+  generateMnemonic(): string
+  deriveKeyPairFromMnemonic(mnemonic: string): Promise<KeyPair>
+  validateMnemonic(mnemonic: string): boolean
+
+  // DID (did:key with Ed25519)
   createDid(publicKey: CryptoKey): Promise<string>
   didToPublicKey(did: string): Promise<CryptoKey>
 
-  // Signing
+  // Signing (Ed25519)
   sign(data: Uint8Array, privateKey: CryptoKey): Promise<Uint8Array>
   verify(data: Uint8Array, signature: Uint8Array, publicKey: CryptoKey): Promise<boolean>
   signString(data: string, privateKey: CryptoKey): Promise<string>
   verifyString(data: string, signature: string, publicKey: CryptoKey): Promise<boolean>
+
+  // Encryption (X25519 + AES-256-GCM for Items)
+  encrypt(plaintext: Uint8Array, recipientPublicKey: Uint8Array): Promise<EncryptedPayload>
+  decrypt(payload: EncryptedPayload, privateKey: Uint8Array): Promise<Uint8Array>
 
   // Utilities
   generateNonce(): string

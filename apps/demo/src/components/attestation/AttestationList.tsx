@@ -11,7 +11,7 @@ export function AttestationList() {
   const getContactName = (did: string) => {
     if (identity?.did === did) return identity.profile.name
     const contact = contacts.find((c) => c.did === did)
-    return contact?.profile.name
+    return contact?.name
   }
 
   if (isLoading) {
@@ -54,9 +54,9 @@ export function AttestationList() {
               <AttestationCard
                 key={attestation.id}
                 attestation={attestation}
-                issuerName={getContactName(attestation.issuerDid)}
-                subjectName={getContactName(attestation.subjectDid)}
-                showIssuer={false}
+                fromName={getContactName(attestation.from)}
+                toName={getContactName(attestation.to)}
+                showFrom={false}
                 showExport={true}
               />
             ))}
@@ -74,8 +74,8 @@ export function AttestationList() {
               <AttestationCard
                 key={attestation.id}
                 attestation={attestation}
-                issuerName={getContactName(attestation.issuerDid)}
-                subjectName={getContactName(attestation.subjectDid)}
+                fromName={getContactName(attestation.from)}
+                toName={getContactName(attestation.to)}
               />
             ))}
           </div>

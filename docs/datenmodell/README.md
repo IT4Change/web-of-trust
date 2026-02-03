@@ -6,6 +6,7 @@
 
 | Dokument | Beschreibung |
 |----------|--------------|
+| [Architektur](architektur.md) | Framework-agnostische Architektur und Adapter-Pattern |
 | [Entitäten](entitaeten.md) | Vollständiges ER-Diagramm aller Entitäten |
 | [did:key Verwendung](did-key-usage.md) | Wie `did:key` im System genutzt wird |
 | [Graph und Sichtbarkeit](graph-und-sichtbarkeit.md) | Wie das Netzwerk aus lokalen Perspektiven entsteht |
@@ -73,7 +74,7 @@ Eine signierte Aussage über einen Kontakt (wird beim Empfänger gespeichert).
 | to | `did:key` | Empfänger (Speicherort) |
 | claim | String | Die Aussage |
 | tags | String[] | Kategorisierung |
-| hidden | Boolean | Empfänger kann ausblenden (Default: false) |
+| accepted | Boolean | Empfänger kann annehmen (Default: false) - lokale Metadaten |
 | createdAt | DateTime | Erstellungszeitpunkt |
 | proof | Signature | Ed25519-Signatur von `from` |
 

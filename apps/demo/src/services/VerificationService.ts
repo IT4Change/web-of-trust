@@ -6,6 +6,7 @@ import type {
   VerificationResponse,
   Identity,
   KeyPair,
+  Proof,
 } from '@web-of-trust/core'
 
 export class VerificationService {
@@ -20,11 +21,9 @@ export class VerificationService {
     return {
       nonce: this.crypto.generateNonce(),
       timestamp: new Date().toISOString(),
-      initiatorDid: identity.did,
-      initiatorPublicKey: publicKeyExported,
-      initiatorProfile: {
-        name: identity.profile.name,
-      },
+      fromDid: identity.did,
+      fromPublicKey: publicKeyExported,
+      fromName: identity.profile.name,
     }
   }
 
@@ -35,79 +34,61 @@ export class VerificationService {
   ): Promise<VerificationResponse> {
     const publicKeyExported = await this.crypto.exportPublicKey(keyPair.publicKey)
 
-    // Sign the challenge data
-    const challengeData = JSON.stringify({
-      nonce: challenge.nonce,
-      timestamp: challenge.timestamp,
-      initiatorDid: challenge.initiatorDid,
-    })
-    const challengeSignature = await this.crypto.signString(challengeData, keyPair.privateKey)
-
     return {
       nonce: challenge.nonce,
       timestamp: new Date().toISOString(),
-      responderDid: identity.did,
-      responderPublicKey: publicKeyExported,
-      responderProfile: {
-        name: identity.profile.name,
-      },
-      challengeSignature,
+      toDid: identity.did,
+      toPublicKey: publicKeyExported,
+      toName: identity.profile.name,
     }
   }
 
-  async verifyResponse(
-    challenge: VerificationChallenge,
-    response: VerificationResponse
-  ): Promise<boolean> {
-    // Verify the challenge signature
-    const challengeData = JSON.stringify({
-      nonce: challenge.nonce,
-      timestamp: challenge.timestamp,
-      initiatorDid: challenge.initiatorDid,
-    })
-
-    const responderPublicKey = await this.crypto.importPublicKey(response.responderPublicKey)
-
-    return this.crypto.verifyString(challengeData, response.challengeSignature, responderPublicKey)
-  }
-
+  /**
+   * Complete verification (Empfänger-Prinzip)
+   * Creates a Verification that will be stored at the recipient (to)
+   */
   async completeVerification(
     challenge: VerificationChallenge,
     response: VerificationResponse,
     keyPair: KeyPair
   ): Promise<Verification> {
-    // Verify the response first
-    const isValid = await this.verifyResponse(challenge, response)
-    if (!isValid) {
-      throw new Error('Invalid verification response')
-    }
+    const timestamp = new Date().toISOString()
 
-    // Create verification record
+    // Create verification: challenge.from verifies response.to
+    // Stored at response.to (the recipient of this verification)
     const verificationData = JSON.stringify({
       nonce: challenge.nonce,
-      initiatorDid: challenge.initiatorDid,
-      responderDid: response.responderDid,
-      timestamp: response.timestamp,
+      from: challenge.fromDid,
+      to: response.toDid,
+      timestamp,
     })
 
-    const initiatorSignature = await this.crypto.signString(verificationData, keyPair.privateKey)
+    const signature = await this.crypto.signString(verificationData, keyPair.privateKey)
 
-    const verification: Verification = {
-      id: `ver-${challenge.nonce}`,
-      initiatorDid: challenge.initiatorDid,
-      responderDid: response.responderDid,
-      initiatorSignature,
-      responderSignature: response.challengeSignature,
-      timestamp: response.timestamp,
+    const proof: Proof = {
+      type: 'Ed25519Signature2020',
+      verificationMethod: `${challenge.fromDid}#key-1`,
+      created: timestamp,
+      proofPurpose: 'authentication',
+      proofValue: signature,
     }
 
-    await this.storage.addVerification(verification)
+    const verification: Verification = {
+      id: `urn:uuid:ver-${challenge.nonce}`,
+      from: challenge.fromDid,
+      to: response.toDid,
+      timestamp,
+      proof,
+    }
+
+    // Store at recipient (this is our own verification we receive)
+    await this.storage.saveVerification(verification)
 
     return verification
   }
 
-  async getVerifications(contactDid?: string): Promise<Verification[]> {
-    return this.storage.getVerifications(contactDid)
+  async getReceivedVerifications(): Promise<Verification[]> {
+    return this.storage.getReceivedVerifications()
   }
 
   async getVerification(id: string): Promise<Verification | null> {

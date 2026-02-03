@@ -9,7 +9,7 @@ type VerificationStep = 'idle' | 'initiating' | 'responding' | 'completing' | 'd
 export function useVerification() {
   const { verificationService } = useAdapters()
   const { identity, keyPair } = useIdentity()
-  const { addContact, verifyContact: markVerified } = useContacts()
+  const { addContact, activateContact } = useContacts()
 
   const [step, setStep] = useState<VerificationStep>('idle')
   const [challenge, setChallenge] = useState<VerificationChallenge | null>(null)
@@ -50,10 +50,13 @@ export function useVerification() {
         const newResponse = await verificationService.createResponse(decodedChallenge, identity, keyPair)
         setResponse(newResponse)
 
-        // Add initiator as pending contact
-        await addContact(decodedChallenge.initiatorDid, {
-          name: decodedChallenge.initiatorProfile.name,
-        }, 'verified')
+        // Add the challenge initiator as an active contact
+        await addContact(
+          decodedChallenge.fromDid,
+          decodedChallenge.fromPublicKey,
+          decodedChallenge.fromName,
+          'active'
+        )
 
         setStep('done')
         return verificationService.encodeResponse(newResponse)
@@ -86,10 +89,13 @@ export function useVerification() {
           keyPair
         )
 
-        // Add responder as verified contact
-        await addContact(decodedResponse.responderDid, {
-          name: decodedResponse.responderProfile.name,
-        }, 'verified')
+        // Add responder as active contact
+        await addContact(
+          decodedResponse.toDid,
+          decodedResponse.toPublicKey,
+          decodedResponse.toName,
+          'active'
+        )
 
         setStep('done')
         return verification

@@ -1,9 +1,9 @@
 import { openDB, type IDBPDatabase } from 'idb'
 import type { StorageAdapter } from '../interfaces/StorageAdapter'
-import type { Identity, Profile, Contact, Verification, Attestation } from '../../types'
+import type { Identity, Profile, Contact, Verification, Attestation, AttestationMetadata } from '../../types'
 
 const DB_NAME = 'web-of-trust'
-const DB_VERSION = 1
+const DB_VERSION = 2
 
 interface WoTDB {
   identity: {
@@ -18,12 +18,16 @@ interface WoTDB {
   verifications: {
     key: string
     value: Verification
-    indexes: { 'by-contact': string }
+    indexes: { 'by-from': string }
   }
   attestations: {
     key: string
     value: Attestation
-    indexes: { 'by-issuer': string; 'by-subject': string }
+    indexes: { 'by-from': string }
+  }
+  attestationMetadata: {
+    key: string
+    value: AttestationMetadata
   }
 }
 
@@ -44,17 +48,21 @@ export class LocalStorageAdapter implements StorageAdapter {
           contactStore.createIndex('by-status', 'status')
         }
 
-        // Verifications store
+        // Verifications store (Empfänger-Prinzip: indexed by 'from')
         if (!db.objectStoreNames.contains('verifications')) {
           const verificationStore = db.createObjectStore('verifications', { keyPath: 'id' })
-          verificationStore.createIndex('by-contact', 'responderDid')
+          verificationStore.createIndex('by-from', 'from')
         }
 
-        // Attestations store
+        // Attestations store (Empfänger-Prinzip: indexed by 'from')
         if (!db.objectStoreNames.contains('attestations')) {
           const attestationStore = db.createObjectStore('attestations', { keyPath: 'id' })
-          attestationStore.createIndex('by-issuer', 'issuerDid')
-          attestationStore.createIndex('by-subject', 'subjectDid')
+          attestationStore.createIndex('by-from', 'from')
+        }
+
+        // Attestation metadata (local, not synced)
+        if (!db.objectStoreNames.contains('attestationMetadata')) {
+          db.createObjectStore('attestationMetadata', { keyPath: 'attestationId' })
         }
       },
     })
@@ -120,17 +128,14 @@ export class LocalStorageAdapter implements StorageAdapter {
     await db.delete('contacts', did)
   }
 
-  // Verification methods
-  async addVerification(verification: Verification): Promise<void> {
+  // Verification methods (Empfänger-Prinzip)
+  async saveVerification(verification: Verification): Promise<void> {
     const db = this.ensureDb()
     await db.put('verifications', verification)
   }
 
-  async getVerifications(contactDid?: string): Promise<Verification[]> {
+  async getReceivedVerifications(): Promise<Verification[]> {
     const db = this.ensureDb()
-    if (contactDid) {
-      return db.getAllFromIndex('verifications', 'by-contact', contactDid)
-    }
     return db.getAll('verifications')
   }
 
@@ -139,28 +144,44 @@ export class LocalStorageAdapter implements StorageAdapter {
     return (await db.get('verifications', id)) || null
   }
 
-  // Attestation methods
-  async addAttestation(attestation: Attestation): Promise<void> {
+  // Attestation methods (Empfänger-Prinzip)
+  async saveAttestation(attestation: Attestation): Promise<void> {
     const db = this.ensureDb()
     await db.put('attestations', attestation)
-  }
-
-  async getAttestations(issuerDid?: string): Promise<Attestation[]> {
-    const db = this.ensureDb()
-    if (issuerDid) {
-      return db.getAllFromIndex('attestations', 'by-issuer', issuerDid)
+    // Create default metadata if not exists
+    const existing = await db.get('attestationMetadata', attestation.id)
+    if (!existing) {
+      await db.put('attestationMetadata', {
+        attestationId: attestation.id,
+        accepted: false,
+      })
     }
-    return db.getAll('attestations')
   }
 
-  async getAttestationsAbout(subjectDid: string): Promise<Attestation[]> {
+  async getReceivedAttestations(): Promise<Attestation[]> {
     const db = this.ensureDb()
-    return db.getAllFromIndex('attestations', 'by-subject', subjectDid)
+    return db.getAll('attestations')
   }
 
   async getAttestation(id: string): Promise<Attestation | null> {
     const db = this.ensureDb()
     return (await db.get('attestations', id)) || null
+  }
+
+  // Attestation Metadata methods
+  async getAttestationMetadata(attestationId: string): Promise<AttestationMetadata | null> {
+    const db = this.ensureDb()
+    return (await db.get('attestationMetadata', attestationId)) || null
+  }
+
+  async setAttestationAccepted(attestationId: string, accepted: boolean): Promise<void> {
+    const db = this.ensureDb()
+    const metadata: AttestationMetadata = {
+      attestationId,
+      accepted,
+      acceptedAt: accepted ? new Date().toISOString() : undefined,
+    }
+    await db.put('attestationMetadata', metadata)
   }
 
   // Lifecycle
@@ -171,6 +192,7 @@ export class LocalStorageAdapter implements StorageAdapter {
       db.clear('contacts'),
       db.clear('verifications'),
       db.clear('attestations'),
+      db.clear('attestationMetadata'),
     ])
   }
 }

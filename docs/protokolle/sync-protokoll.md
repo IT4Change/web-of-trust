@@ -344,10 +344,13 @@ sequenceDiagram
 │  ⏳ Spezifische Sync-Library                                │
 │                                                             │
 │  Mögliche Implementierungen:                                │
-│  • Automerge                                                │
-│  • Yjs                                                      │
+│  • Evolu (SQLite + CRDT + E2EE)                            │
+│  • Jazz (CoJSON + E2EE)                                    │
+│  • NextGraph (DID + CRDT + E2EE)                           │
+│  • Yjs / Automerge / Loro (CRDT-only)                      │
 │  • Custom LWW-Implementierung                               │
-│  • Electric SQL                                             │
+│                                                             │
+│  → Siehe [Framework-Evaluation](framework-evaluation.md)   │
 │                                                             │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -356,7 +359,6 @@ sequenceDiagram
 
 ## Weiterführend
 
+- [Framework-Evaluation](framework-evaluation.md) - Analyse von CRDT/E2EE Frameworks
 - [Verschlüsselung](verschluesselung.md) - Wie Daten vor dem Sync verschlüsselt werden
 - [Flow: Sync](../flows/05-sync-nutzer-flow.md) - Nutzer-Perspektive auf Sync
-- [Automerge](https://automerge.org/) - Mögliches CRDT-Framework
-- [Yjs](https://yjs.dev/) - Alternatives CRDT-Framework

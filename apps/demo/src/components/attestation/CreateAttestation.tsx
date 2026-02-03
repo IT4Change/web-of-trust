@@ -2,27 +2,17 @@ import { useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { ArrowLeft, Award } from 'lucide-react'
 import { useAttestations, useContacts } from '../../hooks'
-import type { AttestationType } from '@web-of-trust/core'
-
-const attestationTypes: { value: AttestationType; label: string; description: string }[] = [
-  { value: 'skill', label: 'Fähigkeit', description: 'Bestätige eine Fähigkeit dieser Person' },
-  { value: 'help', label: 'Hilfe', description: 'Diese Person hat dir geholfen' },
-  { value: 'collaboration', label: 'Zusammenarbeit', description: 'Ihr habt zusammen gearbeitet' },
-  { value: 'recommendation', label: 'Empfehlung', description: 'Du empfiehlst diese Person' },
-  { value: 'custom', label: 'Sonstiges', description: 'Andere Art von Attestation' },
-]
 
 export function CreateAttestation() {
   const navigate = useNavigate()
   const [searchParams] = useSearchParams()
-  const subjectDid = searchParams.get('subject')
+  const toDid = searchParams.get('to')
 
   const { createAttestation, isLoading } = useAttestations()
-  const { verifiedContacts } = useContacts()
+  const { activeContacts } = useContacts()
 
-  const [selectedContact, setSelectedContact] = useState(subjectDid || '')
-  const [type, setType] = useState<AttestationType>('skill')
-  const [content, setContent] = useState('')
+  const [selectedContact, setSelectedContact] = useState(toDid || '')
+  const [claim, setClaim] = useState('')
   const [tags, setTags] = useState('')
   const [error, setError] = useState<string | null>(null)
 
@@ -34,7 +24,7 @@ export function CreateAttestation() {
       return
     }
 
-    if (!content.trim()) {
+    if (!claim.trim()) {
       setError('Bitte gib einen Text ein')
       return
     }
@@ -46,14 +36,14 @@ export function CreateAttestation() {
         .map((t) => t.trim())
         .filter((t) => t.length > 0)
 
-      await createAttestation(selectedContact, type, content.trim(), tagList.length > 0 ? tagList : undefined)
+      await createAttestation(selectedContact, claim.trim(), tagList.length > 0 ? tagList : undefined)
       navigate('/attestations')
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Fehler beim Erstellen')
     }
   }
 
-  const selectedContactInfo = verifiedContacts.find((c) => c.did === selectedContact)
+  const selectedContactInfo = activeContacts.find((c) => c.did === selectedContact)
 
   return (
     <div className="space-y-6">
@@ -72,7 +62,7 @@ export function CreateAttestation() {
         </p>
       </div>
 
-      {verifiedContacts.length === 0 ? (
+      {activeContacts.length === 0 ? (
         <div className="text-center py-8">
           <div className="w-16 h-16 bg-slate-100 rounded-full flex items-center justify-center mx-auto mb-4">
             <Award className="w-8 h-8 text-slate-400" />
@@ -93,47 +83,27 @@ export function CreateAttestation() {
               className="w-full px-4 py-3 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent bg-white"
             >
               <option value="">Kontakt auswählen...</option>
-              {verifiedContacts.map((contact) => (
+              {activeContacts.map((contact) => (
                 <option key={contact.did} value={contact.did}>
-                  {contact.profile.name}
+                  {contact.name || contact.did.slice(0, 20) + '...'}
                 </option>
               ))}
             </select>
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-slate-700 mb-2">
-              Art der Attestation
-            </label>
-            <div className="grid grid-cols-2 gap-2">
-              {attestationTypes.map((at) => (
-                <button
-                  key={at.value}
-                  type="button"
-                  onClick={() => setType(at.value)}
-                  className={`p-3 text-left rounded-lg border-2 transition-colors ${
-                    type === at.value
-                      ? 'border-primary-500 bg-primary-50'
-                      : 'border-slate-200 hover:border-slate-300'
-                  }`}
-                >
-                  <span className="block font-medium text-slate-900">{at.label}</span>
-                  <span className="text-xs text-slate-500">{at.description}</span>
-                </button>
-              ))}
-            </div>
-          </div>
-
-          <div>
             <label className="block text-sm font-medium text-slate-700 mb-1">
-              Beschreibung
+              Was möchtest du über diese Person sagen?
             </label>
             <textarea
-              value={content}
-              onChange={(e) => setContent(e.target.value)}
-              placeholder={`Was möchtest du über ${selectedContactInfo?.profile.name || 'diese Person'} sagen?`}
+              value={claim}
+              onChange={(e) => setClaim(e.target.value)}
+              placeholder={`Was möchtest du über ${selectedContactInfo?.name || 'diese Person'} sagen?`}
               className="w-full px-4 py-3 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent resize-none h-24"
             />
+            <p className="text-xs text-slate-500 mt-1">
+              Beispiel: "Hat mir im Garten geholfen" oder "Kann gut kochen"
+            </p>
           </div>
 
           <div>

@@ -8,6 +8,7 @@
 |----------|--------------|
 | [Verschlüsselung](verschluesselung.md) | E2E-Verschlüsselung, Protokoll-Vergleich |
 | [Sync-Protokoll](sync-protokoll.md) | Offline/Online Synchronisation |
+| [Framework-Evaluation](framework-evaluation.md) | Analyse von CRDT/E2EE Frameworks |
 | [QR-Code-Formate](qr-code-formate.md) | QR-Code-Strukturen für Verifizierung |
 
 ---

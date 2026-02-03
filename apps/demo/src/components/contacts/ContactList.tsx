@@ -4,11 +4,11 @@ import { useContacts, useAttestations } from '../../hooks'
 import { ContactCard } from './ContactCard'
 
 export function ContactList() {
-  const { verifiedContacts, hiddenContacts, isLoading, hideContact, unhideContact, removeContact } = useContacts()
+  const { activeContacts, pendingContacts, isLoading, removeContact } = useContacts()
   const { attestations } = useAttestations()
 
   const getAttestationCount = (did: string) => {
-    return attestations.filter((a) => a.subjectDid === did).length
+    return attestations.filter((a) => a.to === did).length
   }
 
   if (isLoading) {
@@ -19,7 +19,7 @@ export function ContactList() {
     )
   }
 
-  if (verifiedContacts.length === 0 && hiddenContacts.length === 0) {
+  if (activeContacts.length === 0 && pendingContacts.length === 0) {
     return (
       <div className="text-center py-12">
         <div className="w-16 h-16 bg-slate-100 rounded-full flex items-center justify-center mx-auto mb-4">
@@ -41,17 +41,16 @@ export function ContactList() {
 
   return (
     <div className="space-y-6">
-      {verifiedContacts.length > 0 && (
+      {activeContacts.length > 0 && (
         <section>
           <h2 className="text-sm font-medium text-slate-500 uppercase tracking-wider mb-3">
-            Verifizierte Kontakte ({verifiedContacts.length})
+            Verifizierte Kontakte ({activeContacts.length})
           </h2>
           <div className="space-y-2">
-            {verifiedContacts.map((contact) => (
+            {activeContacts.map((contact) => (
               <ContactCard
                 key={contact.did}
                 contact={contact}
-                onHide={() => hideContact(contact.did)}
                 attestationCount={getAttestationCount(contact.did)}
               />
             ))}
@@ -59,19 +58,18 @@ export function ContactList() {
         </section>
       )}
 
-      {hiddenContacts.length > 0 && (
+      {pendingContacts.length > 0 && (
         <section>
           <h2 className="text-sm font-medium text-slate-500 uppercase tracking-wider mb-3">
-            Ausgeblendete Kontakte ({hiddenContacts.length})
+            Ausstehende Kontakte ({pendingContacts.length})
           </h2>
           <div className="space-y-2">
-            {hiddenContacts.map((contact) => (
+            {pendingContacts.map((contact) => (
               <ContactCard
                 key={contact.did}
                 contact={contact}
-                onUnhide={() => unhideContact(contact.did)}
                 onRemove={() => removeContact(contact.did)}
-                attestationCount={getAttestationCount(contact.did)}
+                attestationCount={0}
               />
             ))}
           </div>

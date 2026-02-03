@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { useAdapters } from '../context'
 import { useIdentity } from './useIdentity'
-import type { Attestation, AttestationType } from '@web-of-trust/core'
+import type { Attestation } from '@web-of-trust/core'
 
 export function useAttestations() {
   const { attestationService } = useAdapters()
@@ -14,7 +14,7 @@ export function useAttestations() {
     try {
       setIsLoading(true)
       setError(null)
-      const loaded = await attestationService.getAttestations()
+      const loaded = await attestationService.getReceivedAttestations()
       setAttestations(loaded)
     } catch (e) {
       setError(e instanceof Error ? e : new Error('Failed to load attestations'))
@@ -29,9 +29,8 @@ export function useAttestations() {
 
   const createAttestation = useCallback(
     async (
-      subjectDid: string,
-      type: AttestationType,
-      content: string,
+      toDid: string,
+      claim: string,
       tags?: string[]
     ) => {
       if (!identity || !keyPair) {
@@ -42,9 +41,8 @@ export function useAttestations() {
         setError(null)
         const attestation = await attestationService.createAttestation(
           identity.did,
-          subjectDid,
-          type,
-          content,
+          toDid,
+          claim,
           keyPair,
           tags
         )
@@ -57,19 +55,6 @@ export function useAttestations() {
       }
     },
     [identity, keyPair, attestationService, loadAttestations]
-  )
-
-  const getAttestationsAbout = useCallback(
-    async (subjectDid: string) => {
-      try {
-        return await attestationService.getAttestationsAbout(subjectDid)
-      } catch (e) {
-        const err = e instanceof Error ? e : new Error('Failed to get attestations')
-        setError(err)
-        throw err
-      }
-    },
-    [attestationService]
   )
 
   const verifyAttestation = useCallback(
@@ -101,13 +86,29 @@ export function useAttestations() {
     [attestationService, loadAttestations]
   )
 
-  // Filter attestations by current user
+  const setAttestationAccepted = useCallback(
+    async (attestationId: string, accepted: boolean) => {
+      try {
+        await attestationService.setAttestationAccepted(attestationId, accepted)
+        await loadAttestations()
+      } catch (e) {
+        const err = e instanceof Error ? e : new Error('Failed to update attestation')
+        setError(err)
+        throw err
+      }
+    },
+    [attestationService, loadAttestations]
+  )
+
+  // Filter attestations:
+  // - myAttestations: I am the sender (from)
+  // - receivedAttestations: I am the recipient (to)
   const myAttestations = identity
-    ? attestations.filter((a) => a.issuerDid === identity.did)
+    ? attestations.filter((a) => a.from === identity.did)
     : []
 
   const receivedAttestations = identity
-    ? attestations.filter((a) => a.subjectDid === identity.did)
+    ? attestations.filter((a) => a.to === identity.did)
     : []
 
   return {
@@ -118,8 +119,8 @@ export function useAttestations() {
     error,
     createAttestation,
     importAttestation,
-    getAttestationsAbout,
     verifyAttestation,
+    setAttestationAccepted,
     refresh: loadAttestations,
   }
 }

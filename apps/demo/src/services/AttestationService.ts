@@ -2,8 +2,8 @@ import type {
   StorageAdapter,
   CryptoAdapter,
   Attestation,
-  AttestationType,
   KeyPair,
+  Proof,
 } from '@web-of-trust/core'
 
 export class AttestationService {
@@ -12,42 +12,54 @@ export class AttestationService {
     private crypto: CryptoAdapter
   ) {}
 
+  /**
+   * Create an attestation (as the sender/from)
+   * Note: In a real app, this would be sent to the recipient for storage
+   * For demo purposes, we store it locally
+   */
   async createAttestation(
-    issuerDid: string,
-    subjectDid: string,
-    type: AttestationType,
-    content: string,
+    fromDid: string,
+    toDid: string,
+    claim: string,
     keyPair: KeyPair,
     tags?: string[]
   ): Promise<Attestation> {
-    const id = `att-${this.crypto.generateNonce().slice(0, 16)}`
+    const id = `urn:uuid:${this.crypto.generateNonce().slice(0, 8)}-${Date.now()}`
     const createdAt = new Date().toISOString()
 
-    // Create data to sign
+    // Create data to sign (without proof)
     const dataToSign = JSON.stringify({
       id,
-      type,
-      issuerDid,
-      subjectDid,
-      content,
+      from: fromDid,
+      to: toDid,
+      claim,
       tags,
       createdAt,
     })
 
     const signature = await this.crypto.signString(dataToSign, keyPair.privateKey)
 
-    const attestation: Attestation = {
-      id,
-      type,
-      issuerDid,
-      subjectDid,
-      content,
-      tags,
-      signature,
-      createdAt,
+    const proof: Proof = {
+      type: 'Ed25519Signature2020',
+      verificationMethod: `${fromDid}#key-1`,
+      created: createdAt,
+      proofPurpose: 'assertionMethod',
+      proofValue: signature,
     }
 
-    await this.storage.addAttestation(attestation)
+    const attestation: Attestation = {
+      id,
+      from: fromDid,
+      to: toDid,
+      claim,
+      tags,
+      createdAt,
+      proof,
+    }
+
+    // In Empfänger-Prinzip, attestations are stored at the recipient
+    // For demo, we store locally (simulating receiving an attestation)
+    await this.storage.saveAttestation(attestation)
 
     return attestation
   }
@@ -55,34 +67,34 @@ export class AttestationService {
   async verifyAttestation(attestation: Attestation): Promise<boolean> {
     const dataToVerify = JSON.stringify({
       id: attestation.id,
-      type: attestation.type,
-      issuerDid: attestation.issuerDid,
-      subjectDid: attestation.subjectDid,
-      content: attestation.content,
+      from: attestation.from,
+      to: attestation.to,
+      claim: attestation.claim,
       tags: attestation.tags,
       createdAt: attestation.createdAt,
     })
 
-    const issuerPublicKey = await this.crypto.didToPublicKey(attestation.issuerDid)
+    const fromPublicKey = await this.crypto.didToPublicKey(attestation.from)
 
-    return this.crypto.verifyString(dataToVerify, attestation.signature, issuerPublicKey)
+    return this.crypto.verifyString(dataToVerify, attestation.proof.proofValue, fromPublicKey)
   }
 
-  async getAttestations(issuerDid?: string): Promise<Attestation[]> {
-    return this.storage.getAttestations(issuerDid)
-  }
-
-  async getAttestationsAbout(subjectDid: string): Promise<Attestation[]> {
-    return this.storage.getAttestationsAbout(subjectDid)
+  /**
+   * Get all attestations I've received (stored locally)
+   */
+  async getReceivedAttestations(): Promise<Attestation[]> {
+    return this.storage.getReceivedAttestations()
   }
 
   async getAttestation(id: string): Promise<Attestation | null> {
     return this.storage.getAttestation(id)
   }
 
-  async getAttestationsByType(type: AttestationType): Promise<Attestation[]> {
-    const all = await this.storage.getAttestations()
-    return all.filter((a) => a.type === type)
+  /**
+   * Accept or reject an attestation
+   */
+  async setAttestationAccepted(attestationId: string, accepted: boolean): Promise<void> {
+    await this.storage.setAttestationAccepted(attestationId, accepted)
   }
 
   async importAttestation(encoded: string): Promise<Attestation> {
@@ -96,8 +108,8 @@ export class AttestationService {
     }
 
     // Validate required fields
-    if (!attestation.id || !attestation.issuerDid || !attestation.subjectDid ||
-        !attestation.content || !attestation.signature || !attestation.createdAt) {
+    if (!attestation.id || !attestation.from || !attestation.to ||
+        !attestation.claim || !attestation.proof || !attestation.createdAt) {
       throw new Error('Unvollständige Attestation. Erforderliche Felder fehlen.')
     }
 
@@ -114,7 +126,7 @@ export class AttestationService {
     }
 
     // Save to storage
-    await this.storage.addAttestation(attestation)
+    await this.storage.saveAttestation(attestation)
 
     return attestation
   }

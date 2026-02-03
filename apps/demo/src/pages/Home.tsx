@@ -4,13 +4,13 @@ import { useIdentity, useContacts, useAttestations } from '../hooks'
 
 export function Home() {
   const { identity } = useIdentity()
-  const { verifiedContacts } = useContacts()
+  const { activeContacts } = useContacts()
   const { myAttestations, receivedAttestations } = useAttestations()
 
   const stats = [
     {
       label: 'Kontakte',
-      value: verifiedContacts.length,
+      value: activeContacts.length,
       icon: Users,
       to: '/contacts',
       color: 'bg-blue-100 text-blue-600',
@@ -77,7 +77,7 @@ export function Home() {
           <ArrowRight className="text-primary-600" />
         </Link>
 
-        {verifiedContacts.length > 0 && (
+        {activeContacts.length > 0 && (
           <Link
             to="/attestations/new"
             className="flex items-center justify-between p-4 bg-white border border-slate-200 rounded-xl hover:border-slate-300 transition-colors"

@@ -1,13 +1,23 @@
-import type { Profile } from './identity'
+/**
+ * Contact status
+ * - pending: One-sided verification, waiting for mutual
+ * - active: Mutual verification complete
+ *
+ * Note: "Hidden" contacts are handled via excludedMembers in AutoGroup,
+ * not via contact status.
+ */
+export type ContactStatus = 'pending' | 'active'
 
-export type ContactStatus = 'pending' | 'verified' | 'hidden'
-
+/**
+ * A contact is a local record of someone you've verified.
+ * Stores their public key for E2E encryption.
+ */
 export interface Contact {
   did: string
-  profile: Profile
+  publicKey: string
+  name?: string
   status: ContactStatus
   verifiedAt?: string
-  hiddenAt?: string
   createdAt: string
   updatedAt: string
 }

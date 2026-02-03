@@ -154,10 +154,10 @@ export function VerificationFlow() {
         </div>
         <h3 className="text-xl font-bold text-slate-900 mb-2">Verifizierung erfolgreich!</h3>
         <p className="text-slate-600 mb-6">
-          {response
-            ? `${response.responderProfile?.name || 'Kontakt'} wurde verifiziert.`
-            : challenge
-            ? `${challenge.initiatorProfile?.name || 'Kontakt'} wurde verifiziert.`
+          {responseCode
+            ? `${challenge?.fromName || 'Kontakt'} wurde verifiziert.`
+            : response
+            ? `${response.toName || 'Kontakt'} wurde verifiziert.`
             : 'Der Kontakt wurde verifiziert.'}
         </p>
 

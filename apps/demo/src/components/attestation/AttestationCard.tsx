@@ -4,38 +4,22 @@ import type { Attestation } from '@web-of-trust/core'
 
 interface AttestationCardProps {
   attestation: Attestation
-  issuerName?: string
-  subjectName?: string
-  showIssuer?: boolean
+  fromName?: string
+  toName?: string
+  showFrom?: boolean
   showExport?: boolean
-}
-
-const typeLabels: Record<string, string> = {
-  skill: 'Fähigkeit',
-  help: 'Hilfe',
-  collaboration: 'Zusammenarbeit',
-  recommendation: 'Empfehlung',
-  custom: 'Sonstiges',
-}
-
-const typeColors: Record<string, string> = {
-  skill: 'bg-blue-100 text-blue-700',
-  help: 'bg-green-100 text-green-700',
-  collaboration: 'bg-purple-100 text-purple-700',
-  recommendation: 'bg-amber-100 text-amber-700',
-  custom: 'bg-slate-100 text-slate-700',
 }
 
 export function AttestationCard({
   attestation,
-  issuerName,
-  subjectName,
-  showIssuer = true,
+  fromName,
+  toName,
+  showFrom = true,
   showExport = false,
 }: AttestationCardProps) {
   const [copied, setCopied] = useState(false)
-  const shortIssuerDid = attestation.issuerDid.slice(0, 12) + '...'
-  const shortSubjectDid = attestation.subjectDid.slice(0, 12) + '...'
+  const shortFromDid = attestation.from.slice(0, 20) + '...'
+  const shortToDid = attestation.to.slice(0, 20) + '...'
 
   const handleExport = async () => {
     const encoded = btoa(JSON.stringify(attestation))
@@ -52,32 +36,31 @@ export function AttestationCard({
         </div>
 
         <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2 mb-2">
-            <span className={`text-xs px-2 py-0.5 rounded-full ${typeColors[attestation.type]}`}>
-              {typeLabels[attestation.type]}
-            </span>
-            {attestation.tags?.map((tag) => (
-              <span
-                key={tag}
-                className="text-xs px-2 py-0.5 bg-slate-100 text-slate-600 rounded-full"
-              >
-                {tag}
-              </span>
-            ))}
-          </div>
+          {attestation.tags && attestation.tags.length > 0 && (
+            <div className="flex items-center gap-2 mb-2">
+              {attestation.tags.map((tag) => (
+                <span
+                  key={tag}
+                  className="text-xs px-2 py-0.5 bg-slate-100 text-slate-600 rounded-full"
+                >
+                  {tag}
+                </span>
+              ))}
+            </div>
+          )}
 
-          <p className="text-slate-900 mb-2">{attestation.content}</p>
+          <p className="text-slate-900 mb-2">{attestation.claim}</p>
 
           <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-500">
-            {showIssuer && (
+            {showFrom && (
               <span className="flex items-center gap-1">
                 <User size={12} />
-                Von: {issuerName || shortIssuerDid}
+                Von: {fromName || shortFromDid}
               </span>
             )}
             <span className="flex items-center gap-1">
               <User size={12} />
-              Für: {subjectName || shortSubjectDid}
+              Für: {toName || shortToDid}
             </span>
             <span className="flex items-center gap-1">
               <Calendar size={12} />

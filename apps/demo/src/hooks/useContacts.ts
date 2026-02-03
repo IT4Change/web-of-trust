@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import { useAdapters } from '../context'
-import type { Contact, Profile, ContactStatus } from '@web-of-trust/core'
+import type { Contact, ContactStatus } from '@web-of-trust/core'
 
 export function useContacts() {
   const { contactService } = useAdapters()
@@ -26,10 +26,10 @@ export function useContacts() {
   }, [loadContacts])
 
   const addContact = useCallback(
-    async (did: string, profile: Profile, status: ContactStatus = 'pending') => {
+    async (did: string, publicKey: string, name?: string, status: ContactStatus = 'pending') => {
       try {
         setError(null)
-        const contact = await contactService.addContact(did, profile, status)
+        const contact = await contactService.addContact(did, publicKey, name, status)
         await loadContacts()
         return contact
       } catch (e) {
@@ -41,14 +41,14 @@ export function useContacts() {
     [contactService, loadContacts]
   )
 
-  const verifyContact = useCallback(
+  const activateContact = useCallback(
     async (did: string) => {
       try {
         setError(null)
-        await contactService.verifyContact(did)
+        await contactService.activateContact(did)
         await loadContacts()
       } catch (e) {
-        const err = e instanceof Error ? e : new Error('Failed to verify contact')
+        const err = e instanceof Error ? e : new Error('Failed to activate contact')
         setError(err)
         throw err
       }
@@ -56,29 +56,14 @@ export function useContacts() {
     [contactService, loadContacts]
   )
 
-  const hideContact = useCallback(
-    async (did: string) => {
+  const updateContactName = useCallback(
+    async (did: string, name: string) => {
       try {
         setError(null)
-        await contactService.hideContact(did)
+        await contactService.updateContactName(did, name)
         await loadContacts()
       } catch (e) {
-        const err = e instanceof Error ? e : new Error('Failed to hide contact')
-        setError(err)
-        throw err
-      }
-    },
-    [contactService, loadContacts]
-  )
-
-  const unhideContact = useCallback(
-    async (did: string) => {
-      try {
-        setError(null)
-        await contactService.unhideContact(did)
-        await loadContacts()
-      } catch (e) {
-        const err = e instanceof Error ? e : new Error('Failed to unhide contact')
+        const err = e instanceof Error ? e : new Error('Failed to update contact')
         setError(err)
         throw err
       }
@@ -101,21 +86,19 @@ export function useContacts() {
     [contactService, loadContacts]
   )
 
-  const verifiedContacts = contacts.filter((c) => c.status === 'verified')
+  // Filter by status
+  const activeContacts = contacts.filter((c) => c.status === 'active')
   const pendingContacts = contacts.filter((c) => c.status === 'pending')
-  const hiddenContacts = contacts.filter((c) => c.status === 'hidden')
 
   return {
     contacts,
-    verifiedContacts,
+    activeContacts,
     pendingContacts,
-    hiddenContacts,
     isLoading,
     error,
     addContact,
-    verifyContact,
-    hideContact,
-    unhideContact,
+    activateContact,
+    updateContactName,
     removeContact,
     refresh: loadContacts,
   }

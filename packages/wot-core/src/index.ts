@@ -12,18 +12,24 @@ export type {
 
 export type {
   Verification,
+  GeoLocation,
   VerificationChallenge,
   VerificationResponse,
 } from './types/verification'
 
 export type {
   Attestation,
-  AttestationType,
+  AttestationMetadata,
 } from './types/attestation'
+
+export type { Proof } from './types/proof'
 
 // Adapter Interfaces
 export type { StorageAdapter } from './adapters/interfaces/StorageAdapter'
-export type { CryptoAdapter } from './adapters/interfaces/CryptoAdapter'
+export type {
+  CryptoAdapter,
+  EncryptedPayload,
+} from './adapters/interfaces/CryptoAdapter'
 export type {
   SyncAdapter,
   SyncState,

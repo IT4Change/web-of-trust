@@ -1,13 +1,19 @@
-import type { StorageAdapter, Contact, Profile, ContactStatus } from '@web-of-trust/core'
+import type { StorageAdapter, Contact, ContactStatus } from '@web-of-trust/core'
 
 export class ContactService {
   constructor(private storage: StorageAdapter) {}
 
-  async addContact(did: string, profile: Profile, status: ContactStatus = 'pending'): Promise<Contact> {
+  async addContact(
+    did: string,
+    publicKey: string,
+    name?: string,
+    status: ContactStatus = 'pending'
+  ): Promise<Contact> {
     const now = new Date().toISOString()
     const contact: Contact = {
       did,
-      profile,
+      publicKey,
+      name,
       status,
       createdAt: now,
       updatedAt: now,
@@ -20,51 +26,31 @@ export class ContactService {
     return this.storage.getContacts()
   }
 
-  async getVerifiedContacts(): Promise<Contact[]> {
+  async getActiveContacts(): Promise<Contact[]> {
     const contacts = await this.storage.getContacts()
-    return contacts.filter((c) => c.status === 'verified')
+    return contacts.filter((c) => c.status === 'active')
   }
 
   async getContact(did: string): Promise<Contact | null> {
     return this.storage.getContact(did)
   }
 
-  async verifyContact(did: string): Promise<void> {
+  async activateContact(did: string): Promise<void> {
     const contact = await this.storage.getContact(did)
     if (!contact) {
       throw new Error('Contact not found')
     }
-    contact.status = 'verified'
+    contact.status = 'active'
     contact.verifiedAt = new Date().toISOString()
     await this.storage.updateContact(contact)
   }
 
-  async hideContact(did: string): Promise<void> {
+  async updateContactName(did: string, name: string): Promise<void> {
     const contact = await this.storage.getContact(did)
     if (!contact) {
       throw new Error('Contact not found')
     }
-    contact.status = 'hidden'
-    contact.hiddenAt = new Date().toISOString()
-    await this.storage.updateContact(contact)
-  }
-
-  async unhideContact(did: string): Promise<void> {
-    const contact = await this.storage.getContact(did)
-    if (!contact) {
-      throw new Error('Contact not found')
-    }
-    contact.status = 'verified'
-    delete contact.hiddenAt
-    await this.storage.updateContact(contact)
-  }
-
-  async updateContactProfile(did: string, profile: Profile): Promise<void> {
-    const contact = await this.storage.getContact(did)
-    if (!contact) {
-      throw new Error('Contact not found')
-    }
-    contact.profile = profile
+    contact.name = name
     await this.storage.updateContact(contact)
   }
 

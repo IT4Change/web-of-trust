@@ -32,7 +32,7 @@ export function IdentityCard() {
             <User className="w-8 h-8 text-white" />
           </div>
           <div>
-            <h2 className="text-xl font-bold text-white">{identity.profile.name}</h2>
+            <h2 className="text-xl font-bold text-white">{identity.profile.name || 'Unbekannt'}</h2>
             <p className="text-primary-100 text-sm">Verifizierte Identität</p>
           </div>
         </div>
