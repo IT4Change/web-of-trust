@@ -17,7 +17,7 @@ importers:
 
   apps/demo:
     dependencies:
-      '@web-of-trust/core':
+      '@real-life/wot-core':
         specifier: workspace:*
         version: link:../../packages/wot-core
       lucide-react:
