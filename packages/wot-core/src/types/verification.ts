@@ -38,11 +38,17 @@ export interface VerificationChallenge {
 
 /**
  * Response to a verification challenge
+ * Includes both responder's info and original challenge info
  */
 export interface VerificationResponse {
   nonce: string
   timestamp: string
+  // Responder info
   toDid: string
   toPublicKey: string
   toName?: string
+  // Original challenge info (from initiator)
+  fromDid: string
+  fromPublicKey: string
+  fromName?: string
 }

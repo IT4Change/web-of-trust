@@ -61,6 +61,12 @@ export {
 // Identity
 export { WotIdentity } from './identity'
 
+// Contact
+export { ContactStorage } from './contact'
+
+// Verification
+export { VerificationHelper } from './verification'
+
 // Adapter Implementations
 export { WebCryptoAdapter } from './adapters/crypto/WebCryptoAdapter'
 export { LocalStorageAdapter } from './adapters/storage/LocalStorageAdapter'

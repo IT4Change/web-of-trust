@@ -1,7 +1,12 @@
-import type { StorageAdapter, Contact, ContactStatus } from '@real-life/wot-core'
+import { ContactStorage, type Contact, type ContactStatus } from '@real-life/wot-core'
 
+/**
+ * ContactService - Wrapper around ContactStorage
+ *
+ * Provides business logic layer for contact management.
+ */
 export class ContactService {
-  constructor(private storage: StorageAdapter) {}
+  constructor(private storage: ContactStorage) {}
 
   async addContact(
     did: string,
@@ -23,12 +28,11 @@ export class ContactService {
   }
 
   async getContacts(): Promise<Contact[]> {
-    return this.storage.getContacts()
+    return this.storage.getAllContacts()
   }
 
   async getActiveContacts(): Promise<Contact[]> {
-    const contacts = await this.storage.getContacts()
-    return contacts.filter((c) => c.status === 'active')
+    return this.storage.getActiveContacts()
   }
 
   async getContact(did: string): Promise<Contact | null> {
@@ -36,22 +40,11 @@ export class ContactService {
   }
 
   async activateContact(did: string): Promise<void> {
-    const contact = await this.storage.getContact(did)
-    if (!contact) {
-      throw new Error('Contact not found')
-    }
-    contact.status = 'active'
-    contact.verifiedAt = new Date().toISOString()
-    await this.storage.updateContact(contact)
+    await this.storage.activateContact(did)
   }
 
   async updateContactName(did: string, name: string): Promise<void> {
-    const contact = await this.storage.getContact(did)
-    if (!contact) {
-      throw new Error('Contact not found')
-    }
-    contact.name = name
-    await this.storage.updateContact(contact)
+    await this.storage.updateContact(did, { name })
   }
 
   async removeContact(did: string): Promise<void> {

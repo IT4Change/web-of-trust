@@ -3,6 +3,7 @@ import {
   LocalStorageAdapter,
   WebCryptoAdapter,
   NoOpSyncAdapter,
+  ContactStorage,
   type StorageAdapter,
   type CryptoAdapter,
   type SyncAdapter,
@@ -37,14 +38,15 @@ export function AdapterProvider({ children }: AdapterProviderProps) {
     const storage = new LocalStorageAdapter()
     const crypto = new WebCryptoAdapter()
     const sync = new NoOpSyncAdapter()
+    const contactStorage = new ContactStorage()
 
     return {
       storage,
       crypto,
       sync,
       identityService: new IdentityService(storage, crypto),
-      contactService: new ContactService(storage),
-      verificationService: new VerificationService(storage, crypto),
+      contactService: new ContactService(contactStorage),
+      verificationService: new VerificationService(storage),
       attestationService: new AttestationService(storage, crypto),
     }
   })

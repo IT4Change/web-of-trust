@@ -124,6 +124,9 @@ importers:
       '@noble/ed25519':
         specifier: ^3.0.0
         version: 3.0.0
+      '@scure/base':
+        specifier: ^2.0.0
+        version: 2.0.0
       '@scure/bip39':
         specifier: ^2.0.1
         version: 2.0.1

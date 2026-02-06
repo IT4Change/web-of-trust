@@ -1,15 +1,19 @@
 import { useState, useCallback } from 'react'
-import { useAdapters } from '../context'
-import { useIdentity } from './useIdentity'
-import { useContacts } from './useContacts'
+import { VerificationHelper } from '@real-life/wot-core'
 import type { VerificationChallenge, VerificationResponse } from '@real-life/wot-core'
+import { useAdapters } from '../context'
+import { useWotIdentity } from '../context/WotIdentityContext'
+import { useContacts } from './useContacts'
 
 type VerificationStep = 'idle' | 'initiating' | 'responding' | 'completing' | 'done' | 'error'
 
+/**
+ * Hook for in-person verification flow using WotIdentity
+ */
 export function useVerification() {
   const { verificationService } = useAdapters()
-  const { identity, keyPair } = useIdentity()
-  const { addContact, activateContact } = useContacts()
+  const { identity, did } = useWotIdentity()
+  const { addContact } = useContacts()
 
   const [step, setStep] = useState<VerificationStep>('idle')
   const [challenge, setChallenge] = useState<VerificationChallenge | null>(null)
@@ -17,38 +21,50 @@ export function useVerification() {
   const [error, setError] = useState<Error | null>(null)
 
   const createChallenge = useCallback(async () => {
-    if (!identity || !keyPair) {
+    if (!identity) {
       throw new Error('No identity found')
     }
 
     try {
       setStep('initiating')
       setError(null)
-      const newChallenge = await verificationService.createChallenge(identity, keyPair)
-      setChallenge(newChallenge)
-      return verificationService.encodeChallenge(newChallenge)
+
+      // Use VerificationHelper from wot-core
+      const challengeCode = await VerificationHelper.createChallenge(identity, 'User')
+      const decodedChallenge = JSON.parse(atob(challengeCode))
+      setChallenge(decodedChallenge)
+
+      return challengeCode
     } catch (e) {
       const err = e instanceof Error ? e : new Error('Failed to create challenge')
       setError(err)
       setStep('error')
       throw err
     }
-  }, [identity, keyPair, verificationService])
+  }, [identity])
 
   const respondToChallenge = useCallback(
-    async (encodedChallenge: string) => {
-      if (!identity || !keyPair) {
+    async (challengeCode: string) => {
+      if (!identity) {
         throw new Error('No identity found')
       }
 
       try {
         setStep('responding')
         setError(null)
-        const decodedChallenge = verificationService.decodeChallenge(encodedChallenge)
+
+        const decodedChallenge = JSON.parse(atob(challengeCode))
         setChallenge(decodedChallenge)
 
-        const newResponse = await verificationService.createResponse(decodedChallenge, identity, keyPair)
-        setResponse(newResponse)
+        // Create response with VerificationHelper
+        const responseCode = await VerificationHelper.respondToChallenge(
+          challengeCode,
+          identity,
+          'User'
+        )
+
+        const decodedResponse = JSON.parse(atob(responseCode))
+        setResponse(decodedResponse)
 
         // Add the challenge initiator as an active contact
         await addContact(
@@ -59,7 +75,7 @@ export function useVerification() {
         )
 
         setStep('done')
-        return verificationService.encodeResponse(newResponse)
+        return responseCode
       } catch (e) {
         const err = e instanceof Error ? e : new Error('Failed to respond to challenge')
         setError(err)
@@ -67,27 +83,31 @@ export function useVerification() {
         throw err
       }
     },
-    [identity, keyPair, verificationService, addContact]
+    [identity, addContact]
   )
 
   const completeVerification = useCallback(
-    async (encodedResponse: string) => {
-      if (!identity || !keyPair || !challenge) {
+    async (responseCode: string) => {
+      if (!identity || !challenge) {
         throw new Error('No challenge found')
       }
 
       try {
         setStep('completing')
         setError(null)
-        const decodedResponse = verificationService.decodeResponse(encodedResponse)
+
+        const decodedResponse = JSON.parse(atob(responseCode))
         setResponse(decodedResponse)
 
-        // Complete verification
-        const verification = await verificationService.completeVerification(
-          challenge,
-          decodedResponse,
-          keyPair
+        // Complete verification with VerificationHelper
+        const verification = await VerificationHelper.completeVerification(
+          responseCode,
+          identity,
+          challenge.nonce
         )
+
+        // Save verification to storage
+        await verificationService.saveVerification(verification)
 
         // Add responder as active contact
         await addContact(
@@ -106,7 +126,7 @@ export function useVerification() {
         throw err
       }
     },
-    [identity, keyPair, challenge, verificationService, addContact]
+    [identity, challenge, verificationService, addContact]
   )
 
   const reset = useCallback(() => {
