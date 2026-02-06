@@ -59,7 +59,7 @@ export {
 } from './crypto/jws'
 
 // Identity
-export { SecureWotIdentity } from './identity'
+export { WotIdentity } from './identity'
 
 // Adapter Implementations
 export { WebCryptoAdapter } from './adapters/crypto/WebCryptoAdapter'

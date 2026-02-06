@@ -1,9 +1,9 @@
 import { useState } from 'react'
 import { Lock, Eye, EyeOff } from 'lucide-react'
-import { SecureWotIdentity } from '@real-life/wot-core'
+import { WotIdentity } from '@real-life/wot-core'
 
 interface UnlockFlowProps {
-  onComplete: (identity: SecureWotIdentity, did: string) => void
+  onComplete: (identity: WotIdentity, did: string) => void
   onRecover: () => void
 }
 
@@ -23,7 +23,7 @@ export function UnlockFlow({ onComplete, onRecover }: UnlockFlowProps) {
       setIsLoading(true)
       setError(null)
 
-      const identity = new SecureWotIdentity()
+      const identity = new WotIdentity()
       await identity.unlockFromStorage(passphrase)
 
       const did = identity.getDid()

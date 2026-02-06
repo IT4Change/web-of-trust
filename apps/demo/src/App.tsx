@@ -1,10 +1,10 @@
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
-import { AdapterProvider, IdentityProvider, SecureIdentityProvider, useSecureIdentity } from './context'
+import { AdapterProvider, IdentityProvider, WotIdentityProvider, useWotIdentity } from './context'
 import { AppShell, IdentityManagement } from './components'
 import { Home, Identity, Contacts, Verify, Attestations } from './pages'
 
 function RequireIdentity({ children }: { children: React.ReactNode }) {
-  const { identity, did, setIdentity } = useSecureIdentity()
+  const { identity, did, setIdentity } = useWotIdentity()
 
   if (!identity || !did) {
     return (
@@ -43,9 +43,9 @@ export default function App() {
     <BrowserRouter>
       <AdapterProvider>
         <IdentityProvider>
-          <SecureIdentityProvider>
+          <WotIdentityProvider>
             <AppRoutes />
-          </SecureIdentityProvider>
+          </WotIdentityProvider>
         </IdentityProvider>
       </AdapterProvider>
     </BrowserRouter>

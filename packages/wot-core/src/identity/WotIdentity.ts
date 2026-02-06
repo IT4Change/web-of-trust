@@ -4,7 +4,7 @@ import * as ed25519 from '@noble/ed25519'
 import { SeedStorage } from './SeedStorage'
 
 /**
- * SecureWotIdentity - BIP39-based identity with native WebCrypto
+ * WotIdentity - BIP39-based identity with native WebCrypto
  *
  * Security architecture:
  * - BIP39 Mnemonic (12 words, 128 bit entropy)
@@ -17,7 +17,7 @@ import { SeedStorage } from './SeedStorage'
  * - Master Seed: Encrypted with PBKDF2(passphrase) + AES-GCM in IndexedDB
  * - Keys: All derived from master seed via HKDF
  */
-export class SecureWotIdentity {
+export class WotIdentity {
   private masterKey: CryptoKey | null = null
   private identityKeyPair: CryptoKeyPair | null = null
   private did: string | null = null

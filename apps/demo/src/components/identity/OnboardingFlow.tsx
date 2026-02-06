@@ -1,11 +1,11 @@
 import { useState } from 'react'
 import { Key, Copy, Check, AlertTriangle, Eye, EyeOff } from 'lucide-react'
-import { SecureWotIdentity } from '@real-life/wot-core'
+import { WotIdentity } from '@real-life/wot-core'
 
 type OnboardingStep = 'passphrase' | 'mnemonic' | 'verify' | 'complete'
 
 interface OnboardingFlowProps {
-  onComplete: (identity: SecureWotIdentity, did: string) => void
+  onComplete: (identity: WotIdentity, did: string) => void
 }
 
 export function OnboardingFlow({ onComplete }: OnboardingFlowProps) {
@@ -35,7 +35,7 @@ export function OnboardingFlow({ onComplete }: OnboardingFlowProps) {
       setIsLoading(true)
       setError(null)
 
-      const identity = new SecureWotIdentity()
+      const identity = new WotIdentity()
       const result = await identity.create(passphrase)
 
       setMnemonic(result.mnemonic)
@@ -84,7 +84,7 @@ export function OnboardingFlow({ onComplete }: OnboardingFlowProps) {
     setStep('complete')
 
     // Complete onboarding
-    const identity = new SecureWotIdentity()
+    const identity = new WotIdentity()
     identity.unlock(mnemonic, passphrase).then(() => {
       onComplete(identity, did)
     })

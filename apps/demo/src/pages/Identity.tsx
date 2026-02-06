@@ -1,9 +1,9 @@
-import { useSecureIdentity } from '../context'
+import { useWotIdentity } from '../context'
 import { useState, useEffect } from 'react'
 import { Copy, Check, KeyRound, Fingerprint, Shield } from 'lucide-react'
 
 export function Identity() {
-  const { identity, did } = useSecureIdentity()
+  const { identity, did } = useWotIdentity()
   const [copiedDid, setCopiedDid] = useState(false)
   const [copiedPubKey, setCopiedPubKey] = useState(false)
   const [pubKey, setPubKey] = useState<string | null>(null)

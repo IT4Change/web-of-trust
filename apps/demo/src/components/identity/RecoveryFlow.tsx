@@ -1,9 +1,9 @@
 import { useState } from 'react'
 import { KeyRound, Eye, EyeOff } from 'lucide-react'
-import { SecureWotIdentity } from '@real-life/wot-core'
+import { WotIdentity } from '@real-life/wot-core'
 
 interface RecoveryFlowProps {
-  onComplete: (identity: SecureWotIdentity, did: string) => void
+  onComplete: (identity: WotIdentity, did: string) => void
   onCancel: () => void
 }
 
@@ -30,7 +30,7 @@ export function RecoveryFlow({ onComplete, onCancel }: RecoveryFlowProps) {
       setIsLoading(true)
       setError(null)
 
-      const identity = new SecureWotIdentity()
+      const identity = new WotIdentity()
       await identity.unlock(mnemonic.trim(), passphrase)
 
       const did = identity.getDid()

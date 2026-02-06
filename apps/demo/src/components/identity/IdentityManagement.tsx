@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { SecureWotIdentity } from '@real-life/wot-core'
+import { WotIdentity } from '@real-life/wot-core'
 import { OnboardingFlow } from './OnboardingFlow'
 import { RecoveryFlow } from './RecoveryFlow'
 import { UnlockFlow } from './UnlockFlow'
@@ -7,7 +7,7 @@ import { UnlockFlow } from './UnlockFlow'
 type Mode = 'checking' | 'unlock' | 'onboarding' | 'recovery'
 
 interface IdentityManagementProps {
-  onComplete: (identity: SecureWotIdentity, did: string) => void
+  onComplete: (identity: WotIdentity, did: string) => void
 }
 
 export function IdentityManagement({ onComplete }: IdentityManagementProps) {
@@ -19,7 +19,7 @@ export function IdentityManagement({ onComplete }: IdentityManagementProps) {
 
   const checkStoredIdentity = async () => {
     try {
-      const identity = new SecureWotIdentity()
+      const identity = new WotIdentity()
       const hasSeed = await identity.hasStoredIdentity()
 
       if (hasSeed) {
