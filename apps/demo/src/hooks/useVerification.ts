@@ -88,8 +88,8 @@ export function useVerification() {
 
   const completeVerification = useCallback(
     async (responseCode: string) => {
-      if (!identity || !challenge) {
-        throw new Error('No challenge found')
+      if (!identity) {
+        throw new Error('No identity found')
       }
 
       try {
@@ -99,11 +99,14 @@ export function useVerification() {
         const decodedResponse = JSON.parse(atob(responseCode))
         setResponse(decodedResponse)
 
+        // Use nonce from response if challenge state is lost
+        const expectedNonce = challenge?.nonce || decodedResponse.nonce
+
         // Complete verification with VerificationHelper
         const verification = await VerificationHelper.completeVerification(
           responseCode,
           identity,
-          challenge.nonce
+          expectedNonce
         )
 
         // Save verification to storage
@@ -126,7 +129,7 @@ export function useVerification() {
         throw err
       }
     },
-    [identity, challenge, verificationService, addContact]
+    [identity, verificationService, addContact, challenge]
   )
 
   const reset = useCallback(() => {
