@@ -143,4 +143,14 @@ export class ContactStorage {
     const contact = await this.getContact(did)
     return contact !== null
   }
+
+  /**
+   * Delete all contacts (useful for identity reset)
+   */
+  async deleteAll(): Promise<void> {
+    const db = await this.ensureDB()
+    const tx = db.transaction(this.STORE_NAME, 'readwrite')
+    await tx.objectStore(this.STORE_NAME).clear()
+    await tx.done
+  }
 }

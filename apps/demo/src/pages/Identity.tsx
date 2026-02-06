@@ -1,10 +1,13 @@
 import { useWotIdentity } from '../context'
+import { useAdapters } from '../context'
 import { useState, useEffect } from 'react'
 import { Copy, Check, KeyRound, Fingerprint, Shield, Trash2 } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
+import { ContactStorage } from '@real-life/wot-core'
 
 export function Identity() {
   const { identity, did } = useWotIdentity()
+  const { contactService } = useAdapters()
   const navigate = useNavigate()
   const [copiedDid, setCopiedDid] = useState(false)
   const [copiedPubKey, setCopiedPubKey] = useState(false)
@@ -39,7 +42,24 @@ export function Identity() {
 
     try {
       setIsDeleting(true)
+
+      // Delete identity seed
       await identity.deleteStoredIdentity()
+
+      // Delete all contacts (wot-contacts DB)
+      const contactStorage = new ContactStorage()
+      await contactStorage.deleteAll()
+
+      // Delete verifications and other data (web-of-trust DB)
+      await new Promise<void>((resolve, reject) => {
+        const request = indexedDB.deleteDatabase('web-of-trust')
+        request.onsuccess = () => resolve()
+        request.onerror = () => reject(request.error)
+        request.onblocked = () => {
+          console.warn('Database deletion blocked')
+          resolve() // Continue anyway
+        }
+      })
 
       // Reload the page to trigger re-initialization
       window.location.href = '/'
