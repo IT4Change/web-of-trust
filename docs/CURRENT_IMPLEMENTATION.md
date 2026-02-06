@@ -1,6 +1,9 @@
-# Implementation Status
+# Current Implementation
 
-Dieses Dokument dokumentiert den aktuellen Implementierungsstand des Web of Trust Projekts.
+> **Hinweis:** Dies ist KEINE Spezifikation, sondern dokumentiert den aktuellen Implementierungsstand.
+> Die Spezifikation findest du in [docs/flows/](./flows/) und anderen Spec-Dokumenten.
+
+Dieses Dokument zeigt, was bereits implementiert ist und welche Entscheidungen getroffen wurden.
 
 ## Letzte Aktualisierung
 
@@ -25,8 +28,8 @@ Vollständige Identity-Management-Lösung mit:
 - ✅ **Deterministic Key Derivation** - Gleicher Mnemonic → gleiche DID
 - ✅ **Ed25519 Key Pairs** - Native WebCrypto API
 - ✅ **did:key Format** - Standard-konforme Decentralized Identifiers
-- ✅ **Encrypted Storage** - PBKDF2 (600k iterations) + AES-GCM
-- ✅ **Non-extractable Master Key** - Hardware-backed wenn verfügbar
+- ✅ **Encrypted Storage** - Seed verschlüsselt in IndexedDB mit PBKDF2 (600k) + AES-GCM
+- ✅ **Runtime-only Keys** - Keys als non-extractable CryptoKey, nur während Session im Memory
 
 **API Methods:**
 

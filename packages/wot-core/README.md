@@ -47,9 +47,9 @@ console.log(identity2.getDid()) // Same DID
 
 - **BIP39 Mnemonic**: 12-word recovery phrase (128-bit entropy)
 - **Deterministic**: Same mnemonic always produces same DID
-- **Encrypted Storage**: Seed encrypted with PBKDF2 + AES-GCM
+- **Encrypted Storage**: Seed encrypted with PBKDF2 + AES-GCM in IndexedDB
 - **Native WebCrypto**: Pure browser crypto, no external dependencies
-- **Non-extractable Keys**: Master key never leaves crypto hardware
+- **Runtime-only Keys**: Keys exist only in memory during session (non-extractable)
 
 ```typescript
 import { WotIdentity } from '@web-of-trust/core'
@@ -83,9 +83,10 @@ console.log(did) // did:key:z6MkpTHz...
 
 Identity seeds are stored encrypted in IndexedDB:
 
-- Passphrase → PBKDF2 (600k iterations) → AES-GCM encryption
+- Seed encrypted with PBKDF2 (600k iterations) + AES-GCM
 - Random salt and IV per storage operation
-- Master key is non-extractable (stays in crypto hardware)
+- Keys derived at runtime as non-extractable CryptoKey objects
+- Keys cleared from memory on lock/reload
 
 ```typescript
 // Check if identity exists

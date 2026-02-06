@@ -23,11 +23,15 @@ Die Verifizierung bestätigt nur: "Das ist wirklich diese Person." Das eigentlic
 
 ## Spezifikation
 
+> **Wichtig:** Die Spezifikation beschreibt das Ziel-Design. Der aktuelle Implementierungsstand kann davon abweichen.
+> Siehe [Current Implementation](docs/CURRENT_IMPLEMENTATION.md) für den tatsächlichen Stand.
+
 ### Einstieg
 
 | Dokument | Beschreibung |
 | -------- | ------------ |
 | [Glossar](docs/GLOSSAR.md) | Begriffsdefinitionen |
+| [Current Implementation](docs/CURRENT_IMPLEMENTATION.md) | ✅ Was ist bereits implementiert |
 
 ### Flows
 
