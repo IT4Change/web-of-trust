@@ -6,7 +6,7 @@ import { useNavigate } from 'react-router-dom'
 import { ContactStorage } from '@real-life/wot-core'
 
 export function Identity() {
-  const { identity, did } = useWotIdentity()
+  const { identity, did, clearIdentity } = useWotIdentity()
   const { contactService } = useAdapters()
   const navigate = useNavigate()
   const [copiedDid, setCopiedDid] = useState(false)
@@ -43,25 +43,40 @@ export function Identity() {
     try {
       setIsDeleting(true)
 
-      // Delete identity seed
+      // Delete identity seed (wot-identity DB)
       await identity.deleteStoredIdentity()
 
-      // Delete all contacts (wot-contacts DB)
-      const contactStorage = new ContactStorage()
-      await contactStorage.deleteAll()
+      // Delete all 3 IndexedDB databases
+      const databases = ['wot-identity', 'wot-contacts', 'web-of-trust']
 
-      // Delete verifications and other data (web-of-trust DB)
-      await new Promise<void>((resolve, reject) => {
-        const request = indexedDB.deleteDatabase('web-of-trust')
-        request.onsuccess = () => resolve()
-        request.onerror = () => reject(request.error)
-        request.onblocked = () => {
-          console.warn('Database deletion blocked')
-          resolve() // Continue anyway
-        }
-      })
+      await Promise.all(
+        databases.map(
+          (dbName) =>
+            new Promise<void>((resolve, reject) => {
+              const request = indexedDB.deleteDatabase(dbName)
+              request.onsuccess = () => {
+                console.log(`Deleted database: ${dbName}`)
+                resolve()
+              }
+              request.onerror = () => {
+                console.error(`Failed to delete database ${dbName}:`, request.error)
+                reject(request.error)
+              }
+              request.onblocked = () => {
+                console.warn(`Database deletion blocked: ${dbName}`)
+                resolve() // Continue anyway
+              }
+            })
+        )
+      )
 
-      // Reload the page to trigger re-initialization
+      // Clear React context state
+      clearIdentity()
+
+      // Small delay to ensure context update propagates
+      await new Promise((resolve) => setTimeout(resolve, 50))
+
+      // Navigate to root to trigger onboarding
       window.location.href = '/'
     } catch (error) {
       console.error('Failed to delete identity:', error)
