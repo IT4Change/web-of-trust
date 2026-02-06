@@ -329,5 +329,37 @@ describe('Verification with WotIdentity', () => {
       expect(verificationBtoA.from).toBe(benDid)
       expect(verificationBtoA.to).toBe(annaDid)
     })
+
+    it('should use nonce from response when challenge state is lost', async () => {
+      // Scenario: User navigates away or reloads page after creating challenge
+      // Challenge state is lost, but response contains the nonce
+      const challengeCode = await VerificationHelper.createChallenge(anna, 'Anna')
+      const challenge = JSON.parse(atob(challengeCode))
+
+      const responseCode = await VerificationHelper.respondToChallenge(
+        challengeCode,
+        ben,
+        'Ben'
+      )
+      const response = JSON.parse(atob(responseCode))
+
+      // Simulate lost challenge state by completing verification
+      // using ONLY the response code (not the original challenge)
+      // This is the actual fix: expectedNonce = challenge?.nonce || response.nonce
+      const verification = await VerificationHelper.completeVerification(
+        responseCode,
+        anna,
+        response.nonce // Use nonce from response as fallback
+      )
+
+      // Verification should succeed
+      expect(verification).toBeDefined()
+      expect(verification.from).toBe(annaDid)
+      expect(verification.to).toBe(benDid)
+
+      // Signature should be valid
+      const isValid = await VerificationHelper.verifySignature(verification)
+      expect(isValid).toBe(true)
+    })
   })
 })
