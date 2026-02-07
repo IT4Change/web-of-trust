@@ -687,9 +687,51 @@ packages/wot-core/tests/
 
 ### Für nächste Weeks
 
-- **DID Server aufsetzen** - did:web für stabile, auflösbare DIDs
+- **Social Recovery (Shamir)** - Seed-Backup über verifizierte Kontakte
 - **Evolu Integration** - Storage + Sync mit derived keys
 - **Error Messages verbessern** - Nutzerfreundlicher
+
+---
+
+## Architektur-Entscheidungen (Forschung)
+
+### DID-Methode: did:key (bestätigt)
+
+Nach umfassender Evaluation von 6 DID-Methoden (did:key, did:peer, did:web, did:webvh, did:dht, did:plc) bleibt **did:key** unsere Wahl für den POC.
+
+**Gründe:**
+- Keine Infrastruktur nötig (kein Server, kein DHT)
+- Offline-fähig und self-certifying
+- BIP39 Seed → deterministische DID → Multi-Device gelöst (gleicher Seed = gleiche DID)
+- Bestätigt durch Murmurations Network (nutzt ebenfalls did:key + Ed25519)
+
+**Mittelfristig:** did:key + did:peer Hybrid (did:peer für 1:1-Kanäle mit Key Rotation)
+
+**Langfristig:** WoT-Layer methoden-agnostisch (verschiedene Nutzer können verschiedene DID-Methoden nutzen)
+
+Details: [docs/konzepte/did-methoden-vergleich.md](./konzepte/did-methoden-vergleich.md)
+
+### Multi-Device: Seed-basiert
+
+Multi-Device ist durch BIP39 bereits gelöst: Gleicher Seed auf allen Geräten eingeben → gleiche DID, gleicher Key.
+
+Kein Login-Token-System, kein Server, keine Email nötig. Murmurations braucht dafür Login Tokens und Email-Recovery, weil ihre Keys non-exportable sind.
+
+### Recovery: Social Recovery (geplant)
+
+Drei Schutzschichten geplant:
+
+1. **BIP39 Mnemonic** (✅ implementiert) - Seed aufschreiben
+2. **Shamir Secret Sharing** (nächster Schritt) - Seed in Shards aufteilen, an verifizierte Kontakte verteilen
+3. **Guardian Recovery** (später) - Verifizierte Kontakte autorisieren neuen Key (braucht Key Rotation)
+
+Unser WoT ist gleichzeitig das Guardian-Netzwerk: Verifizierte Kontakte = natürliche Recovery-Partner.
+
+Details: [docs/konzepte/social-recovery.md](./konzepte/social-recovery.md)
+
+### UCAN (beobachten)
+
+Murmurations nutzt UCAN (User Controlled Authorization Networks) für capability-basierte Delegation. Relevant für uns wenn wir Zeitgutscheine und Rollen einführen.
 
 ---
 
