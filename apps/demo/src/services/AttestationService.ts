@@ -52,7 +52,7 @@ export class AttestationService {
       from: fromDid,
       to: toDid,
       claim,
-      tags,
+      ...(tags != null ? { tags } : {}),
       createdAt,
       proof,
     }

@@ -3,7 +3,6 @@ import { useAdapters } from '../context'
 import { useState, useEffect } from 'react'
 import { Copy, Check, KeyRound, Fingerprint, Shield, Trash2 } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
-import { ContactStorage } from '@real-life/wot-core'
 
 export function Identity() {
   const { identity, did, clearIdentity } = useWotIdentity()

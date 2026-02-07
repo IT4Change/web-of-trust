@@ -3,6 +3,11 @@ import { AdapterProvider, IdentityProvider, WotIdentityProvider, useWotIdentity 
 import { AppShell, IdentityManagement } from './components'
 import { Home, Identity, Contacts, Verify, Attestations } from './pages'
 
+/**
+ * RequireIdentity gate - shows onboarding if no unlocked identity.
+ * Once identity is unlocked, it renders AdapterProvider (which inits Evolu)
+ * and then the rest of the app.
+ */
 function RequireIdentity({ children }: { children: React.ReactNode }) {
   const { identity, did, hasStoredIdentity, setIdentity } = useWotIdentity()
 
@@ -30,7 +35,14 @@ function RequireIdentity({ children }: { children: React.ReactNode }) {
     )
   }
 
-  return <>{children}</>
+  // Identity is unlocked -> initialize Evolu with identity-derived keys
+  return (
+    <AdapterProvider identity={identity}>
+      <IdentityProvider>
+        {children}
+      </IdentityProvider>
+    </AdapterProvider>
+  )
 }
 
 function AppRoutes() {
@@ -53,13 +65,9 @@ function AppRoutes() {
 export default function App() {
   return (
     <BrowserRouter>
-      <AdapterProvider>
-        <IdentityProvider>
-          <WotIdentityProvider>
-            <AppRoutes />
-          </WotIdentityProvider>
-        </IdentityProvider>
-      </AdapterProvider>
+      <WotIdentityProvider>
+        <AppRoutes />
+      </WotIdentityProvider>
     </BrowserRouter>
   )
 }

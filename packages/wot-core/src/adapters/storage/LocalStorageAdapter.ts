@@ -179,7 +179,7 @@ export class LocalStorageAdapter implements StorageAdapter {
     const metadata: AttestationMetadata = {
       attestationId,
       accepted,
-      acceptedAt: accepted ? new Date().toISOString() : undefined,
+      ...(accepted ? { acceptedAt: new Date().toISOString() } : {}),
     }
     await db.put('attestationMetadata', metadata)
   }

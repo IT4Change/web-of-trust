@@ -4,10 +4,10 @@ import type { Attestation } from '@real-life/wot-core'
 
 interface AttestationCardProps {
   attestation: Attestation
-  fromName?: string
-  toName?: string
-  showFrom?: boolean
-  showExport?: boolean
+  fromName?: string | undefined
+  toName?: string | undefined
+  showFrom?: boolean | undefined
+  showExport?: boolean | undefined
 }
 
 export function AttestationCard({

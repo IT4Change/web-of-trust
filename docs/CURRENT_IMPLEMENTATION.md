@@ -8,7 +8,7 @@ Dieses Dokument zeigt, was bereits implementiert ist und welche Entscheidungen g
 ## Letzte Aktualisierung
 
 **Datum:** 2026-02-07
-**Phase:** Week 2+ - Identity Polish & German Wordlist
+**Phase:** Week 3 - Evolu Integration
 
 ---
 
@@ -399,7 +399,123 @@ Drei kritische Bugs nach User-Testing gefunden und behoben:
 ✓ Full Flow - complete onboarding flow
 ```
 
-**Gesamt: 77 Tests** (29 Week 1 + 35 Week 2 + 13 Week 2+) - alle passing ✅
+**Gesamt: 77 Tests** (29 Week 1 + 35 Week 2 + 13 Week 2+) - alle passing ✅ (auch nach Week 3 Evolu Integration)
+
+---
+
+## Week 3: Evolu Integration ✅
+
+### Übersicht Week 3
+
+Evolu als Storage- und Sync-Framework integriert. Die Demo App nutzt jetzt Evolu (SQLite WASM + CRDT) statt des direkten IndexedDB-Adapters für Contacts, Verifications und Attestations. Identity-Daten bleiben in verschlüsseltem IndexedDB (SeedStorage).
+
+### Warum Evolu
+
+- **Custom Keys** (seit Nov 2025, Issue #537) - `externalAppOwner` erlaubt eigene Keys
+- **BIP39-kompatibel** - `deriveFrameworkKey('evolu-storage-v1')` → 32-byte `OwnerSecret`
+- **Local-first** - SQLite WASM mit OPFS, CRDT-basierter Sync
+- **TypeScript-native** - Effect Schema für Type Safety
+- **React Integration** - Provider, Hooks, Queries
+
+Details: [docs/protokolle/framework-evaluation.md](./protokolle/framework-evaluation.md)
+
+### Implementiert Week 3
+
+#### Evolu Schema & Setup (`apps/demo/src/db.ts`)
+
+Zentrales Schema mit 4 Tabellen und WotIdentity-Key-Integration:
+
+- ✅ **4 Tabellen** - contact, verification, attestation, attestationMetadata
+- ✅ **Branded ID Types** - `ContactId`, `VerificationId`, `AttestationId`, `AttestationMetadataId`
+- ✅ **Effect Schema Types** - `NonEmptyString1000`, `SqliteBoolean`, `nullOr()`
+- ✅ **Custom Key Integration** - `deriveFrameworkKey('evolu-storage-v1')` → `OwnerSecret` → `AppOwner`
+- ✅ **Local-only Transports** - `transports: []` (Sync kommt später)
+- ✅ **Instance Management** - `createWotEvolu()`, `getEvolu()`, `isEvoluInitialized()`
+
+```typescript
+// Key Integration Pattern:
+const frameworkKey = await identity.deriveFrameworkKey('evolu-storage-v1')
+const ownerSecret = frameworkKey as unknown as OwnerSecret
+const appOwner = createAppOwner(ownerSecret)
+const evolu = createEvolu(evoluReactWebDeps)(Schema, {
+  name: SimpleName.orThrow('wot'),
+  externalAppOwner: appOwner,
+  transports: [],
+})
+```
+
+#### EvoluStorageAdapter (`apps/demo/src/adapters/EvoluStorageAdapter.ts`)
+
+Implementiert `StorageAdapter` Interface mit Evolu als Backend:
+
+- ✅ **Identity in localStorage** - Nicht in Evolu (local-only, kein Sync nötig)
+- ✅ **Contacts in Evolu** - CRUD mit deterministic IDs via `createIdFromString<'Contact'>(did)`
+- ✅ **Verifications in Evolu** - Empfänger-Prinzip beibehalten
+- ✅ **Attestations in Evolu** - Inkl. Metadata (accepted/acceptedAt)
+- ✅ **JSON Serialization** - Proof, GeoLocation, tags als JSON Strings in `NonEmptyString1000`
+- ✅ **Soft Delete** - Evolu nutzt `isDeleted` statt physischem Löschen
+- ✅ **Row Mappers** - Konvertierung Evolu Rows ↔ WoT Types
+
+**Key Patterns:**
+```typescript
+// Deterministic branded IDs
+createIdFromString<'Contact'>(contact.did)
+
+// Branded strings
+const str = (s: string) => NonEmptyString1000.orThrow(s)
+
+// Boolean conversion
+booleanToSqliteBoolean(true)  // → 1
+sqliteBooleanToBoolean(row.accepted)  // → true/false
+```
+
+#### Provider-Hierarchie (geändert)
+
+WotIdentity muss vor Evolu initialisiert werden (Evolu braucht abgeleitete Keys):
+
+```
+// Vorher (Week 2):
+BrowserRouter > AdapterProvider > IdentityProvider > WotIdentityProvider > Routes
+
+// Nachher (Week 3):
+BrowserRouter > WotIdentityProvider > RequireIdentity > AdapterProvider(identity) > IdentityProvider > Routes
+```
+
+- ✅ **AdapterProvider** akzeptiert jetzt `identity: WotIdentity` prop
+- ✅ **Async Initialization** - Evolu wird in `useEffect` initialisiert
+- ✅ **RequireIdentity** - Rendert AdapterProvider erst nach Identity-Unlock
+
+#### TypeScript Compatibility
+
+`exactOptionalPropertyTypes: true` in tsconfig (Evolu-Requirement) erforderte 4 Fixes:
+
+- ✅ `AttestationCard.tsx` - Optional props `?: string | undefined`
+- ✅ `ContactService.ts` - Spread pattern statt `undefined` assignment
+- ✅ `AttestationService.ts` - Spread pattern für tags
+- ✅ `LocalStorageAdapter.ts` - Spread pattern für acceptedAt
+
+### Packages
+
+```json
+{
+  "@evolu/common": "^7.4.1",
+  "@evolu/react": "^10.4.0",
+  "@evolu/react-web": "^2.4.0"
+}
+```
+
+### Build Output
+
+Evolu bringt SQLite WASM mit (~1MB):
+- `Db.worker-*.js` (~497KB) - SQLite Worker
+- `sqlite3.wasm` (~1MB) - SQLite WASM Binary
+- OPFS (Origin Private File System) für Browser-Storage
+
+### Tests Week 3
+
+- ✅ **77/77 bestehende Tests passing** - Keine Regressionen
+- ✅ **TypeScript clean** - 0 Errors mit `exactOptionalPropertyTypes`
+- ✅ **Vite Build erfolgreich** - SQLite WASM + Workers korrekt gebundelt
 
 ---
 
@@ -467,11 +583,11 @@ const evolKey = await identity.deriveFrameworkKey('evolu-storage-v1')
 - Vercel KV für Storage
 - Domain: `poc.real-life-stack.de`
 
-### Evolu Integration (poc-plan Week 3) - AUSSTEHEND
+### Evolu Integration (poc-plan Week 3) - ✅ ERLEDIGT
 
-- EvoluAdapter mit `deriveFrameworkKey('evolu-storage-v1')`
-- Schema Extension Pattern für RLS
-- Sync zwischen 2 Tabs/Devices
+- ✅ EvoluAdapter mit `deriveFrameworkKey('evolu-storage-v1')`
+- ✅ Schema mit 4 Tabellen (contact, verification, attestation, attestationMetadata)
+- ⏳ Sync zwischen 2 Tabs/Devices (transports noch leer)
 
 ### RLS Integration (poc-plan Week 4) - AUSSTEHEND
 
@@ -508,6 +624,19 @@ const evolKey = await identity.deriveFrameworkKey('evolu-storage-v1')
 - happy-dom alleine reicht nicht
 - Ermöglicht echte Storage-Tests ohne Browser
 
+### Evolu als Storage/Sync Framework
+
+**Entscheidung:** Evolu (SQLite WASM + CRDT)
+**Grund:**
+- Custom Keys seit Nov 2025 (`externalAppOwner` in `DbConfig`)
+- `deriveFrameworkKey('evolu-storage-v1')` → 32-byte `OwnerSecret` passt perfekt
+- Local-first mit CRDT-basiertem Sync (Relay kommt später)
+- Effect Schema für Type Safety (branded types)
+- OPFS-basiertes Storage im Browser (kein IndexedDB-Limit)
+- React Provider + Hooks Integration
+
+**Trade-off:** Identity-Daten bleiben in eigenem IndexedDB (SeedStorage), nicht in Evolu. Grund: Verschlüsselter Seed darf nicht gesynct werden.
+
 ### Deutsche Wortliste
 
 **Entscheidung:** dys2p/wordlists-de (2048 Wörter)
@@ -542,6 +671,10 @@ const evolKey = await identity.deriveFrameworkKey('evolu-storage-v1')
 ### Week 2+ Commits
 
 14. **feat: Add German BIP39 wordlist and fix identity persistence** - Deutsche Wortliste, 3 Persistence-Bugs, Enter-Navigation
+
+### Week 3 Commits
+
+15. **feat: Integrate Evolu as storage backend** - Schema, EvoluStorageAdapter, Provider-Hierarchie, Custom Keys
 
 ---
 
@@ -623,9 +756,11 @@ apps/demo/src/
 │       ├── AppShell.tsx
 │       ├── Navigation.tsx
 │       └── index.ts
+├── adapters/
+│   └── EvoluStorageAdapter.ts       # StorageAdapter via Evolu
 ├── context/
 │   ├── WotIdentityContext.tsx       # Identity State + hasStoredIdentity
-│   ├── AdapterContext.tsx
+│   ├── AdapterContext.tsx           # Evolu init + EvoluStorageAdapter
 │   ├── IdentityContext.tsx
 │   └── index.ts
 ├── hooks/
@@ -647,6 +782,7 @@ apps/demo/src/
 │   ├── Contacts.tsx
 │   ├── Attestations.tsx
 │   └── index.ts
+├── db.ts                            # Evolu Schema + createWotEvolu()
 ├── App.tsx                          # RequireIdentity + Loading/Unlock
 └── main.tsx
 ```
@@ -687,8 +823,9 @@ packages/wot-core/tests/
 
 ### Für nächste Weeks
 
+- **Evolu Sync** - Transports konfigurieren für Multi-Tab/Device Sync
 - **Social Recovery (Shamir)** - Seed-Backup über verifizierte Kontakte
-- **Evolu Integration** - Storage + Sync mit derived keys
+- **RLS Module Integration** - DataInterface + WotConnector
 - **Error Messages verbessern** - Nutzerfreundlicher
 
 ---

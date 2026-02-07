@@ -1,1 +1,0 @@
-export { ContactStorage } from './ContactStorage'

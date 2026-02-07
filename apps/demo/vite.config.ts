@@ -12,4 +12,13 @@ export default defineConfig({
       '@web-of-trust/core': path.resolve(__dirname, '../../packages/wot-core/src'),
     },
   },
+  server: {
+    headers: {
+      'Cross-Origin-Opener-Policy': 'same-origin',
+      'Cross-Origin-Embedder-Policy': 'require-corp',
+    },
+  },
+  optimizeDeps: {
+    exclude: ['@evolu/sqlite-wasm', '@evolu/web', '@evolu/react-web'],
+  },
 })

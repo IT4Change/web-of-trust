@@ -36,6 +36,8 @@ export type {
   SyncChange,
 } from './adapters/interfaces/SyncAdapter'
 export { NoOpSyncAdapter } from './adapters/interfaces/SyncAdapter'
+export type { Subscribable } from './adapters/interfaces/Subscribable'
+export type { ReactiveStorageAdapter } from './adapters/interfaces/ReactiveStorageAdapter'
 
 // Crypto Utilities
 export {
@@ -60,9 +62,6 @@ export {
 
 // Identity
 export { WotIdentity } from './identity'
-
-// Contact
-export { ContactStorage } from './contact'
 
 // Verification
 export { VerificationHelper } from './verification'

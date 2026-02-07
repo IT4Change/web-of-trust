@@ -1,105 +1,55 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useCallback, useMemo } from 'react'
 import { useAdapters } from '../context'
-import type { Contact, ContactStatus } from '@real-life/wot-core'
+import { useSubscribable } from './useSubscribable'
+import type { ContactStatus } from '@real-life/wot-core'
 
 export function useContacts() {
-  const { contactService } = useAdapters()
-  const [contacts, setContacts] = useState<Contact[]>([])
-  const [isLoading, setIsLoading] = useState(true)
-  const [error, setError] = useState<Error | null>(null)
+  const { contactService, reactiveStorage } = useAdapters()
 
-  const loadContacts = useCallback(async () => {
-    try {
-      setIsLoading(true)
-      setError(null)
-      const loaded = await contactService.getContacts()
-      setContacts(loaded)
-    } catch (e) {
-      setError(e instanceof Error ? e : new Error('Failed to load contacts'))
-    } finally {
-      setIsLoading(false)
-    }
-  }, [contactService])
-
-  useEffect(() => {
-    loadContacts()
-  }, [loadContacts])
+  const contactsSubscribable = useMemo(() => reactiveStorage.watchContacts(), [reactiveStorage])
+  const contacts = useSubscribable(contactsSubscribable)
 
   const addContact = useCallback(
     async (did: string, publicKey: string, name?: string, status: ContactStatus = 'pending') => {
-      try {
-        setError(null)
-        const contact = await contactService.addContact(did, publicKey, name, status)
-        await loadContacts()
-        return contact
-      } catch (e) {
-        const err = e instanceof Error ? e : new Error('Failed to add contact')
-        setError(err)
-        throw err
-      }
+      return contactService.addContact(did, publicKey, name, status)
     },
-    [contactService, loadContacts]
+    [contactService]
   )
 
   const activateContact = useCallback(
     async (did: string) => {
-      try {
-        setError(null)
-        await contactService.activateContact(did)
-        await loadContacts()
-      } catch (e) {
-        const err = e instanceof Error ? e : new Error('Failed to activate contact')
-        setError(err)
-        throw err
-      }
+      await contactService.activateContact(did)
     },
-    [contactService, loadContacts]
+    [contactService]
   )
 
   const updateContactName = useCallback(
     async (did: string, name: string) => {
-      try {
-        setError(null)
-        await contactService.updateContactName(did, name)
-        await loadContacts()
-      } catch (e) {
-        const err = e instanceof Error ? e : new Error('Failed to update contact')
-        setError(err)
-        throw err
-      }
+      await contactService.updateContactName(did, name)
     },
-    [contactService, loadContacts]
+    [contactService]
   )
 
   const removeContact = useCallback(
     async (did: string) => {
-      try {
-        setError(null)
-        await contactService.removeContact(did)
-        await loadContacts()
-      } catch (e) {
-        const err = e instanceof Error ? e : new Error('Failed to remove contact')
-        setError(err)
-        throw err
-      }
+      await contactService.removeContact(did)
     },
-    [contactService, loadContacts]
+    [contactService]
   )
 
-  // Filter by status
-  const activeContacts = contacts.filter((c) => c.status === 'active')
-  const pendingContacts = contacts.filter((c) => c.status === 'pending')
+  const activeContacts = useMemo(() => contacts.filter(c => c.status === 'active'), [contacts])
+  const pendingContacts = useMemo(() => contacts.filter(c => c.status === 'pending'), [contacts])
 
   return {
     contacts,
     activeContacts,
     pendingContacts,
-    isLoading,
-    error,
+    isLoading: false,
+    error: null,
     addContact,
     activateContact,
     updateContactName,
     removeContact,
-    refresh: loadContacts,
+    refresh: () => {},
   }
 }

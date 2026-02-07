@@ -1,12 +1,12 @@
 import { createContext, useContext, useState, useEffect, type ReactNode } from 'react'
 import {
-  LocalStorageAdapter,
   WebCryptoAdapter,
   NoOpSyncAdapter,
-  ContactStorage,
   type StorageAdapter,
+  type ReactiveStorageAdapter,
   type CryptoAdapter,
   type SyncAdapter,
+  type WotIdentity,
 } from '@real-life/wot-core'
 import {
   IdentityService,
@@ -14,9 +14,12 @@ import {
   VerificationService,
   AttestationService,
 } from '../services'
+import { EvoluStorageAdapter } from '../adapters/EvoluStorageAdapter'
+import { createWotEvolu, isEvoluInitialized, getEvolu } from '../db'
 
 interface AdapterContextValue {
   storage: StorageAdapter
+  reactiveStorage: ReactiveStorageAdapter
   crypto: CryptoAdapter
   sync: SyncAdapter
   identityService: IdentityService
@@ -30,37 +33,56 @@ const AdapterContext = createContext<AdapterContextValue | null>(null)
 
 interface AdapterProviderProps {
   children: ReactNode
+  identity: WotIdentity
 }
 
-export function AdapterProvider({ children }: AdapterProviderProps) {
+/**
+ * AdapterProvider initializes Evolu with WotIdentity-derived custom keys.
+ * The identity must be unlocked before this provider is rendered.
+ */
+export function AdapterProvider({ children, identity }: AdapterProviderProps) {
   const [isInitialized, setIsInitialized] = useState(false)
-  const [adapters] = useState(() => {
-    const storage = new LocalStorageAdapter()
-    const crypto = new WebCryptoAdapter()
-    const sync = new NoOpSyncAdapter()
-    const contactStorage = new ContactStorage()
-
-    return {
-      storage,
-      crypto,
-      sync,
-      identityService: new IdentityService(storage, crypto),
-      contactService: new ContactService(contactStorage),
-      verificationService: new VerificationService(storage),
-      attestationService: new AttestationService(storage, crypto),
-    }
-  })
+  const [adapters, setAdapters] = useState<Omit<AdapterContextValue, 'isInitialized'> | null>(null)
 
   useEffect(() => {
-    adapters.storage.init().then(() => {
-      setIsInitialized(true)
-    })
-  }, [adapters.storage])
+    let cancelled = false
 
-  if (!isInitialized) {
+    async function initEvolu() {
+      try {
+        const evolu = isEvoluInitialized()
+          ? getEvolu()
+          : await createWotEvolu(identity)
+
+        const storage = new EvoluStorageAdapter(evolu)
+        const crypto = new WebCryptoAdapter()
+        const sync = new NoOpSyncAdapter()
+
+        if (!cancelled) {
+          setAdapters({
+            storage,
+            reactiveStorage: storage,
+            crypto,
+            sync,
+            identityService: new IdentityService(storage, crypto),
+            contactService: new ContactService(storage),
+            verificationService: new VerificationService(storage),
+            attestationService: new AttestationService(storage, crypto),
+          })
+          setIsInitialized(true)
+        }
+      } catch (error) {
+        console.error('Failed to initialize Evolu:', error)
+      }
+    }
+
+    initEvolu()
+    return () => { cancelled = true }
+  }, [identity])
+
+  if (!isInitialized || !adapters) {
     return (
       <div className="min-h-screen flex items-center justify-center">
-        <div className="text-slate-500">Initialisiere...</div>
+        <div className="text-slate-500">Initialisiere Evolu...</div>
       </div>
     )
   }
