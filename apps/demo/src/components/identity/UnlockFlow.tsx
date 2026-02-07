@@ -15,7 +15,7 @@ export function UnlockFlow({ onComplete, onRecover }: UnlockFlowProps) {
 
   const handleUnlock = async () => {
     if (!passphrase) {
-      setError('Bitte gib deine Passphrase ein')
+      setError('Bitte gib dein Passwort ein')
       return
     }
 
@@ -31,7 +31,7 @@ export function UnlockFlow({ onComplete, onRecover }: UnlockFlowProps) {
     } catch (e) {
       if (e instanceof Error) {
         if (e.message.includes('Invalid passphrase')) {
-          setError('Falsche Passphrase')
+          setError('Falsches Passwort')
         } else if (e.message.includes('No stored seed')) {
           setError('Keine gespeicherte Identität gefunden')
         } else {
@@ -62,14 +62,14 @@ export function UnlockFlow({ onComplete, onRecover }: UnlockFlowProps) {
             Willkommen zurück!
           </h1>
           <p className="text-slate-600">
-            Gib deine Passphrase ein, um deine Identität zu entsperren.
+            Gib dein Passwort ein, um deine Identität zu entsperren.
           </p>
         </div>
 
         <div className="space-y-4">
           <div>
             <label className="block text-sm font-medium text-slate-700 mb-1">
-              Passphrase
+              Passwort
             </label>
             <div className="relative">
               <input
@@ -78,7 +78,7 @@ export function UnlockFlow({ onComplete, onRecover }: UnlockFlowProps) {
                 onChange={(e) => setPassphrase(e.target.value)}
                 onKeyDown={handleKeyDown}
                 className="w-full px-4 py-3 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                placeholder="Deine Passphrase"
+                placeholder="Dein Passwort"
                 autoFocus
               />
               <button
@@ -110,7 +110,7 @@ export function UnlockFlow({ onComplete, onRecover }: UnlockFlowProps) {
               onClick={onRecover}
               className="text-sm text-blue-600 hover:text-blue-700 hover:underline"
             >
-              Identität aus Recovery Phrase wiederherstellen
+              Identität mit Magischen Wörtern wiederherstellen
             </button>
           </div>
         </div>

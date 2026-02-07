@@ -166,8 +166,8 @@ export function Identity() {
           <div className="flex items-start space-x-3">
             <Shield className="w-5 h-5 text-green-600 flex-shrink-0 mt-0.5" />
             <div className="text-sm text-green-800">
-              <strong>Sicher gespeichert:</strong> Dein privater Schlüssel ist mit deiner Passphrase
-              verschlüsselt und verlässt niemals dieses Gerät. Mit deiner 12-Wort Recovery Phrase kannst
+              <strong>Sicher gespeichert:</strong> Dein privater Schlüssel ist mit deinem Passwort
+              verschlüsselt und verlässt niemals dieses Gerät. Mit deinen 12 Magischen Wörtern kannst
               du deine Identität auf anderen Geräten wiederherstellen.
             </div>
           </div>
@@ -198,7 +198,7 @@ export function Identity() {
                 </p>
                 <p className="text-sm text-red-800 mt-1">
                   Alle lokalen Daten (Identität, Kontakte, Verifikationen) werden gelöscht.
-                  Stelle sicher, dass du deine 12-Wort Recovery Phrase gesichert hast!
+                  Stelle sicher, dass du deine 12 Magischen Wörter gesichert hast!
                 </p>
               </div>
               <div className="flex space-x-3">

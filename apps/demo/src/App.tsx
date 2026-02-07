@@ -4,8 +4,20 @@ import { AppShell, IdentityManagement } from './components'
 import { Home, Identity, Contacts, Verify, Attestations } from './pages'
 
 function RequireIdentity({ children }: { children: React.ReactNode }) {
-  const { identity, did, setIdentity } = useWotIdentity()
+  const { identity, did, hasStoredIdentity, setIdentity } = useWotIdentity()
 
+  // Still checking if identity exists in storage
+  if (hasStoredIdentity === null) {
+    return (
+      <div className="min-h-screen flex items-center justify-center p-4">
+        <div className="text-center">
+          <p className="text-gray-600">Lade...</p>
+        </div>
+      </div>
+    )
+  }
+
+  // Identity not unlocked yet (but might be stored)
   if (!identity || !did) {
     return (
       <div className="min-h-screen flex items-center justify-center p-4">

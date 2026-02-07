@@ -1,39 +1,29 @@
 import { useState, useEffect } from 'react'
 import { WotIdentity } from '@real-life/wot-core'
+import { useWotIdentity } from '../../context'
 import { OnboardingFlow } from './OnboardingFlow'
 import { RecoveryFlow } from './RecoveryFlow'
 import { UnlockFlow } from './UnlockFlow'
 
-type Mode = 'checking' | 'unlock' | 'onboarding' | 'recovery'
+type Mode = 'unlock' | 'onboarding' | 'recovery'
 
 interface IdentityManagementProps {
   onComplete: (identity: WotIdentity, did: string) => void
 }
 
 export function IdentityManagement({ onComplete }: IdentityManagementProps) {
-  const [mode, setMode] = useState<Mode>('checking')
+  const { hasStoredIdentity } = useWotIdentity()
+  const [mode, setMode] = useState<Mode | null>(null)
 
   useEffect(() => {
-    checkStoredIdentity()
-  }, [])
-
-  const checkStoredIdentity = async () => {
-    try {
-      const identity = new WotIdentity()
-      const hasSeed = await identity.hasStoredIdentity()
-
-      if (hasSeed) {
-        setMode('unlock')
-      } else {
-        setMode('onboarding')
-      }
-    } catch (error) {
-      console.error('Error checking stored identity:', error)
-      setMode('onboarding')
+    // Use hasStoredIdentity from context instead of checking again
+    if (hasStoredIdentity !== null) {
+      setMode(hasStoredIdentity ? 'unlock' : 'onboarding')
     }
-  }
+  }, [hasStoredIdentity])
 
-  if (mode === 'checking') {
+  // Still loading from context
+  if (mode === null) {
     return (
       <div className="min-h-screen flex items-center justify-center">
         <div className="text-slate-500">Lade...</div>
@@ -61,8 +51,16 @@ export function IdentityManagement({ onComplete }: IdentityManagementProps) {
 
   // mode === 'onboarding'
   return (
-    <OnboardingFlow
-      onComplete={onComplete}
-    />
+    <div>
+      <OnboardingFlow onComplete={onComplete} />
+      <div className="max-w-2xl mx-auto px-6 mt-4">
+        <button
+          onClick={() => setMode('recovery')}
+          className="w-full py-2 text-sm text-slate-600 hover:text-slate-900 transition-colors"
+        >
+          Bereits Magische Wörter? → Identität importieren
+        </button>
+      </div>
+    </div>
   )
 }

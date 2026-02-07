@@ -1,7 +1,7 @@
 import { generateMnemonic, mnemonicToSeedSync, validateMnemonic } from '@scure/bip39'
-import { wordlist } from '@scure/bip39/wordlists/english.js'
 import * as ed25519 from '@noble/ed25519'
 import { SeedStorage } from './SeedStorage'
+import { germanPositiveWordlist } from '../wordlists/german-positive'
 
 /**
  * WotIdentity - BIP39-based identity with native WebCrypto
@@ -35,7 +35,7 @@ export class WotIdentity {
     did: string
   }> {
     // 1. Generate BIP39 Mnemonic (12 words = 128 bit entropy)
-    const mnemonic = generateMnemonic(wordlist, 128)
+    const mnemonic = generateMnemonic(germanPositiveWordlist, 128)
     const seed = mnemonicToSeedSync(mnemonic, userPassphrase)
 
     // 2. Store encrypted seed (optional)
@@ -66,15 +66,21 @@ export class WotIdentity {
    *
    * @param mnemonic - 12 word BIP39 mnemonic
    * @param passphrase - User's passphrase
+   * @param storeSeed - Store encrypted seed in IndexedDB (default: false)
    */
-  async unlock(mnemonic: string, passphrase: string): Promise<void> {
+  async unlock(mnemonic: string, passphrase: string, storeSeed: boolean = false): Promise<void> {
     // Validate mnemonic
-    if (!validateMnemonic(mnemonic, wordlist)) {
+    if (!validateMnemonic(mnemonic, germanPositiveWordlist)) {
       throw new Error('Invalid mnemonic')
     }
 
     // Derive seed
     const seed = mnemonicToSeedSync(mnemonic, passphrase)
+
+    // Store encrypted seed (optional)
+    if (storeSeed) {
+      await this.storage.storeSeed(new Uint8Array(seed.slice(0, 32)), passphrase)
+    }
 
     // Import Master Key (non-extractable)
     this.masterKey = await crypto.subtle.importKey(
