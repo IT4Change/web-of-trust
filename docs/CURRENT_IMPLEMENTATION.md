@@ -7,8 +7,8 @@ Dieses Dokument zeigt, was bereits implementiert ist und welche Entscheidungen g
 
 ## Letzte Aktualisierung
 
-**Datum:** 2026-02-06
-**Phase:** Week 2 - In-Person Verification Complete
+**Datum:** 2026-02-07
+**Phase:** Week 2+ - Identity Polish & German Wordlist
 
 ---
 
@@ -25,18 +25,20 @@ Die Grundlage für das Identitätssystem wurde implementiert und vollständig ge
 Vollständige Identity-Management-Lösung mit:
 
 - ✅ **BIP39 Mnemonic Generation** - 12-Wort Recovery-Phrase (128-bit Entropy)
+- ✅ **Deutsche BIP39-Wortliste** - 2048 deutsche Wörter (dys2p/wordlists-de)
 - ✅ **Deterministic Key Derivation** - Gleicher Mnemonic → gleiche DID
-- ✅ **Ed25519 Key Pairs** - Native WebCrypto API
+- ✅ **Ed25519 Key Pairs** - @noble/ed25519 Library
 - ✅ **did:key Format** - Standard-konforme Decentralized Identifiers
 - ✅ **Encrypted Storage** - Seed verschlüsselt in IndexedDB mit PBKDF2 (600k) + AES-GCM
-- ✅ **Runtime-only Keys** - Keys als non-extractable CryptoKey, nur während Session im Memory
+- ✅ **Runtime-only Keys** - Keys nur während Session im Memory
+- ✅ **storeSeed Parameter** - Kontrolle wann Identity in IndexedDB gespeichert wird
 
 **API Methods:**
 
 ```typescript
 // Identity Creation & Recovery
 create(passphrase: string, storeSeed: boolean): Promise<{ mnemonic: string, did: string }>
-unlock(mnemonic: string, passphrase: string): Promise<void>
+unlock(mnemonic: string, passphrase: string, storeSeed: boolean): Promise<void>
 unlockFromStorage(passphrase: string): Promise<void>
 
 // Cryptographic Operations
@@ -52,6 +54,13 @@ deleteStoredIdentity(): Promise<void>
 deriveFrameworkKey(info: string): Promise<Uint8Array>
 ```
 
+#### Deutsche BIP39-Wortliste (`packages/wot-core/src/wordlists/german-positive.ts`)
+
+- ✅ **2048 deutsche Wörter** - Quelle: [dys2p/wordlists-de](https://github.com/dys2p/wordlists-de)
+- ✅ **BIP39-konform** - Erste 4 Zeichen jedes Worts sind einzigartig
+- ✅ **Validierung** - Runtime-Check auf exakt 2048 Wörter
+- ✅ **User-facing: "Magische Wörter"** - Mnemonic heißt in der UI "Magische Wörter"
+
 #### SeedStorage Class (`packages/wot-core/src/identity/SeedStorage.ts`)
 
 Sichere Seed-Verschlüsselung und -Speicherung:
@@ -65,12 +74,25 @@ Sichere Seed-Verschlüsselung und -Speicherung:
 #### Demo App Integration
 
 - ✅ **Onboarding Flow** - Neue Identität erstellen
-  - Mnemonic anzeigen (einmalig)
+  - Mnemonic anzeigen (einmalig, "Magische Wörter")
   - Mnemonic-Verifikation (3 zufällige Wörter)
-  - Encrypted Storage
+  - Passphrase setzen → Encrypted Storage
+  - Enter-Navigation in allen Schritten
+  - storeSeed=false bei Generierung, storeSeed=true erst nach Passphrase
 - ✅ **Recovery Flow** - Identität aus Mnemonic wiederherstellen
+  - storeSeed=true beim Import
 - ✅ **Unlock Flow** - Identität aus verschlüsseltem Storage entsperren
 - ✅ **Identity Management** - DID anzeigen, Identität löschen
+- ✅ **Persistenz-Handling** - hasStoredIdentity Check beim App-Start
+  - Loading State während Check
+  - Unlock Screen wenn Identity gespeichert
+  - Onboarding Screen wenn keine Identity
+
+#### Shared UI Components
+
+- ✅ **ProgressIndicator** - Step-Anzeige im Onboarding
+- ✅ **SecurityChecklist** - Checkbox-Liste für Sicherheitsbestätigung
+- ✅ **InfoTooltip** - Hilfe-Tooltips
 
 ### Tests
 
@@ -130,12 +152,6 @@ Sichere Seed-Verschlüsselung und -Speicherung:
 - fake-indexeddb for IndexedDB simulation
 - All tests passing ✅
 
-### Dokumentation
-
-- ✅ **wot-core README** - Vollständige API-Dokumentation mit Beispielen
-- ✅ **Test Coverage** - 29 Tests dokumentiert
-- ✅ **Implementation Status** - Dieses Dokument
-
 ---
 
 ## Week 2: In-Person Verification ✅
@@ -177,6 +193,7 @@ Challenge-Response-Protokoll mit WotIdentity:
 - ✅ **Signature Creation** - Ed25519 signature via WotIdentity.sign()
 - ✅ **Signature Verification** - Multibase public key conversion + WebCrypto verify
 - ✅ **Nonce Validation** - Schutz gegen Replay-Angriffe
+- ✅ **Nonce Fallback** - Nonce aus Response wenn Challenge-State verloren
 - ✅ **Base64 Encoding** - QR-Code-kompatibel
 
 **API Methods:**
@@ -240,11 +257,10 @@ multibaseToBytes(multibase: string): Uint8Array
 
 **35 neue Tests** (zusätzlich zu 29 Week 1 Tests):
 
-#### ContactStorage Tests (18 Tests)
+#### ContactStorage Tests (15 Tests)
 
 ```typescript
 ✓ addContact() - store contact with did:key format
-✓ addContact() - store multibase public key
 ✓ addContact() - default status is pending
 ✓ addContact() - throws if contact already exists
 
@@ -255,12 +271,12 @@ multibaseToBytes(multibase: string): Uint8Array
 ✓ getAllContacts() - returns empty array when empty
 
 ✓ updateContact() - update name
-✓ updateContact() - update status
-✓ updateContact() - update multiple fields
+✓ updateContact() - update updatedAt timestamp
 ✓ updateContact() - throws if contact not found
 
 ✓ activateContact() - changes status to active
 ✓ activateContact() - sets verifiedAt timestamp
+✓ activateContact() - throws for non-existent contact
 
 ✓ removeContact() - deletes contact from storage
 ✓ removeContact() - no error for non-existent
@@ -269,33 +285,33 @@ multibaseToBytes(multibase: string): Uint8Array
 ✓ getActiveContacts() - returns empty array when none active
 ```
 
-#### VerificationIntegration Tests (17 Tests)
+#### VerificationIntegration Tests (20 Tests)
 
 ```typescript
 ✓ Challenge Creation - with WotIdentity DID and public key
 ✓ Challenge Creation - encodes to base64
-✓ Challenge Creation - includes timestamp and nonce
+✓ Challenge Creation - generates unique nonce
 ✓ Challenge Creation - includes challenger name
 
 ✓ Challenge Response - responder adds own identity
-✓ Challenge Response - preserves original nonce
 ✓ Challenge Response - encodes to base64
-✓ Challenge Response - includes responder name
+✓ Challenge Response - preserves nonce from challenge
+✓ Challenge Response - includes challenge initiator info
 
-✓ Complete Verification - validates nonce match
-✓ Complete Verification - throws on nonce mismatch
-✓ Complete Verification - creates Ed25519Signature2020 proof
-✓ Complete Verification - signs with initiator identity
-
-✓ Signature Verification - verifies valid signature
-✓ Signature Verification - rejects invalid signature
+✓ Signature Verification - signs with WotIdentity
+✓ Signature Verification - verifies using public key multibase
+✓ Signature Verification - creates Ed25519Signature2020 proof
+✓ Signature Verification - fails with wrong public key
+✓ Signature Verification - rejects nonce mismatch
 
 ✓ Public Key Exchange - extracts key from did:key format
 ✓ Public Key Exchange - converts multibase to bytes
-✓ Public Key Exchange - handles Ed25519 0xed01 prefix correctly
-```
+✓ Public Key Exchange - parses did:key for public key
 
-**Gesamt:** 64 Tests (29 Week 1 + 35 Week 2) - alle passing ✅
+✓ Complete Verification Flow - full mutual verification
+✓ Complete Verification Flow - bidirectional verification
+✓ Complete Verification Flow - nonce fallback for lost challenge state
+```
 
 ### Demo App Integration Week 2
 
@@ -311,11 +327,79 @@ User-Bestätigung: "Läuft noch und es funktioniert" ✅
 
 1. Identity Creation in Browser
 2. Challenge Generation
-3. Challenge Code Copy/Paste (oder QR in Zukunft)
+3. Challenge Code Copy/Paste (oder QR)
 4. Response Generation
 5. Response Code Copy/Paste
 6. Verification Completion
 7. Contact Storage (beide Seiten)
+
+---
+
+## Week 2+: Identity Polish ✅
+
+### Übersicht
+
+Verbesserungen an Identity-Persistenz und UX nach User-Testing.
+
+### Implementiert
+
+#### Deutsche BIP39-Wortliste
+
+- ✅ **2048 deutsche Wörter** aus [dys2p/wordlists-de](https://github.com/dys2p/wordlists-de)
+- ✅ Ersetzt englische Wortliste komplett
+- ✅ Validierung: exakt 2048 Wörter, einzigartige erste 4 Zeichen
+- ✅ Alle bestehenden Tests laufen weiterhin
+
+#### Identity Persistence Bugfixes
+
+Drei kritische Bugs nach User-Testing gefunden und behoben:
+
+**Bug #1: Vorzeitige Speicherung während Onboarding**
+- **Problem:** `create()` speicherte Identity sofort in IndexedDB, bevor User Passphrase gesetzt hatte. Reload bei Mnemonic-Anzeige zeigte Unlock-Screen.
+- **Fix:** `storeSeed: false` bei `create()` im OnboardingFlow. Speicherung erst nach Passphrase-Schritt.
+
+**Bug #2: Verlust nach Reload in der App**
+- **Problem:** Nach vollständigem Onboarding ging Reload zurück zum Start statt zum Unlock-Screen.
+- **Fix:** `hasStoredIdentity` State in WotIdentityContext mit `useEffect` Check beim Mount. App.tsx zeigt Loading → Unlock → App basierend auf Storage-Status.
+
+**Bug #3: Import/Recovery speicherte nicht**
+- **Problem:** RecoveryFlow rief `unlock()` ohne `storeSeed=true`. Nach Import war Identity nicht persistent.
+- **Fix:** `storeSeed: true` im RecoveryFlow `handleProtect()`.
+
+#### UX-Verbesserungen
+
+- ✅ **Enter-Navigation** im gesamten Onboarding:
+  - Step 1 (Generate): Enter → Identity generieren
+  - Step 2 (Display): Enter → Weiter (wenn alle Checkboxen gesetzt)
+  - Step 3 (Verify): Enter → Nächstes Input / Submit wenn letztes
+  - Step 4 (Protect): Enter → Abschließen (wenn Passphrase gültig)
+
+### Tests Week 2+
+
+**13 neue Tests** (OnboardingFlow):
+
+#### OnboardingFlow Tests (13 Tests)
+
+```typescript
+✓ Step 1 - generate mnemonic and DID without passphrase
+✓ Step 1 - generate different mnemonics on each call
+
+✓ Step 2 - split mnemonic into 12 words
+✓ Step 2 - valid BIP39 format
+
+✓ Step 3 - validate correct word at correct position
+✓ Step 3 - reject incorrect word at position
+✓ Step 3 - handle case-insensitive verification
+
+✓ Step 4 - accept passphrase after mnemonic generated
+✓ Step 4 - enforce minimum passphrase length
+✓ Step 4 - accept passphrase with 8+ characters
+✓ Step 4 - store identity with passphrase protection
+
+✓ Full Flow - complete onboarding flow
+```
+
+**Gesamt: 77 Tests** (29 Week 1 + 35 Week 2 + 13 Week 2+) - alle passing ✅
 
 ---
 
@@ -346,6 +430,13 @@ User-Bestätigung: "Läuft noch und es funktioniert" ✅
 const evolKey = await identity.deriveFrameworkKey('evolu-storage-v1')
 ```
 
+### Wortliste
+
+**Spezifikation / poc-plan:** Englische BIP39-Wortliste
+**Implementiert:** Deutsche BIP39-Wortliste (dys2p/wordlists-de)
+
+**Grund:** Deutschsprachige Zielgruppe, bessere Merkbarkeit. User-facing Begriff: "Magische Wörter".
+
 ### Storage Passphrase
 
 **Neu implementiert:** Passphrase-Schutz für verschlüsselten Seed
@@ -353,45 +444,40 @@ const evolKey = await identity.deriveFrameworkKey('evolu-storage-v1')
 **Grund:** Browser haben keine sichere OS-Keychain. Passphrase bietet zusätzlichen Schutz.
 
 **Workflow:**
-1. Identity erstellen mit Passphrase
-2. Seed verschlüsselt in IndexedDB speichern
+1. Identity erstellen (storeSeed=false, kein Passphrase nötig)
+2. Passphrase setzen und Seed verschlüsselt speichern (storeSeed=true)
 3. Unlock mit gleicher Passphrase
+
+### Mnemonic Länge
+
+**poc-plan:** Teils 24 Wörter (256 bit) erwähnt
+**Implementiert:** 12 Wörter (128 bit)
+
+**Grund:** 128 bit bietet ausreichende Security bei besserer UX. BIP39-Standard unterstützt beides.
 
 ---
 
-## Nächste Schritte (Week 3+)
+## Nächste Schritte (laut poc-plan.md)
 
-### QR-Code Enhancement (Week 2 Extension) ✅
+### DID Server (poc-plan Week 2) - AUSSTEHEND
 
-**Implementiert:**
+- DIDProvider Interface + DidWebProvider
+- Hono Server auf Vercel
+- POST `/api/did/publish`, GET `/.well-known/did.json`
+- Vercel KV für Storage
+- Domain: `poc.real-life-stack.de`
 
-- ✅ QR-Code Generation in ShowCode.tsx (mit `qrcode` npm package)
-- ✅ QR-Code Scanner in ScanCode.tsx (mit `html5-qrcode`)
-- ⚠️ Base64-encoded Challenge/Response (kein custom URL-Format)
+### Evolu Integration (poc-plan Week 3) - AUSSTEHEND
 
-**Hinweis:** Kamera-Scanner benötigt HTTPS oder localhost für Browser-Permissions
+- EvoluAdapter mit `deriveFrameworkKey('evolu-storage-v1')`
+- Schema Extension Pattern für RLS
+- Sync zwischen 2 Tabs/Devices
 
-### Contact List UI (Week 3)
+### RLS Integration (poc-plan Week 4) - AUSSTEHEND
 
-**Geplant:**
-
-- Contact List View auf `/contacts`
-- Filter: Alle / Active / Pending
-- Contact Details mit Verification-Info
-
-### Sync Protocol (Week 3+)
-
-**Geplant:**
-- CRDTs für offline-first
-- Sync Server API
-- Conflict Resolution
-
-### Content Sharing (Week 4+)
-
-**Geplant:**
-- Item Encryption (per-item keys)
-- Group Key Management
-- Shared Content UI
+- DataInterface + WotConnector
+- Kanban Module + Calendar Module
+- `packages/modules/` in real-life-stack Repo
 
 ---
 
@@ -399,14 +485,12 @@ const evolKey = await identity.deriveFrameworkKey('evolu-storage-v1')
 
 ### WebCrypto API vs. Externe Libraries
 
-**Entscheidung:** Native WebCrypto API
+**Entscheidung:** Native WebCrypto API + @noble/ed25519
 **Grund:**
-- Zero dependencies für Crypto-Operationen
+- WebCrypto für HKDF, PBKDF2, AES-GCM (zero dependencies)
+- @noble/ed25519 für Ed25519 Signing (WebCrypto Ed25519 hat Browser-Kompatibilitätsprobleme)
 - Hardware-backed wenn verfügbar
 - Browser-Security-Updates automatisch
-- Non-extractable Keys möglich
-
-**Trade-off:** Komplexere Implementierung vs. externe Lib
 
 ### IndexedDB vs. LocalStorage
 
@@ -424,6 +508,14 @@ const evolKey = await identity.deriveFrameworkKey('evolu-storage-v1')
 - happy-dom alleine reicht nicht
 - Ermöglicht echte Storage-Tests ohne Browser
 
+### Deutsche Wortliste
+
+**Entscheidung:** dys2p/wordlists-de (2048 Wörter)
+**Grund:**
+- Etablierte, BIP39-konforme deutsche Wortliste
+- Breite Community-Nutzung
+- Keine Umlaute-Verwirrung (ae/ue/oe statt ä/ü/ö)
+
 ---
 
 ## Commits & Git History
@@ -437,6 +529,140 @@ const evolKey = await identity.deriveFrameworkKey('evolu-storage-v1')
 5. **Update wot-core README** - API documentation
 6. **Add Implementation Status** - This document
 
+### Week 2 Commits
+
+7. **Week 2 Core Complete: Verification with WotIdentity** - ContactStorage + VerificationHelper
+8. **feat: Add QR code support for in-person verification**
+9. **fix: QR scanner DOM timing and update docs**
+10. **fix: Handle lost challenge state in completeVerification**
+11. **feat: Add delete identity button to /identity page**
+12. **fix: Delete all data when navigate to root**
+13. **Add nonce fallback test for lost challenge state**
+
+### Week 2+ Commits
+
+14. **feat: Add German BIP39 wordlist and fix identity persistence** - Deutsche Wortliste, 3 Persistence-Bugs, Enter-Navigation
+
+---
+
+## File Structure (aktuell)
+
+### wot-core Package
+
+```
+packages/wot-core/src/
+├── identity/
+│   ├── WotIdentity.ts              # Haupt-Identity-Klasse
+│   ├── SeedStorage.ts              # Encrypted seed storage
+│   └── index.ts
+├── contact/
+│   ├── ContactStorage.ts           # Contact CRUD in IndexedDB
+│   └── index.ts
+├── verification/
+│   ├── VerificationHelper.ts       # Challenge-Response-Protokoll
+│   └── index.ts
+├── wordlists/
+│   ├── german-positive.ts          # 2048 deutsche BIP39-Wörter
+│   └── index.ts
+├── crypto/
+│   ├── did.ts                      # DID utilities
+│   ├── encoding.ts                 # Base64/multibase
+│   ├── jws.ts                      # JWS signing
+│   └── index.ts
+├── adapters/
+│   ├── interfaces/
+│   │   ├── StorageAdapter.ts
+│   │   ├── CryptoAdapter.ts
+│   │   ├── SyncAdapter.ts
+│   │   └── index.ts
+│   ├── crypto/
+│   │   ├── WebCryptoAdapter.ts
+│   │   └── index.ts
+│   ├── storage/
+│   │   ├── LocalStorageAdapter.ts
+│   │   └── index.ts
+│   └── index.ts
+├── types/
+│   ├── identity.ts
+│   ├── contact.ts
+│   ├── verification.ts
+│   ├── attestation.ts
+│   ├── proof.ts
+│   └── index.ts
+└── index.ts
+```
+
+### Demo App
+
+```
+apps/demo/src/
+├── components/
+│   ├── identity/
+│   │   ├── OnboardingFlow.tsx       # Neuer Identity-Flow (4 Steps)
+│   │   ├── RecoveryFlow.tsx         # Mnemonic-Import
+│   │   ├── UnlockFlow.tsx           # Passphrase-Unlock
+│   │   ├── IdentityManagement.tsx   # Routing: Onboarding/Unlock/Recovery
+│   │   ├── CreateIdentity.tsx
+│   │   ├── IdentityCard.tsx
+│   │   └── index.ts
+│   ├── verification/
+│   │   ├── VerificationFlow.tsx
+│   │   ├── ShowCode.tsx             # QR-Code Generation
+│   │   ├── ScanCode.tsx             # QR-Code Scanner
+│   │   └── index.ts
+│   ├── contacts/
+│   │   ├── ContactCard.tsx
+│   │   ├── ContactList.tsx
+│   │   └── index.ts
+│   ├── shared/
+│   │   ├── ProgressIndicator.tsx
+│   │   ├── SecurityChecklist.tsx
+│   │   ├── InfoTooltip.tsx
+│   │   └── index.ts
+│   └── layout/
+│       ├── AppShell.tsx
+│       ├── Navigation.tsx
+│       └── index.ts
+├── context/
+│   ├── WotIdentityContext.tsx       # Identity State + hasStoredIdentity
+│   ├── AdapterContext.tsx
+│   ├── IdentityContext.tsx
+│   └── index.ts
+├── hooks/
+│   ├── useVerification.ts
+│   ├── useContacts.ts
+│   ├── useIdentity.ts
+│   ├── useAttestations.ts
+│   └── index.ts
+├── services/
+│   ├── VerificationService.ts
+│   ├── ContactService.ts
+│   ├── IdentityService.ts
+│   ├── AttestationService.ts
+│   └── index.ts
+├── pages/
+│   ├── Home.tsx
+│   ├── Identity.tsx
+│   ├── Verify.tsx
+│   ├── Contacts.tsx
+│   ├── Attestations.tsx
+│   └── index.ts
+├── App.tsx                          # RequireIdentity + Loading/Unlock
+└── main.tsx
+```
+
+### Tests
+
+```
+packages/wot-core/tests/
+├── WotIdentity.test.ts              # 17 Tests
+├── SeedStorage.test.ts              # 12 Tests
+├── ContactStorage.test.ts           # 15 Tests
+├── VerificationIntegration.test.ts  # 20 Tests
+├── OnboardingFlow.test.ts           # 13 Tests
+└── setup.ts                         # fake-indexeddb setup
+```
+
 ---
 
 ## Lessons Learned
@@ -444,21 +670,25 @@ const evolKey = await identity.deriveFrameworkKey('evolu-storage-v1')
 ### Was gut funktioniert hat
 
 - **BIP39 für Recovery** - Standard-Wortliste, breite Tool-Unterstützung
+- **Deutsche Wortliste** - Bessere Merkbarkeit für Zielgruppe
 - **did:key Format** - Keine eigene Infrastruktur nötig
 - **Deterministic Keys** - Gleicher Mnemonic → gleiche DID
 - **Test-First Approach** - Tests helfen Bugs früh zu finden
-- **IndexedDB für CryptoKeys** - Native Browser-Integration
+- **User-Testing** - 3 kritische Persistence-Bugs durch reales Testen gefunden
+- **storeSeed Parameter** - Feine Kontrolle über Speicherzeitpunkt
 
 ### Herausforderungen
 
-- **WebCrypto Complexity** - Viele Subtile Details (extractable, usages, etc.)
+- **WebCrypto Complexity** - Viele subtile Details (extractable, usages, etc.)
 - **Test Environment** - IndexedDB Mocking erforderte fake-indexeddb
 - **Passphrase Storage** - Browser haben keine sichere OS-Keychain
+- **Identity Persistence** - Timing wann Identity gespeichert wird ist kritisch
+- **React State vs. Storage** - hasStoredIdentity muss beim Mount geprüft werden
 
 ### Für nächste Weeks
 
-- **Specifications updaten** - did:wot → did:key durchgehend
-- **Verification Flow testen** - End-to-End mit zwei Geräten
+- **DID Server aufsetzen** - did:web für stabile, auflösbare DIDs
+- **Evolu Integration** - Storage + Sync mit derived keys
 - **Error Messages verbessern** - Nutzerfreundlicher
 
 ---
