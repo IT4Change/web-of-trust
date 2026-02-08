@@ -1,30 +1,29 @@
 import { useCallback, useMemo } from 'react'
-import { useAdapters } from '../context'
-import { useIdentity } from './useIdentity'
+import { useAdapters, useIdentity } from '../context'
 import { useSubscribable } from './useSubscribable'
 import type { Attestation } from '@real-life/wot-core'
 
 export function useAttestations() {
   const { attestationService, reactiveStorage } = useAdapters()
-  const { identity, keyPair } = useIdentity()
+  const { identity: wotIdentity, did } = useIdentity()
 
   const attestationsSubscribable = useMemo(() => reactiveStorage.watchReceivedAttestations(), [reactiveStorage])
   const attestations = useSubscribable(attestationsSubscribable)
 
   const createAttestation = useCallback(
     async (toDid: string, claim: string, tags?: string[]) => {
-      if (!identity || !keyPair) {
+      if (!wotIdentity || !did) {
         throw new Error('No identity found')
       }
       return attestationService.createAttestation(
-        identity.did,
+        did,
         toDid,
         claim,
-        keyPair,
+        (data) => wotIdentity.sign(data),
         tags
       )
     },
-    [identity, keyPair, attestationService]
+    [wotIdentity, did, attestationService]
   )
 
   const verifyAttestation = useCallback(
@@ -49,13 +48,13 @@ export function useAttestations() {
   )
 
   const myAttestations = useMemo(
-    () => identity ? attestations.filter(a => a.from === identity.did) : [],
-    [attestations, identity]
+    () => did ? attestations.filter(a => a.from === did) : [],
+    [attestations, did]
   )
 
   const receivedAttestations = useMemo(
-    () => identity ? attestations.filter(a => a.to === identity.did) : [],
-    [attestations, identity]
+    () => did ? attestations.filter(a => a.to === did) : [],
+    [attestations, did]
   )
 
   return {

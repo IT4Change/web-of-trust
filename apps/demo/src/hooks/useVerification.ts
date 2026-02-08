@@ -2,7 +2,7 @@ import { useState, useCallback } from 'react'
 import { VerificationHelper } from '@real-life/wot-core'
 import type { VerificationChallenge, VerificationResponse } from '@real-life/wot-core'
 import { useAdapters } from '../context'
-import { useWotIdentity } from '../context/WotIdentityContext'
+import { useIdentity } from '../context'
 import { useContacts } from './useContacts'
 
 type VerificationStep = 'idle' | 'initiating' | 'responding' | 'completing' | 'done' | 'error'
@@ -12,7 +12,7 @@ type VerificationStep = 'idle' | 'initiating' | 'responding' | 'completing' | 'd
  */
 export function useVerification() {
   const { verificationService } = useAdapters()
-  const { identity, did } = useWotIdentity()
+  const { identity, did } = useIdentity()
   const { addContact } = useContacts()
 
   const [step, setStep] = useState<VerificationStep>('idle')

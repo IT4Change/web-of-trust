@@ -1,11 +1,23 @@
+import { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
 import { Users, Shield, Award, ArrowRight } from 'lucide-react'
-import { useIdentity, useContacts, useAttestations } from '../hooks'
+import { useContacts, useAttestations } from '../hooks'
+import { useIdentity, useAdapters } from '../context'
 
 export function Home() {
-  const { identity } = useIdentity()
+  const { did } = useIdentity()
+  const { storage } = useAdapters()
   const { activeContacts } = useContacts()
   const { myAttestations, receivedAttestations } = useAttestations()
+  const [profileName, setProfileName] = useState<string | null>(null)
+
+  useEffect(() => {
+    storage.getIdentity().then((id) => {
+      setProfileName(id?.profile.name ?? null)
+    })
+  }, [storage])
+
+  const displayName = profileName || (did ? `did:...${did.slice(-8)}` : '')
 
   const stats = [
     {
@@ -35,7 +47,7 @@ export function Home() {
     <div className="space-y-8">
       <div>
         <h1 className="text-2xl font-bold text-slate-900 mb-2">
-          Hallo, {identity?.profile.name}!
+          Hallo, {displayName}!
         </h1>
         <p className="text-slate-600">
           Willkommen im Web of Trust Demo.

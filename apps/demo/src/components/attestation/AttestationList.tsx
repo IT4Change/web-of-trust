@@ -1,15 +1,16 @@
 import { Award } from 'lucide-react'
 import { Link } from 'react-router-dom'
-import { useAttestations, useContacts, useIdentity } from '../../hooks'
+import { useAttestations, useContacts } from '../../hooks'
+import { useIdentity } from '../../context'
 import { AttestationCard } from './AttestationCard'
 
 export function AttestationList() {
   const { myAttestations, receivedAttestations, isLoading } = useAttestations()
   const { contacts } = useContacts()
-  const { identity } = useIdentity()
+  const { did: myDid } = useIdentity()
 
   const getContactName = (did: string) => {
-    if (identity?.did === did) return identity.profile.name
+    if (myDid === did) return 'Ich'
     const contact = contacts.find((c) => c.did === did)
     return contact?.name
   }

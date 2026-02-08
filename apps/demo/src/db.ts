@@ -88,16 +88,13 @@ export async function createWotEvolu(identity: WotIdentity): Promise<Evolu<AppSc
   const ownerSecret = frameworkKey as unknown as OwnerSecret
   const appOwner = createAppOwner(ownerSecret)
 
-  // Evolu ignores externalAppOwner if a DB already exists (reads owner from DB).
-  // If the identity changed (different seed), we must reset the old DB first.
+  // Track owner for diagnostics (no auto-reset — use manual DB reset button)
   const storedOwnerId = localStorage.getItem('wot-evolu-owner-id')
   if (storedOwnerId && storedOwnerId !== appOwner.id) {
-    // Owner mismatch: old DB belongs to different identity, reset it
-    const oldEvolu = createEvolu(evoluReactWebDeps)(Schema, {
-      name: SimpleName.orThrow('wot'),
-      transports: [],
-    })
-    await oldEvolu.resetAppOwner({ reload: false })
+    console.warn(
+      'Evolu Owner-Mismatch: gespeicherte Owner-ID stimmt nicht mit aktueller Identität überein.',
+      'Nutze "Datenbank zurücksetzen" auf der Identitäts-Seite falls Probleme auftreten.',
+    )
   }
 
   const evolu = createEvolu(evoluReactWebDeps)(Schema, {

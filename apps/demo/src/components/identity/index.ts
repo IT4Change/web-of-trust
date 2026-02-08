@@ -1,5 +1,3 @@
-export * from './CreateIdentity'
-export * from './IdentityCard'
 export * from './OnboardingFlow'
 export * from './RecoveryFlow'
 export * from './UnlockFlow'

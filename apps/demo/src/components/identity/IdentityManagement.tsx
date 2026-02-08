@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { WotIdentity } from '@real-life/wot-core'
-import { useWotIdentity } from '../../context'
+import { useIdentity } from '../../context'
 import { OnboardingFlow } from './OnboardingFlow'
 import { RecoveryFlow } from './RecoveryFlow'
 import { UnlockFlow } from './UnlockFlow'
@@ -12,7 +12,7 @@ interface IdentityManagementProps {
 }
 
 export function IdentityManagement({ onComplete }: IdentityManagementProps) {
-  const { hasStoredIdentity } = useWotIdentity()
+  const { hasStoredIdentity } = useIdentity()
   const [mode, setMode] = useState<Mode | null>(null)
 
   useEffect(() => {

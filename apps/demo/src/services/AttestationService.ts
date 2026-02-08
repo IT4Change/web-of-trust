@@ -2,7 +2,6 @@ import type {
   StorageAdapter,
   CryptoAdapter,
   Attestation,
-  KeyPair,
   Proof,
 } from '@real-life/wot-core'
 
@@ -21,7 +20,7 @@ export class AttestationService {
     fromDid: string,
     toDid: string,
     claim: string,
-    keyPair: KeyPair,
+    signFn: (data: string) => Promise<string>,
     tags?: string[]
   ): Promise<Attestation> {
     const id = `urn:uuid:${this.crypto.generateNonce().slice(0, 8)}-${Date.now()}`
@@ -37,7 +36,7 @@ export class AttestationService {
       createdAt,
     })
 
-    const signature = await this.crypto.signString(dataToSign, keyPair.privateKey)
+    const signature = await signFn(dataToSign)
 
     const proof: Proof = {
       type: 'Ed25519Signature2020',

@@ -255,51 +255,70 @@ export class EvoluStorageAdapter implements StorageAdapter, ReactiveStorageAdapt
   // it in the subscribe callback when Evolu notifies us of a change.
 
   watchContacts(): Subscribable<Contact[]> {
-    const query = this.evolu.createQuery((db) =>
+    const evolu = this.evolu
+    const query = evolu.createQuery((db) =>
       db.selectFrom('contact').selectAll()
         .where('isDeleted', 'is not', booleanToSqliteBoolean(true))
     )
-    let snapshot: Contact[] = [...this.evolu.getQueryRows(query)].map(rowToContact)
+    let snapshot: Contact[] = [...evolu.getQueryRows(query)].map(rowToContact)
     return {
       subscribe: (callback) => {
-        return this.evolu.subscribeQuery(query)(() => {
-          snapshot = [...this.evolu.getQueryRows(query)].map(rowToContact)
+        const unsub = evolu.subscribeQuery(query)(() => {
+          snapshot = [...evolu.getQueryRows(query)].map(rowToContact)
           callback(snapshot)
         })
+        // Trigger initial load from OPFS — subscribeQuery only fires on mutations
+        evolu.loadQuery(query).then(() => {
+          snapshot = [...evolu.getQueryRows(query)].map(rowToContact)
+          callback(snapshot)
+        })
+        return unsub
       },
       getValue: () => snapshot,
     }
   }
 
   watchReceivedVerifications(): Subscribable<Verification[]> {
-    const query = this.evolu.createQuery((db) =>
+    const evolu = this.evolu
+    const query = evolu.createQuery((db) =>
       db.selectFrom('verification').selectAll()
         .where('isDeleted', 'is not', booleanToSqliteBoolean(true))
     )
-    let snapshot: Verification[] = [...this.evolu.getQueryRows(query)].map(rowToVerification)
+    let snapshot: Verification[] = [...evolu.getQueryRows(query)].map(rowToVerification)
     return {
       subscribe: (callback) => {
-        return this.evolu.subscribeQuery(query)(() => {
-          snapshot = [...this.evolu.getQueryRows(query)].map(rowToVerification)
+        const unsub = evolu.subscribeQuery(query)(() => {
+          snapshot = [...evolu.getQueryRows(query)].map(rowToVerification)
           callback(snapshot)
         })
+        evolu.loadQuery(query).then(() => {
+          snapshot = [...evolu.getQueryRows(query)].map(rowToVerification)
+          callback(snapshot)
+        })
+        return unsub
       },
       getValue: () => snapshot,
     }
   }
 
   watchReceivedAttestations(): Subscribable<Attestation[]> {
-    const query = this.evolu.createQuery((db) =>
+    const evolu = this.evolu
+    const query = evolu.createQuery((db) =>
       db.selectFrom('attestation').selectAll()
         .where('isDeleted', 'is not', booleanToSqliteBoolean(true))
     )
-    let snapshot: Attestation[] = [...this.evolu.getQueryRows(query)].map(rowToAttestation)
+    let snapshot: Attestation[] = [...evolu.getQueryRows(query)].map(rowToAttestation)
     return {
       subscribe: (callback) => {
-        return this.evolu.subscribeQuery(query)(() => {
-          snapshot = [...this.evolu.getQueryRows(query)].map(rowToAttestation)
+        const unsub = evolu.subscribeQuery(query)(() => {
+          snapshot = [...evolu.getQueryRows(query)].map(rowToAttestation)
           callback(snapshot)
         })
+        evolu.loadQuery(query).then(() => {
+          snapshot = [...evolu.getQueryRows(query)].map(rowToAttestation)
+          callback(snapshot)
+        })
+        return unsub
       },
       getValue: () => snapshot,
     }

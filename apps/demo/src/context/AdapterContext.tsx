@@ -9,7 +9,6 @@ import {
   type WotIdentity,
 } from '@real-life/wot-core'
 import {
-  IdentityService,
   ContactService,
   VerificationService,
   AttestationService,
@@ -22,7 +21,6 @@ interface AdapterContextValue {
   reactiveStorage: ReactiveStorageAdapter
   crypto: CryptoAdapter
   sync: SyncAdapter
-  identityService: IdentityService
   contactService: ContactService
   verificationService: VerificationService
   attestationService: AttestationService
@@ -63,7 +61,6 @@ export function AdapterProvider({ children, identity }: AdapterProviderProps) {
             reactiveStorage: storage,
             crypto,
             sync,
-            identityService: new IdentityService(storage, crypto),
             contactService: new ContactService(storage),
             verificationService: new VerificationService(storage),
             attestationService: new AttestationService(storage, crypto),

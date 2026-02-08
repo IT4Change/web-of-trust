@@ -1,5 +1,5 @@
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
-import { AdapterProvider, IdentityProvider, WotIdentityProvider, useWotIdentity } from './context'
+import { AdapterProvider, IdentityProvider, useIdentity } from './context'
 import { AppShell, IdentityManagement } from './components'
 import { Home, Identity, Contacts, Verify, Attestations } from './pages'
 
@@ -9,7 +9,7 @@ import { Home, Identity, Contacts, Verify, Attestations } from './pages'
  * and then the rest of the app.
  */
 function RequireIdentity({ children }: { children: React.ReactNode }) {
-  const { identity, did, hasStoredIdentity, setIdentity } = useWotIdentity()
+  const { identity, did, hasStoredIdentity, setIdentity } = useIdentity()
 
   // Still checking if identity exists in storage
   if (hasStoredIdentity === null) {
@@ -38,9 +38,7 @@ function RequireIdentity({ children }: { children: React.ReactNode }) {
   // Identity is unlocked -> initialize Evolu with identity-derived keys
   return (
     <AdapterProvider identity={identity}>
-      <IdentityProvider>
-        {children}
-      </IdentityProvider>
+      {children}
     </AdapterProvider>
   )
 }
@@ -65,9 +63,9 @@ function AppRoutes() {
 export default function App() {
   return (
     <BrowserRouter>
-      <WotIdentityProvider>
+      <IdentityProvider>
         <AppRoutes />
-      </WotIdentityProvider>
+      </IdentityProvider>
     </BrowserRouter>
   )
 }

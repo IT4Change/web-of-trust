@@ -1,4 +1,4 @@
-import { useWotIdentity } from '../context'
+import { useIdentity } from '../context'
 import { useAdapters } from '../context'
 import { useState, useEffect } from 'react'
 import { Copy, Check, KeyRound, Fingerprint, Shield, Trash2, Database } from 'lucide-react'
@@ -6,7 +6,7 @@ import { useNavigate } from 'react-router-dom'
 import { resetEvolu } from '../db'
 
 export function Identity() {
-  const { identity, did, clearIdentity } = useWotIdentity()
+  const { identity, did, clearIdentity } = useIdentity()
   const { contactService } = useAdapters()
   const navigate = useNavigate()
   const [copiedDid, setCopiedDid] = useState(false)

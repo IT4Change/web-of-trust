@@ -1,113 +1,57 @@
-import { createContext, useContext, useState, useEffect, useCallback, type ReactNode } from 'react'
-import { useAdapters } from './AdapterContext'
-import type { Identity, Profile, KeyPair } from '@real-life/wot-core'
+import { createContext, useContext, useState, useEffect, type ReactNode } from 'react'
+import { WotIdentity } from '@real-life/wot-core'
 
 interface IdentityContextValue {
-  identity: Identity | null
-  keyPair: KeyPair | null
-  isLoading: boolean
-  error: Error | null
-  hasIdentity: boolean
-  createIdentity: (profile: Profile) => Promise<Identity>
-  updateProfile: (profile: Profile) => Promise<void>
-  deleteIdentity: () => Promise<void>
-  refresh: () => Promise<void>
+  identity: WotIdentity | null
+  did: string | null
+  hasStoredIdentity: boolean | null // null = loading, true/false = checked
+  setIdentity: (identity: WotIdentity, did: string) => void
+  clearIdentity: () => void
 }
 
 const IdentityContext = createContext<IdentityContextValue | null>(null)
 
 export function IdentityProvider({ children }: { children: ReactNode }) {
-  const { identityService } = useAdapters()
-  const [identity, setIdentity] = useState<Identity | null>(null)
-  const [keyPair, setKeyPair] = useState<KeyPair | null>(null)
-  const [isLoading, setIsLoading] = useState(true)
-  const [error, setError] = useState<Error | null>(null)
+  const [identity, setIdentityState] = useState<WotIdentity | null>(null)
+  const [did, setDid] = useState<string | null>(null)
+  const [hasStoredIdentity, setHasStoredIdentity] = useState<boolean | null>(null)
 
-  const loadIdentity = useCallback(async () => {
-    try {
-      setIsLoading(true)
-      setError(null)
-      const [id, kp] = await Promise.all([
-        identityService.getIdentity(),
-        identityService.getKeyPair(),
-      ])
-      setIdentity(id)
-      setKeyPair(kp)
-    } catch (e) {
-      setError(e instanceof Error ? e : new Error('Failed to load identity'))
-    } finally {
-      setIsLoading(false)
-    }
-  }, [identityService])
-
+  // Check on mount if there's a stored identity in IndexedDB
   useEffect(() => {
-    loadIdentity()
-  }, [loadIdentity])
-
-  const createIdentity = useCallback(
-    async (profile: Profile) => {
+    const checkStoredIdentity = async () => {
       try {
-        setIsLoading(true)
-        setError(null)
-        const newIdentity = await identityService.createIdentity(profile)
-        const kp = await identityService.getKeyPair()
-        setIdentity(newIdentity)
-        setKeyPair(kp)
-        return newIdentity
-      } catch (e) {
-        const err = e instanceof Error ? e : new Error('Failed to create identity')
-        setError(err)
-        throw err
-      } finally {
-        setIsLoading(false)
+        const tempIdentity = new WotIdentity()
+        const hasStored = await tempIdentity.hasStoredIdentity()
+        setHasStoredIdentity(hasStored)
+      } catch (error) {
+        console.error('Error checking stored identity:', error)
+        setHasStoredIdentity(false)
       }
-    },
-    [identityService]
-  )
-
-  const updateProfile = useCallback(
-    async (profile: Profile) => {
-      try {
-        setError(null)
-        await identityService.updateProfile(profile)
-        await loadIdentity()
-      } catch (e) {
-        const err = e instanceof Error ? e : new Error('Failed to update profile')
-        setError(err)
-        throw err
-      }
-    },
-    [identityService, loadIdentity]
-  )
-
-  const deleteIdentity = useCallback(async () => {
-    try {
-      setIsLoading(true)
-      setError(null)
-      await identityService.deleteIdentity()
-      setIdentity(null)
-      setKeyPair(null)
-    } catch (e) {
-      const err = e instanceof Error ? e : new Error('Failed to delete identity')
-      setError(err)
-      throw err
-    } finally {
-      setIsLoading(false)
     }
-  }, [identityService])
+
+    checkStoredIdentity()
+  }, [])
+
+  const setIdentity = (newIdentity: WotIdentity, newDid: string) => {
+    setIdentityState(newIdentity)
+    setDid(newDid)
+    setHasStoredIdentity(true)
+  }
+
+  const clearIdentity = () => {
+    setIdentityState(null)
+    setDid(null)
+    setHasStoredIdentity(false)
+  }
 
   return (
     <IdentityContext.Provider
       value={{
         identity,
-        keyPair,
-        isLoading,
-        error,
-        hasIdentity: identity !== null,
-        createIdentity,
-        updateProfile,
-        deleteIdentity,
-        refresh: loadIdentity,
+        did,
+        hasStoredIdentity,
+        setIdentity,
+        clearIdentity,
       }}
     >
       {children}
