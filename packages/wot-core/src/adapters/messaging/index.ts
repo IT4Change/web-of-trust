@@ -1,0 +1,1 @@
+export { InMemoryMessagingAdapter } from './InMemoryMessagingAdapter'

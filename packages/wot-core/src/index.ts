@@ -24,6 +24,23 @@ export type {
 
 export type { Proof } from './types/proof'
 
+export type {
+  ResourceType,
+  ResourceRef,
+} from './types/resource-ref'
+
+export {
+  createResourceRef,
+  parseResourceRef,
+} from './types/resource-ref'
+
+export type {
+  MessageType,
+  MessageEnvelope,
+  DeliveryReceipt,
+  MessagingState,
+} from './types/messaging'
+
 // Adapter Interfaces
 export type { StorageAdapter } from './adapters/interfaces/StorageAdapter'
 export type {
@@ -38,6 +55,7 @@ export type {
 export { NoOpSyncAdapter } from './adapters/interfaces/SyncAdapter'
 export type { Subscribable } from './adapters/interfaces/Subscribable'
 export type { ReactiveStorageAdapter } from './adapters/interfaces/ReactiveStorageAdapter'
+export type { MessagingAdapter } from './adapters/interfaces/MessagingAdapter'
 
 // Crypto Utilities
 export {
@@ -69,3 +87,4 @@ export { VerificationHelper } from './verification'
 // Adapter Implementations
 export { WebCryptoAdapter } from './adapters/crypto/WebCryptoAdapter'
 export { LocalStorageAdapter } from './adapters/storage/LocalStorageAdapter'
+export { InMemoryMessagingAdapter } from './adapters/messaging/InMemoryMessagingAdapter'
