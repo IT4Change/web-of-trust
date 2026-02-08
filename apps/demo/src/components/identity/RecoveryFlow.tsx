@@ -101,11 +101,13 @@ export function RecoveryFlow({ onComplete, onCancel }: RecoveryFlowProps) {
       // WICHTIG: storeSeed=true - Identity in IndexedDB speichern
       await identity.unlock(mnemonic, passphrase, true)
 
+      const recoveredDid = identity.getDid()
+      setDid(recoveredDid)
       setStep('complete')
 
       // Complete recovery
       setTimeout(() => {
-        onComplete(identity, did)
+        onComplete(identity, recoveredDid)
       }, 2000)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Fehler bei der Wiederherstellung')

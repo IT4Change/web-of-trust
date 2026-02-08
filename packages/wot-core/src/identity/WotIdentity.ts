@@ -36,7 +36,9 @@ export class WotIdentity {
   }> {
     // 1. Generate BIP39 Mnemonic (12 words = 128 bit entropy)
     const mnemonic = generateMnemonic(germanPositiveWordlist, 128)
-    const seed = mnemonicToSeedSync(mnemonic, userPassphrase)
+    // Empty BIP39 passphrase: same mnemonic = same identity regardless of device password
+    // The userPassphrase is only used for local seed encryption, not seed derivation
+    const seed = mnemonicToSeedSync(mnemonic, '')
 
     // 2. Store encrypted seed (optional)
     if (storeSeed) {
@@ -74,8 +76,8 @@ export class WotIdentity {
       throw new Error('Invalid mnemonic')
     }
 
-    // Derive seed
-    const seed = mnemonicToSeedSync(mnemonic, passphrase)
+    // Derive seed - empty BIP39 passphrase so same mnemonic always yields same identity
+    const seed = mnemonicToSeedSync(mnemonic, '')
 
     // Store encrypted seed (optional)
     if (storeSeed) {

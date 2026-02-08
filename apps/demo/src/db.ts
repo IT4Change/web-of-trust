@@ -14,7 +14,6 @@ import {
   SimpleName,
   OwnerSecret,
   type Evolu,
-  type EvoluSchema,
 } from '@evolu/common'
 import { evoluReactWebDeps } from '@evolu/react-web'
 import type { WotIdentity } from '@real-life/wot-core'
@@ -89,11 +88,26 @@ export async function createWotEvolu(identity: WotIdentity): Promise<Evolu<AppSc
   const ownerSecret = frameworkKey as unknown as OwnerSecret
   const appOwner = createAppOwner(ownerSecret)
 
+  // Evolu ignores externalAppOwner if a DB already exists (reads owner from DB).
+  // If the identity changed (different seed), we must reset the old DB first.
+  const storedOwnerId = localStorage.getItem('wot-evolu-owner-id')
+  if (storedOwnerId && storedOwnerId !== appOwner.id) {
+    // Owner mismatch: old DB belongs to different identity, reset it
+    const oldEvolu = createEvolu(evoluReactWebDeps)(Schema, {
+      name: SimpleName.orThrow('wot'),
+      transports: [],
+    })
+    await oldEvolu.resetAppOwner({ reload: false })
+  }
+
   const evolu = createEvolu(evoluReactWebDeps)(Schema, {
     name: SimpleName.orThrow('wot'),
     externalAppOwner: appOwner,
-    transports: [], // Local-only for now, sync later
+    transports: [{ type: 'WebSocket', url: 'wss://free.evoluhq.com' }],
   })
+
+  // Remember which owner this DB belongs to
+  localStorage.setItem('wot-evolu-owner-id', appOwner.id)
 
   evoluInstance = evolu
   return evolu
@@ -114,6 +128,18 @@ export function getEvolu(): Evolu<AppSchema> {
  */
 export function isEvoluInitialized(): boolean {
   return evoluInstance !== null
+}
+
+/**
+ * Reset Evolu: delete all local data and clear the singleton.
+ * Uses Evolu's own resetAppOwner which properly cleans up OPFS + IndexedDB.
+ */
+export async function resetEvolu(): Promise<void> {
+  if (evoluInstance) {
+    await evoluInstance.resetAppOwner({ reload: false })
+    evoluInstance = null
+  }
+  localStorage.removeItem('wot-evolu-owner-id')
 }
 
 export { Schema, type AppSchema, type ContactId, type VerificationId, type AttestationId, type AttestationMetadataId }

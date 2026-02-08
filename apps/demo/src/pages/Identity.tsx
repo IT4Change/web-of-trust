@@ -1,8 +1,9 @@
 import { useWotIdentity } from '../context'
 import { useAdapters } from '../context'
 import { useState, useEffect } from 'react'
-import { Copy, Check, KeyRound, Fingerprint, Shield, Trash2 } from 'lucide-react'
+import { Copy, Check, KeyRound, Fingerprint, Shield, Trash2, Database } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
+import { resetEvolu } from '../db'
 
 export function Identity() {
   const { identity, did, clearIdentity } = useWotIdentity()
@@ -13,6 +14,8 @@ export function Identity() {
   const [pubKey, setPubKey] = useState<string | null>(null)
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
   const [isDeleting, setIsDeleting] = useState(false)
+  const [isResettingDb, setIsResettingDb] = useState(false)
+  const [dbResetDone, setDbResetDone] = useState(false)
 
   useEffect(() => {
     if (identity) {
@@ -45,35 +48,14 @@ export function Identity() {
       // Delete identity seed (wot-identity DB)
       await identity.deleteStoredIdentity()
 
-      // Delete all 3 IndexedDB databases
-      const databases = ['wot-identity', 'wot-contacts', 'web-of-trust']
+      // Reset Evolu (cleans OPFS + IndexedDB + clears singleton)
+      await resetEvolu()
 
-      await Promise.all(
-        databases.map(
-          (dbName) =>
-            new Promise<void>((resolve, reject) => {
-              const request = indexedDB.deleteDatabase(dbName)
-              request.onsuccess = () => {
-                console.log(`Deleted database: ${dbName}`)
-                resolve()
-              }
-              request.onerror = () => {
-                console.error(`Failed to delete database ${dbName}:`, request.error)
-                reject(request.error)
-              }
-              request.onblocked = () => {
-                console.warn(`Database deletion blocked: ${dbName}`)
-                resolve() // Continue anyway
-              }
-            })
-        )
-      )
+      // Clear localStorage identity cache
+      localStorage.removeItem('wot-identity')
 
       // Clear React context state
       clearIdentity()
-
-      // Small delay to ensure context update propagates
-      await new Promise((resolve) => setTimeout(resolve, 50))
 
       // Navigate to root to trigger onboarding
       window.location.href = '/'
@@ -170,6 +152,49 @@ export function Identity() {
               du deine Identität auf anderen Geräten wiederherstellen.
             </div>
           </div>
+        </div>
+
+        {/* Database Reset */}
+        <div className="bg-amber-50 border border-amber-200 rounded-lg p-6 space-y-4">
+          <div>
+            <h3 className="text-sm font-medium text-amber-900 mb-1">Datenbank zurücksetzen</h3>
+            <p className="text-sm text-amber-700">
+              Löscht alle Kontakte, Verifikationen und Attestierungen. Deine Identität bleibt erhalten.
+              Nützlich wenn alte Sync-Daten Probleme verursachen.
+            </p>
+          </div>
+          <button
+            onClick={async () => {
+              try {
+                setIsResettingDb(true)
+                await resetEvolu()
+                setDbResetDone(true)
+                setTimeout(() => { window.location.reload() }, 1500)
+              } catch (error) {
+                console.error('Failed to reset database:', error)
+                setIsResettingDb(false)
+              }
+            }}
+            disabled={isResettingDb}
+            className="flex items-center space-x-2 px-4 py-2 bg-amber-600 text-white rounded-lg hover:bg-amber-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {dbResetDone ? (
+              <>
+                <Check size={16} />
+                <span>Zurückgesetzt! Lade neu...</span>
+              </>
+            ) : isResettingDb ? (
+              <>
+                <div className="animate-spin h-4 w-4 border-2 border-white border-t-transparent rounded-full" />
+                <span>Setze zurück...</span>
+              </>
+            ) : (
+              <>
+                <Database size={16} />
+                <span>Datenbank zurücksetzen</span>
+              </>
+            )}
+          </button>
         </div>
 
         {/* Danger Zone */}
