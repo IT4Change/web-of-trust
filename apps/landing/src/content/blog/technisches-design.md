@@ -2,7 +2,7 @@
 
 *9. Februar 2026 — Anton Tranelis*
 
-Dieser Artikel beschreibt die technische Architektur der Web-of-Trust Demo. Er richtet sich an Entwickler, die verstehen wollen, wie die Bausteine zusammenspielen — oder die auf dem Projekt aufbauen möchten.
+Dieser Artikel beschreibt die technische Architektur der Web-of-Trust Demo. Er richtet sich an Entwickler, die verstehen wollen, wie die Bausteine zusammenspielen — oder die auf dem Projekt aufbauen möchten. Wer die Demo erst einmal ausprobieren will, findet eine Anleitung im [Einführungsartikel](/blog/demo-ausprobieren).
 
 ## Die 6-Adapter Architektur
 
@@ -21,7 +21,7 @@ Die Adapter lassen sich in zwei Gruppen einteilen:
 
 ```
 ┌──────────────────────────────────────────────────┐
-│                  Lokal (ein Nutzer)              │
+│                       Lokal                      │
 │                                                  │
 │  StorageAdapter    ReactiveStorage   Crypto      │
 │  ┌────────────┐   ┌─────────────┐   ┌─────────┐  │
@@ -30,7 +30,7 @@ Die Adapter lassen sich in zwei Gruppen einteilen:
 │  │ Atteste    │   │  (watch)    │   │Ableiten │  │
 │  └────────────┘   └─────────────┘   └─────────┘  │
 ├──────────────────────────────────────────────────┤
-│              Cross-User (mehrere Nutzer)         │
+│                    Cross-User                    │
 │                                                  │
 │  MessagingAdapter  ReplicationAdapter  AuthZ     │
 │  ┌────────────┐   ┌─────────────┐   ┌────────┐   │

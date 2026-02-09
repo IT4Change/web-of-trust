@@ -15,7 +15,7 @@ Wenn du die [Demo](/demo) zum ersten Mal öffnest, wirst du durch die Erstellung
 3. **Profil** — Wähle einen Namen und optional ein Profilbild.
 4. **Passwort** — Schützt deine Identität auf diesem Gerät.
 
-Technisch passiert dabei: Aus den 12 Wörtern (BIP39) wird ein kryptographischer Schlüssel abgeleitet (Ed25519). Daraus entsteht deine DID (Decentralized Identifier) — eine weltweit eindeutige Adresse, die nur du kontrollierst.
+Technisch passiert dabei: Aus den 12 Wörtern (BIP39) wird ein kryptographischer Schlüssel abgeleitet (Ed25519). Daraus entsteht deine DID (Decentralized Identifier) — eine weltweit eindeutige Adresse, die nur du kontrollierst. Mehr dazu im [technischen Design-Artikel](/blog/technisches-design).
 
 ## Kontakte verifizieren
 
@@ -58,5 +58,7 @@ Die Demo zeigt das Fundament. Darauf bauen wir auf:
 - **Gruppen-Räume** für gemeinschaftliche Zusammenarbeit
 - **Mehr Attestierungstypen** (Fähigkeiten, Empfehlungen, Rollen)
 - **Federation** über Matrix (damit verschiedene Communities sich verbinden können)
+
+Wer verstehen will, wie das alles technisch zusammenspielt — von der Kryptographie über die Adapter-Architektur bis zum Relay — findet die Details im [technischen Design-Artikel](/blog/technisches-design).
 
 [Probier die Demo aus →](/demo)
