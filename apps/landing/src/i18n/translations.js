@@ -7,6 +7,7 @@ export const translations = {
       apps: 'Apps',
       personas: 'Für wen?',
       faq: 'FAQ',
+      blog: 'Blog',
     },
 
     // Hero
@@ -339,6 +340,7 @@ export const translations = {
       apps: 'Apps',
       personas: 'For whom?',
       faq: 'FAQ',
+      blog: 'Blog',
     },
 
     // Hero
@@ -671,6 +673,7 @@ export const translations = {
       apps: 'Apps',
       personas: '¿Para quién?',
       faq: 'FAQ',
+      blog: 'Blog',
     },
 
     // Hero
@@ -1003,6 +1006,7 @@ export const translations = {
       apps: 'Apps',
       personas: 'Para quem?',
       faq: 'FAQ',
+      blog: 'Blog',
     },
 
     // Hero
@@ -1999,6 +2003,7 @@ export const translations = {
       apps: 'Приложения',
       personas: 'Для кого?',
       faq: 'FAQ',
+      blog: 'Blog',
     },
 
     // Hero
@@ -2331,6 +2336,7 @@ export const translations = {
       apps: 'Додатки',
       personas: 'Для кого?',
       faq: 'FAQ',
+      blog: 'Blog',
     },
 
     // Hero
@@ -2995,6 +3001,7 @@ export const translations = {
       apps: 'App',
       personas: 'Per chi?',
       faq: 'FAQ',
+      blog: 'Blog',
     },
 
     // Hero

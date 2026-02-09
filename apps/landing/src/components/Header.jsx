@@ -21,6 +21,7 @@ export default function Header() {
     { label: t.nav.howItWorks, href: '#how-it-works' },
     { label: t.nav.apps, href: '#apps' },
     { label: t.nav.faq, href: '#faq' },
+    { label: t.nav.blog, href: '/blog' },
   ]
 
   // Close dropdowns when clicking outside
