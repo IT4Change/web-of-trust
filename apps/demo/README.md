@@ -1,171 +1,109 @@
 # Web of Trust Demo
 
-Eine Demo-Anwendung zum Testen des Web of Trust Konzepts. Dient als Testbed für verschiedene CRDT-Frameworks, Datenbanken und Backend-Systeme.
+Eine Demo-Anwendung für das Web-of-Trust Konzept. Identität erstellen, Kontakte persönlich verifizieren, Attestierungen austauschen — alles lokal verschlüsselt im Browser.
 
 ## Features
 
-- **Identität erstellen**: Ed25519-Schlüsselpaar generieren, DID:key Format
-- **Kontakte verifizieren**: Challenge-Response Protokoll via Copy/Paste (Dev-Mode)
-- **Attestationen erstellen**: Fähigkeiten, Hilfe, Zusammenarbeit, Empfehlungen
-- **Attestationen importieren/exportieren**: Base64-codiert mit Signaturverifikation
+- **Identität erstellen**: BIP39-Mnemonic (12 Wörter, deutsche Wortliste), Ed25519-Schlüssel, `did:key`-Format
+- **Session-Cache**: Nach Passworteingabe bleibt die Identität 30 Minuten entsperrt (CryptoKey in IndexedDB)
+- **Kontakte verifizieren**: Challenge-Response via QR-Code oder manuellem Code-Austausch
+- **Attestierungen**: Signierte Aussagen über Kontakte, Versand über WebSocket Relay
+- **Lokale Speicherung**: Alle Daten bleiben verschlüsselt im Browser (Evolu/SQLite via OPFS)
 
 ## Tech Stack
 
 - React 19 + TypeScript
 - Tailwind CSS 4
 - Vite
-- IndexedDB (via `idb` Library)
-- Web Crypto API (Ed25519)
+- `@real-life/wot-core` (Identität, Krypto, Verification, Messaging)
+- Evolu (CRDT-basierte lokale Datenbank)
+- WebSocket Relay (`wot-relay`) für DID-zu-DID Messaging
 
 ## Architektur
 
+Die Demo nutzt die 6-Adapter-Architektur aus `wot-core`:
+
 ```
-┌──────────────────────────────────────────────────────────────┐
-│                         UI Layer                             │
-│  (React Components + Pages)                                  │
-├──────────────────────────────────────────────────────────────┤
-│                      Hooks Layer                             │
-│  useIdentity, useContacts, useVerifications, useAttestations │
-├──────────────────────────────────────────────────────────────┤
-│                    Service Layer                             │
-│  IdentityService, ContactService, VerificationService, etc.  │
-├──────────────────────────────────────────────────────────────┤
-│                   Adapter Interfaces                         │
-│  StorageAdapter, CryptoAdapter, SyncAdapter (Placeholder)    │
-├──────────────────────────────────────────────────────────────┤
-│                  Adapter Implementations                     │
-│  LocalStorageAdapter (IndexedDB) │ WebCryptoAdapter (Ed25519)│
-└──────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────┐
+│                    UI Layer                      │
+│  React Components + Pages                       │
+├─────────────────────────────────────────────────┤
+│                   Hooks Layer                    │
+│  useContacts, useAttestations, useMessaging,     │
+│  useVerification                                 │
+├─────────────────────────────────────────────────┤
+│                 Service Layer                    │
+│  ContactService, AttestationService,             │
+│  VerificationService                             │
+├─────────────────────────────────────────────────┤
+│            Adapter Interfaces (wot-core)         │
+│                                                  │
+│  Lokal:                                          │
+│  StorageAdapter · ReactiveStorageAdapter · Crypto │
+│                                                  │
+│  Cross-User:                                     │
+│  MessagingAdapter · ReplicationAdapter · AuthZ   │
+├─────────────────────────────────────────────────┤
+│            Adapter Implementations               │
+│  EvoluStorageAdapter │ WebSocket Relay            │
+│  WotIdentity (Ed25519, HKDF, WebCrypto)          │
+└─────────────────────────────────────────────────┘
 ```
-
-### Interface/Adapter Pattern
-
-Die Demo verwendet ein Adapter-Pattern für maximale Austauschbarkeit:
-
-- **StorageAdapter**: Abstrahiert Datenspeicherung (aktuell: IndexedDB)
-- **CryptoAdapter**: Abstrahiert Kryptografie (aktuell: Web Crypto API)
-- **SyncAdapter**: Placeholder für zukünftige CRDT-Sync-Implementierungen
 
 ## Installation
 
 ```bash
-cd demo
-npm install
-npm run dev
+# Aus dem Monorepo-Root:
+pnpm install
+pnpm --filter demo dev
 ```
 
 Die App läuft dann unter <http://localhost:5173> (oder nächster freier Port).
 
 ## Multi-User Testing
 
-Da die Demo im Dev-Mode läuft, werden QR-Codes durch Copy/Paste ersetzt:
-
 ### Verifizierung testen
 
-1. **Tab A**: Öffne <http://localhost:5173> → Identität erstellen (z.B. "Alice")
-2. **Tab B**: Öffne <http://localhost:5173> im Inkognito-Fenster → Identität erstellen (z.B. "Bob")
-3. **Tab A**: Gehe zu "Verifizieren" → Kopiere den angezeigten Code
-4. **Tab B**: Gehe zu "Verifizieren" → Füge Alices Code ein → Kopiere Bobs Antwort-Code
-5. **Tab A**: Füge Bobs Antwort-Code ein
-6. Beide Tabs zeigen nun den jeweils anderen als verifizierten Kontakt
+1. **Tab A**: Öffne <http://localhost:5173> → Identität erstellen
+2. **Tab B**: Öffne <http://localhost:5173> im Inkognito-Fenster → Identität erstellen
+3. **Tab A**: Gehe zu "Verifizieren" → QR-Code wird angezeigt
+4. **Tab B**: Gehe zu "Verifizieren" → QR-Code scannen (oder Code manuell kopieren)
+5. **Tab A**: Antwort-Code scannen/einfügen → Verifizierung abschließen
+6. Beide Tabs zeigen den jeweils anderen als verifizierten Kontakt
 
-### Attestationen testen
+### Attestierungen testen
 
-1. Erstelle eine Attestation in Tab A für den verifizierten Kontakt (Bob)
-2. Klicke auf das Kopier-Icon bei der erstellten Attestation
-3. Wechsle zu Tab B → Attestationen → "Importieren"
-4. Füge den Code ein → "Importieren & Verifizieren"
-5. Die Attestation erscheint in Tab B unter "Über mich"
+1. Erstelle eine Attestierung in Tab A für einen verifizierten Kontakt
+2. Die Attestierung wird automatisch über den WebSocket Relay zugestellt
+3. In Tab B erscheint die Attestierung unter "Erhalten"
+4. Der Empfänger kann sie annehmen oder ablehnen
 
 ## Projektstruktur
 
 ```
 demo/src/
-├── adapters/           # Interface-Definitionen & Implementierungen
-│   ├── interfaces/     # StorageAdapter, CryptoAdapter, SyncAdapter
-│   ├── storage/        # LocalStorageAdapter (IndexedDB)
-│   └── crypto/         # WebCryptoAdapter (Ed25519)
-├── components/         # React UI-Komponenten
+├── adapters/           # Adapter-Implementierungen
+│   └── EvoluStorageAdapter.ts
+├── components/
 │   ├── attestation/    # AttestationCard, AttestationList, Create, Import
-│   ├── contacts/       # ContactList, ContactCard, AddContact
-│   ├── identity/       # IdentityCard, CreateIdentity
+│   ├── contacts/       # ContactList, ContactCard
+│   ├── identity/       # IdentityManagement, Onboarding, Recovery, Unlock
 │   ├── layout/         # AppShell, Navigation
+│   ├── shared/         # Avatar, AvatarUpload, InfoTooltip, etc.
 │   └── verification/   # VerificationFlow, ShowCode, ScanCode
 ├── context/            # React Context (AdapterContext, IdentityContext)
-├── hooks/              # Custom Hooks (useIdentity, useContacts, etc.)
-├── pages/              # Seiten-Komponenten (Home, Identity, Contacts, etc.)
-├── services/           # Business Logic (IdentityService, etc.)
-└── types/              # TypeScript Definitionen
-```
-
-## Datenmodell
-
-### Identity
-
-```typescript
-{
-  did: string              // did:key:z6Mk...
-  profile: {
-    name: string
-    bio?: string
-    avatar?: string
-  }
-  createdAt: string
-}
-```
-
-### Contact
-
-```typescript
-{
-  did: string
-  profile: { name, bio?, avatar? }
-  verifiedAt?: string      // Wann verifiziert
-  verifiedBy?: string      // Wer hat verifiziert (eigene DID)
-  hidden: boolean
-  addedAt: string
-}
-```
-
-### Verification
-
-```typescript
-{
-  id: string
-  initiatorDid: string
-  responderDid: string
-  method: 'in-person' | 'video' | 'vouched'
-  location?: string
-  completedAt: string
-  signatures: {
-    initiator: string
-    responder: string
-  }
-}
-```
-
-### Attestation
-
-```typescript
-{
-  id: string
-  type: 'skill' | 'help' | 'collaboration' | 'recommendation' | 'custom'
-  issuerDid: string
-  subjectDid: string
-  content: string
-  tags?: string[]
-  signature: string
-  createdAt: string
-}
+├── hooks/              # useContacts, useAttestations, useMessaging, etc.
+├── pages/              # Home, Identity, Contacts, Verify, Attestations
+└── services/           # ContactService, AttestationService, VerificationService
 ```
 
 ## Nächste Schritte
 
-- [ ] CRDT-Adapter implementieren (Automerge oder Yjs)
-- [ ] Sync zwischen Geräten
-- [ ] QR-Code Scanner für Mobile
-- [ ] Gruppen-Funktionalität
-- [ ] Content-Sharing (Kalender, Karten, etc.)
+- [ ] Profil-Sync (Name bei Verification + Broadcast an Kontakte)
+- [ ] Automerge für Cross-User CRDT-Spaces
+- [ ] Föderiertes Messaging (Matrix)
+- [ ] Gruppen-Räume
+- [ ] Capability-basierte Berechtigungen
 
 ## Lizenz
 

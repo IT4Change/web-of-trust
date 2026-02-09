@@ -6,9 +6,9 @@ import Footer from '../components/Footer'
 
 export default function BlogList() {
   return (
-    <div className="min-h-screen bg-background">
+    <div className="min-h-screen bg-background flex flex-col">
       <Header />
-      <main className="max-w-3xl mx-auto px-4 sm:px-6 lg:px-8 py-16 pt-32">
+      <main className="flex-1 max-w-3xl mx-auto px-4 sm:px-6 lg:px-8 py-16 pt-32 w-full">
         <h1 className="text-3xl font-bold text-foreground mb-2">Blog</h1>
         <p className="text-muted-foreground mb-12">
           Neuigkeiten und Hintergründe zum Web-of-Trust Projekt.
