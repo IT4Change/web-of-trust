@@ -3,6 +3,7 @@ import * as ed25519 from '@noble/ed25519'
 import { SeedStorage } from './SeedStorage'
 import { germanPositiveWordlist } from '../wordlists/german-positive'
 import { signJws as signJwsUtil } from '../crypto/jws'
+import type { EncryptedPayload } from '../adapters/interfaces/CryptoAdapter'
 
 /**
  * WotIdentity - BIP39-based identity with native WebCrypto
@@ -21,6 +22,7 @@ import { signJws as signJwsUtil } from '../crypto/jws'
 export class WotIdentity {
   private masterKey: CryptoKey | null = null
   private identityKeyPair: CryptoKeyPair | null = null
+  private encryptionKeyPair: CryptoKeyPair | null = null
   private did: string | null = null
   private storage: SeedStorage = new SeedStorage()
 
@@ -169,6 +171,7 @@ export class WotIdentity {
   async lock(): Promise<void> {
     this.masterKey = null
     this.identityKeyPair = null
+    this.encryptionKeyPair = null
     this.did = null
     await this.storage.clearSessionKey()
   }
@@ -284,6 +287,169 @@ export class WotIdentity {
     return 'z' + this.base58Encode(combined)
   }
 
+  // --- Encryption (X25519 ECDH + AES-GCM) ---
+
+  /**
+   * Get the X25519 encryption key pair (derived via separate HKDF path).
+   * Lazily derived on first call, then cached.
+   */
+  async getEncryptionKeyPair(): Promise<CryptoKeyPair> {
+    if (!this.masterKey) {
+      throw new Error('Identity not unlocked')
+    }
+    if (!this.encryptionKeyPair) {
+      await this.deriveEncryptionKeyPair()
+    }
+    return this.encryptionKeyPair!
+  }
+
+  /**
+   * Get X25519 public key as raw bytes (32 bytes).
+   * This is what others need to encrypt messages for this identity.
+   */
+  async getEncryptionPublicKeyBytes(): Promise<Uint8Array> {
+    const kp = await this.getEncryptionKeyPair()
+    const raw = await crypto.subtle.exportKey('raw', kp.publicKey)
+    return new Uint8Array(raw)
+  }
+
+  /**
+   * Encrypt data for a recipient using their X25519 public key.
+   * Uses ephemeral ECDH + HKDF + AES-256-GCM (ECIES-like).
+   */
+  async encryptForRecipient(
+    plaintext: Uint8Array,
+    recipientPublicKeyBytes: Uint8Array,
+  ): Promise<EncryptedPayload> {
+    if (!this.masterKey) {
+      throw new Error('Identity not unlocked')
+    }
+
+    // 1. Generate ephemeral X25519 key pair
+    const ephemeral = await crypto.subtle.generateKey(
+      { name: 'X25519' },
+      true, // extractable (need to send public key)
+      ['deriveBits'],
+    ) as CryptoKeyPair
+
+    // 2. Import recipient's public key
+    const recipientPub = await crypto.subtle.importKey(
+      'raw',
+      recipientPublicKeyBytes,
+      { name: 'X25519' },
+      true,
+      [],
+    )
+
+    // 3. ECDH: ephemeral private × recipient public → shared secret
+    const sharedBits = await crypto.subtle.deriveBits(
+      { name: 'X25519', public: recipientPub },
+      ephemeral.privateKey,
+      256,
+    )
+
+    // 4. HKDF: shared secret → AES-GCM key
+    const hkdfKey = await crypto.subtle.importKey(
+      'raw',
+      sharedBits,
+      { name: 'HKDF' },
+      false,
+      ['deriveKey'],
+    )
+    const aesKey = await crypto.subtle.deriveKey(
+      {
+        name: 'HKDF',
+        hash: 'SHA-256',
+        salt: new Uint8Array(32),
+        info: new TextEncoder().encode('wot-ecies-v1'),
+      },
+      hkdfKey,
+      { name: 'AES-GCM', length: 256 },
+      false,
+      ['encrypt'],
+    )
+
+    // 5. AES-GCM encrypt
+    const nonce = crypto.getRandomValues(new Uint8Array(12))
+    const ciphertext = await crypto.subtle.encrypt(
+      { name: 'AES-GCM', iv: nonce },
+      aesKey,
+      plaintext,
+    )
+
+    // 6. Export ephemeral public key
+    const ephemeralPubBytes = new Uint8Array(
+      await crypto.subtle.exportKey('raw', ephemeral.publicKey),
+    )
+
+    return {
+      ciphertext: new Uint8Array(ciphertext),
+      nonce,
+      ephemeralPublicKey: ephemeralPubBytes,
+    }
+  }
+
+  /**
+   * Decrypt data encrypted for this identity.
+   * Uses own X25519 private key + ephemeral public key from sender.
+   */
+  async decryptForMe(payload: EncryptedPayload): Promise<Uint8Array> {
+    if (!this.masterKey) {
+      throw new Error('Identity not unlocked')
+    }
+    if (!payload.ephemeralPublicKey) {
+      throw new Error('Missing ephemeral public key')
+    }
+
+    const kp = await this.getEncryptionKeyPair()
+
+    // 1. Import sender's ephemeral public key
+    const ephemeralPub = await crypto.subtle.importKey(
+      'raw',
+      payload.ephemeralPublicKey,
+      { name: 'X25519' },
+      true,
+      [],
+    )
+
+    // 2. ECDH: own private × ephemeral public → same shared secret
+    const sharedBits = await crypto.subtle.deriveBits(
+      { name: 'X25519', public: ephemeralPub },
+      kp.privateKey,
+      256,
+    )
+
+    // 3. HKDF: shared secret → AES-GCM key (same params as encrypt)
+    const hkdfKey = await crypto.subtle.importKey(
+      'raw',
+      sharedBits,
+      { name: 'HKDF' },
+      false,
+      ['deriveKey'],
+    )
+    const aesKey = await crypto.subtle.deriveKey(
+      {
+        name: 'HKDF',
+        hash: 'SHA-256',
+        salt: new Uint8Array(32),
+        info: new TextEncoder().encode('wot-ecies-v1'),
+      },
+      hkdfKey,
+      { name: 'AES-GCM', length: 256 },
+      false,
+      ['decrypt'],
+    )
+
+    // 4. AES-GCM decrypt
+    const plaintext = await crypto.subtle.decrypt(
+      { name: 'AES-GCM', iv: payload.nonce },
+      aesKey,
+      payload.ciphertext,
+    )
+
+    return new Uint8Array(plaintext)
+  }
+
   // Private methods
 
   private async deriveIdentityKeyPair(): Promise<void> {
@@ -345,6 +511,77 @@ export class WotIdentity {
     )
 
     this.identityKeyPair = { privateKey, publicKey }
+  }
+
+  private async deriveEncryptionKeyPair(): Promise<void> {
+    if (!this.masterKey) {
+      throw new Error('Master key not initialized')
+    }
+
+    // Derive X25519 seed via HKDF with a DIFFERENT info string
+    // This ensures cryptographic independence from the Ed25519 identity key
+    const encryptionSeed = await crypto.subtle.deriveBits(
+      {
+        name: 'HKDF',
+        hash: 'SHA-256',
+        salt: new Uint8Array(),
+        info: new TextEncoder().encode('wot-encryption-v1'),
+      },
+      this.masterKey,
+      256, // 32 bytes for X25519
+    )
+
+    // Import as X25519 private key via PKCS8
+    // X25519 raw import requires PKCS8 wrapping for private keys
+    const pkcs8 = this.wrapX25519PrivateKey(new Uint8Array(encryptionSeed))
+    const privateKey = await crypto.subtle.importKey(
+      'pkcs8',
+      pkcs8,
+      { name: 'X25519' },
+      false, // non-extractable
+      ['deriveBits'],
+    )
+
+    // Derive public key by generating bits with a known base point
+    // WebCrypto doesn't have a direct "get public key from private" for X25519
+    // So we import as extractable, export JWK, and re-import
+    const extractablePriv = await crypto.subtle.importKey(
+      'pkcs8',
+      pkcs8,
+      { name: 'X25519' },
+      true, // extractable to get JWK
+      ['deriveBits'],
+    )
+    const jwk = await crypto.subtle.exportKey('jwk', extractablePriv)
+    const publicKey = await crypto.subtle.importKey(
+      'jwk',
+      { kty: jwk.kty, crv: jwk.crv, x: jwk.x },
+      { name: 'X25519' },
+      true,
+      [],
+    )
+
+    this.encryptionKeyPair = { privateKey, publicKey }
+  }
+
+  /**
+   * Wrap raw 32-byte X25519 private key in PKCS8 DER format.
+   * PKCS8 = SEQUENCE { version, algorithm, key }
+   */
+  private wrapX25519PrivateKey(rawKey: Uint8Array): Uint8Array {
+    // OID for X25519: 1.3.101.110
+    const prefix = new Uint8Array([
+      0x30, 0x2e, // SEQUENCE (46 bytes)
+      0x02, 0x01, 0x00, // INTEGER version = 0
+      0x30, 0x05, // SEQUENCE (5 bytes)
+      0x06, 0x03, 0x2b, 0x65, 0x6e, // OID 1.3.101.110 (X25519)
+      0x04, 0x22, // OCTET STRING (34 bytes)
+      0x04, 0x20, // OCTET STRING (32 bytes) — the actual key
+    ])
+    const pkcs8 = new Uint8Array(prefix.length + rawKey.length)
+    pkcs8.set(prefix)
+    pkcs8.set(rawKey, prefix.length)
+    return pkcs8
   }
 
   private async generateDID(): Promise<string> {
