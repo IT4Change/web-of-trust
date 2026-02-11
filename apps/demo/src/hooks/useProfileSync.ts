@@ -1,5 +1,5 @@
 import { useEffect, useCallback, useRef } from 'react'
-import { ProfileService, type PublicProfile } from '@real-life/wot-core'
+import { ProfileService, type PublicProfile, type MessageEnvelope } from '@real-life/wot-core'
 import { useAdapters } from '../context'
 import { useIdentity } from '../context'
 
@@ -49,11 +49,31 @@ export function useProfileSync() {
 
       if (!res.ok) {
         console.warn('Profile upload failed:', res.status, await res.text())
+        return
+      }
+
+      // Notify all contacts about the profile update via relay
+      const contacts = await storage.getContacts()
+      for (const contact of contacts) {
+        const envelope: MessageEnvelope = {
+          v: 1,
+          id: crypto.randomUUID(),
+          type: 'profile-update',
+          fromDid: did,
+          toDid: contact.did,
+          createdAt: new Date().toISOString(),
+          encoding: 'json',
+          payload: JSON.stringify({ did, name: profile.name }),
+          signature: '',
+        }
+        messaging.send(envelope).catch(() => {
+          // Non-blocking — contact may be offline, relay will queue
+        })
       }
     } catch (error) {
       console.warn('Profile upload failed:', error)
     }
-  }, [identity, storage])
+  }, [identity, storage, messaging])
 
   /**
    * Fetch a contact's profile from the profile service.
