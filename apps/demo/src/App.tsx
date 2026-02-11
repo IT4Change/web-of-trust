@@ -1,8 +1,10 @@
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
-import { AdapterProvider, IdentityProvider, useIdentity } from './context'
-import { AppShell, IdentityManagement } from './components'
+import { useEffect } from 'react'
+import { BrowserRouter, Routes, Route, Navigate, useNavigate } from 'react-router-dom'
+import { AdapterProvider, IdentityProvider, useIdentity, PendingVerificationProvider, usePendingVerification } from './context'
+import { AppShell, IdentityManagement, Confetti } from './components'
 import { Home, Identity, Contacts, Verify, Attestations, PublicProfile } from './pages'
-import { useProfileSync } from './hooks'
+import { useProfileSync, useMessaging, useContacts } from './hooks'
+import type { VerificationPayload } from './types/verification-messages'
 
 /**
  * Mounts useProfileSync globally so profile-update listeners
@@ -11,6 +13,55 @@ import { useProfileSync } from './hooks'
 function ProfileSyncEffect() {
   useProfileSync()
   return null
+}
+
+/**
+ * Global listener for incoming verification messages.
+ * - response: If Alice leaves /verify and Bob responds, stores pending and navigates back.
+ * - complete: Bob receives Alice's completion → triggers global confetti.
+ */
+function VerificationListenerEffect() {
+  const { onMessage } = useMessaging()
+  const { challengeNonce, setPending, triggerConfetti } = usePendingVerification()
+  const { activeContacts } = useContacts()
+  const navigate = useNavigate()
+
+  useEffect(() => {
+    const unsubscribe = onMessage((envelope) => {
+      if (envelope.type !== 'verification') return
+
+      let payload: VerificationPayload
+      try {
+        payload = JSON.parse(envelope.payload)
+      } catch {
+        return
+      }
+
+      if (payload.action === 'response' && challengeNonce) {
+        const decoded = JSON.parse(atob(payload.responseCode))
+        if (decoded.nonce !== challengeNonce) return
+
+        // Only show confirm screen if peer is not already a verified contact
+        const alreadyContact = activeContacts.some(c => c.did === decoded.toDid)
+        if (alreadyContact) return
+
+        setPending({ responseCode: payload.responseCode, decoded })
+        navigate('/verify')
+      }
+    })
+    return unsubscribe
+  }, [onMessage, challengeNonce, setPending, navigate, activeContacts, triggerConfetti])
+
+  return null
+}
+
+/**
+ * Renders global confetti overlay when triggerConfetti() is called.
+ */
+function GlobalConfetti() {
+  const { confettiKey } = usePendingVerification()
+  if (confettiKey === 0) return null
+  return <Confetti key={confettiKey} />
 }
 
 /**
@@ -48,8 +99,12 @@ function RequireIdentity({ children }: { children: React.ReactNode }) {
   // Identity is unlocked -> initialize Evolu with identity-derived keys
   return (
     <AdapterProvider identity={identity}>
-      <ProfileSyncEffect />
-      {children}
+      <PendingVerificationProvider>
+        <ProfileSyncEffect />
+        <VerificationListenerEffect />
+        <GlobalConfetti />
+        {children}
+      </PendingVerificationProvider>
     </AdapterProvider>
   )
 }

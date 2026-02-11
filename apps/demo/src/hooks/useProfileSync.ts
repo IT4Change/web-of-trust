@@ -96,6 +96,18 @@ export function useProfileSync() {
   }, [])
 
   /**
+   * Upload profile once after onboarding (first mount after identity creation).
+   */
+  useEffect(() => {
+    if (!identity) return
+    const key = `wot-profile-uploaded:${identity.getDid()}`
+    if (localStorage.getItem(key)) return
+    uploadProfile().then(() => {
+      localStorage.setItem(key, '1')
+    })
+  }, [identity, uploadProfile])
+
+  /**
    * Sync all contact profiles on mount.
    */
   useEffect(() => {
