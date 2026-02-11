@@ -7,8 +7,8 @@ Dieses Dokument zeigt, was bereits implementiert ist und welche Entscheidungen g
 
 ## Letzte Aktualisierung
 
-**Datum:** 2026-02-10
-**Phase:** Week 4 - Profile Sync + Symmetrische Encryption
+**Datum:** 2026-02-11
+**Phase:** Week 5 - Encrypted Group Spaces (Phase 3 Foundations)
 
 ---
 
@@ -871,6 +871,153 @@ packages/wot-profiles/tests/profile-rest.test.ts (7 Tests)
 
 ---
 
+## Week 5: Encrypted Group Spaces — Foundations (2026-02-11) ✅
+
+### Übersicht
+
+Phase 3 des Plans: Asymmetrische Encryption, EncryptedSyncService und GroupKeyService — die drei Grundbausteine für Encrypted Group Spaces. Außerdem: wot-profiles Docker-Deployment auf `profiles.utopia-lab.org`.
+
+### Architektur-Entscheidung: Separater HKDF-Pfad
+
+Statt Ed25519→X25519 Konvertierung (mit `@noble/curves`) oder separatem Key Pair wurde ein **dritter Weg** gewählt: Ein eigener HKDF-Pfad vom gleichen Master Seed.
+
+```
+BIP39 Mnemonic
+     ↓
+Master Seed (32 bytes)
+     ↓ HKDF
+     ├─→ 'wot-identity-v1'   → Ed25519 (Signing, DID)
+     ├─→ 'wot-encryption-v1' → X25519 (Encryption, ECDH)  ← NEU
+     └─→ 'evolu-storage-v1'  → Evolu OwnerSecret
+```
+
+**Vorteile:**
+- Ein Seed, kryptographisch unabhängige Keys
+- Keine externe Dependency (`@noble/curves` nicht nötig)
+- Rein WebCrypto API — keine Drittbibliotheken für Phase 3
+- Sicherheits-theoretisch sauber (keine Cross-Curve-Konvertierung nötig)
+
+**Referenz:** Option C wurde nach Evaluation von Thormarker 2021 (formaler Sicherheitsbeweis für Ed25519→X25519) gewählt. Die Konvertierung wäre sicher gewesen, aber der separate HKDF-Pfad ist eleganter.
+
+### Implementiert
+
+#### Asymmetrische Encryption (ECIES-like Pattern)
+
+**WotIdentity erweitert** (`packages/wot-core/src/identity/WotIdentity.ts`):
+
+- ✅ **deriveEncryptionKeyPair()** — HKDF(`'wot-encryption-v1'`) → X25519 Key Pair
+- ✅ **getEncryptionKeyPair()** — Lazy-Init, cached X25519 CryptoKeyPair
+- ✅ **getEncryptionPublicKeyBytes()** — 32-byte Raw Public Key (zum Teilen)
+- ✅ **encryptForRecipient(plaintext, recipientPublicKeyBytes)** — ECIES: Ephemeral X25519 → ECDH → HKDF(`'wot-ecies-v1'`) → AES-256-GCM
+- ✅ **decryptForMe(payload)** — Reverse ECIES mit eigenem statischen X25519 Key
+- ✅ **wrapX25519PrivateKey()** — PKCS8 DER Wrapping für WebCrypto Import
+
+**EncryptedPayload Type** (`packages/wot-core/src/adapters/interfaces/CryptoAdapter.ts`):
+```typescript
+export interface EncryptedPayload {
+  ciphertext: Uint8Array
+  nonce: Uint8Array
+  ephemeralPublicKey?: Uint8Array  // 32 bytes, für ECIES
+}
+```
+
+#### EncryptedSyncService (`packages/wot-core/src/services/EncryptedSyncService.ts`)
+
+Verschlüsselt/entschlüsselt CRDT-Changes mit einem Group Key (AES-256-GCM). Encrypt-then-sync Pattern:
+
+- ✅ **encryptChange(data, groupKey, spaceId, generation, fromDid)** — AES-256-GCM mit Random-Nonce
+- ✅ **decryptChange(change, groupKey)** — Entschlüsselung mit Auth-Tag-Verifikation
+
+```typescript
+interface EncryptedChange {
+  ciphertext: Uint8Array
+  nonce: Uint8Array
+  spaceId: string
+  generation: number  // Key-Generation für Key-Lookup
+  fromDid: string
+}
+```
+
+#### GroupKeyService (`packages/wot-core/src/services/GroupKeyService.ts`)
+
+In-Memory Key-Management pro Space mit Generation-Tracking:
+
+- ✅ **createKey(spaceId)** — Erzeugt 32-byte Key (Generation 0)
+- ✅ **rotateKey(spaceId)** — Neue Generation, alte Keys bleiben zugänglich
+- ✅ **getCurrentKey(spaceId)** — Aktueller Key (neueste Generation)
+- ✅ **getKeyByGeneration(spaceId, generation)** — Alter Key für historische Nachrichten
+- ✅ **getCurrentGeneration(spaceId)** — Aktuelle Generation (-1 wenn unbekannt)
+- ✅ **importKey(spaceId, key, generation)** — Key von Invite importieren
+
+### wot-profiles Deployment
+
+- ✅ **Dockerfile** — Multi-Stage Build (Node 22-slim, better-sqlite3 native compilation)
+- ✅ **docker-compose.yml** — Port 8788, SQLite Volume, gleiche Netzwerk-Konfiguration wie wot-relay
+- ✅ **Produktion** — Live unter `profiles.utopia-lab.org` (Caddy Reverse Proxy)
+- ✅ **E2E-Test gegen Produktion** — PUT/GET/Tamper/DID-Mismatch/CORS bestanden
+- ✅ **Demo App verbunden** — `VITE_PROFILE_SERVICE_URL=https://profiles.utopia-lab.org`
+
+### Tests Week 5
+
+**34 neue Tests:**
+
+#### Asymmetric Crypto Tests (16 Tests)
+```
+packages/wot-core/tests/AsymmetricCrypto.test.ts
+✓ deriveEncryptionKeyPair - returns X25519 key pair
+✓ deriveEncryptionKeyPair - deterministic (same identity = same public key)
+✓ deriveEncryptionKeyPair - different from Ed25519 identity key
+✓ deriveEncryptionKeyPair - different keys for different identities
+✓ deriveEncryptionKeyPair - throws when identity is locked
+✓ encryptForRecipient/decryptForMe - round-trip
+✓ encryptForRecipient/decryptForMe - wrong recipient fails
+✓ encryptForRecipient - different ciphertexts (ephemeral key)
+✓ encryptForRecipient/decryptForMe - tampered ciphertext fails
+✓ encryptForRecipient/decryptForMe - tampered ephemeral key fails
+✓ encryptForRecipient/decryptForMe - empty plaintext
+✓ encryptForRecipient/decryptForMe - large plaintext (1MB)
+✓ encryptForRecipient - 12-byte nonce
+✓ encryptForRecipient/decryptForMe - throws when locked
+✓ getEncryptionPublicKeyBytes - returns 32 bytes
+✓ getEncryptionPublicKeyBytes - deterministic
+```
+
+#### EncryptedSyncService Tests (8 Tests)
+```
+packages/wot-core/tests/EncryptedSyncService.test.ts
+✓ Encrypt change with group key
+✓ Decrypt change with correct group key
+✓ Fail with wrong group key
+✓ Include spaceId and generation in metadata
+✓ Include fromDid in metadata
+✓ Different ciphertexts for same data (random nonce)
+✓ Fail with tampered ciphertext
+✓ Handle empty data
+```
+
+#### GroupKeyService Tests (10 Tests)
+```
+packages/wot-core/tests/GroupKeyService.test.ts
+✓ Create new group key for space
+✓ Track key generations
+✓ Retrieve current key for space
+✓ Retrieve key by generation (old messages)
+✓ Rotate key and increment generation
+✓ Keep old keys accessible after rotation
+✓ Return null for unknown space
+✓ Throw when rotating key for unknown space
+✓ Manage multiple spaces independently
+✓ Generate different keys on each creation
+```
+
+**Gesamt: ~156 Tests** (140 wot-core + 11 wot-profiles + 15 wot-relay) — alle passing ✅
+
+### Commits
+
+23. **feat: Add asymmetric encryption (X25519 ECIES), EncryptedSyncService, GroupKeyService** — Phase 3 Foundations, 34 Tests
+
+---
+
 ## Unterschiede zur Spezifikation
 
 ### DID Format
@@ -927,17 +1074,19 @@ const evolKey = await identity.deriveFrameworkKey('evolu-storage-v1')
 
 ## Nächste Schritte
 
-### Priorität 1: Encrypted Group Spaces ⬅️ NÄCHSTER SCHRITT
+### Priorität 1: AutomergeReplicationAdapter ⬅️ NÄCHSTER SCHRITT
 
-- **Asymmetrische Encryption** — X25519 ECDH (Ed25519 → Curve25519 Konvertierung) für Key-Exchange
-- **EncryptedSyncService** — Encrypt-then-sync Pattern (AES-GCM mit Group Key)
-- **GroupKeyService** — Key Generation, Rotation, Generation-Tracking
 - **AutomergeReplicationAdapter** — CRDT Spaces mit verschlüsseltem Transport
+  - Space erstellen (Automerge Doc)
+  - Transact: Change → Encrypt → Send to Members
+  - Receive: Decrypt → Apply Changes → Callback
+  - Space Invite (verschlüsselte Group-Key-Übergabe)
+  - Key Rotation bei Member-Entfernung
+- **Dependencies:** `@automerge/automerge`
 
 ### Priorität 2: Polish + Deployment
 
 - **Relay Deployment** — Docker + öffentliche URL für Remote-Testing
-- **wot-profiles Deployment** — Docker für Profile Service
 - **Profil-Name im Verification-Handshake** — `useVerification` sendet echten Namen statt hardcoded `'User'`
 
 ### Priorität 3: RLS Integration & Module
@@ -952,6 +1101,10 @@ const evolKey = await identity.deriveFrameworkKey('evolu-storage-v1')
 - ~~Attestation Delivery E2E~~ ✅
 - ~~Profil-Sync (JWS-signierte Profile, wot-profiles Service)~~ ✅
 - ~~Symmetrische Encryption (AES-256-GCM)~~ ✅
+- ~~Asymmetrische Encryption (X25519 ECIES)~~ ✅
+- ~~EncryptedSyncService (Encrypt-then-sync)~~ ✅
+- ~~GroupKeyService (Key Generation, Rotation, Generations)~~ ✅
+- ~~wot-profiles Deployment (Docker, profiles.utopia-lab.org)~~ ✅
 - **Identity-System konsolidieren** — altes IdentityService/useIdentity entfernen (Plan existiert, niedrige Priorität)
 
 ### Zurückgestellt
@@ -968,8 +1121,9 @@ const evolKey = await identity.deriveFrameworkKey('evolu-storage-v1')
 
 **Entscheidung:** Native WebCrypto API + @noble/ed25519
 **Grund:**
-- WebCrypto für HKDF, PBKDF2, AES-GCM (zero dependencies)
+- WebCrypto für HKDF, PBKDF2, AES-GCM, X25519 ECDH (zero dependencies)
 - @noble/ed25519 für Ed25519 Signing (WebCrypto Ed25519 hat Browser-Kompatibilitätsprobleme)
+- X25519 über separaten HKDF-Pfad (kein @noble/curves nötig)
 - Hardware-backed wenn verfügbar
 - Browser-Security-Updates automatisch
 
@@ -1070,7 +1224,7 @@ packages/wot-core/src/
 ├── adapters/
 │   ├── interfaces/
 │   │   ├── StorageAdapter.ts
-│   │   ├── CryptoAdapter.ts        # + Symmetric: generateSymmetricKey, encrypt/decrypt
+│   │   ├── CryptoAdapter.ts        # + Symmetric + EncryptedPayload Type
 │   │   ├── MessagingAdapter.ts     # Cross-User Messaging
 │   │   └── index.ts
 │   ├── crypto/
@@ -1085,7 +1239,9 @@ packages/wot-core/src/
 │   │   └── index.ts
 │   └── index.ts
 ├── services/
-│   ├── ProfileService.ts           # NEU: signProfile, verifyProfile (static)
+│   ├── ProfileService.ts           # signProfile, verifyProfile (static)
+│   ├── EncryptedSyncService.ts     # Encrypt/Decrypt CRDT Changes (AES-256-GCM)
+│   ├── GroupKeyService.ts          # Group Key Management (per Space, Generations)
 │   └── index.ts
 ├── types/
 │   ├── identity.ts                 # + PublicProfile
@@ -1099,7 +1255,7 @@ packages/wot-core/src/
 └── index.ts
 ```
 
-### wot-profiles Package (NEU)
+### wot-profiles Package
 
 ```
 packages/wot-profiles/
@@ -1111,6 +1267,9 @@ packages/wot-profiles/
 ├── tests/
 │   ├── profile-store.test.ts        # 4 Tests
 │   └── profile-rest.test.ts         # 7 Tests
+├── Dockerfile                       # Multi-Stage Build (Node 22-slim)
+├── docker-compose.yml               # Port 8788, SQLite Volume
+├── tsconfig.docker.json             # Standalone tsconfig für Docker
 ├── package.json
 └── tsconfig.json
 ```
@@ -1190,13 +1349,16 @@ packages/wot-core/tests/
 ├── OnboardingFlow.test.ts           # 13 Tests  (Anm: 12 nach Dedup)
 ├── ResourceRef.test.ts              # 14 Tests
 ├── MessagingAdapter.test.ts         # 14 Tests
-├── ProfileService.test.ts           # 6 Tests   NEU
-├── SymmetricCrypto.test.ts          # 10 Tests  NEU
+├── ProfileService.test.ts           # 6 Tests
+├── SymmetricCrypto.test.ts          # 10 Tests
+├── AsymmetricCrypto.test.ts         # 16 Tests  NEU (Week 5)
+├── EncryptedSyncService.test.ts     # 8 Tests   NEU (Week 5)
+├── GroupKeyService.test.ts          # 10 Tests  NEU (Week 5)
 └── setup.ts                         # fake-indexeddb setup
 
 packages/wot-profiles/tests/
-├── profile-store.test.ts            # 4 Tests   NEU
-└── profile-rest.test.ts             # 7 Tests   NEU
+├── profile-store.test.ts            # 4 Tests
+└── profile-rest.test.ts             # 7 Tests
 
 packages/wot-relay/tests/
 ├── relay.test.ts                    # 9 Tests
@@ -1231,7 +1393,10 @@ packages/wot-relay/tests/
 - ~~Attestation Delivery E2E~~ ✅ (Week 3++)
 - ~~Profil-Sync~~ ✅ (Week 4) — JWS-signierte Profile, wot-profiles Service, useProfileSync Hook
 - ~~Symmetrische Encryption~~ ✅ (Week 4) — AES-256-GCM im CryptoAdapter
-- **Encrypted Group Spaces** — Automerge + Encrypt-then-sync (Phase 3)
+- ~~Asymmetrische Encryption~~ ✅ (Week 5) — X25519 ECIES, separater HKDF-Pfad
+- ~~EncryptedSyncService + GroupKeyService~~ ✅ (Week 5) — Encrypt-then-sync Foundations
+- ~~wot-profiles Deployment~~ ✅ (Week 5) — Docker, profiles.utopia-lab.org
+- **AutomergeReplicationAdapter** — CRDT Spaces mit verschlüsseltem Transport (nächster Schritt)
 - **Relay Deployment** — Docker + öffentliche URL für Remote-Testing
 - **Evolu Sync** - Transports konfigurieren für Multi-Tab/Device Sync
 - **Social Recovery (Shamir)** - Seed-Backup über verifizierte Kontakte

@@ -42,6 +42,12 @@ export type {
   MessagingState,
 } from './types/messaging'
 
+export type {
+  SpaceInfo,
+  SpaceMemberChange,
+  ReplicationState,
+} from './types/space'
+
 // Adapter Interfaces
 export type { StorageAdapter } from './adapters/interfaces/StorageAdapter'
 export type {
@@ -51,6 +57,7 @@ export type {
 export type { Subscribable } from './adapters/interfaces/Subscribable'
 export type { ReactiveStorageAdapter } from './adapters/interfaces/ReactiveStorageAdapter'
 export type { MessagingAdapter } from './adapters/interfaces/MessagingAdapter'
+export type { ReplicationAdapter, SpaceHandle } from './adapters/interfaces/ReplicationAdapter'
 
 // Crypto Utilities
 export {
@@ -81,9 +88,12 @@ export { VerificationHelper } from './verification'
 
 // Services
 export { ProfileService } from './services/ProfileService'
+export { EncryptedSyncService } from './services/EncryptedSyncService'
+export { GroupKeyService } from './services/GroupKeyService'
 
 // Adapter Implementations
 export { WebCryptoAdapter } from './adapters/crypto/WebCryptoAdapter'
 export { LocalStorageAdapter } from './adapters/storage/LocalStorageAdapter'
 export { InMemoryMessagingAdapter } from './adapters/messaging/InMemoryMessagingAdapter'
 export { WebSocketMessagingAdapter } from './adapters/messaging/WebSocketMessagingAdapter'
+export { AutomergeReplicationAdapter } from './adapters/replication/AutomergeReplicationAdapter'

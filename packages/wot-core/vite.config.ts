@@ -16,7 +16,7 @@ export default defineConfig({
       fileName: 'index',
     },
     rollupOptions: {
-      external: ['react', 'idb'],
+      external: ['react', 'idb', '@automerge/automerge'],
     },
   },
   test: {
