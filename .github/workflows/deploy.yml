@@ -57,7 +57,15 @@ jobs:
           cp -r apps/demo/dist/* combined/demo/
 
       - name: SPA fallback (GitHub Pages serves 404.html on unknown routes)
-        run: cp combined/demo/index.html combined/404.html
+        run: |
+          cat > combined/404.html << 'HTMLEOF'
+          <!DOCTYPE html><html><head><meta charset="utf-8"><script>
+          var p = location.pathname + location.search + location.hash;
+          var target = p.startsWith('/demo') ? '/demo/' : '/';
+          sessionStorage.setItem('spa-redirect', p);
+          location.replace(target);
+          </script></head><body></body></html>
+          HTMLEOF
 
       - name: Setup Pages
         uses: actions/configure-pages@v4
