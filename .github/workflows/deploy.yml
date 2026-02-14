@@ -41,6 +41,9 @@ jobs:
       - name: Build wot-core
         run: pnpm --filter @real-life/wot-core build
 
+      - name: Run tests
+        run: pnpm test
+
       - name: Build landing
         run: pnpm --filter landing build
 

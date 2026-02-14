@@ -124,7 +124,8 @@ export function useVerification() {
           const isValid = await VerificationHelper.verifySignature(verification)
           if (!isValid) return
 
-          await verificationService.saveVerification(verification)
+          // Save may fail if global listener already saved it — that's OK
+          await verificationService.saveVerification(verification).catch(() => {})
           const name = peerNameRef.current || 'Kontakt'
           triggerConfetti(`${name} und du habt euch gegenseitig verifiziert!`)
           setStep('done')

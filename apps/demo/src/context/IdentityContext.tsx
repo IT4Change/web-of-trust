@@ -20,6 +20,8 @@ export function IdentityProvider({ children }: { children: ReactNode }) {
   const [initialProfile, setInitialProfile] = useState<Profile | null>(null)
 
   // Check on mount: try session-key auto-unlock, then fall back to checking stored identity
+  // IMPORTANT: hasStoredIdentity stays null until the entire check (incl. auto-unlock) is done.
+  // AppRoutes uses hasStoredIdentity === null as "still loading" guard to prevent layout flash.
   useEffect(() => {
     const initIdentity = async () => {
       try {

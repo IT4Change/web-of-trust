@@ -25,5 +25,10 @@ export default defineConfig(({ mode }) => {
   optimizeDeps: {
     exclude: ['@evolu/sqlite-wasm', '@evolu/web', '@evolu/react-web'],
   },
+  test: {
+    environment: 'happy-dom',
+    globals: true,
+    setupFiles: ['./tests/setup.ts'],
+  },
   }
 })

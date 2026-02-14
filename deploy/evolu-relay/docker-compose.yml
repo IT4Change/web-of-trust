@@ -1,0 +1,20 @@
+services:
+  evolu-relay:
+    build: .
+    image: wot-evolu-relay
+    container_name: evolu-relay
+    hostname: 'evolu-relay'
+    restart: unless-stopped
+    expose:
+      - "4000"
+    volumes:
+      - evolu-data:/app/data
+    networks:
+      - net
+
+networks:
+  net:
+    external: true
+
+volumes:
+  evolu-data:

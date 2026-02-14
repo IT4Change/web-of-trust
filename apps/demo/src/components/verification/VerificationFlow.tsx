@@ -1,10 +1,11 @@
 import { useState, useEffect } from 'react'
 import { CheckCircle, XCircle, ArrowLeft, Loader2, Wifi, WifiOff, User, ShieldCheck, ShieldX } from 'lucide-react'
-import { useVerification, useProfileSync } from '../../hooks'
+import { useVerification } from '../../hooks'
 import type { PublicProfile } from '@real-life/wot-core'
 import { Avatar } from '../shared/Avatar'
 import { ShowCode } from './ShowCode'
 import { ScanCode } from './ScanCode'
+import { useAdapters } from '../../context'
 
 type Mode = 'select' | 'initiate' | 'confirm' | 'respond' | 'waiting' | 'success' | 'error'
 
@@ -24,22 +25,22 @@ export function VerificationFlow() {
     completeVerification,
     reset,
   } = useVerification()
-  const { fetchContactProfile } = useProfileSync()
+  const { discovery } = useAdapters()
 
   const [mode, setMode] = useState<Mode>('select')
   const [challengeCode, setChallengeCode] = useState('')
   const [responseCode, setResponseCode] = useState('')
   const [peerProfile, setPeerProfile] = useState<PublicProfile | null>(null)
 
-  // Fetch peer profile from Profile Service when entering confirm mode
+  // Fetch peer profile directly from DiscoveryAdapter when entering confirm mode
   useEffect(() => {
-    if (mode === 'confirm' && peerDid) {
-      setPeerProfile(null)
-      fetchContactProfile(peerDid).then((profile) => {
-        if (profile) setPeerProfile(profile)
-      })
-    }
-  }, [mode, peerDid, fetchContactProfile])
+    if (mode !== 'confirm' || !peerDid) return
+    let cancelled = false
+    discovery.resolveProfile(peerDid)
+      .then((profile) => { if (!cancelled && profile) setPeerProfile(profile) })
+      .catch(() => {})
+    return () => { cancelled = true }
+  }, [mode, peerDid, discovery])
 
   // Auto-transition: hook step changes drive mode transitions
   useEffect(() => {

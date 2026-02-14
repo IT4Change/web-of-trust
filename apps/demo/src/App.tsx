@@ -167,9 +167,31 @@ function PublicProfileStandalone() {
  * When logged in, /p/:did renders inside AppShell with navigation.
  */
 function AppRoutes() {
-  const { identity } = useIdentity()
+  const { identity, hasStoredIdentity } = useIdentity()
 
-  // Not logged in: only /p/:did is accessible
+  // Still initializing or auto-unlocking — don't flash the standalone layout.
+  // hasStoredIdentity === null means check hasn't finished yet.
+  // hasStoredIdentity === true && !identity means auto-unlock failed, passphrase needed.
+  // In both cases, go through RequireIdentity (which shows loading or passphrase prompt).
+  if (!identity && hasStoredIdentity !== false) {
+    return (
+      <RequireIdentity>
+        <Routes>
+          <Route element={<AppShell />}>
+            <Route path="/" element={<Home />} />
+            <Route path="/identity" element={<Identity />} />
+            <Route path="/contacts" element={<Contacts />} />
+            <Route path="/verify" element={<Verify />} />
+            <Route path="/attestations/*" element={<Attestations />} />
+            <Route path="/p/:did" element={<PublicProfile />} />
+            <Route path="*" element={<Navigate to="/" replace />} />
+          </Route>
+        </Routes>
+      </RequireIdentity>
+    )
+  }
+
+  // Definitely not logged in (no stored identity): /p/:did is standalone, rest goes to onboarding
   if (!identity) {
     return (
       <Routes>
@@ -187,7 +209,7 @@ function AppRoutes() {
     )
   }
 
-  // Logged in: all routes including /p/:did inside AppShell
+  // Logged in: all routes inside AppShell
   return (
     <RequireIdentity>
       <Routes>

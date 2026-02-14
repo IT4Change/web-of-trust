@@ -122,23 +122,16 @@ export async function createWotEvolu(identity: WotIdentity): Promise<Evolu<AppSc
   const ownerSecret = frameworkKey as unknown as OwnerSecret
   const appOwner = createAppOwner(ownerSecret)
 
-  // Track owner for diagnostics (no auto-reset — use manual DB reset button)
-  const storedOwnerId = localStorage.getItem('wot-evolu-owner-id')
-  if (storedOwnerId && storedOwnerId !== appOwner.id) {
-    console.warn(
-      'Evolu Owner-Mismatch: gespeicherte Owner-ID stimmt nicht mit aktueller Identität überein.',
-      'Nutze "Datenbank zurücksetzen" auf der Identitäts-Seite falls Probleme auftreten.',
-    )
-  }
-
   const evolu = createEvolu(evoluReactWebDeps)(Schema, {
     name: SimpleName.orThrow('wot'),
     externalAppOwner: appOwner,
-    transports: [{ type: 'WebSocket', url: 'wss://free.evoluhq.com' }],
+    transports: [{ type: 'WebSocket', url: 'wss://evolu.utopia-lab.org' }],
   })
 
-  // Remember which owner this DB belongs to
-  localStorage.setItem('wot-evolu-owner-id', appOwner.id)
+  evolu.subscribeError(() => {
+    const error = evolu.getError()
+    console.error('[wot-evolu] Sync error:', error)
+  })
 
   evoluInstance = evolu
   return evolu

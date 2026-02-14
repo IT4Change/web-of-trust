@@ -180,6 +180,7 @@ export class EvoluStorageAdapter implements StorageAdapter, ReactiveStorageAdapt
       db.selectFrom('verification')
         .selectAll()
         .where('isDeleted', 'is not', booleanToSqliteBoolean(true))
+        .where('toDid', '=', str(this.did))
     )
     const rows = await this.evolu.loadQuery(query)
     return [...rows].map(rowToVerification)
@@ -227,6 +228,7 @@ export class EvoluStorageAdapter implements StorageAdapter, ReactiveStorageAdapt
       db.selectFrom('attestation')
         .selectAll()
         .where('isDeleted', 'is not', booleanToSqliteBoolean(true))
+        .where('toDid', '=', str(this.did))
     )
     const rows = await this.evolu.loadQuery(query)
     return [...rows].map(rowToAttestation)
@@ -425,6 +427,7 @@ export class EvoluStorageAdapter implements StorageAdapter, ReactiveStorageAdapt
     const query = evolu.createQuery((db) =>
       db.selectFrom('verification').selectAll()
         .where('isDeleted', 'is not', booleanToSqliteBoolean(true))
+        .where('toDid', '=', str(this.did))
     )
     let snapshot: Verification[] = [...evolu.getQueryRows(query)].map(rowToVerification)
     let snapshotKey = JSON.stringify(snapshot)
@@ -454,6 +457,7 @@ export class EvoluStorageAdapter implements StorageAdapter, ReactiveStorageAdapt
     const query = evolu.createQuery((db) =>
       db.selectFrom('attestation').selectAll()
         .where('isDeleted', 'is not', booleanToSqliteBoolean(true))
+        .where('toDid', '=', str(this.did))
     )
     let snapshot: Attestation[] = [...evolu.getQueryRows(query)].map(rowToAttestation)
     let snapshotKey = JSON.stringify(snapshot)

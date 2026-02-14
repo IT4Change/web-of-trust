@@ -1,0 +1,3 @@
+evolu.utopia-lab.org {
+	reverse_proxy evolu-relay:4000
+}
