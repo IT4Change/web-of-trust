@@ -28,10 +28,9 @@ function ProfileSyncEffect() {
  * This makes the flow symmetric: B scans A's QR → both get verified.
  */
 function VerificationListenerEffect() {
-  const { onMessage, send } = useMessaging()
+  const { onMessage } = useMessaging()
   const { verificationService } = useAdapters()
-  const { identity, did } = useIdentity()
-  const { contacts } = useContacts()
+  const { did } = useIdentity()
   const { allVerifications } = useVerificationStatus()
   const { challengeNonce, setChallengeNonce, setPendingIncoming } = useConfetti()
 
@@ -57,56 +56,22 @@ function VerificationListenerEffect() {
         return
       }
 
-      // Counter-verification: if I'm the recipient and I haven't
-      // verified the sender yet.
-      //
-      // Two paths:
-      // 1. Known contact → auto counter-verify (trusted)
-      // 2. Unknown sender with valid nonce → show confirmation UI
-      //    (nonce proves QR scan, but user must confirm in-person)
-      if (did && identity && verification.to === did) {
+      // Counter-verification: if I'm the recipient, I haven't verified
+      // the sender yet, and the verification contains my active challenge
+      // nonce (proves physical QR scan) → show confirmation UI.
+      if (did && verification.to === did) {
         const alreadyVerified = allVerifications.some(
           v => v.from === did && v.to === verification.from
         )
 
-        if (!alreadyVerified) {
-          const isContact = contacts.some(c => c.did === verification.from)
-
-          if (isContact) {
-            // Known contact: auto counter-verify
-            try {
-              const nonce = crypto.randomUUID()
-              const counter = await VerificationHelper.createVerificationFor(identity, verification.from, nonce)
-              await verificationService.saveVerification(counter)
-
-              const counterEnvelope: MessageEnvelope = {
-                v: 1,
-                id: counter.id,
-                type: 'verification',
-                fromDid: did,
-                toDid: verification.from,
-                createdAt: new Date().toISOString(),
-                encoding: 'json',
-                payload: JSON.stringify(counter),
-                signature: counter.proof.proofValue,
-              }
-              await send(counterEnvelope)
-            } catch {
-              // Counter-verification failed — non-critical
-            }
-          } else {
-            // Unknown sender: only accept if nonce proves QR scan
-            if (challengeNonce && verification.id.includes(challengeNonce)) {
-              setChallengeNonce(null) // Nonce consumed
-              setPendingIncoming({ verification, fromDid: verification.from })
-            }
-            // else: spam — ignore
-          }
+        if (!alreadyVerified && challengeNonce && verification.id.includes(challengeNonce)) {
+          setChallengeNonce(null) // Nonce consumed
+          setPendingIncoming({ verification, fromDid: verification.from })
         }
       }
     })
     return unsubscribe
-  }, [onMessage, verificationService, did, identity, contacts, allVerifications, send, challengeNonce, setChallengeNonce, setPendingIncoming])
+  }, [onMessage, verificationService, did, allVerifications, challengeNonce, setChallengeNonce, setPendingIncoming])
 
   return null
 }

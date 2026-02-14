@@ -5,12 +5,12 @@
  * 1. Receives a verification message
  * 2. Verifies the signature
  * 3. Saves it to storage
- * 4. If I'm the recipient and haven't verified the sender yet →
- *    - Known contact: auto counter-verify (trusted)
- *    - Unknown sender with valid nonce: set pendingIncoming for user confirmation
- *    - Unknown sender without nonce: ignore (spam)
+ * 4. If I'm the recipient, haven't verified the sender yet,
+ *    AND the verification contains my active challenge nonce →
+ *    set pendingIncoming for user confirmation
  *
- * Confetti is handled separately by a reactive mutual-detection effect.
+ * Counter-verification (addContact + send) happens only after
+ * user confirms in the UI (confirmIncoming in useVerification).
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { VerificationHelper } from '@real-life/wot-core'
@@ -60,20 +60,16 @@ function makeVerificationEnvelope(fromDid: string, toDid: string, verification: 
 /**
  * Simulates the verification listener logic from App.tsx.
  *
- * Two paths for counter-verification:
- * 1. Known contact → auto counter-verify
- * 2. Unknown sender with valid nonce → setPendingIncoming (user must confirm)
+ * Receive → verify signature → save → if nonce matches → setPendingIncoming.
+ * No auto counter-verification — that requires user confirmation.
  */
 function createVerificationListener(deps: {
   myDid: string
-  contacts: Array<{ did: string; name?: string }>
   existingVerifications: Verification[]
   challengeNonce: string | null
   saveVerification: (v: Verification) => Promise<void>
   setChallengeNonce: (nonce: string | null) => void
   setPendingIncoming: (pending: { verification: Verification; fromDid: string } | null) => void
-  createCounterVerification: (toDid: string) => Promise<Verification>
-  sendEnvelope: (envelope: MessageEnvelope) => Promise<void>
 }) {
   return async (envelope: MessageEnvelope) => {
     if (envelope.type !== 'verification') return
@@ -96,44 +92,14 @@ function createVerificationListener(deps: {
       return
     }
 
-    // Counter-verification logic
     if (verification.to === deps.myDid) {
       const alreadyVerified = deps.existingVerifications.some(
         v => v.from === deps.myDid && v.to === verification.from
       )
 
-      if (!alreadyVerified) {
-        const isContact = deps.contacts.some(c => c.did === verification.from)
-
-        if (isContact) {
-          // Known contact: auto counter-verify
-          try {
-            const counter = await deps.createCounterVerification(verification.from)
-            await deps.saveVerification(counter)
-
-            const counterEnvelope: MessageEnvelope = {
-              v: 1,
-              id: counter.id,
-              type: 'verification',
-              fromDid: deps.myDid,
-              toDid: verification.from,
-              createdAt: new Date().toISOString(),
-              encoding: 'json',
-              payload: JSON.stringify(counter),
-              signature: counter.proof.proofValue,
-            }
-            await deps.sendEnvelope(counterEnvelope)
-          } catch {
-            // Counter-verification failed — non-critical
-          }
-        } else {
-          // Unknown sender: only accept if nonce proves QR scan
-          if (deps.challengeNonce && verification.id.includes(deps.challengeNonce)) {
-            deps.setChallengeNonce(null) // Nonce consumed
-            deps.setPendingIncoming({ verification, fromDid: verification.from })
-          }
-          // else: spam — ignore
-        }
+      if (!alreadyVerified && deps.challengeNonce && verification.id.includes(deps.challengeNonce)) {
+        deps.setChallengeNonce(null)
+        deps.setPendingIncoming({ verification, fromDid: verification.from })
       }
     }
   }
@@ -145,29 +111,22 @@ describe('Verification Listener', () => {
   let saveVerification: ReturnType<typeof vi.fn>
   let setChallengeNonce: ReturnType<typeof vi.fn>
   let setPendingIncoming: ReturnType<typeof vi.fn>
-  let createCounterVerification: ReturnType<typeof vi.fn>
-  let sendEnvelope: ReturnType<typeof vi.fn>
 
   beforeEach(() => {
     saveVerification = vi.fn().mockResolvedValue(undefined)
     setChallengeNonce = vi.fn()
     setPendingIncoming = vi.fn()
-    createCounterVerification = vi.fn().mockResolvedValue(makeVerification(ALICE_DID, BOB_DID))
-    sendEnvelope = vi.fn().mockResolvedValue(undefined)
     vi.restoreAllMocks()
   })
 
   function defaultDeps(overrides?: Partial<Parameters<typeof createVerificationListener>[0]>) {
     return {
       myDid: ALICE_DID,
-      contacts: [] as Array<{ did: string; name?: string }>,
       existingVerifications: [] as Verification[],
       challengeNonce: null as string | null,
       saveVerification,
       setChallengeNonce,
       setPendingIncoming,
-      createCounterVerification,
-      sendEnvelope,
       ...overrides,
     }
   }
@@ -186,108 +145,31 @@ describe('Verification Listener', () => {
     })
   })
 
-  describe('auto counter-verification (known contact)', () => {
-    it('should auto counter-verify known contact WITHOUT user confirmation', async () => {
-      vi.spyOn(VerificationHelper, 'verifySignature').mockResolvedValue(true)
-      const counterVer = makeVerification(ALICE_DID, BOB_DID, 'counter-id')
-      createCounterVerification.mockResolvedValue(counterVer)
-
-      const handler = createVerificationListener(defaultDeps({
-        contacts: [{ did: BOB_DID, name: 'Bob' }], // Already a contact
-        challengeNonce: null, // No active challenge — doesn't matter
-      }))
-
-      const bobVerifiesAlice = makeVerification(BOB_DID, ALICE_DID)
-      await handler(makeVerificationEnvelope(BOB_DID, ALICE_DID, bobVerifiesAlice))
-
-      // Auto counter-verify: no user confirmation needed
-      expect(setPendingIncoming).not.toHaveBeenCalled()
-      expect(saveVerification).toHaveBeenCalledTimes(2)
-      expect(sendEnvelope).toHaveBeenCalled()
-    })
-
-    it('should NOT counter-verify when already verified', async () => {
-      vi.spyOn(VerificationHelper, 'verifySignature').mockResolvedValue(true)
-
-      const existingVerification = makeVerification(ALICE_DID, BOB_DID)
-
-      const handler = createVerificationListener(defaultDeps({
-        contacts: [{ did: BOB_DID }],
-        existingVerifications: [existingVerification],
-      }))
-
-      const bobVerifiesAlice = makeVerification(BOB_DID, ALICE_DID)
-      await handler(makeVerificationEnvelope(BOB_DID, ALICE_DID, bobVerifiesAlice))
-
-      expect(saveVerification).toHaveBeenCalledTimes(1)
-      expect(createCounterVerification).not.toHaveBeenCalled()
-      expect(setPendingIncoming).not.toHaveBeenCalled()
-    })
-
-    it('should NOT counter-verify when I am the sender', async () => {
+  describe('pending incoming (nonce-gated)', () => {
+    it('should set pendingIncoming when sender has valid nonce', async () => {
       vi.spyOn(VerificationHelper, 'verifySignature').mockResolvedValue(true)
 
       const handler = createVerificationListener(defaultDeps({
-        contacts: [{ did: BOB_DID }],
-      }))
-
-      const aliceVerifiesBob = makeVerification(ALICE_DID, BOB_DID)
-      await handler(makeVerificationEnvelope(ALICE_DID, BOB_DID, aliceVerifiesBob))
-
-      expect(saveVerification).toHaveBeenCalledTimes(1)
-      expect(createCounterVerification).not.toHaveBeenCalled()
-      expect(setPendingIncoming).not.toHaveBeenCalled()
-    })
-
-    it('should handle counter-verification failure gracefully', async () => {
-      vi.spyOn(VerificationHelper, 'verifySignature').mockResolvedValue(true)
-      createCounterVerification.mockRejectedValue(new Error('identity locked'))
-
-      const handler = createVerificationListener(defaultDeps({
-        contacts: [{ did: BOB_DID }],
-      }))
-
-      const bobVerifiesAlice = makeVerification(BOB_DID, ALICE_DID)
-      await handler(makeVerificationEnvelope(BOB_DID, ALICE_DID, bobVerifiesAlice))
-
-      expect(saveVerification).toHaveBeenCalledTimes(1)
-    })
-  })
-
-  describe('pending incoming (unknown sender with nonce)', () => {
-    it('should set pendingIncoming when unknown sender has valid nonce', async () => {
-      vi.spyOn(VerificationHelper, 'verifySignature').mockResolvedValue(true)
-
-      const handler = createVerificationListener(defaultDeps({
-        contacts: [],
         challengeNonce: CHALLENGE_NONCE,
       }))
 
       const bobVerifiesAlice = makeVerificationWithNonce(BOB_DID, ALICE_DID, CHALLENGE_NONCE)
       await handler(makeVerificationEnvelope(BOB_DID, ALICE_DID, bobVerifiesAlice))
 
-      // Verification saved
       expect(saveVerification).toHaveBeenCalledTimes(1)
 
-      // Pending set for user confirmation (NOT auto-added)
       expect(setPendingIncoming).toHaveBeenCalledWith({
         verification: bobVerifiesAlice,
         fromDid: BOB_DID,
       })
 
-      // Nonce consumed
       expect(setChallengeNonce).toHaveBeenCalledWith(null)
-
-      // NO auto counter-verify
-      expect(createCounterVerification).not.toHaveBeenCalled()
-      expect(sendEnvelope).not.toHaveBeenCalled()
     })
 
-    it('should REJECT unknown sender without active nonce (spam)', async () => {
+    it('should REJECT sender without active nonce (spam)', async () => {
       vi.spyOn(VerificationHelper, 'verifySignature').mockResolvedValue(true)
 
       const handler = createVerificationListener(defaultDeps({
-        contacts: [],
         challengeNonce: null,
       }))
 
@@ -296,14 +178,12 @@ describe('Verification Listener', () => {
 
       expect(saveVerification).toHaveBeenCalledTimes(1)
       expect(setPendingIncoming).not.toHaveBeenCalled()
-      expect(createCounterVerification).not.toHaveBeenCalled()
     })
 
-    it('should REJECT unknown sender with wrong nonce (spam)', async () => {
+    it('should REJECT sender with wrong nonce (spam)', async () => {
       vi.spyOn(VerificationHelper, 'verifySignature').mockResolvedValue(true)
 
       const handler = createVerificationListener(defaultDeps({
-        contacts: [],
         challengeNonce: CHALLENGE_NONCE,
       }))
 
@@ -312,7 +192,37 @@ describe('Verification Listener', () => {
 
       expect(saveVerification).toHaveBeenCalledTimes(1)
       expect(setPendingIncoming).not.toHaveBeenCalled()
-      expect(createCounterVerification).not.toHaveBeenCalled()
+    })
+
+    it('should NOT set pending when already verified', async () => {
+      vi.spyOn(VerificationHelper, 'verifySignature').mockResolvedValue(true)
+
+      const existingVerification = makeVerification(ALICE_DID, BOB_DID)
+
+      const handler = createVerificationListener(defaultDeps({
+        existingVerifications: [existingVerification],
+        challengeNonce: CHALLENGE_NONCE,
+      }))
+
+      const bobVerifiesAlice = makeVerificationWithNonce(BOB_DID, ALICE_DID, CHALLENGE_NONCE)
+      await handler(makeVerificationEnvelope(BOB_DID, ALICE_DID, bobVerifiesAlice))
+
+      expect(saveVerification).toHaveBeenCalledTimes(1)
+      expect(setPendingIncoming).not.toHaveBeenCalled()
+    })
+
+    it('should NOT set pending when I am the sender', async () => {
+      vi.spyOn(VerificationHelper, 'verifySignature').mockResolvedValue(true)
+
+      const handler = createVerificationListener(defaultDeps({
+        challengeNonce: CHALLENGE_NONCE,
+      }))
+
+      const aliceVerifiesBob = makeVerification(ALICE_DID, BOB_DID)
+      await handler(makeVerificationEnvelope(ALICE_DID, BOB_DID, aliceVerifiesBob))
+
+      expect(saveVerification).toHaveBeenCalledTimes(1)
+      expect(setPendingIncoming).not.toHaveBeenCalled()
     })
   })
 
@@ -326,7 +236,6 @@ describe('Verification Listener', () => {
       await handler(makeVerificationEnvelope(BOB_DID, ALICE_DID, fakeVerification))
 
       expect(saveVerification).not.toHaveBeenCalled()
-      expect(createCounterVerification).not.toHaveBeenCalled()
       expect(setPendingIncoming).not.toHaveBeenCalled()
     })
 
@@ -413,7 +322,6 @@ describe('Verification Listener', () => {
       await handler(makeVerificationEnvelope(BOB_DID, ALICE_DID, verification))
 
       expect(saveVerification).toHaveBeenCalledTimes(1)
-      expect(createCounterVerification).not.toHaveBeenCalled()
       expect(setPendingIncoming).not.toHaveBeenCalled()
     })
   })
