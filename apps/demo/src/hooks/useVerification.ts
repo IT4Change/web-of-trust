@@ -131,7 +131,7 @@ export function useVerification() {
         )
         await verificationService.saveVerification(verification)
 
-        // Send via relay (critical — recipient needs this for Empfänger-Prinzip)
+        // Send via relay (non-blocking — outbox handles retry if offline)
         const envelope: MessageEnvelope = {
           v: 1,
           id: verification.id,
@@ -143,7 +143,7 @@ export function useVerification() {
           payload: JSON.stringify(verification),
           signature: verification.proof.proofValue,
         }
-        await send(envelope)
+        send(envelope).catch(() => {})
 
         pendingChallengeCodeRef.current = null
         setChallengeNonce(null)
@@ -178,7 +178,7 @@ export function useVerification() {
         const counter = await VerificationHelper.createVerificationFor(identity, verification.from, nonce)
         await verificationService.saveVerification(counter)
 
-        // Send counter-verification via relay (critical — recipient needs this)
+        // Send counter-verification via relay (non-blocking — outbox handles retry)
         const envelope: MessageEnvelope = {
           v: 1,
           id: counter.id,
@@ -190,7 +190,7 @@ export function useVerification() {
           payload: JSON.stringify(counter),
           signature: counter.proof.proofValue,
         }
-        await send(envelope)
+        send(envelope).catch(() => {})
 
         setPendingIncoming(null)
         setStep('done')
@@ -235,7 +235,7 @@ export function useVerification() {
         payload: JSON.stringify(counter),
         signature: counter.proof.proofValue,
       }
-      await send(envelope)
+      send(envelope).catch(() => {})
     },
     [identity, did, addContact, syncContactProfile, verificationService, send]
   )

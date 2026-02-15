@@ -13,6 +13,7 @@
 export type ClientMessage =
   | { type: 'register'; did: string }
   | { type: 'send'; envelope: Record<string, unknown> }
+  | { type: 'ping' }
 
 /** Relay → Client */
 export type RelayMessage =
@@ -20,6 +21,7 @@ export type RelayMessage =
   | { type: 'message'; envelope: Record<string, unknown> }
   | { type: 'receipt'; receipt: RelayReceipt }
   | { type: 'error'; code: string; message: string }
+  | { type: 'pong' }
 
 export interface RelayReceipt {
   messageId: string

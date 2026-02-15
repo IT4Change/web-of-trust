@@ -83,9 +83,12 @@ export class AttestationService {
           signature: attestation.proof.proofValue,
           ref: createResourceRef('attestation', attestation.id),
         }
-        await this.messaging.send(envelope)
+        // Non-blocking — outbox handles retry if offline/slow
+        this.messaging.send(envelope).catch((error) => {
+          console.warn('Failed to send attestation via relay:', error)
+        })
       } catch (error) {
-        console.warn('Failed to send attestation via relay:', error)
+        console.warn('Failed to prepare attestation envelope:', error)
       }
     }
 

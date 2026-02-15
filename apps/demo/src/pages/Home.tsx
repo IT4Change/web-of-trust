@@ -1,6 +1,6 @@
 import { Link } from 'react-router-dom'
-import { Users, Shield, Award, ArrowRight, Wifi, WifiOff, CloudOff } from 'lucide-react'
-import { useContacts, useAttestations, useMessaging, useSyncStatus, useLocalIdentity } from '../hooks'
+import { Users, Shield, Award, ArrowRight, Wifi, WifiOff, CloudOff, Send } from 'lucide-react'
+import { useContacts, useAttestations, useMessaging, useSyncStatus, useOutboxStatus, useLocalIdentity } from '../hooks'
 import { useIdentity } from '../context'
 
 export function Home() {
@@ -10,6 +10,7 @@ export function Home() {
   const { myAttestations, receivedAttestations } = useAttestations()
   const { state: relayState, isConnected } = useMessaging()
   const { hasPendingSync } = useSyncStatus()
+  const { pendingCount, hasPendingMessages } = useOutboxStatus()
 
   const displayName = localIdentity?.profile.name || (did ? `did:...${did.slice(-8)}` : '')
 
@@ -44,7 +45,7 @@ export function Home() {
           Hallo, {displayName}!
         </h1>
         <p className="text-slate-600">
-          Willkommen im Web of Trust Demo.
+          Willkommen im Web of Trust
         </p>
         <div className="mt-2 flex items-center gap-2 text-sm">
           {isConnected ? (
@@ -68,6 +69,13 @@ export function Home() {
               <span className="text-slate-300">|</span>
               <CloudOff size={14} className="text-amber-500" />
               <span className="text-amber-600">Profil-Sync ausstehend</span>
+            </>
+          )}
+          {hasPendingMessages && (
+            <>
+              <span className="text-slate-300">|</span>
+              <Send size={14} className="text-amber-500" />
+              <span className="text-amber-600">{pendingCount} Nachricht{pendingCount !== 1 ? 'en' : ''} in Warteschlange</span>
             </>
           )}
         </div>

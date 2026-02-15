@@ -2,7 +2,7 @@
 
 > Framework-agnostische Architektur des Web of Trust
 >
-> Aktualisiert: 2026-02-11 (v2: 7-Adapter-Architektur)
+> Aktualisiert: 2026-02-14 (v2: 7-Adapter-Architektur + Offline-First)
 
 ## Überblick
 
@@ -31,12 +31,12 @@ Das Web of Trust ist **framework-agnostisch** aufgebaut. Die Kernlogik ist unabh
 │  │  • ReactiveStorageAdapter (Live Queries)                  │   │
 │  │  • CryptoAdapter         (Signing/Encryption/DID)         │   │
 │  │                                                           │   │
-│  │  Netzwerk (v2):                                           │   │
+│  │  Netzwerk (v2, implementiert):                             │   │
 │  │  • DiscoveryAdapter      (Öffentliche Profile/Discovery)  │   │
 │  │  • MessagingAdapter      (Cross-User Delivery)            │   │
 │  │  • ReplicationAdapter    (CRDT Sync + Spaces)             │   │
 │  │                                                           │   │
-│  │  Querschnitt (v2):                                        │   │
+│  │  Querschnitt (v2, geplant):                                │   │
 │  │  • AuthorizationAdapter  (UCAN-like Capabilities)         │   │
 │  └──────────────────────────────────────────────────────────┘   │
 │                            │                                     │
@@ -198,7 +198,8 @@ Verantwortlich für:
 
 Verantwortlich für:
 - Live Queries die auf Datenänderungen reagieren
-- Mapped auf React's `useSyncExternalStore` via `Subscribable<T>`
+- `Subscribable<T>` Pattern mit `useState`+`useEffect` (nicht `useSyncExternalStore` — Evolu's `loadQuery().then()` in `subscribe()` verletzt dessen Contract)
+- `watchIdentity()` — Reaktive Identity-Änderungen beobachten
 
 **Implementierungen:**
 - `EvoluStorageAdapter` (implementiert beide Interfaces)
@@ -230,6 +231,7 @@ Verantwortlich für:
 **Implementierungen:**
 
 - `HttpDiscoveryAdapter` (wot-profiles) — HTTP REST + SQLite, aktiv genutzt
+- `OfflineFirstDiscoveryAdapter` (Wrapper) — Offline-Cache + Dirty-Flag-Tracking, delegiert an HttpDiscoveryAdapter
 
 #### MessagingAdapter
 
@@ -239,9 +241,11 @@ Verantwortlich für:
 - Item-Key Delivery (selektive Sichtbarkeit)
 - DID-Auflösung (wie findet man den Empfänger?)
 
-**Geplante Implementierungen:**
-- Custom WebSocket Relay (POC)
-- Matrix Client (Produktion)
+**Implementierungen:**
+
+- `InMemoryMessagingAdapter` (Tests) — Shared-Bus Pattern für Unit-Tests
+- `WebSocketMessagingAdapter` (POC) — Browser-nativer WebSocket Client + wot-relay Server
+- Matrix Client (Produktion, geplant)
 
 #### ReplicationAdapter
 
@@ -250,9 +254,11 @@ Verantwortlich für:
 - Multi-User Sync (Shared Spaces: Kanban, Kalender, Karte)
 - Membership Management (wer ist in welchem Space?)
 
-**Geplante Implementierungen:**
-- Evolu (Personal Space, POC)
-- Automerge (Shared Spaces, Produktion)
+**Implementierungen:**
+
+- `AutomergeReplicationAdapter` (POC) — Automerge CRDT + EncryptedSyncService + GroupKeyService + MessagingAdapter
+- Evolu (Personal Space, Multi-Device — geplant)
+- Matrix-backed (Produktion, geplant)
 
 #### AuthorizationAdapter
 
@@ -274,22 +280,54 @@ Die TypeScript-Definitionen aller Typen und Interfaces befinden sich im `package
 ```
 packages/wot-core/src/
 ├── types/
-│   ├── identity.ts      # Identity, Profile, KeyPair
-│   ├── contact.ts       # Contact, ContactStatus
-│   ├── verification.ts  # Verification, GeoLocation
-│   ├── attestation.ts   # Attestation, AttestationMetadata
-│   └── proof.ts         # Proof (W3C Data Integrity)
+│   ├── identity.ts        # Identity, Profile, PublicProfile, KeyPair
+│   ├── contact.ts         # Contact, ContactStatus
+│   ├── verification.ts    # Verification, GeoLocation
+│   ├── attestation.ts     # Attestation, AttestationMetadata
+│   ├── proof.ts           # Proof (W3C Data Integrity)
+│   ├── messaging.ts       # MessageEnvelope, DeliveryReceipt, MessagingState
+│   ├── resource-ref.ts    # ResourceRef branded type (wot:<type>:<id>)
+│   └── space.ts           # SpaceInfo, SpaceMemberChange, ReplicationState
 ├── adapters/
-│   └── interfaces/
-│       ├── StorageAdapter.ts
-│       ├── ReactiveStorageAdapter.ts
-│       ├── Subscribable.ts
-│       ├── CryptoAdapter.ts
-│       └── SyncAdapter.ts          # → wird durch Messaging + Replication ersetzt
-└── crypto/
-    ├── did.ts           # did:key Implementierung
-    ├── jws.ts           # JSON Web Signature
-    └── encoding.ts      # Base58, Base64Url
+│   ├── interfaces/
+│   │   ├── StorageAdapter.ts
+│   │   ├── ReactiveStorageAdapter.ts    # + watchIdentity()
+│   │   ├── Subscribable.ts
+│   │   ├── CryptoAdapter.ts            # + Symmetric + EncryptedPayload
+│   │   ├── MessagingAdapter.ts         # Cross-User Messaging
+│   │   ├── DiscoveryAdapter.ts         # Public Profile Discovery
+│   │   ├── DiscoverySyncStore.ts       # Offline-Cache Interface
+│   │   └── ReplicationAdapter.ts       # CRDT Spaces + SpaceHandle<T>
+│   ├── crypto/
+│   │   └── WebCryptoAdapter.ts         # Ed25519 + X25519 + AES-256-GCM
+│   ├── messaging/
+│   │   ├── InMemoryMessagingAdapter.ts # Shared-Bus für Tests
+│   │   └── WebSocketMessagingAdapter.ts # Browser WebSocket Client
+│   ├── discovery/
+│   │   ├── HttpDiscoveryAdapter.ts     # HTTP-based (wot-profiles)
+│   │   ├── OfflineFirstDiscoveryAdapter.ts  # Offline-Cache Wrapper
+│   │   └── InMemoryDiscoverySyncStore.ts    # In-Memory Cache für Tests
+│   ├── replication/
+│   │   └── AutomergeReplicationAdapter.ts   # Automerge + E2EE + GroupKeys
+│   └── storage/
+│       └── LocalStorageAdapter.ts
+├── services/
+│   ├── ProfileService.ts             # signProfile, verifyProfile (JWS)
+│   ├── EncryptedSyncService.ts       # Encrypt/Decrypt CRDT Changes
+│   └── GroupKeyService.ts            # Group Key Management (Generations)
+├── crypto/
+│   ├── did.ts             # did:key Implementierung
+│   ├── jws.ts             # JSON Web Signature
+│   └── encoding.ts        # Base58, Base64Url
+├── identity/
+│   ├── WotIdentity.ts     # Ed25519 + X25519 + JWS + HKDF
+│   └── SeedStorage.ts     # Encrypted Seed in IndexedDB
+├── contact/
+│   └── ContactStorage.ts  # Contact CRUD in IndexedDB
+├── verification/
+│   └── VerificationHelper.ts  # Challenge-Response-Protokoll
+└── wordlists/
+    └── german-positive.ts # 2048 deutsche BIP39-Wörter
 ```
 
 ## Framework-Evaluation
@@ -299,7 +337,7 @@ Für eine detaillierte Analyse aller evaluierten CRDT/E2EE/Messaging Frameworks 
 
 ## Weiterführend
 
-- [Adapter-Architektur v2](../protokolle/adapter-architektur-v2.md) - 6-Adapter-Spezifikation (NEU)
+- [Adapter-Architektur v2](../protokolle/adapter-architektur-v2.md) - 7-Adapter-Spezifikation
 - [Entitäten](entitaeten.md) - Datenmodell im Detail
 - [Sync-Protokoll](../protokolle/sync-protokoll.md) - Wie Daten synchronisiert werden
 - [Verschlüsselung](../protokolle/verschluesselung.md) - E2E-Verschlüsselung

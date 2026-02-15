@@ -14,7 +14,7 @@ import { useIdentity } from '../context'
  * This hook triggers publish operations and retry via syncDiscovery().
  */
 export function useProfileSync() {
-  const { storage, messaging, reactiveStorage, discovery, syncDiscovery } = useAdapters()
+  const { storage, messaging, reactiveStorage, discovery, syncDiscovery, flushOutbox, reconnectRelay } = useAdapters()
   const { identity } = useIdentity()
   const fetchedRef = useRef(new Set<string>())
   const vaUploadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -111,10 +111,16 @@ export function useProfileSync() {
 
     // Sync pending on mount
     syncDiscovery()
+    flushOutbox()
 
-    const handleOnline = () => syncDiscovery()
+    const handleReconnect = async () => {
+      await reconnectRelay()
+      syncDiscovery()
+      flushOutbox()
+    }
+    const handleOnline = () => { handleReconnect() }
     const handleVisible = () => {
-      if (document.visibilityState === 'visible') syncDiscovery()
+      if (document.visibilityState === 'visible') handleReconnect()
     }
 
     window.addEventListener('online', handleOnline)
@@ -124,7 +130,7 @@ export function useProfileSync() {
       window.removeEventListener('online', handleOnline)
       document.removeEventListener('visibilitychange', handleVisible)
     }
-  }, [identity, syncDiscovery])
+  }, [identity, syncDiscovery, flushOutbox, reconnectRelay])
 
   // Note: No unconditional uploadProfile() on mount.
   // syncDiscovery() above already retries dirty flags.

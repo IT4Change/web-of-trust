@@ -4,6 +4,7 @@ import {
   WebSocketMessagingAdapter,
   HttpDiscoveryAdapter,
   OfflineFirstDiscoveryAdapter,
+  OutboxMessagingAdapter,
   type StorageAdapter,
   type ReactiveStorageAdapter,
   type CryptoAdapter,
@@ -22,6 +23,7 @@ import {
 } from '../services'
 import { EvoluStorageAdapter } from '../adapters/EvoluStorageAdapter'
 import { EvoluDiscoverySyncStore } from '../adapters/EvoluDiscoverySyncStore'
+import { EvoluOutboxStore } from '../adapters/EvoluOutboxStore'
 import { createWotEvolu, isEvoluInitialized, getEvolu } from '../db'
 import { useIdentity } from './IdentityContext'
 
@@ -35,11 +37,14 @@ interface AdapterContextValue {
   messaging: MessagingAdapter
   discovery: DiscoveryAdapter
   discoverySyncStore: EvoluDiscoverySyncStore
+  outboxStore: EvoluOutboxStore
   messagingState: MessagingState
   contactService: ContactService
   verificationService: VerificationService
   attestationService: AttestationService
   syncDiscovery: () => Promise<void>
+  flushOutbox: () => Promise<void>
+  reconnectRelay: () => Promise<void>
   isInitialized: boolean
 }
 
@@ -63,7 +68,9 @@ export function AdapterProvider({ children, identity }: AdapterProviderProps) {
 
   useEffect(() => {
     let cancelled = false
-    let messagingAdapter: WebSocketMessagingAdapter | null = null
+    let outboxAdapter: OutboxMessagingAdapter | null = null
+    let reconnectTimer: ReturnType<typeof setInterval> | null = null
+    let offlineHandler: (() => void) | null = null
 
     async function initAdapters() {
       try {
@@ -74,13 +81,18 @@ export function AdapterProvider({ children, identity }: AdapterProviderProps) {
 
         const storage = new EvoluStorageAdapter(evolu, did)
         const crypto = new WebCryptoAdapter()
-        messagingAdapter = new WebSocketMessagingAdapter(RELAY_URL)
+        const wsAdapter = new WebSocketMessagingAdapter(RELAY_URL)
+        const outboxStore = new EvoluOutboxStore(evolu)
+        outboxAdapter = new OutboxMessagingAdapter(wsAdapter, outboxStore, {
+          skipTypes: ['profile-update'],
+          sendTimeoutMs: 15_000,
+        })
         const httpDiscovery = new HttpDiscoveryAdapter(PROFILE_SERVICE_URL)
         const discoverySyncStore = new EvoluDiscoverySyncStore(evolu, did)
         const discovery = new OfflineFirstDiscoveryAdapter(httpDiscovery, discoverySyncStore)
 
         const attestationService = new AttestationService(storage, crypto)
-        attestationService.setMessaging(messagingAdapter)
+        attestationService.setMessaging(outboxAdapter)
 
         // Ensure identity exists in Evolu.
         // On a new device (recovery/import), Evolu may still be syncing from relay,
@@ -139,37 +151,84 @@ export function AdapterProvider({ children, identity }: AdapterProviderProps) {
           }
         }
 
+        const flushOutbox = async () => {
+          try {
+            await outboxAdapter!.flushOutbox()
+          } catch (error) {
+            console.warn('Outbox flush failed:', error)
+          }
+        }
+
+        const reconnectRelay = async () => {
+          const currentState = outboxAdapter!.getState()
+          if (!did || currentState === 'connected' || currentState === 'connecting') return
+          try {
+            setMessagingState('connecting')
+            await outboxAdapter!.connect(did)
+            if (!cancelled) setMessagingState('connected')
+          } catch (error) {
+            console.warn('Relay reconnect failed:', error)
+            if (!cancelled) setMessagingState('error')
+          }
+        }
+
         if (!cancelled) {
           setAdapters({
             storage,
             reactiveStorage: storage,
             crypto,
-            messaging: messagingAdapter,
+            messaging: outboxAdapter,
             discovery,
             discoverySyncStore,
+            outboxStore,
             contactService: new ContactService(storage),
             verificationService: new VerificationService(storage),
             attestationService,
             syncDiscovery,
+            flushOutbox,
+            reconnectRelay,
           })
           setIsInitialized(true)
 
           // Connect to relay after adapters are set
           if (did && !cancelled) {
             // Track adapter state changes (disconnect, reconnect)
-            messagingAdapter.onStateChange((state) => {
-              if (!cancelled) setMessagingState(state)
+            outboxAdapter.onStateChange((state) => {
+              if (!cancelled) {
+                setMessagingState(state)
+                // Flush outbox on reconnect
+                if (state === 'connected') outboxAdapter!.flushOutbox()
+              }
             })
 
             try {
               setMessagingState('connecting')
-              await messagingAdapter.connect(did)
+              await outboxAdapter.connect(did)
               if (!cancelled) setMessagingState('connected')
               console.log(`Relay connected: ${RELAY_URL} (${did.slice(0, 20)}...)`)
             } catch (error) {
               console.warn('Relay connection failed:', error)
               if (!cancelled) setMessagingState('error')
             }
+
+            // Immediately disconnect WebSocket when browser goes offline
+            offlineHandler = () => {
+              if (!cancelled) {
+                outboxAdapter!.disconnect()
+                setMessagingState('disconnected')
+              }
+            }
+            window.addEventListener('offline', offlineHandler)
+
+            // Auto-reconnect: retry every 10s when disconnected
+            reconnectTimer = setInterval(() => {
+              if (cancelled) return
+              if (!navigator.onLine) return // Don't retry while browser is offline
+              const state = outboxAdapter!.getState()
+              if (state === 'disconnected' || state === 'error') {
+                reconnectRelay()
+              }
+            }, 10_000)
           }
         }
       } catch (error) {
@@ -188,7 +247,9 @@ export function AdapterProvider({ children, identity }: AdapterProviderProps) {
     initAdapters()
     return () => {
       cancelled = true
-      messagingAdapter?.disconnect()
+      if (reconnectTimer) clearInterval(reconnectTimer)
+      if (offlineHandler) window.removeEventListener('offline', offlineHandler)
+      outboxAdapter?.disconnect()
     }
   }, [identity])
 

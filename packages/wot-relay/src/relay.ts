@@ -88,6 +88,9 @@ export class RelayServer {
       case 'send':
         this.handleSend(ws, msg.envelope)
         break
+      case 'ping':
+        this.sendTo(ws, { type: 'pong' })
+        break
     }
   }
 

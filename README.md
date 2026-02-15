@@ -1,5 +1,8 @@
 # Web of Trust
 
+[![CI](https://github.com/antontranelis/web-of-trust/actions/workflows/ci.yml/badge.svg)](https://github.com/antontranelis/web-of-trust/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/@real-life/wot-core)](https://www.npmjs.com/package/@real-life/wot-core)
+
 Das Web of Trust vernetzt Menschen, die sich im echten Leben treffen, kooperieren und gegenseitig vertrauen.
 
 ## Konzept

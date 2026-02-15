@@ -42,6 +42,9 @@ type DiscoverySyncStateId = typeof DiscoverySyncStateId.Type
 const CachedProfileId = id('CachedProfile')
 type CachedProfileId = typeof CachedProfileId.Type
 
+const OutboxId = id('Outbox')
+type OutboxId = typeof OutboxId.Type
+
 // --- Schema ---
 
 const Schema = {
@@ -100,6 +103,12 @@ const Schema = {
     bio: nullOr(NonEmptyString1000),
     avatar: nullOr(NonEmptyString),
     fetchedAt: NonEmptyString1000,
+  },
+  outbox: {
+    id: OutboxId,
+    envelopeId: NonEmptyString1000,
+    envelopeJson: NonEmptyString, // Full serialized MessageEnvelope
+    retryCount: NonEmptyString1000, // String-encoded integer
   },
 } as const
 
@@ -167,4 +176,4 @@ export async function resetEvolu(): Promise<void> {
   localStorage.removeItem('wot-evolu-owner-id')
 }
 
-export { Schema, type AppSchema, type ProfileId, type ContactId, type VerificationId, type AttestationId, type AttestationMetadataId, type DiscoverySyncStateId, type CachedProfileId }
+export { Schema, type AppSchema, type ProfileId, type ContactId, type VerificationId, type AttestationId, type AttestationMetadataId, type DiscoverySyncStateId, type CachedProfileId, type OutboxId }

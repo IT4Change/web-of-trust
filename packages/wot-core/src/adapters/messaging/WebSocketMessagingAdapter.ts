@@ -24,6 +24,10 @@ export class WebSocketMessagingAdapter implements MessagingAdapter {
   private stateCallbacks = new Set<(state: MessagingState) => void>()
   private transportMap = new Map<string, string>()
   private pendingReceipts = new Map<string, (receipt: DeliveryReceipt) => void>()
+  private heartbeatInterval: ReturnType<typeof setInterval> | null = null
+  private heartbeatTimeout: ReturnType<typeof setTimeout> | null = null
+  private readonly HEARTBEAT_INTERVAL_MS = 15_000
+  private readonly HEARTBEAT_TIMEOUT_MS = 5_000
 
   constructor(private relayUrl: string) {}
 
@@ -59,6 +63,7 @@ export class WebSocketMessagingAdapter implements MessagingAdapter {
         switch (msg.type) {
           case 'registered':
             this.setState('connected')
+            this.startHeartbeat()
             resolve()
             break
 
@@ -83,6 +88,10 @@ export class WebSocketMessagingAdapter implements MessagingAdapter {
             break
           }
 
+          case 'pong':
+            this.handlePong()
+            break
+
           case 'error':
             if (this.state === 'connecting') {
               this.setState('error')
@@ -106,6 +115,7 @@ export class WebSocketMessagingAdapter implements MessagingAdapter {
   }
 
   async disconnect(): Promise<void> {
+    this.stopHeartbeat()
     if (this.ws) {
       this.ws.close()
       this.ws = null
@@ -115,6 +125,46 @@ export class WebSocketMessagingAdapter implements MessagingAdapter {
 
   getState(): MessagingState {
     return this.state
+  }
+
+  private startHeartbeat(): void {
+    this.stopHeartbeat()
+    this.heartbeatInterval = setInterval(() => {
+      if (this.state !== 'connected' || !this.ws) {
+        this.stopHeartbeat()
+        return
+      }
+      // Send ping and start timeout
+      this.ws.send(JSON.stringify({ type: 'ping' }))
+      this.heartbeatTimeout = setTimeout(() => {
+        // No pong received — connection is dead
+        this.stopHeartbeat()
+        if (this.ws) {
+          this.ws.close()
+          this.ws = null
+        }
+        this.setState('disconnected')
+      }, this.HEARTBEAT_TIMEOUT_MS)
+    }, this.HEARTBEAT_INTERVAL_MS)
+  }
+
+  private stopHeartbeat(): void {
+    if (this.heartbeatInterval) {
+      clearInterval(this.heartbeatInterval)
+      this.heartbeatInterval = null
+    }
+    if (this.heartbeatTimeout) {
+      clearTimeout(this.heartbeatTimeout)
+      this.heartbeatTimeout = null
+    }
+  }
+
+  private handlePong(): void {
+    // Pong received — connection is alive, clear timeout
+    if (this.heartbeatTimeout) {
+      clearTimeout(this.heartbeatTimeout)
+      this.heartbeatTimeout = null
+    }
   }
 
   async send(envelope: MessageEnvelope): Promise<DeliveryReceipt> {

@@ -7,8 +7,8 @@ Dieses Dokument zeigt, was bereits implementiert ist und welche Entscheidungen g
 
 ## Letzte Aktualisierung
 
-**Datum:** 2026-02-11
-**Phase:** Week 5++ - DiscoveryAdapter (7-Adapter-Architektur Complete)
+**Datum:** 2026-02-14
+**Phase:** Week 5+++ - Offline-First Discovery + Reactive Identity
 
 ---
 
@@ -1225,7 +1225,118 @@ POC-Implementierung gegen wot-profiles HTTP Service:
 
 Keine neuen Tests nötig — die bestehenden wot-profiles Tests (19) decken die HTTP-Endpunkte ab, und die Demo-App funktioniert wie vorher.
 
-**Gesamt: 190 Tests** (156 wot-core + 19 wot-profiles + 15 wot-relay) — alle passing ✅
+**Gesamt (vor Week 5+++): 190 Tests** (156 wot-core + 19 wot-profiles + 15 wot-relay) — alle passing ✅
+
+---
+
+## Week 5+++: Offline-First Discovery + Reactive Identity (2026-02-14) ✅
+
+### Übersicht
+
+Vier zusammenhängende Verbesserungen für Offline-Fähigkeit und reaktive Daten: Identity-Refactoring (Evolu als Single Source of Truth), Offline-First Discovery Layer, Reactive Identity mit Offline-Fallback für Public Profiles, und Profile-Upload-Fix.
+
+### Implementiert
+
+#### Identity-Refactoring: localStorage eliminiert (`e1a54cd`)
+
+- ✅ **Evolu ist Single Source of Truth** — Identity-Daten (Name, Bio, Avatar) werden nicht mehr parallel in localStorage gehalten
+- ✅ **Migration** — Bestehende localStorage-Daten werden beim ersten Start nach Evolu migriert
+- ✅ **Vereinfachung** — Keine Synchronisationsprobleme mehr zwischen zwei Stores
+
+#### Offline-First Discovery Layer (`55d82a3`)
+
+Neues Wrapper-Pattern: `OfflineFirstDiscoveryAdapter` umschließt `HttpDiscoveryAdapter` und fügt Offline-Cache + Dirty-Flag-Tracking hinzu.
+
+**Neue Interfaces/Klassen in wot-core:**
+
+- ✅ **DiscoverySyncStore Interface** (`adapters/interfaces/DiscoverySyncStore.ts`) — 5 Methoden für Cache-Persistenz
+  - `getCachedProfile(did)` / `setCachedProfile(did, profile)`
+  - `getDirtyProfiles()` / `markDirty(did)` / `clearDirty(did)`
+- ✅ **InMemoryDiscoverySyncStore** — In-Memory-Implementierung für Tests
+- ✅ **OfflineFirstDiscoveryAdapter** — Wrapper mit Offline-Fallback
+  - `resolveProfile()` → Cache zuerst, dann HTTP (wenn online)
+  - `publishProfile()` → HTTP wenn online, sonst Dirty-Flag setzen
+  - `syncDirty()` — Alle ausstehenden Profile-Updates hochladen
+
+**Neue Klassen in Demo-App:**
+
+- ✅ **EvoluDiscoverySyncStore** (`adapters/EvoluDiscoverySyncStore.ts`) — Evolu-basierte Cache-Persistenz
+  - Neue Evolu-Tabelle `profileCache` (did, name, bio, avatar, updatedAt, isDirty)
+  - Überlebt Browser-Restart
+- ✅ **useOnlineStatus Hook** — `navigator.onLine` + Event-Listener
+- ✅ **useSyncStatus Hook** — Zeigt Dirty-Count an
+
+**AdapterContext aktualisiert:**
+
+- `OfflineFirstDiscoveryAdapter` statt direktem `HttpDiscoveryAdapter`
+- `EvoluDiscoverySyncStore` als Cache-Backend
+- Auto-Sync bei Online-Reconnect
+
+#### Reactive Identity + Offline Profile Fallback (`a5fdc3a`)
+
+- ✅ **watchIdentity()** — Neues Method in `ReactiveStorageAdapter` Interface, reagiert auf Identity-Änderungen in Evolu
+- ✅ **useProfile Hook erweitert** — Nutzt `watchIdentity()` für reaktive Updates (Name/Bio ändern → sofort sichtbar)
+- ✅ **useSubscribable erweitert** — Unterstützt jetzt `initialValue` Parameter
+- ✅ **Home.tsx reaktiv** — Zeigt Identity-Daten reaktiv an (kein Reload nötig nach Profiländerung)
+- ✅ **PublicProfile Offline-Fallback** — Wenn offline: Profildaten aus lokalen Kontakten/Identity-Daten zusammenbauen
+- ✅ **Amber Offline-Banner** — Zeigt an wenn Profildaten möglicherweise veraltet sind
+
+#### Profile-Upload Fix (`e3712c1`)
+
+- ✅ **Kein unconditional uploadProfile() bei Mount** — Verhindert Stale Overwrites (wenn Tab geöffnet wird, überschreibt es nicht die Serverdaten mit möglicherweise veralteten lokalen Daten)
+- ✅ **Upload nur bei expliziter Profiländerung** — Dirty-Flag-basiert
+
+### Tests Week 5+++
+
+**19 neue Tests:**
+
+#### OfflineFirstDiscoveryAdapter Tests (19 Tests)
+
+```typescript
+packages/wot-core/tests/OfflineFirstDiscoveryAdapter.test.ts
+
+Resolve (Online):
+✓ Fetch from HTTP and cache locally
+✓ Return cached profile when HTTP fails
+✓ Update cache when HTTP returns newer data
+
+Resolve (Offline):
+✓ Return cached profile when offline
+✓ Return null when offline and no cache
+
+Publish (Online):
+✓ Publish via HTTP and clear dirty flag
+✓ Publish falls back to dirty flag when HTTP fails
+
+Publish (Offline):
+✓ Mark as dirty when offline
+✓ Don't attempt HTTP when offline
+
+Sync:
+✓ Sync all dirty profiles when back online
+✓ Clear dirty flags after successful sync
+✓ Handle partial sync failures
+
+Cache Management:
+✓ Cache profiles from resolve
+✓ Separate caches per DID
+✓ Update existing cache entries
+
+Verifications/Attestations:
+✓ Delegate to inner adapter (online)
+✓ Return empty arrays when offline
+✓ Publish verifications/attestations
+✓ Dirty flag for verifications/attestations
+```
+
+**Gesamt: 209 Tests** (175 wot-core + 19 wot-profiles + 15 wot-relay) — alle passing ✅
+
+### Commits Week 5+++
+
+- **refactor: eliminate localStorage for identity, Evolu is single source of truth** — Identity-Daten nur noch in Evolu
+- **feat: offline-first discovery layer with dirty-flag tracking and profile caching** — OfflineFirstDiscoveryAdapter, DiscoverySyncStore, EvoluDiscoverySyncStore, 19 Tests
+- **feat: reactive identity + offline fallback for public profiles** — watchIdentity(), useProfile reaktiv, PublicProfile Offline-Fallback
+- **fix: remove unconditional uploadProfile() on mount to prevent stale overwrites** — Dirty-Flag-basierter Upload
 
 ---
 
@@ -1314,6 +1425,10 @@ const evolKey = await identity.deriveFrameworkKey('evolu-storage-v1')
 - ~~GroupKeyService (Key Generation, Rotation, Generations)~~ ✅
 - ~~wot-profiles Deployment (Docker, profiles.utopia-lab.org)~~ ✅
 - ~~DiscoveryAdapter (7. Adapter, HttpDiscoveryAdapter)~~ ✅
+- ~~Offline-First Discovery (OfflineFirstDiscoveryAdapter, DiscoverySyncStore)~~ ✅
+- ~~Reactive Identity (watchIdentity, useProfile reaktiv)~~ ✅
+- ~~localStorage eliminiert (Evolu = Single Source of Truth)~~ ✅
+- ~~Profile-Upload Fix (Dirty-Flag-basiert statt unconditional)~~ ✅
 - **Identity-System konsolidieren** — altes IdentityService/useIdentity entfernen (Plan existiert, niedrige Priorität)
 
 ### Zurückgestellt
@@ -1413,8 +1528,8 @@ const evolKey = await identity.deriveFrameworkKey('evolu-storage-v1')
 ```
 packages/wot-core/src/
 ├── identity/
-│   ├── WotIdentity.ts              # Haupt-Identity-Klasse
-│   ├── SeedStorage.ts              # Encrypted seed storage
+│   ├── WotIdentity.ts              # Ed25519 + X25519 + JWS + HKDF
+│   ├── SeedStorage.ts              # Encrypted seed in IndexedDB
 │   └── index.ts
 ├── contact/
 │   ├── ContactStorage.ts           # Contact CRUD in IndexedDB
@@ -1433,30 +1548,30 @@ packages/wot-core/src/
 ├── adapters/
 │   ├── interfaces/
 │   │   ├── StorageAdapter.ts
+│   │   ├── ReactiveStorageAdapter.ts  # + watchIdentity()
+│   │   ├── Subscribable.ts
 │   │   ├── CryptoAdapter.ts        # + Symmetric + EncryptedPayload Type
 │   │   ├── MessagingAdapter.ts     # Cross-User Messaging
-│   │   ├── DiscoveryAdapter.ts     # Public Profile Discovery (7. Adapter)
+│   │   ├── DiscoveryAdapter.ts     # Public Profile Discovery
+│   │   ├── DiscoverySyncStore.ts   # Offline-Cache Interface
 │   │   ├── ReplicationAdapter.ts   # CRDT Spaces + SpaceHandle<T>
 │   │   └── index.ts
 │   ├── crypto/
-│   │   ├── WebCryptoAdapter.ts     # + AES-256-GCM symmetric encryption
-│   │   └── index.ts
+│   │   └── WebCryptoAdapter.ts     # Ed25519 + X25519 + AES-256-GCM
 │   ├── messaging/
 │   │   ├── InMemoryMessagingAdapter.ts  # Shared-Bus für Tests
-│   │   ├── WebSocketMessagingAdapter.ts # Browser WebSocket Client
-│   │   └── index.ts
+│   │   └── WebSocketMessagingAdapter.ts # Browser WebSocket Client
 │   ├── discovery/
-│   │   ├── HttpDiscoveryAdapter.ts    # HTTP-based Discovery (wot-profiles)
-│   │   └── index.ts
+│   │   ├── HttpDiscoveryAdapter.ts          # HTTP-based (wot-profiles)
+│   │   ├── OfflineFirstDiscoveryAdapter.ts  # Offline-Cache Wrapper
+│   │   └── InMemoryDiscoverySyncStore.ts    # In-Memory Cache für Tests
 │   ├── replication/
-│   │   ├── AutomergeReplicationAdapter.ts  # Automerge + E2EE + GroupKeys
-│   │   └── index.ts
+│   │   └── AutomergeReplicationAdapter.ts   # Automerge + E2EE + GroupKeys
 │   ├── storage/
-│   │   ├── LocalStorageAdapter.ts
-│   │   └── index.ts
+│   │   └── LocalStorageAdapter.ts
 │   └── index.ts
 ├── services/
-│   ├── ProfileService.ts           # signProfile, verifyProfile (static)
+│   ├── ProfileService.ts           # signProfile, verifyProfile (JWS)
 │   ├── EncryptedSyncService.ts     # Encrypt/Decrypt CRDT Changes (AES-256-GCM)
 │   ├── GroupKeyService.ts          # Group Key Management (per Space, Generations)
 │   └── index.ts
@@ -1466,8 +1581,8 @@ packages/wot-core/src/
 │   ├── verification.ts
 │   ├── attestation.ts
 │   ├── proof.ts
-│   ├── messaging.ts                # MessageEnvelope, DeliveryReceipt, + 'profile-update'
-│   ├── resource-ref.ts             # ResourceRef branded type
+│   ├── messaging.ts                # MessageEnvelope, DeliveryReceipt, MessagingState
+│   ├── resource-ref.ts             # ResourceRef branded type (wot:<type>:<id>)
 │   ├── space.ts                    # SpaceInfo, SpaceMemberChange, ReplicationState
 │   └── index.ts
 └── index.ts
@@ -1509,12 +1624,21 @@ apps/demo/src/
 │   │   ├── VerificationFlow.tsx
 │   │   ├── ShowCode.tsx             # QR-Code Generation
 │   │   ├── ScanCode.tsx             # QR-Code Scanner
+│   │   ├── Confetti.tsx             # Konfetti-Animation nach Verification
 │   │   └── index.ts
 │   ├── contacts/
 │   │   ├── ContactCard.tsx
 │   │   ├── ContactList.tsx
 │   │   └── index.ts
+│   ├── attestation/
+│   │   ├── AttestationCard.tsx
+│   │   ├── AttestationList.tsx
+│   │   ├── CreateAttestation.tsx
+│   │   ├── ImportAttestation.tsx
+│   │   └── index.ts
 │   ├── shared/
+│   │   ├── Avatar.tsx
+│   │   ├── AvatarUpload.tsx
 │   │   ├── ProgressIndicator.tsx
 │   │   ├── SecurityChecklist.tsx
 │   │   ├── InfoTooltip.tsx
@@ -1524,24 +1648,28 @@ apps/demo/src/
 │       ├── Navigation.tsx
 │       └── index.ts
 ├── adapters/
-│   └── EvoluStorageAdapter.ts       # StorageAdapter via Evolu
+│   ├── EvoluStorageAdapter.ts         # StorageAdapter + ReactiveStorageAdapter via Evolu
+│   ├── EvoluDiscoverySyncStore.ts     # Evolu-basierter Offline-Cache für Discovery
+│   └── rowMappers.ts                  # Evolu Row ↔ WoT Type Konvertierung
 ├── context/
-│   ├── WotIdentityContext.tsx       # Identity State + hasStoredIdentity
-│   ├── AdapterContext.tsx           # Evolu init + EvoluStorageAdapter
+│   ├── AdapterContext.tsx             # Evolu init + alle Adapter (Storage, Messaging, Discovery)
 │   ├── IdentityContext.tsx
+│   ├── PendingVerificationContext.tsx # Globaler Verification-State
 │   └── index.ts
 ├── hooks/
 │   ├── useVerification.ts
 │   ├── useContacts.ts
-│   ├── useIdentity.ts
 │   ├── useAttestations.ts
 │   ├── useMessaging.ts                # Relay send/onMessage/state
-│   ├── useProfileSync.ts             # NEU: Upload/Fetch Profile, Auto-Sync
+│   ├── useProfileSync.ts             # Upload/Fetch Profile, Dirty-Flag-Sync
+│   ├── useProfile.ts                  # Reaktives Profil via watchIdentity()
+│   ├── useSubscribable.ts            # Subscribable<T> → React State
+│   ├── useOnlineStatus.ts            # navigator.onLine + Events
+│   ├── useSyncStatus.ts              # Dirty-Count Anzeige
 │   └── index.ts
 ├── services/
 │   ├── VerificationService.ts
 │   ├── ContactService.ts
-│   ├── IdentityService.ts
 │   ├── AttestationService.ts
 │   └── index.ts
 ├── pages/
@@ -1560,27 +1688,28 @@ apps/demo/src/
 ### Tests
 
 ```
-packages/wot-core/tests/
+packages/wot-core/tests/                              # 175 Tests
 ├── WotIdentity.test.ts              # 20 Tests  (+3 signJws)
 ├── SeedStorage.test.ts              # 12 Tests
 ├── ContactStorage.test.ts           # 15 Tests
-├── VerificationIntegration.test.ts  # 20 Tests  (Anm: 18 nach Dedup)
-├── OnboardingFlow.test.ts           # 13 Tests  (Anm: 12 nach Dedup)
+├── VerificationIntegration.test.ts  # 20 Tests
+├── OnboardingFlow.test.ts           # 13 Tests
 ├── ResourceRef.test.ts              # 14 Tests
 ├── MessagingAdapter.test.ts         # 14 Tests
 ├── ProfileService.test.ts           # 6 Tests
 ├── SymmetricCrypto.test.ts          # 10 Tests
-├── AsymmetricCrypto.test.ts         # 16 Tests  NEU (Week 5)
-├── EncryptedSyncService.test.ts     # 8 Tests   NEU (Week 5)
-├── GroupKeyService.test.ts          # 10 Tests  NEU (Week 5)
-├── AutomergeReplication.test.ts     # 16 Tests  NEU (Week 5+)
+├── AsymmetricCrypto.test.ts         # 16 Tests
+├── EncryptedSyncService.test.ts     # 8 Tests
+├── GroupKeyService.test.ts          # 10 Tests
+├── AutomergeReplication.test.ts     # 16 Tests
+├── OfflineFirstDiscoveryAdapter.test.ts  # 19 Tests  NEU (Week 5+++)
 └── setup.ts                         # fake-indexeddb setup
 
-packages/wot-profiles/tests/
+packages/wot-profiles/tests/                          # 19 Tests
 ├── profile-store.test.ts            # 4 Tests
 └── profile-rest.test.ts             # 15 Tests
 
-packages/wot-relay/tests/
+packages/wot-relay/tests/                              # 15 Tests
 ├── relay.test.ts                    # 9 Tests
 └── integration.test.ts              # 6 Tests
 ```
@@ -1619,6 +1748,9 @@ packages/wot-relay/tests/
 - ~~AutomergeReplicationAdapter~~ ✅ (Week 5+) — CRDT Spaces mit verschlüsseltem Transport, 16 Tests
 - ~~Relay Deployment~~ ✅ — Live unter `wss://relay.utopia-lab.org`
 - ~~DiscoveryAdapter~~ ✅ (Week 5++) — 7. Adapter, HttpDiscoveryAdapter, Demo-App Refactoring
+- ~~Offline-First Discovery~~ ✅ (Week 5+++) — OfflineFirstDiscoveryAdapter, DiscoverySyncStore, 19 Tests
+- ~~Reactive Identity~~ ✅ (Week 5+++) — watchIdentity(), useProfile reaktiv, Offline-Fallback
+- ~~localStorage eliminiert~~ ✅ (Week 5+++) — Evolu = Single Source of Truth
 - **Spaces UI in Demo App** — AutomergeReplicationAdapter testbar machen (nächster Schritt)
 - **Evolu Sync** - Transports konfigurieren für Multi-Tab/Device Sync
 - **Social Recovery (Shamir)** - Seed-Backup über verifizierte Kontakte
