@@ -1,5 +1,6 @@
-import { useState, useEffect } from 'react'
-import { CheckCircle, XCircle, ArrowLeft, Loader2, Wifi, WifiOff, ShieldCheck, ShieldX } from 'lucide-react'
+import { useState, useEffect, useRef } from 'react'
+import { CheckCircle, XCircle, ArrowLeft, Loader2, ShieldCheck, ShieldX, X } from 'lucide-react'
+import { Html5Qrcode } from 'html5-qrcode'
 import { useVerification } from '../../hooks'
 import type { PublicProfile } from '@real-life/wot-core'
 import { Avatar } from '../shared/Avatar'
@@ -7,7 +8,7 @@ import { ShowCode } from './ShowCode'
 import { ScanCode } from './ScanCode'
 import { useAdapters } from '../../context'
 
-type Mode = 'select' | 'initiate' | 'confirm' | 'respond' | 'success' | 'error'
+type Mode = 'ready' | 'confirm' | 'success' | 'error'
 
 export function VerificationFlow() {
   const {
@@ -16,7 +17,6 @@ export function VerificationFlow() {
     error,
     peerName,
     peerDid,
-    isConnected,
     createChallenge,
     prepareResponse,
     confirmAndRespond,
@@ -24,9 +24,36 @@ export function VerificationFlow() {
   } = useVerification()
   const { discovery } = useAdapters()
 
-  const [mode, setMode] = useState<Mode>('select')
+  const [mode, setMode] = useState<Mode>('ready')
   const [challengeCode, setChallengeCode] = useState('')
   const [peerProfile, setPeerProfile] = useState<PublicProfile | null>(null)
+  const [isScanning, setIsScanning] = useState(false)
+  const [scanError, setScanError] = useState<string | null>(null)
+  const challengeCreated = useRef(false)
+  const scannerRef = useRef<Html5Qrcode | null>(null)
+  const scannerElementId = 'qr-scanner'
+
+  // Auto-create challenge on mount
+  useEffect(() => {
+    if (challengeCreated.current) return
+    challengeCreated.current = true
+
+    createChallenge()
+      .then((code) => setChallengeCode(code))
+      .catch(() => {})
+  }, [createChallenge])
+
+  // Cleanup scanner on unmount
+  useEffect(() => {
+    return () => {
+      if (scannerRef.current) {
+        scannerRef.current
+          .stop()
+          .catch((err) => console.error('Failed to stop scanner:', err))
+      }
+    }
+  }, [])
+
   // Fetch peer profile from DiscoveryAdapter when entering confirm mode
   useEffect(() => {
     if (mode !== 'confirm' || !peerDid) return
@@ -39,22 +66,57 @@ export function VerificationFlow() {
 
   // Auto-transition: step 'done' → success
   useEffect(() => {
-    if (step === 'done' && (mode === 'confirm' || mode === 'initiate')) {
+    if (step === 'done' && (mode === 'confirm' || mode === 'ready')) {
       setMode('success')
     }
   }, [step, mode])
 
-  const handleInitiate = async () => {
+  const startScanning = async () => {
     try {
-      const code = await createChallenge()
-      setChallengeCode(code)
-      setMode('initiate')
-    } catch {
-      setMode('error')
+      setScanError(null)
+      setIsScanning(true)
+
+      // Wait for DOM to render the scanner element
+      await new Promise((resolve) => setTimeout(resolve, 100))
+
+      const scanner = new Html5Qrcode(scannerElementId)
+      scannerRef.current = scanner
+
+      await scanner.start(
+        { facingMode: 'environment' },
+        {
+          fps: 10,
+          qrbox: { width: 250, height: 250 },
+        },
+        (decodedText) => {
+          // Successfully scanned — auto-submit
+          stopScanning()
+          handleScanCode(decodedText)
+        },
+        () => {
+          // Scanning in progress (not an error)
+        }
+      )
+    } catch (err) {
+      setScanError('Kamera konnte nicht gestartet werden. Bitte überprüfe die Berechtigungen.')
+      setIsScanning(false)
+      console.error('Scanner error:', err)
     }
   }
 
-  // Bob scans code → decode and show peer info for confirmation
+  const stopScanning = async () => {
+    if (scannerRef.current) {
+      try {
+        await scannerRef.current.stop()
+        scannerRef.current = null
+      } catch (err) {
+        console.error('Failed to stop scanner:', err)
+      }
+    }
+    setIsScanning(false)
+  }
+
+  // Scanned code → decode and show peer info for confirmation
   const handleScanCode = async (code: string) => {
     try {
       await prepareResponse(code)
@@ -64,7 +126,7 @@ export function VerificationFlow() {
     }
   }
 
-  // Bob confirms → create verification + send
+  // Confirm → create verification + send
   const handleConfirm = async () => {
     try {
       await confirmAndRespond()
@@ -75,109 +137,70 @@ export function VerificationFlow() {
   }
 
   const handleReset = () => {
+    stopScanning()
     reset()
-    setMode('select')
+    setMode('ready')
     setChallengeCode('')
     setPeerProfile(null)
+    setScanError(null)
+    challengeCreated.current = false
+    // Re-create challenge
+    createChallenge()
+      .then((code) => {
+        setChallengeCode(code)
+        challengeCreated.current = true
+      })
+      .catch(() => {})
   }
 
-  if (mode === 'select') {
-    return (
-      <div className="space-y-4">
-        <div className="text-center mb-6">
-          <h2 className="text-xl font-bold text-slate-900 mb-2">Kontakt verifizieren</h2>
-          <p className="text-slate-600">
-            Verifiziere einen Kontakt durch persönliches Treffen.
-          </p>
-        </div>
-
-        <button
-          onClick={handleInitiate}
-          className="w-full p-4 border-2 border-primary-200 rounded-xl hover:border-primary-400 hover:bg-primary-50 transition-colors text-left"
-        >
-          <h3 className="font-medium text-slate-900 mb-1">Verifizierung starten</h3>
-          <p className="text-sm text-slate-600">
-            Zeige deinen Code der anderen Person
-          </p>
-        </button>
-
-        <button
-          onClick={() => setMode('respond')}
-          className="w-full p-4 border-2 border-slate-200 rounded-xl hover:border-slate-300 hover:bg-slate-50 transition-colors text-left"
-        >
-          <h3 className="font-medium text-slate-900 mb-1">Code eingeben</h3>
-          <p className="text-sm text-slate-600">
-            Gib den Code ein, den dir jemand zeigt
-          </p>
-        </button>
-      </div>
-    )
-  }
-
-  // Incoming verification dialog is now rendered globally in App.tsx (IncomingVerificationDialog)
-
-  if (mode === 'initiate') {
+  if (mode === 'ready') {
     return (
       <div className="space-y-6">
-        <button
-          onClick={handleReset}
-          className="flex items-center gap-2 text-slate-600 hover:text-slate-900 transition-colors"
-        >
-          <ArrowLeft size={18} />
-          Zurück
-        </button>
-
-        <ShowCode
-          code={challengeCode}
-          title="Dein Verifizierungs-Code"
-          description="Die andere Person scannt diesen Code."
-          onRefresh={handleInitiate}
-        />
-
-        {/* Relay status */}
-        <div className="flex items-center gap-2 text-sm">
-          {isConnected ? (
-            <>
-              <Wifi size={14} className="text-green-500" />
-              <span className="text-green-600">Relay verbunden</span>
-            </>
-          ) : (
-            <>
-              <WifiOff size={14} className="text-amber-500" />
-              <span className="text-amber-600">Relay nicht verbunden</span>
-            </>
-          )}
+        <div className="text-center">
+          <h2 className="text-xl font-bold text-slate-900">Verifizieren</h2>
+          <p className="text-sm text-slate-500 mt-1">
+            Zeige deinen Code oder scanne den Code der anderen Person.
+          </p>
         </div>
 
-        {/* Waiting indicator */}
-        {step === 'initiating' && (
-          <div className="flex items-center justify-center gap-3 py-4 text-slate-600">
-            <Loader2 className="w-5 h-5 animate-spin" />
-            <span>Warte darauf, dass jemand den Code scannt...</span>
+        {/* QR Code or Scanner — same area */}
+        {isScanning ? (
+          <div className="relative">
+            <div id={scannerElementId} className="rounded-lg overflow-hidden" />
+            <button
+              type="button"
+              onClick={stopScanning}
+              className="absolute top-2 right-2 p-2 bg-red-500 text-white rounded-lg hover:bg-red-600 transition-colors shadow-lg"
+            >
+              <X size={20} />
+            </button>
+          </div>
+        ) : challengeCode ? (
+          <ShowCode code={challengeCode} />
+        ) : (
+          <div className="flex items-center justify-center py-12">
+            <Loader2 className="w-6 h-6 animate-spin text-slate-400" />
           </div>
         )}
-      </div>
-    )
-  }
 
-  if (mode === 'respond') {
-    return (
-      <div className="space-y-6">
-        <button
-          onClick={handleReset}
-          className="flex items-center gap-2 text-slate-600 hover:text-slate-900 transition-colors"
-        >
-          <ArrowLeft size={18} />
-          Zurück
-        </button>
+        {scanError && (
+          <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-red-700 text-sm">
+            {scanError}
+          </div>
+        )}
 
-        <ScanCode
-          title="Code eingeben"
-          description="Gib den Code ein, den dir die andere Person zeigt."
-          placeholder="Code hier einfügen..."
-          buttonText="Code prüfen"
-          onSubmit={handleScanCode}
-        />
+        {/* Divider + Scanner controls (only when not scanning) */}
+        {!isScanning && (
+          <>
+            <div className="flex items-center gap-3">
+              <div className="flex-1 h-px bg-slate-200" />
+              <span className="text-sm text-slate-400">oder</span>
+              <div className="flex-1 h-px bg-slate-200" />
+            </div>
+
+            <ScanCode onSubmit={handleScanCode} onStartScan={startScanning} />
+          </>
+        )}
       </div>
     )
   }
