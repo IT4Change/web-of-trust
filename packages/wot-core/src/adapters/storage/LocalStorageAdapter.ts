@@ -131,6 +131,13 @@ export class LocalStorageAdapter implements StorageAdapter {
   // Verification methods (Empfänger-Prinzip)
   async saveVerification(verification: Verification): Promise<void> {
     const db = this.ensureDb()
+    // Overwrite existing verification from the same from→to pair (renewal)
+    const all = await db.getAll('verifications')
+    for (const existing of all) {
+      if (existing.from === verification.from && existing.to === verification.to && existing.id !== verification.id) {
+        await db.delete('verifications', existing.id)
+      }
+    }
     await db.put('verifications', verification)
   }
 

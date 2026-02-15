@@ -160,6 +160,25 @@ export class EvoluStorageAdapter implements StorageAdapter, ReactiveStorageAdapt
   // --- Verifications ---
 
   async saveVerification(verification: Verification): Promise<void> {
+    // Overwrite existing verification from the same from→to pair (renewal).
+    // Soft-delete any previous verification so only the latest one exists.
+    const existingQuery = this.evolu.createQuery((db) =>
+      db.selectFrom('verification')
+        .select('id')
+        .where('fromDid', '=', str(verification.from))
+        .where('toDid', '=', str(verification.to))
+        .where('isDeleted', 'is not', booleanToSqliteBoolean(true))
+    )
+    const existing = await this.evolu.loadQuery(existingQuery)
+    for (const row of existing) {
+      if (row.id !== createIdFromString<'Verification'>(verification.id)) {
+        this.evolu.update('verification', {
+          id: row.id,
+          isDeleted: booleanToSqliteBoolean(true),
+        })
+      }
+    }
+
     const result = this.evolu.upsert('verification', {
       id: createIdFromString<'Verification'>(verification.id),
       fromDid: str(verification.from),

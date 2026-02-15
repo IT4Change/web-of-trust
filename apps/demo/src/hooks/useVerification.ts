@@ -208,6 +208,38 @@ export function useVerification() {
     setPendingIncoming(null)
   }, [setPendingIncoming])
 
+  // Counter-verify a DID directly (without QR scan).
+  // Used for deferred counter-verification from the contacts list.
+  const counterVerify = useCallback(
+    async (targetDid: string, name?: string) => {
+      if (!identity || !did) {
+        throw new Error('No identity found')
+      }
+
+      const publicKey = VerificationHelper.publicKeyFromDid(targetDid)
+      await addContact(targetDid, publicKey, name, 'active')
+      syncContactProfile(targetDid)
+
+      const nonce = crypto.randomUUID()
+      const counter = await VerificationHelper.createVerificationFor(identity, targetDid, nonce)
+      await verificationService.saveVerification(counter)
+
+      const envelope: MessageEnvelope = {
+        v: 1,
+        id: counter.id,
+        type: 'verification',
+        fromDid: did,
+        toDid: targetDid,
+        createdAt: new Date().toISOString(),
+        encoding: 'json',
+        payload: JSON.stringify(counter),
+        signature: counter.proof.proofValue,
+      }
+      await send(envelope)
+    },
+    [identity, did, addContact, syncContactProfile, verificationService, send]
+  )
+
   const reset = useCallback(() => {
     setStep('idle')
     setChallenge(null)
@@ -232,6 +264,7 @@ export function useVerification() {
     confirmAndRespond,
     confirmIncoming,
     rejectIncoming,
+    counterVerify,
     reset,
   }
 }

@@ -32,15 +32,12 @@ function VerificationListenerEffect() {
   const { onMessage } = useMessaging()
   const { verificationService } = useAdapters()
   const { did } = useIdentity()
-  const { allVerifications } = useVerificationStatus()
   const { challengeNonce, setChallengeNonce, setPendingIncoming } = useConfetti()
 
-  // Use refs so the onMessage callback always sees current values
+  // Use ref so the onMessage callback always sees current nonce
   // without needing to re-subscribe (which can lose messages).
   const challengeNonceRef = useRef(challengeNonce)
   challengeNonceRef.current = challengeNonce
-  const allVerificationsRef = useRef(allVerifications)
-  allVerificationsRef.current = allVerifications
 
   useEffect(() => {
     const unsubscribe = onMessage(async (envelope) => {
@@ -64,17 +61,13 @@ function VerificationListenerEffect() {
         return
       }
 
-      // Counter-verification: if I'm the recipient, I haven't verified
-      // the sender yet, and the verification contains my active challenge
-      // nonce (proves physical QR scan) → show confirmation UI.
+      // Counter-verification: if I'm the recipient and the verification
+      // contains my active challenge nonce (proves physical QR scan)
+      // → show confirmation UI. Re-verification is allowed (renewal).
       if (did && verification.to === did) {
         const nonce = challengeNonceRef.current
-        const verifications = allVerificationsRef.current
-        const alreadyVerified = verifications.some(
-          v => v.from === did && v.to === verification.from
-        )
 
-        if (!alreadyVerified && nonce && verification.id.includes(nonce)) {
+        if (nonce && verification.id.includes(nonce)) {
           setChallengeNonce(null) // Nonce consumed
           setPendingIncoming({ verification, fromDid: verification.from })
         }
