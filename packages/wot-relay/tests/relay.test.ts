@@ -252,4 +252,97 @@ describe('RelayServer', () => {
       charlie.close()
     })
   })
+
+  describe('multi-device (same DID)', () => {
+    it('should deliver message to all devices of a DID', async () => {
+      const alice = await createClient(RELAY_URL)
+      const bobDevice1 = await createClient(RELAY_URL)
+      const bobDevice2 = await createClient(RELAY_URL)
+
+      sendMsg(alice, { type: 'register', did: ALICE_DID })
+      sendMsg(bobDevice1, { type: 'register', did: BOB_DID })
+      sendMsg(bobDevice2, { type: 'register', did: BOB_DID })
+
+      await waitForMessage(alice)    // registered
+      await waitForMessage(bobDevice1) // registered
+      await waitForMessage(bobDevice2) // registered
+
+      // Bob should appear once in connectedDids
+      expect(server.connectedDids.filter(d => d === BOB_DID)).toHaveLength(1)
+
+      const envelope = createTestEnvelope(ALICE_DID, BOB_DID)
+
+      const d1Promise = waitForMessage(bobDevice1)
+      const d2Promise = waitForMessage(bobDevice2)
+      const receiptPromise = waitForMessage(alice)
+
+      sendMsg(alice, { type: 'send', envelope })
+
+      const [d1Msg, d2Msg, receipt] = await Promise.all([d1Promise, d2Promise, receiptPromise])
+
+      // Both devices receive the message
+      expect(d1Msg.type).toBe('message')
+      expect(d2Msg.type).toBe('message')
+      if (d1Msg.type === 'message') expect(d1Msg.envelope.id).toBe(envelope.id)
+      if (d2Msg.type === 'message') expect(d2Msg.envelope.id).toBe(envelope.id)
+
+      // Sender gets delivered receipt
+      expect(receipt.type).toBe('receipt')
+      if (receipt.type === 'receipt') expect(receipt.receipt.status).toBe('delivered')
+
+      alice.close()
+      bobDevice1.close()
+      bobDevice2.close()
+    })
+
+    it('should keep other devices connected when one disconnects', async () => {
+      const bobDevice1 = await createClient(RELAY_URL)
+      const bobDevice2 = await createClient(RELAY_URL)
+
+      sendMsg(bobDevice1, { type: 'register', did: BOB_DID })
+      sendMsg(bobDevice2, { type: 'register', did: BOB_DID })
+
+      await waitForMessage(bobDevice1)
+      await waitForMessage(bobDevice2)
+
+      // Disconnect device 1
+      bobDevice1.close()
+      await new Promise((r) => setTimeout(r, 100))
+
+      // Bob should still be connected (device 2)
+      expect(server.connectedDids).toContain(BOB_DID)
+
+      // Send a message — should reach device 2
+      const alice = await createClient(RELAY_URL)
+      sendMsg(alice, { type: 'register', did: ALICE_DID })
+      await waitForMessage(alice) // registered
+
+      const envelope = createTestEnvelope(ALICE_DID, BOB_DID)
+      const d2Promise = waitForMessage(bobDevice2)
+      sendMsg(alice, { type: 'send', envelope })
+
+      const d2Msg = await d2Promise
+      expect(d2Msg.type).toBe('message')
+
+      alice.close()
+      bobDevice2.close()
+    })
+
+    it('should remove DID when all devices disconnect', async () => {
+      const bobDevice1 = await createClient(RELAY_URL)
+      const bobDevice2 = await createClient(RELAY_URL)
+
+      sendMsg(bobDevice1, { type: 'register', did: BOB_DID })
+      sendMsg(bobDevice2, { type: 'register', did: BOB_DID })
+
+      await waitForMessage(bobDevice1)
+      await waitForMessage(bobDevice2)
+
+      bobDevice1.close()
+      bobDevice2.close()
+      await new Promise((r) => setTimeout(r, 100))
+
+      expect(server.connectedDids).not.toContain(BOB_DID)
+    })
+  })
 })

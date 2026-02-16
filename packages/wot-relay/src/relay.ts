@@ -9,7 +9,7 @@ export interface RelayServerOptions {
 
 export class RelayServer {
   private wss: WebSocketServer | null = null
-  private connections = new Map<string, WebSocket>() // DID → WebSocket
+  private connections = new Map<string, Set<WebSocket>>() // DID → Set of WebSockets (multi-device)
   private socketToDid = new Map<WebSocket, string>() // WebSocket → DID (reverse lookup)
   private queue: OfflineQueue
 
@@ -31,8 +31,8 @@ export class RelayServer {
 
   async stop(): Promise<void> {
     // Close all client connections
-    for (const ws of this.connections.values()) {
-      ws.close()
+    for (const sockets of this.connections.values()) {
+      for (const ws of sockets) ws.close()
     }
     this.connections.clear()
     this.socketToDid.clear()
@@ -74,7 +74,11 @@ export class RelayServer {
     ws.on('close', () => {
       const did = this.socketToDid.get(ws)
       if (did) {
-        this.connections.delete(did)
+        const sockets = this.connections.get(did)
+        if (sockets) {
+          sockets.delete(ws)
+          if (sockets.size === 0) this.connections.delete(did)
+        }
         this.socketToDid.delete(ws)
       }
     })
@@ -95,18 +99,18 @@ export class RelayServer {
   }
 
   private handleRegister(ws: WebSocket, did: string): void {
-    // Close existing connection for this DID (if any)
-    const existing = this.connections.get(did)
-    if (existing && existing !== ws) {
-      existing.close()
+    // Support multiple devices per DID
+    let sockets = this.connections.get(did)
+    if (!sockets) {
+      sockets = new Set()
+      this.connections.set(did, sockets)
     }
-
-    this.connections.set(did, ws)
+    sockets.add(ws)
     this.socketToDid.set(ws, did)
 
     this.sendTo(ws, { type: 'registered', did })
 
-    // Deliver queued messages
+    // Deliver queued messages (only to the newly connected device)
     const queued = this.queue.dequeue(did)
     for (const envelope of queued) {
       this.sendTo(ws, { type: 'message', envelope })
@@ -137,10 +141,12 @@ export class RelayServer {
     const messageId = (envelope.id as string) ?? 'unknown'
     const now = new Date().toISOString()
 
-    // Try to deliver to connected recipient
-    const recipientWs = this.connections.get(toDid)
-    if (recipientWs) {
-      this.sendTo(recipientWs, { type: 'message', envelope })
+    // Try to deliver to all connected devices of recipient
+    const recipientSockets = this.connections.get(toDid)
+    if (recipientSockets && recipientSockets.size > 0) {
+      for (const recipientWs of recipientSockets) {
+        this.sendTo(recipientWs, { type: 'message', envelope })
+      }
 
       // Notify sender: delivered
       this.sendTo(ws, {
