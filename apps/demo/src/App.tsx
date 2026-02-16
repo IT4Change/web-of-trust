@@ -91,28 +91,24 @@ function MutualVerificationEffect() {
   const { did } = useIdentity()
   const { activeContacts } = useContacts()
   const { allVerifications } = useVerificationStatus()
-  const previousStatusRef = useRef(new Map<string, string>())
-  const initializedRef = useRef(false)
+
+  // Track which mutual-DIDs we already showed confetti for.
+  // sessionStorage survives reloads but not new tabs/browser restarts.
+  const shownRef = useRef<Set<string>>(
+    new Set(JSON.parse(sessionStorage.getItem('mutual-confetti-shown') || '[]'))
+  )
 
   useEffect(() => {
     if (!did) return
 
-    const prev = previousStatusRef.current
     for (const contact of activeContacts) {
       const status = getVerificationStatus(did, contact.did, allVerifications)
-      const prevStatus = prev.get(contact.did)
-
-      // Only trigger dialog for transitions to 'mutual' after initial load.
-      // On first render, just record current state without triggering.
-      // For contacts added after init, default to 'none' so transitions are detected.
-      const effectivePrev = prevStatus ?? (initializedRef.current ? 'none' : undefined)
-      if (initializedRef.current && effectivePrev !== undefined && status === 'mutual' && effectivePrev !== 'mutual') {
+      if (status === 'mutual' && !shownRef.current.has(contact.did)) {
+        shownRef.current.add(contact.did)
+        sessionStorage.setItem('mutual-confetti-shown', JSON.stringify([...shownRef.current]))
         triggerMutualDialog({ name: contact.name || 'Kontakt', did: contact.did })
       }
-
-      prev.set(contact.did, status)
     }
-    initializedRef.current = true
   }, [did, activeContacts, allVerifications, triggerMutualDialog])
 
   return null
@@ -200,11 +196,13 @@ function MutualVerificationDialog() {
 function IncomingAttestationDialog() {
   const { incomingAttestation, dismissAttestationDialog } = usePendingVerification()
   const { attestationService } = useAdapters()
+  const { uploadVerificationsAndAttestations } = useProfileSync()
 
   if (!incomingAttestation) return null
 
   const handlePublish = async () => {
     await attestationService.setAttestationAccepted(incomingAttestation.attestationId, true)
+    uploadVerificationsAndAttestations()
     dismissAttestationDialog()
   }
 

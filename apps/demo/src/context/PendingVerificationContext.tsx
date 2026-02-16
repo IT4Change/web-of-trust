@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, useCallback, type ReactNode } from 'react'
+import { createContext, useContext, useState, useCallback, useMemo, type ReactNode } from 'react'
 import type { Verification } from '@real-life/wot-core'
 
 /** Incoming verification awaiting user confirmation (from QR scan). */
@@ -19,6 +19,14 @@ export interface IncomingAttestationInfo {
   senderName: string
   senderDid: string
   claim: string
+}
+
+export type NotificationType = 'mutual-verification' | 'incoming-attestation' | 'incoming-verification'
+
+export interface QueuedNotification {
+  id: string
+  type: NotificationType
+  data: MutualPeerInfo | IncomingAttestationInfo | PendingIncoming
 }
 
 interface ConfettiContextType {
@@ -42,10 +50,33 @@ const ConfettiContext = createContext<ConfettiContextType | null>(null)
 export function ConfettiProvider({ children }: { children: ReactNode }) {
   const [confettiKey, setConfettiKey] = useState(0)
   const [toastMessage, setToastMessage] = useState<string | null>(null)
-  const [mutualPeer, setMutualPeer] = useState<MutualPeerInfo | null>(null)
-  const [incomingAttestation, setIncomingAttestation] = useState<IncomingAttestationInfo | null>(null)
   const [challengeNonce, setChallengeNonce] = useState<string | null>(null)
-  const [pendingIncoming, setPendingIncoming] = useState<PendingIncoming | null>(null)
+  const [queue, setQueue] = useState<QueuedNotification[]>([])
+
+  const enqueue = useCallback((notification: QueuedNotification) => {
+    setQueue(prev => prev.some(n => n.id === notification.id) ? prev : [...prev, notification])
+  }, [])
+
+  const dismiss = useCallback(() => {
+    setQueue(prev => prev.slice(1))
+  }, [])
+
+  // Derive current dialog states from the first item in the queue
+  const current = queue[0] ?? null
+  const mutualPeer = useMemo(
+    () => current?.type === 'mutual-verification' ? current.data as MutualPeerInfo : null,
+    [current],
+  )
+  const incomingAttestation = useMemo(
+    () => current?.type === 'incoming-attestation' ? current.data as IncomingAttestationInfo : null,
+    [current],
+  )
+  const pendingIncoming = useMemo(
+    () => current?.type === 'incoming-verification' ? current.data as PendingIncoming : null,
+    [current],
+  )
+
+  // Wrapper functions — keep existing API stable for consumers
 
   const triggerConfetti = useCallback((message?: string) => {
     setConfettiKey(k => k + 1)
@@ -54,20 +85,28 @@ export function ConfettiProvider({ children }: { children: ReactNode }) {
 
   const triggerMutualDialog = useCallback((peer: MutualPeerInfo) => {
     setConfettiKey(k => k + 1)
-    setMutualPeer(peer)
-  }, [])
+    enqueue({ id: 'mutual-' + peer.did, type: 'mutual-verification', data: peer })
+  }, [enqueue])
 
   const dismissMutualDialog = useCallback(() => {
-    setMutualPeer(null)
-  }, [])
+    dismiss()
+  }, [dismiss])
 
   const triggerAttestationDialog = useCallback((info: IncomingAttestationInfo) => {
-    setIncomingAttestation(info)
-  }, [])
+    enqueue({ id: 'att-' + info.attestationId, type: 'incoming-attestation', data: info })
+  }, [enqueue])
 
   const dismissAttestationDialog = useCallback(() => {
-    setIncomingAttestation(null)
-  }, [])
+    dismiss()
+  }, [dismiss])
+
+  const setPendingIncoming = useCallback((pending: PendingIncoming | null) => {
+    if (pending) {
+      enqueue({ id: 'ver-' + pending.fromDid, type: 'incoming-verification', data: pending })
+    } else {
+      dismiss()
+    }
+  }, [enqueue, dismiss])
 
   return (
     <ConfettiContext.Provider value={{
