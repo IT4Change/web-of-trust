@@ -7,10 +7,19 @@ export interface PendingIncoming {
   fromDid: string
 }
 
+/** Info about the peer for the mutual verification dialog. */
+export interface MutualPeerInfo {
+  name: string
+  did: string
+}
+
 interface ConfettiContextType {
   confettiKey: number
   toastMessage: string | null
   triggerConfetti: (message?: string) => void
+  mutualPeer: MutualPeerInfo | null
+  triggerMutualDialog: (peer: MutualPeerInfo) => void
+  dismissMutualDialog: () => void
   challengeNonce: string | null
   setChallengeNonce: (nonce: string | null) => void
   pendingIncoming: PendingIncoming | null
@@ -22,6 +31,7 @@ const ConfettiContext = createContext<ConfettiContextType | null>(null)
 export function ConfettiProvider({ children }: { children: ReactNode }) {
   const [confettiKey, setConfettiKey] = useState(0)
   const [toastMessage, setToastMessage] = useState<string | null>(null)
+  const [mutualPeer, setMutualPeer] = useState<MutualPeerInfo | null>(null)
   const [challengeNonce, setChallengeNonce] = useState<string | null>(null)
   const [pendingIncoming, setPendingIncoming] = useState<PendingIncoming | null>(null)
 
@@ -30,8 +40,17 @@ export function ConfettiProvider({ children }: { children: ReactNode }) {
     setToastMessage(message ?? null)
   }, [])
 
+  const triggerMutualDialog = useCallback((peer: MutualPeerInfo) => {
+    setConfettiKey(k => k + 1)
+    setMutualPeer(peer)
+  }, [])
+
+  const dismissMutualDialog = useCallback(() => {
+    setMutualPeer(null)
+  }, [])
+
   return (
-    <ConfettiContext.Provider value={{ confettiKey, toastMessage, triggerConfetti, challengeNonce, setChallengeNonce, pendingIncoming, setPendingIncoming }}>
+    <ConfettiContext.Provider value={{ confettiKey, toastMessage, triggerConfetti, mutualPeer, triggerMutualDialog, dismissMutualDialog, challengeNonce, setChallengeNonce, pendingIncoming, setPendingIncoming }}>
       {children}
     </ConfettiContext.Provider>
   )

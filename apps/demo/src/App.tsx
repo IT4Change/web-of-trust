@@ -1,14 +1,14 @@
 import { useEffect, useRef, useState } from 'react'
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
+import { BrowserRouter, Routes, Route, Navigate, useNavigate } from 'react-router-dom'
 import { AdapterProvider, IdentityProvider, useIdentity, useAdapters, PendingVerificationProvider, usePendingVerification } from './context'
 import { useConfetti } from './context/PendingVerificationContext'
 import { AppShell, IdentityManagement, Confetti } from './components'
 import { Avatar } from './components/shared/Avatar'
 import { Home, Identity, Contacts, Verify, Attestations, PublicProfile } from './pages'
-import { useProfileSync, useMessaging, useContacts, useVerification } from './hooks'
+import { useProfileSync, useMessaging, useContacts, useVerification, useLocalIdentity } from './hooks'
 import { useVerificationStatus, getVerificationStatus } from './hooks/useVerificationStatus'
 import { VerificationHelper } from '@real-life/wot-core'
-import type { Verification, PublicProfile as PublicProfileType, MessageEnvelope } from '@real-life/wot-core'
+import type { Verification, PublicProfile as PublicProfileType } from '@real-life/wot-core'
 
 /**
  * Mounts useProfileSync globally so profile-update listeners
@@ -86,7 +86,7 @@ function VerificationListenerEffect() {
  * status transitions to "mutual". No session state needed.
  */
 function MutualVerificationEffect() {
-  const { triggerConfetti } = usePendingVerification()
+  const { triggerMutualDialog } = usePendingVerification()
   const { did } = useIdentity()
   const { activeContacts } = useContacts()
   const { allVerifications } = useVerificationStatus()
@@ -101,41 +101,116 @@ function MutualVerificationEffect() {
       const status = getVerificationStatus(did, contact.did, allVerifications)
       const prevStatus = prev.get(contact.did)
 
-      // Only trigger confetti for transitions to 'mutual' after initial load.
+      // Only trigger dialog for transitions to 'mutual' after initial load.
       // On first render, just record current state without triggering.
       if (initializedRef.current && prevStatus !== undefined && status === 'mutual' && prevStatus !== 'mutual') {
-        const name = contact.name || 'Kontakt'
-        triggerConfetti(`${name} und du habt euch gegenseitig verifiziert!`)
+        triggerMutualDialog({ name: contact.name || 'Kontakt', did: contact.did })
       }
 
       prev.set(contact.did, status)
     }
     initializedRef.current = true
-  }, [did, activeContacts, allVerifications, triggerConfetti])
+  }, [did, activeContacts, allVerifications, triggerMutualDialog])
 
   return null
 }
 
 /**
- * Renders global confetti + toast overlay when triggerConfetti() is called.
+ * Dialog shown when mutual verification is detected.
+ * Extracted so hooks are only called when mutualPeer exists.
  */
-function GlobalConfetti() {
-  const { confettiKey, toastMessage } = usePendingVerification()
-  const [visible, setVisible] = useState(false)
+function MutualVerificationDialog() {
+  const { mutualPeer, dismissMutualDialog } = usePendingVerification()
+  const { discovery } = useAdapters()
+  const localIdentity = useLocalIdentity()
+  const navigate = useNavigate()
+  const [peerProfile, setPeerProfile] = useState<PublicProfileType | null>(null)
 
   useEffect(() => {
-    if (confettiKey === 0) return
-    setVisible(true)
-    const timer = setTimeout(() => setVisible(false), 4000)
+    if (!mutualPeer) { setPeerProfile(null); return }
+    let cancelled = false
+    discovery.resolveProfile(mutualPeer.did)
+      .then((p) => { if (!cancelled && p) setPeerProfile(p) })
+      .catch(() => {})
+    return () => { cancelled = true }
+  }, [mutualPeer, discovery])
+
+  if (!mutualPeer) return null
+
+  const myName = localIdentity?.profile?.name || 'Du'
+  const peerName = peerProfile?.name || mutualPeer.name
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+      <div className="bg-white rounded-2xl shadow-xl max-w-sm w-full p-6 space-y-4 animate-toast-in">
+        <div className="flex flex-col items-center gap-3 py-2">
+          <div className="flex items-center -space-x-3">
+            <Avatar
+              name={localIdentity?.profile?.name}
+              avatar={localIdentity?.profile?.avatar}
+              size="lg"
+            />
+            <Avatar
+              name={peerProfile?.name || mutualPeer.name}
+              avatar={peerProfile?.avatar}
+              size="lg"
+            />
+          </div>
+          <h3 className="text-lg font-bold text-slate-900 text-center">
+            {myName} und {peerName} sind Freunde!
+          </h3>
+        </div>
+
+        <div className="flex gap-3 pt-2">
+          <button
+            onClick={() => {
+              dismissMutualDialog()
+              navigate(`/attestations/new?to=${encodeURIComponent(mutualPeer.did)}`)
+            }}
+            className="flex-1 px-4 py-3 bg-primary-600 text-white font-medium rounded-xl hover:bg-primary-700 transition-colors"
+          >
+            Attestierung erstellen
+          </button>
+          <button
+            onClick={() => {
+              dismissMutualDialog()
+              navigate(`/p/${encodeURIComponent(mutualPeer.did)}`)
+            }}
+            className="flex-1 px-4 py-3 border-2 border-slate-200 text-slate-700 font-medium rounded-xl hover:bg-slate-50 transition-colors"
+          >
+            Profil ansehen
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/**
+ * Renders global confetti + friendship dialog or toast overlay.
+ */
+function GlobalConfetti() {
+  const { confettiKey, toastMessage, mutualPeer } = usePendingVerification()
+  const [toastVisible, setToastVisible] = useState(false)
+
+  // Auto-hide toast (for non-mutual events like attestations)
+  useEffect(() => {
+    if (confettiKey === 0 || mutualPeer) return
+    if (!toastMessage) return
+    setToastVisible(true)
+    const timer = setTimeout(() => setToastVisible(false), 4000)
     return () => clearTimeout(timer)
-  }, [confettiKey])
+  }, [confettiKey, toastMessage, mutualPeer])
 
   if (confettiKey === 0) return null
 
   return (
     <>
       <Confetti key={confettiKey} />
-      {toastMessage && visible && (
+      <MutualVerificationDialog />
+
+      {/* Toast for non-mutual events (e.g. incoming attestation) */}
+      {!mutualPeer && toastMessage && toastVisible && (
         <div className="fixed top-6 left-1/2 -translate-x-1/2 z-50 animate-toast-in">
           <div className="bg-green-600 text-white px-6 py-3 rounded-xl shadow-lg font-medium text-sm max-w-sm text-center">
             {toastMessage}
