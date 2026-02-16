@@ -217,24 +217,32 @@ function IncomingAttestationDialog() {
         >
           <X size={20} />
         </button>
-        <div className="flex flex-col items-center gap-3 py-2">
-          <div className="w-12 h-12 bg-amber-100 rounded-full flex items-center justify-center">
+        <h3 className="text-lg font-bold text-slate-900">
+          Neue Attestierung von {incomingAttestation.senderName}
+        </h3>
+        <div className="flex items-center gap-3">
+          <div className="w-12 h-12 bg-amber-100 rounded-full flex items-center justify-center flex-shrink-0">
             <Award className="w-6 h-6 text-amber-600" />
           </div>
-          <h3 className="text-lg font-bold text-slate-900 text-center">
-            Neue Attestierung erhalten
-          </h3>
-          <p className="text-sm text-slate-600 text-center">
-            <span className="font-medium text-slate-900">{incomingAttestation.senderName}</span> attestiert: &ldquo;{incomingAttestation.claim}&rdquo;
+          <p className="text-sm text-slate-600">
+            &ldquo;{incomingAttestation.claim}&rdquo;
           </p>
         </div>
 
-        <button
-          onClick={handlePublish}
-          className="w-full px-4 py-3 bg-primary-600 text-white font-medium rounded-xl hover:bg-primary-700 transition-colors"
-        >
-          Veröffentlichen
-        </button>
+        <div className="flex gap-3">
+          <button
+            onClick={dismissAttestationDialog}
+            className="flex-1 px-4 py-3 border-2 border-slate-200 text-slate-700 font-medium rounded-xl hover:bg-slate-50 transition-colors"
+          >
+            Schließen
+          </button>
+          <button
+            onClick={handlePublish}
+            className="flex-1 px-4 py-3 bg-primary-600 text-white font-medium rounded-xl hover:bg-primary-700 transition-colors"
+          >
+            Veröffentlichen
+          </button>
+        </div>
       </div>
     </div>
   )
