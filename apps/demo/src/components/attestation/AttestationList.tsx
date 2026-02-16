@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from 'react'
 import { Award } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { useAttestations, useContacts, useProfileSync } from '../../hooks'
-import { useIdentity, useAdapters } from '../../context'
+import { useIdentity, useAdapters, usePendingVerification } from '../../context'
 import { AttestationCard } from './AttestationCard'
 
 export function AttestationList() {
@@ -11,9 +11,11 @@ export function AttestationList() {
   const { did: myDid } = useIdentity()
   const { storage } = useAdapters()
   const { uploadVerificationsAndAttestations } = useProfileSync()
+  const { incomingAttestation } = usePendingVerification()
   const [publicMap, setPublicMap] = useState<Record<string, boolean>>({})
 
   // Load metadata for all received attestations
+  // Re-runs when attestation dialog closes (incomingAttestation → null)
   useEffect(() => {
     async function loadMetadata() {
       const map: Record<string, boolean> = {}
@@ -24,7 +26,7 @@ export function AttestationList() {
       setPublicMap(map)
     }
     loadMetadata()
-  }, [receivedAttestations, storage])
+  }, [receivedAttestations, storage, incomingAttestation])
 
   const handleTogglePublic = useCallback(async (attestationId: string, publish: boolean) => {
     await setAttestationAccepted(attestationId, publish)
@@ -82,7 +84,6 @@ export function AttestationList() {
                 fromName={getContactName(attestation.from)}
                 toName={getContactName(attestation.to)}
                 showFrom={false}
-                showExport={true}
               />
             ))}
           </div>

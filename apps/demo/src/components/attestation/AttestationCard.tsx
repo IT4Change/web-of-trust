@@ -1,5 +1,4 @@
-import { useState } from 'react'
-import { Award, User, Calendar, Copy, Check, Globe, GlobeLock } from 'lucide-react'
+import { Award, User, Calendar, Globe, GlobeLock } from 'lucide-react'
 import type { Attestation } from '@real-life/wot-core'
 
 interface AttestationCardProps {
@@ -7,7 +6,6 @@ interface AttestationCardProps {
   fromName?: string | undefined
   toName?: string | undefined
   showFrom?: boolean | undefined
-  showExport?: boolean | undefined
   isPublic?: boolean | undefined
   onTogglePublic?: (attestationId: string, publish: boolean) => void
 }
@@ -17,20 +15,11 @@ export function AttestationCard({
   fromName,
   toName,
   showFrom = true,
-  showExport = false,
   isPublic,
   onTogglePublic,
 }: AttestationCardProps) {
-  const [copied, setCopied] = useState(false)
   const shortFromDid = attestation.from.slice(0, 20) + '...'
   const shortToDid = attestation.to.slice(0, 20) + '...'
-
-  const handleExport = async () => {
-    const encoded = btoa(JSON.stringify(attestation))
-    await navigator.clipboard.writeText(encoded)
-    setCopied(true)
-    setTimeout(() => setCopied(false), 2000)
-  }
 
   return (
     <div className="bg-white rounded-lg border border-slate-200 p-4">
@@ -88,15 +77,6 @@ export function AttestationCard({
             </button>
           )}
 
-          {showExport && (
-            <button
-              onClick={handleExport}
-              className="p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg transition-colors"
-              title="Attestation exportieren"
-            >
-              {copied ? <Check size={18} className="text-green-500" /> : <Copy size={18} />}
-            </button>
-          )}
         </div>
       </div>
     </div>

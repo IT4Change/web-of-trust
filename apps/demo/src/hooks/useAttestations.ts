@@ -23,9 +23,7 @@ export function useAttestations() {
       if (envelope.type !== 'attestation') return
       try {
         const attestation: Attestation = JSON.parse(envelope.payload)
-        // Verify and save (importAttestation handles dedup + signature check)
-        const encoded = btoa(JSON.stringify(attestation))
-        await attestationService.importAttestation(encoded)
+        await attestationService.saveIncomingAttestation(attestation)
 
         const contact = activeContactsRef.current.find(c => c.did === attestation.from)
         const name = contact?.name || 'Kontakt'
