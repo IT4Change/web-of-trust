@@ -9,7 +9,7 @@ export function useAttestations() {
   const { attestationService, reactiveStorage } = useAdapters()
   const { identity: wotIdentity, did } = useIdentity()
   const { onMessage } = useMessaging()
-  const { triggerConfetti } = usePendingVerification()
+  const { triggerAttestationDialog } = usePendingVerification()
   const { activeContacts } = useContacts()
   const activeContactsRef = useRef(activeContacts)
   activeContactsRef.current = activeContacts
@@ -29,14 +29,19 @@ export function useAttestations() {
 
         const contact = activeContactsRef.current.find(c => c.did === attestation.from)
         const name = contact?.name || 'Kontakt'
-        triggerConfetti(`Neue Attestation von ${name}: "${attestation.claim}"`)
+        triggerAttestationDialog({
+          attestationId: attestation.id,
+          senderName: name,
+          senderDid: attestation.from,
+          claim: attestation.claim,
+        })
       } catch (error) {
         // Duplicate or invalid — silently ignore
         console.debug('Incoming attestation skipped:', error)
       }
     })
     return unsubscribe
-  }, [onMessage, attestationService, triggerConfetti])
+  }, [onMessage, attestationService, triggerAttestationDialog])
 
   const createAttestation = useCallback(
     async (toDid: string, claim: string, tags?: string[]) => {

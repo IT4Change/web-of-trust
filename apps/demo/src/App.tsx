@@ -4,6 +4,7 @@ import { AdapterProvider, IdentityProvider, useIdentity, useAdapters, PendingVer
 import { useConfetti } from './context/PendingVerificationContext'
 import { AppShell, IdentityManagement, Confetti } from './components'
 import { Avatar } from './components/shared/Avatar'
+import { X, Award } from 'lucide-react'
 import { Home, Identity, Contacts, Verify, Attestations, PublicProfile } from './pages'
 import { useProfileSync, useMessaging, useContacts, useVerification, useLocalIdentity } from './hooks'
 import { useVerificationStatus, getVerificationStatus } from './hooks/useVerificationStatus'
@@ -137,12 +138,17 @@ function MutualVerificationDialog() {
 
   if (!mutualPeer) return null
 
-  const myName = localIdentity?.profile?.name || 'Du'
   const peerName = peerProfile?.name || mutualPeer.name
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-      <div className="bg-white rounded-2xl shadow-xl max-w-sm w-full p-6 space-y-4 animate-toast-in">
+      <div className="bg-white rounded-2xl shadow-xl max-w-sm w-full p-6 space-y-4 animate-toast-in relative">
+        <button
+          onClick={dismissMutualDialog}
+          className="absolute top-3 right-3 p-1.5 text-slate-400 hover:text-slate-600 transition-colors"
+        >
+          <X size={20} />
+        </button>
         <div className="flex flex-col items-center gap-3 py-2">
           <div className="flex items-center -space-x-3">
             <Avatar
@@ -157,7 +163,7 @@ function MutualVerificationDialog() {
             />
           </div>
           <h3 className="text-lg font-bold text-slate-900 text-center">
-            {myName} und {peerName} sind Freunde!
+            Du und {peerName} sind Freunde!
           </h3>
         </div>
 
@@ -187,20 +193,68 @@ function MutualVerificationDialog() {
 }
 
 /**
- * Renders global confetti + friendship dialog or toast overlay.
+ * Dialog shown when an incoming attestation is received.
+ */
+function IncomingAttestationDialog() {
+  const { incomingAttestation, dismissAttestationDialog } = usePendingVerification()
+  const { attestationService } = useAdapters()
+  const navigate = useNavigate()
+
+  if (!incomingAttestation) return null
+
+  const handlePublish = async () => {
+    await attestationService.setAttestationAccepted(incomingAttestation.attestationId, true)
+    dismissAttestationDialog()
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+      <div className="bg-white rounded-2xl shadow-xl max-w-sm w-full p-6 space-y-4 animate-toast-in relative">
+        <button
+          onClick={dismissAttestationDialog}
+          className="absolute top-3 right-3 p-1.5 text-slate-400 hover:text-slate-600 transition-colors"
+        >
+          <X size={20} />
+        </button>
+        <div className="flex flex-col items-center gap-3 py-2">
+          <div className="w-12 h-12 bg-amber-100 rounded-full flex items-center justify-center">
+            <Award className="w-6 h-6 text-amber-600" />
+          </div>
+          <h3 className="text-lg font-bold text-slate-900 text-center">
+            Neue Attestierung erhalten
+          </h3>
+          <p className="text-sm text-slate-600 text-center">
+            <span className="font-medium text-slate-900">{incomingAttestation.senderName}</span> attestiert: &ldquo;{incomingAttestation.claim}&rdquo;
+          </p>
+        </div>
+
+        <div className="flex gap-3 pt-2">
+          <button
+            onClick={handlePublish}
+            className="flex-1 px-4 py-3 bg-primary-600 text-white font-medium rounded-xl hover:bg-primary-700 transition-colors"
+          >
+            Veröffentlichen
+          </button>
+          <button
+            onClick={() => {
+              dismissAttestationDialog()
+              navigate(`/attestations/new?to=${encodeURIComponent(incomingAttestation.senderDid)}`)
+            }}
+            className="flex-1 px-4 py-3 border-2 border-slate-200 text-slate-700 font-medium rounded-xl hover:bg-slate-50 transition-colors"
+          >
+            Attestierung für {incomingAttestation.senderName}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/**
+ * Renders global confetti + mutual verification dialog.
  */
 function GlobalConfetti() {
-  const { confettiKey, toastMessage, mutualPeer } = usePendingVerification()
-  const [toastVisible, setToastVisible] = useState(false)
-
-  // Auto-hide toast (for non-mutual events like attestations)
-  useEffect(() => {
-    if (confettiKey === 0 || mutualPeer) return
-    if (!toastMessage) return
-    setToastVisible(true)
-    const timer = setTimeout(() => setToastVisible(false), 4000)
-    return () => clearTimeout(timer)
-  }, [confettiKey, toastMessage, mutualPeer])
+  const { confettiKey } = usePendingVerification()
 
   if (confettiKey === 0) return null
 
@@ -208,15 +262,6 @@ function GlobalConfetti() {
     <>
       <Confetti key={confettiKey} />
       <MutualVerificationDialog />
-
-      {/* Toast for non-mutual events (e.g. incoming attestation) */}
-      {!mutualPeer && toastMessage && toastVisible && (
-        <div className="fixed top-6 left-1/2 -translate-x-1/2 z-50 animate-toast-in">
-          <div className="bg-green-600 text-white px-6 py-3 rounded-xl shadow-lg font-medium text-sm max-w-sm text-center">
-            {toastMessage}
-          </div>
-        </div>
-      )}
     </>
   )
 }
@@ -341,6 +386,7 @@ function RequireIdentity({ children }: { children: React.ReactNode }) {
         <MutualVerificationEffect />
         <GlobalConfetti />
         <IncomingVerificationDialog />
+        <IncomingAttestationDialog />
         {children}
       </PendingVerificationProvider>
     </AdapterProvider>

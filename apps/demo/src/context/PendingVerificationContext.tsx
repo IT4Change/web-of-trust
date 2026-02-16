@@ -13,6 +13,14 @@ export interface MutualPeerInfo {
   did: string
 }
 
+/** Info about an incoming attestation for the dialog. */
+export interface IncomingAttestationInfo {
+  attestationId: string
+  senderName: string
+  senderDid: string
+  claim: string
+}
+
 interface ConfettiContextType {
   confettiKey: number
   toastMessage: string | null
@@ -20,6 +28,9 @@ interface ConfettiContextType {
   mutualPeer: MutualPeerInfo | null
   triggerMutualDialog: (peer: MutualPeerInfo) => void
   dismissMutualDialog: () => void
+  incomingAttestation: IncomingAttestationInfo | null
+  triggerAttestationDialog: (info: IncomingAttestationInfo) => void
+  dismissAttestationDialog: () => void
   challengeNonce: string | null
   setChallengeNonce: (nonce: string | null) => void
   pendingIncoming: PendingIncoming | null
@@ -32,6 +43,7 @@ export function ConfettiProvider({ children }: { children: ReactNode }) {
   const [confettiKey, setConfettiKey] = useState(0)
   const [toastMessage, setToastMessage] = useState<string | null>(null)
   const [mutualPeer, setMutualPeer] = useState<MutualPeerInfo | null>(null)
+  const [incomingAttestation, setIncomingAttestation] = useState<IncomingAttestationInfo | null>(null)
   const [challengeNonce, setChallengeNonce] = useState<string | null>(null)
   const [pendingIncoming, setPendingIncoming] = useState<PendingIncoming | null>(null)
 
@@ -49,8 +61,22 @@ export function ConfettiProvider({ children }: { children: ReactNode }) {
     setMutualPeer(null)
   }, [])
 
+  const triggerAttestationDialog = useCallback((info: IncomingAttestationInfo) => {
+    setIncomingAttestation(info)
+  }, [])
+
+  const dismissAttestationDialog = useCallback(() => {
+    setIncomingAttestation(null)
+  }, [])
+
   return (
-    <ConfettiContext.Provider value={{ confettiKey, toastMessage, triggerConfetti, mutualPeer, triggerMutualDialog, dismissMutualDialog, challengeNonce, setChallengeNonce, pendingIncoming, setPendingIncoming }}>
+    <ConfettiContext.Provider value={{
+      confettiKey, toastMessage, triggerConfetti,
+      mutualPeer, triggerMutualDialog, dismissMutualDialog,
+      incomingAttestation, triggerAttestationDialog, dismissAttestationDialog,
+      challengeNonce, setChallengeNonce,
+      pendingIncoming, setPendingIncoming,
+    }}>
       {children}
     </ConfettiContext.Provider>
   )
