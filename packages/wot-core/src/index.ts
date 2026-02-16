@@ -61,9 +61,11 @@ export type {
   DiscoveryAdapter,
   PublicVerificationsData,
   PublicAttestationsData,
+  ProfileSummary,
 } from './adapters/interfaces/DiscoveryAdapter'
 export type { ReplicationAdapter, SpaceHandle } from './adapters/interfaces/ReplicationAdapter'
-export type { DiscoverySyncStore, DiscoverySyncField } from './adapters/interfaces/DiscoverySyncStore'
+export type { PublishStateStore, PublishStateField } from './adapters/interfaces/PublishStateStore'
+export type { GraphCacheStore, CachedGraphEntry } from './adapters/interfaces/GraphCacheStore'
 export type { OutboxStore, OutboxEntry } from './adapters/interfaces/OutboxStore'
 
 // Crypto Utilities
@@ -97,6 +99,8 @@ export { VerificationHelper } from './verification'
 export { ProfileService } from './services/ProfileService'
 export { EncryptedSyncService } from './services/EncryptedSyncService'
 export { GroupKeyService } from './services/GroupKeyService'
+export { GraphCacheService } from './services/GraphCacheService'
+export type { GraphCacheOptions } from './services/GraphCacheService'
 
 // Adapter Implementations
 export { WebCryptoAdapter } from './adapters/crypto/WebCryptoAdapter'
@@ -106,6 +110,7 @@ export { WebSocketMessagingAdapter } from './adapters/messaging/WebSocketMessagi
 export { AutomergeReplicationAdapter } from './adapters/replication/AutomergeReplicationAdapter'
 export { HttpDiscoveryAdapter } from './adapters/discovery/HttpDiscoveryAdapter'
 export { OfflineFirstDiscoveryAdapter } from './adapters/discovery/OfflineFirstDiscoveryAdapter'
-export { InMemoryDiscoverySyncStore } from './adapters/discovery/InMemoryDiscoverySyncStore'
+export { InMemoryPublishStateStore } from './adapters/discovery/InMemoryPublishStateStore'
+export { InMemoryGraphCacheStore } from './adapters/discovery/InMemoryGraphCacheStore'
 export { OutboxMessagingAdapter } from './adapters/messaging/OutboxMessagingAdapter'
 export { InMemoryOutboxStore } from './adapters/messaging/InMemoryOutboxStore'

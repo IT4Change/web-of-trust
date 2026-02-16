@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { OfflineFirstDiscoveryAdapter } from '../src/adapters/discovery/OfflineFirstDiscoveryAdapter'
-import { InMemoryDiscoverySyncStore } from '../src/adapters/discovery/InMemoryDiscoverySyncStore'
+import { InMemoryPublishStateStore } from '../src/adapters/discovery/InMemoryPublishStateStore'
+import { InMemoryGraphCacheStore } from '../src/adapters/discovery/InMemoryGraphCacheStore'
 import type { DiscoveryAdapter, PublicVerificationsData, PublicAttestationsData } from '../src/adapters/interfaces/DiscoveryAdapter'
 import type { PublicProfile } from '../src/types/identity'
 import type { WotIdentity } from '../src/identity/WotIdentity'
@@ -41,13 +42,15 @@ function createMockInner(overrides: Partial<DiscoveryAdapter> = {}): DiscoveryAd
 
 describe('OfflineFirstDiscoveryAdapter', () => {
   let inner: DiscoveryAdapter
-  let syncStore: InMemoryDiscoverySyncStore
+  let publishState: InMemoryPublishStateStore
+  let graphCache: InMemoryGraphCacheStore
   let adapter: OfflineFirstDiscoveryAdapter
 
   beforeEach(() => {
     inner = createMockInner()
-    syncStore = new InMemoryDiscoverySyncStore()
-    adapter = new OfflineFirstDiscoveryAdapter(inner, syncStore)
+    publishState = new InMemoryPublishStateStore()
+    graphCache = new InMemoryGraphCacheStore()
+    adapter = new OfflineFirstDiscoveryAdapter(inner, publishState, graphCache)
   })
 
   describe('publishProfile', () => {
@@ -55,7 +58,7 @@ describe('OfflineFirstDiscoveryAdapter', () => {
       await adapter.publishProfile(TEST_PROFILE, MOCK_IDENTITY)
 
       expect(inner.publishProfile).toHaveBeenCalledWith(TEST_PROFILE, MOCK_IDENTITY)
-      const dirty = await syncStore.getDirtyFields(ALICE_DID)
+      const dirty = await publishState.getDirtyFields(ALICE_DID)
       expect(dirty.size).toBe(0)
     })
 
@@ -63,11 +66,11 @@ describe('OfflineFirstDiscoveryAdapter', () => {
       inner = createMockInner({
         publishProfile: vi.fn().mockRejectedValue(new Error('Network error')),
       })
-      adapter = new OfflineFirstDiscoveryAdapter(inner, syncStore)
+      adapter = new OfflineFirstDiscoveryAdapter(inner, publishState, graphCache)
 
       await adapter.publishProfile(TEST_PROFILE, MOCK_IDENTITY)
 
-      const dirty = await syncStore.getDirtyFields(ALICE_DID)
+      const dirty = await publishState.getDirtyFields(ALICE_DID)
       expect(dirty.has('profile')).toBe(true)
     })
   })
@@ -77,7 +80,7 @@ describe('OfflineFirstDiscoveryAdapter', () => {
       await adapter.publishVerifications(TEST_VERIFICATIONS, MOCK_IDENTITY)
 
       expect(inner.publishVerifications).toHaveBeenCalledWith(TEST_VERIFICATIONS, MOCK_IDENTITY)
-      const dirty = await syncStore.getDirtyFields(ALICE_DID)
+      const dirty = await publishState.getDirtyFields(ALICE_DID)
       expect(dirty.size).toBe(0)
     })
 
@@ -85,11 +88,11 @@ describe('OfflineFirstDiscoveryAdapter', () => {
       inner = createMockInner({
         publishVerifications: vi.fn().mockRejectedValue(new Error('Network error')),
       })
-      adapter = new OfflineFirstDiscoveryAdapter(inner, syncStore)
+      adapter = new OfflineFirstDiscoveryAdapter(inner, publishState, graphCache)
 
       await adapter.publishVerifications(TEST_VERIFICATIONS, MOCK_IDENTITY)
 
-      const dirty = await syncStore.getDirtyFields(ALICE_DID)
+      const dirty = await publishState.getDirtyFields(ALICE_DID)
       expect(dirty.has('verifications')).toBe(true)
     })
   })
@@ -99,7 +102,7 @@ describe('OfflineFirstDiscoveryAdapter', () => {
       await adapter.publishAttestations(TEST_ATTESTATIONS, MOCK_IDENTITY)
 
       expect(inner.publishAttestations).toHaveBeenCalledWith(TEST_ATTESTATIONS, MOCK_IDENTITY)
-      const dirty = await syncStore.getDirtyFields(ALICE_DID)
+      const dirty = await publishState.getDirtyFields(ALICE_DID)
       expect(dirty.size).toBe(0)
     })
 
@@ -107,48 +110,50 @@ describe('OfflineFirstDiscoveryAdapter', () => {
       inner = createMockInner({
         publishAttestations: vi.fn().mockRejectedValue(new Error('Network error')),
       })
-      adapter = new OfflineFirstDiscoveryAdapter(inner, syncStore)
+      adapter = new OfflineFirstDiscoveryAdapter(inner, publishState, graphCache)
 
       await adapter.publishAttestations(TEST_ATTESTATIONS, MOCK_IDENTITY)
 
-      const dirty = await syncStore.getDirtyFields(ALICE_DID)
+      const dirty = await publishState.getDirtyFields(ALICE_DID)
       expect(dirty.has('attestations')).toBe(true)
     })
   })
 
   describe('resolveProfile', () => {
-    it('should cache profile on successful resolve', async () => {
+    it('should pass through profile from inner on successful resolve', async () => {
       inner = createMockInner({
         resolveProfile: vi.fn().mockResolvedValue(TEST_PROFILE),
       })
-      adapter = new OfflineFirstDiscoveryAdapter(inner, syncStore)
+      adapter = new OfflineFirstDiscoveryAdapter(inner, publishState, graphCache)
 
       const result = await adapter.resolveProfile(ALICE_DID)
 
       expect(result).toEqual(TEST_PROFILE)
-      const cached = await syncStore.getCachedProfile(ALICE_DID)
-      expect(cached).toEqual(TEST_PROFILE)
+      // resolveProfile does not cache — caching is done by GraphCacheService.refresh()
+      // or explicitly by the UI after fetching all data together
     })
 
-    it('should return cached profile when inner fails', async () => {
-      // Pre-populate cache
-      await syncStore.cacheProfile(ALICE_DID, TEST_PROFILE)
+    it('should return cached profile from graph cache when inner fails', async () => {
+      // Pre-populate graph cache
+      await graphCache.cacheEntry(ALICE_DID, TEST_PROFILE, [], [])
 
       inner = createMockInner({
         resolveProfile: vi.fn().mockRejectedValue(new Error('Offline')),
       })
-      adapter = new OfflineFirstDiscoveryAdapter(inner, syncStore)
+      adapter = new OfflineFirstDiscoveryAdapter(inner, publishState, graphCache)
 
       const result = await adapter.resolveProfile(ALICE_DID)
 
-      expect(result).toEqual(TEST_PROFILE)
+      expect(result).not.toBeNull()
+      expect(result!.name).toBe('Alice')
+      expect(result!.did).toBe(ALICE_DID)
     })
 
     it('should re-throw when inner fails and no cache exists', async () => {
       inner = createMockInner({
         resolveProfile: vi.fn().mockRejectedValue(new Error('Offline')),
       })
-      adapter = new OfflineFirstDiscoveryAdapter(inner, syncStore)
+      adapter = new OfflineFirstDiscoveryAdapter(inner, publishState, graphCache)
 
       await expect(adapter.resolveProfile(ALICE_DID)).rejects.toThrow('Offline')
     })
@@ -157,11 +162,11 @@ describe('OfflineFirstDiscoveryAdapter', () => {
       inner = createMockInner({
         resolveProfile: vi.fn().mockResolvedValue(null),
       })
-      adapter = new OfflineFirstDiscoveryAdapter(inner, syncStore)
+      adapter = new OfflineFirstDiscoveryAdapter(inner, publishState, graphCache)
 
       await adapter.resolveProfile(ALICE_DID)
 
-      const cached = await syncStore.getCachedProfile(ALICE_DID)
+      const cached = await graphCache.getEntry(ALICE_DID)
       expect(cached).toBeNull()
     })
   })
@@ -172,7 +177,7 @@ describe('OfflineFirstDiscoveryAdapter', () => {
       inner = createMockInner({
         resolveVerifications: vi.fn().mockResolvedValue(verifications),
       })
-      adapter = new OfflineFirstDiscoveryAdapter(inner, syncStore)
+      adapter = new OfflineFirstDiscoveryAdapter(inner, publishState, graphCache)
 
       const result = await adapter.resolveVerifications(ALICE_DID)
 
@@ -183,7 +188,7 @@ describe('OfflineFirstDiscoveryAdapter', () => {
       inner = createMockInner({
         resolveVerifications: vi.fn().mockRejectedValue(new Error('Offline')),
       })
-      adapter = new OfflineFirstDiscoveryAdapter(inner, syncStore)
+      adapter = new OfflineFirstDiscoveryAdapter(inner, publishState, graphCache)
 
       const result = await adapter.resolveVerifications(ALICE_DID)
 
@@ -197,7 +202,7 @@ describe('OfflineFirstDiscoveryAdapter', () => {
       inner = createMockInner({
         resolveAttestations: vi.fn().mockResolvedValue(attestations),
       })
-      adapter = new OfflineFirstDiscoveryAdapter(inner, syncStore)
+      adapter = new OfflineFirstDiscoveryAdapter(inner, publishState, graphCache)
 
       const result = await adapter.resolveAttestations(ALICE_DID)
 
@@ -208,11 +213,34 @@ describe('OfflineFirstDiscoveryAdapter', () => {
       inner = createMockInner({
         resolveAttestations: vi.fn().mockRejectedValue(new Error('Offline')),
       })
-      adapter = new OfflineFirstDiscoveryAdapter(inner, syncStore)
+      adapter = new OfflineFirstDiscoveryAdapter(inner, publishState, graphCache)
 
       const result = await adapter.resolveAttestations(ALICE_DID)
 
       expect(result).toEqual([])
+    })
+  })
+
+  describe('resolveSummaries', () => {
+    it('should delegate to inner adapter when supported', async () => {
+      const summaries = [
+        { did: ALICE_DID, name: 'Alice', verificationCount: 3, attestationCount: 1 },
+      ]
+      inner = createMockInner({
+        resolveSummaries: vi.fn().mockResolvedValue(summaries),
+      })
+      adapter = new OfflineFirstDiscoveryAdapter(inner, publishState, graphCache)
+
+      const result = await adapter.resolveSummaries([ALICE_DID])
+
+      expect(result).toEqual(summaries)
+      expect(inner.resolveSummaries).toHaveBeenCalledWith([ALICE_DID])
+    })
+
+    it('should throw when inner adapter does not support resolveSummaries', async () => {
+      // Default mock has no resolveSummaries
+      await expect(adapter.resolveSummaries([ALICE_DID]))
+        .rejects.toThrow('Inner adapter does not support resolveSummaries')
     })
   })
 
@@ -233,14 +261,14 @@ describe('OfflineFirstDiscoveryAdapter', () => {
         publishVerifications: vi.fn().mockRejectedValue(new Error('Offline')),
         publishAttestations: vi.fn().mockRejectedValue(new Error('Offline')),
       })
-      const failingAdapter = new OfflineFirstDiscoveryAdapter(failingInner, syncStore)
+      const failingAdapter = new OfflineFirstDiscoveryAdapter(failingInner, publishState, graphCache)
 
       await failingAdapter.publishProfile(TEST_PROFILE, MOCK_IDENTITY)
       await failingAdapter.publishVerifications(TEST_VERIFICATIONS, MOCK_IDENTITY)
       await failingAdapter.publishAttestations(TEST_ATTESTATIONS, MOCK_IDENTITY)
 
       // Verify all three are dirty
-      const dirty = await syncStore.getDirtyFields(ALICE_DID)
+      const dirty = await publishState.getDirtyFields(ALICE_DID)
       expect(dirty.size).toBe(3)
 
       // Now retry with a working inner adapter
@@ -257,15 +285,15 @@ describe('OfflineFirstDiscoveryAdapter', () => {
       expect(inner.publishAttestations).toHaveBeenCalledWith(TEST_ATTESTATIONS, MOCK_IDENTITY)
 
       // All should be cleared
-      const dirtyAfter = await syncStore.getDirtyFields(ALICE_DID)
+      const dirtyAfter = await publishState.getDirtyFields(ALICE_DID)
       expect(dirtyAfter.size).toBe(0)
     })
 
     it('should clear individually on partial success', async () => {
       // Mark all as dirty
-      await syncStore.markDirty(ALICE_DID, 'profile')
-      await syncStore.markDirty(ALICE_DID, 'verifications')
-      await syncStore.markDirty(ALICE_DID, 'attestations')
+      await publishState.markDirty(ALICE_DID, 'profile')
+      await publishState.markDirty(ALICE_DID, 'verifications')
+      await publishState.markDirty(ALICE_DID, 'attestations')
 
       // Inner: profile succeeds, verifications fails, attestations succeeds
       inner = createMockInner({
@@ -273,7 +301,7 @@ describe('OfflineFirstDiscoveryAdapter', () => {
         publishVerifications: vi.fn().mockRejectedValue(new Error('Server error')),
         publishAttestations: vi.fn().mockResolvedValue(undefined),
       })
-      adapter = new OfflineFirstDiscoveryAdapter(inner, syncStore)
+      adapter = new OfflineFirstDiscoveryAdapter(inner, publishState, graphCache)
 
       const getPublishData = vi.fn().mockResolvedValue({
         profile: TEST_PROFILE,
@@ -283,7 +311,7 @@ describe('OfflineFirstDiscoveryAdapter', () => {
 
       await adapter.syncPending(ALICE_DID, MOCK_IDENTITY, getPublishData)
 
-      const dirty = await syncStore.getDirtyFields(ALICE_DID)
+      const dirty = await publishState.getDirtyFields(ALICE_DID)
       expect(dirty.size).toBe(1)
       expect(dirty.has('verifications')).toBe(true)
       expect(dirty.has('profile')).toBe(false)
@@ -291,8 +319,8 @@ describe('OfflineFirstDiscoveryAdapter', () => {
     })
 
     it('should skip fields without data in getPublishData', async () => {
-      await syncStore.markDirty(ALICE_DID, 'profile')
-      await syncStore.markDirty(ALICE_DID, 'verifications')
+      await publishState.markDirty(ALICE_DID, 'profile')
+      await publishState.markDirty(ALICE_DID, 'verifications')
 
       const getPublishData = vi.fn().mockResolvedValue({
         profile: TEST_PROFILE,
@@ -305,13 +333,13 @@ describe('OfflineFirstDiscoveryAdapter', () => {
       expect(inner.publishVerifications).not.toHaveBeenCalled()
 
       // Profile cleared, verifications still dirty (no data to retry with)
-      const dirty = await syncStore.getDirtyFields(ALICE_DID)
+      const dirty = await publishState.getDirtyFields(ALICE_DID)
       expect(dirty.has('profile')).toBe(false)
       expect(dirty.has('verifications')).toBe(true)
     })
 
     it('should use fresh data from getPublishData callback', async () => {
-      await syncStore.markDirty(ALICE_DID, 'profile')
+      await publishState.markDirty(ALICE_DID, 'profile')
 
       const updatedProfile: PublicProfile = {
         ...TEST_PROFILE,

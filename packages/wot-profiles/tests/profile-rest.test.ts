@@ -223,6 +223,106 @@ describe('Profile REST API', () => {
     })
   })
 
+  describe('GET /s (batch summaries)', () => {
+    it('should return summaries for known DIDs', async () => {
+      // The beforeAll + earlier tests already stored profile, verifications, attestations for `did`
+      const res = await fetch(`${BASE_URL}/s?dids=${encodeURIComponent(did)}`)
+      expect(res.status).toBe(200)
+      const summaries = await res.json()
+      expect(summaries).toHaveLength(1)
+      expect(summaries[0].did).toBe(did)
+      expect(summaries[0].name).toBeTruthy()
+      expect(summaries[0].verificationCount).toBeGreaterThan(0)
+      expect(summaries[0].attestationCount).toBeGreaterThan(0)
+    })
+
+    it('should return name=null and counts=0 for unknown DIDs', async () => {
+      const unknownDid = 'did:key:z6MkUnknown123'
+      const res = await fetch(`${BASE_URL}/s?dids=${encodeURIComponent(unknownDid)}`)
+      expect(res.status).toBe(200)
+      const summaries = await res.json()
+      expect(summaries).toHaveLength(1)
+      expect(summaries[0].did).toBe(unknownDid)
+      expect(summaries[0].name).toBeNull()
+      expect(summaries[0].verificationCount).toBe(0)
+      expect(summaries[0].attestationCount).toBe(0)
+    })
+
+    it('should handle mixed known and unknown DIDs', async () => {
+      const unknownDid = 'did:key:z6MkNobody456'
+      const dids = [did, unknownDid].map(d => encodeURIComponent(d)).join(',')
+      const res = await fetch(`${BASE_URL}/s?dids=${dids}`)
+      expect(res.status).toBe(200)
+      const summaries = await res.json()
+      expect(summaries).toHaveLength(2)
+
+      const known = summaries.find((s: any) => s.did === did)
+      const unknown = summaries.find((s: any) => s.did === unknownDid)
+      expect(known.name).toBeTruthy()
+      expect(unknown.name).toBeNull()
+      expect(unknown.verificationCount).toBe(0)
+    })
+
+    it('should reflect updated counts after attestation change', async () => {
+      // Get current count
+      const before = await fetch(`${BASE_URL}/s?dids=${encodeURIComponent(did)}`)
+      const beforeData = await before.json()
+      const countBefore = beforeData[0].attestationCount
+
+      // Publish new attestations (replacing the old ones)
+      const payload = {
+        did,
+        attestations: [
+          { id: 'a10', from: 'did:key:z6MkAlice', to: did, claim: 'Skill 1' },
+          { id: 'a11', from: 'did:key:z6MkBob', to: did, claim: 'Skill 2' },
+          { id: 'a12', from: 'did:key:z6MkCarol', to: did, claim: 'Skill 3' },
+        ],
+        updatedAt: new Date().toISOString(),
+      }
+      const jws = await identity.signJws(payload)
+      await fetch(`${BASE_URL}/p/${encodeURIComponent(did)}/a`, {
+        method: 'PUT',
+        body: jws,
+        headers: { 'Content-Type': 'text/plain' },
+      })
+
+      // Count should now be 3
+      const after = await fetch(`${BASE_URL}/s?dids=${encodeURIComponent(did)}`)
+      const afterData = await after.json()
+      expect(afterData[0].attestationCount).toBe(3)
+
+      // Publish with fewer attestations (simulating retraction)
+      const reduced = {
+        did,
+        attestations: [
+          { id: 'a10', from: 'did:key:z6MkAlice', to: did, claim: 'Skill 1' },
+        ],
+        updatedAt: new Date().toISOString(),
+      }
+      const jwsReduced = await identity.signJws(reduced)
+      await fetch(`${BASE_URL}/p/${encodeURIComponent(did)}/a`, {
+        method: 'PUT',
+        body: jwsReduced,
+        headers: { 'Content-Type': 'text/plain' },
+      })
+
+      // Count should now be 1
+      const final = await fetch(`${BASE_URL}/s?dids=${encodeURIComponent(did)}`)
+      const finalData = await final.json()
+      expect(finalData[0].attestationCount).toBe(1)
+    })
+
+    it('should return 400 for missing dids parameter', async () => {
+      const res = await fetch(`${BASE_URL}/s`)
+      expect(res.status).toBe(400)
+    })
+
+    it('should return 400 for empty dids parameter', async () => {
+      const res = await fetch(`${BASE_URL}/s?dids=`)
+      expect(res.status).toBe(400)
+    })
+  })
+
   describe('CORS', () => {
     it('should include Access-Control-Allow-Origin header', async () => {
       const res = await fetch(`${BASE_URL}/p/${encodeURIComponent(did)}`)

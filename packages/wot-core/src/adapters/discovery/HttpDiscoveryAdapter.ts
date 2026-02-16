@@ -6,6 +6,7 @@ import type {
   DiscoveryAdapter,
   PublicVerificationsData,
   PublicAttestationsData,
+  ProfileSummary,
 } from '../interfaces/DiscoveryAdapter'
 import { ProfileService } from '../../services/ProfileService'
 
@@ -74,5 +75,12 @@ export class HttpDiscoveryAdapter implements DiscoveryAdapter {
     if (!result.valid || !result.profile) return []
     const data = result.profile as unknown as PublicAttestationsData
     return data.attestations ?? []
+  }
+
+  async resolveSummaries(dids: string[]): Promise<ProfileSummary[]> {
+    const params = dids.map(d => encodeURIComponent(d)).join(',')
+    const res = await fetch(`${this.baseUrl}/s?dids=${params}`)
+    if (!res.ok) throw new Error(`Summary fetch failed: ${res.status}`)
+    return res.json()
   }
 }

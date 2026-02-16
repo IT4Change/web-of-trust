@@ -1,9 +1,17 @@
 import Database from 'better-sqlite3'
+import { extractJwsPayload } from './jws-verify.js'
 
 export interface StoredProfile {
   did: string
   jws: string
   updatedAt: string
+}
+
+export interface ProfileSummary {
+  did: string
+  name: string | null
+  verificationCount: number
+  attestationCount: number
 }
 
 export class ProfileStore {
@@ -93,6 +101,62 @@ export class ProfileStore {
 
     if (!row) return null
     return { did: row.did, jws: row.jws, updatedAt: row.updated_at }
+  }
+
+  getSummaries(dids: string[]): ProfileSummary[] {
+    if (dids.length === 0) return []
+
+    const placeholders = dids.map(() => '?').join(',')
+
+    // Batch query all three tables
+    const profileRows = this.db.prepare(
+      `SELECT did, jws FROM profiles WHERE did IN (${placeholders})`
+    ).all(...dids) as { did: string; jws: string }[]
+
+    const verificationRows = this.db.prepare(
+      `SELECT did, jws FROM verifications WHERE did IN (${placeholders})`
+    ).all(...dids) as { did: string; jws: string }[]
+
+    const attestationRows = this.db.prepare(
+      `SELECT did, jws FROM attestations WHERE did IN (${placeholders})`
+    ).all(...dids) as { did: string; jws: string }[]
+
+    // Build lookup maps
+    const profileMap = new Map(profileRows.map(r => [r.did, r.jws]))
+    const verificationMap = new Map(verificationRows.map(r => [r.did, r.jws]))
+    const attestationMap = new Map(attestationRows.map(r => [r.did, r.jws]))
+
+    return dids.map(did => {
+      let name: string | null = null
+      let verificationCount = 0
+      let attestationCount = 0
+
+      const profileJws = profileMap.get(did)
+      if (profileJws) {
+        const payload = extractJwsPayload(profileJws)
+        if (payload?.name && typeof payload.name === 'string') {
+          name = payload.name
+        }
+      }
+
+      const vJws = verificationMap.get(did)
+      if (vJws) {
+        const payload = extractJwsPayload(vJws)
+        if (Array.isArray(payload?.verifications)) {
+          verificationCount = payload.verifications.length
+        }
+      }
+
+      const aJws = attestationMap.get(did)
+      if (aJws) {
+        const payload = extractJwsPayload(aJws)
+        if (Array.isArray(payload?.attestations)) {
+          attestationCount = payload.attestations.length
+        }
+      }
+
+      return { did, name, verificationCount, attestationCount }
+    })
   }
 
   close(): void {

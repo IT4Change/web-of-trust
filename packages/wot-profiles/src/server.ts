@@ -45,6 +45,13 @@ export class ProfileServer {
     }
 
     const url = new URL(req.url ?? '/', `http://localhost:${this.options.port}`)
+
+    // Batch summary endpoint: GET /s?dids=did1,did2,...
+    if (url.pathname === '/s' && req.method === 'GET') {
+      await this.handleSummaries(url, res)
+      return
+    }
+
     const match = url.pathname.match(/^\/p\/([^/]+)(\/[va])?$/)
 
     if (!match) {
@@ -64,6 +71,32 @@ export class ProfileServer {
       res.writeHead(405)
       res.end('Method Not Allowed')
     }
+  }
+
+  private async handleSummaries(url: URL, res: ServerResponse): Promise<void> {
+    const didsParam = url.searchParams.get('dids')
+    if (!didsParam) {
+      res.writeHead(400, { 'Content-Type': 'text/plain' })
+      res.end('Missing dids parameter')
+      return
+    }
+
+    const dids = didsParam.split(',').map(d => decodeURIComponent(d.trim())).filter(Boolean)
+    if (dids.length === 0) {
+      res.writeHead(400, { 'Content-Type': 'text/plain' })
+      res.end('Empty dids parameter')
+      return
+    }
+
+    if (dids.length > 100) {
+      res.writeHead(400, { 'Content-Type': 'text/plain' })
+      res.end('Too many DIDs (max 100)')
+      return
+    }
+
+    const summaries = this.store.getSummaries(dids)
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify(summaries))
   }
 
   private async handleGet(did: string, subResource: '/v' | '/a' | undefined, res: ServerResponse): Promise<void> {

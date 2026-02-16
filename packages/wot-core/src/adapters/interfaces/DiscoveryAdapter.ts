@@ -24,6 +24,17 @@ export interface PublicAttestationsData {
 }
 
 /**
+ * Lightweight summary for batch queries.
+ * Unsigned (derived from already-verified JWS data server-side).
+ */
+export interface ProfileSummary {
+  did: string
+  name: string | null
+  verificationCount: number
+  attestationCount: number
+}
+
+/**
  * Discovery adapter interface for public profile lookup.
  *
  * Framework-agnostic: Can be implemented with HTTP REST (POC, wot-profiles),
@@ -54,4 +65,7 @@ export interface DiscoveryAdapter {
   resolveProfile(did: string): Promise<PublicProfile | null>
   resolveVerifications(did: string): Promise<Verification[]>
   resolveAttestations(did: string): Promise<Attestation[]>
+
+  // Optional: batch summary for multiple DIDs (unsigned, server-derived counts)
+  resolveSummaries?(dids: string[]): Promise<ProfileSummary[]>
 }

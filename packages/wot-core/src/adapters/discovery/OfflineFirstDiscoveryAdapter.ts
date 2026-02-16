@@ -6,15 +6,17 @@ import type {
   DiscoveryAdapter,
   PublicVerificationsData,
   PublicAttestationsData,
+  ProfileSummary,
 } from '../interfaces/DiscoveryAdapter'
-import type { DiscoverySyncStore } from '../interfaces/DiscoverySyncStore'
+import type { PublishStateStore } from '../interfaces/PublishStateStore'
+import type { GraphCacheStore } from '../interfaces/GraphCacheStore'
 
 /**
  * Offline-first wrapper for any DiscoveryAdapter.
  *
  * Decorator pattern: wraps an inner DiscoveryAdapter and adds:
- * - Dirty-flag tracking for publish operations (via DiscoverySyncStore)
- * - Profile caching for resolve operations
+ * - Dirty-flag tracking for publish operations (via PublishStateStore)
+ * - Profile/verification/attestation caching for resolve operations (via GraphCacheStore)
  * - syncPending() method for retry on reconnect
  *
  * The wrapper is optional — adapters that are natively offline-capable
@@ -22,40 +24,42 @@ import type { DiscoverySyncStore } from '../interfaces/DiscoverySyncStore'
  *
  * Usage:
  *   const http = new HttpDiscoveryAdapter(url)
- *   const syncStore = new EvoluDiscoverySyncStore(evolu, did)
- *   const discovery = new OfflineFirstDiscoveryAdapter(http, syncStore)
+ *   const publishState = new EvoluPublishStateStore(evolu, did)
+ *   const graphCache = new EvoluGraphCacheStore(evolu)
+ *   const discovery = new OfflineFirstDiscoveryAdapter(http, publishState, graphCache)
  */
 export class OfflineFirstDiscoveryAdapter implements DiscoveryAdapter {
   constructor(
     private inner: DiscoveryAdapter,
-    private syncStore: DiscoverySyncStore,
+    private publishState: PublishStateStore,
+    private graphCache: GraphCacheStore,
   ) {}
 
   async publishProfile(data: PublicProfile, identity: WotIdentity): Promise<void> {
-    await this.syncStore.markDirty(data.did, 'profile')
+    await this.publishState.markDirty(data.did, 'profile')
     try {
       await this.inner.publishProfile(data, identity)
-      await this.syncStore.clearDirty(data.did, 'profile')
+      await this.publishState.clearDirty(data.did, 'profile')
     } catch {
       // Flag remains set — will be retried via syncPending()
     }
   }
 
   async publishVerifications(data: PublicVerificationsData, identity: WotIdentity): Promise<void> {
-    await this.syncStore.markDirty(data.did, 'verifications')
+    await this.publishState.markDirty(data.did, 'verifications')
     try {
       await this.inner.publishVerifications(data, identity)
-      await this.syncStore.clearDirty(data.did, 'verifications')
+      await this.publishState.clearDirty(data.did, 'verifications')
     } catch {
       // Flag remains set — will be retried via syncPending()
     }
   }
 
   async publishAttestations(data: PublicAttestationsData, identity: WotIdentity): Promise<void> {
-    await this.syncStore.markDirty(data.did, 'attestations')
+    await this.publishState.markDirty(data.did, 'attestations')
     try {
       await this.inner.publishAttestations(data, identity)
-      await this.syncStore.clearDirty(data.did, 'attestations')
+      await this.publishState.clearDirty(data.did, 'attestations')
     } catch {
       // Flag remains set — will be retried via syncPending()
     }
@@ -63,12 +67,19 @@ export class OfflineFirstDiscoveryAdapter implements DiscoveryAdapter {
 
   async resolveProfile(did: string): Promise<PublicProfile | null> {
     try {
-      const result = await this.inner.resolveProfile(did)
-      if (result) await this.syncStore.cacheProfile(did, result)
-      return result
+      return await this.inner.resolveProfile(did)
     } catch (error) {
-      const cached = await this.syncStore.getCachedProfile(did)
-      if (cached) return cached
+      // Fallback to cached profile
+      const cached = await this.graphCache.getEntry(did)
+      if (cached?.name) {
+        return {
+          did: cached.did,
+          name: cached.name,
+          ...(cached.bio ? { bio: cached.bio } : {}),
+          ...(cached.avatar ? { avatar: cached.avatar } : {}),
+          updatedAt: cached.fetchedAt,
+        }
+      }
       // No cache available — re-throw so the UI can detect the network error
       throw error
     }
@@ -88,6 +99,13 @@ export class OfflineFirstDiscoveryAdapter implements DiscoveryAdapter {
     } catch {
       return []
     }
+  }
+
+  async resolveSummaries(dids: string[]): Promise<ProfileSummary[]> {
+    if (!this.inner.resolveSummaries) {
+      throw new Error('Inner adapter does not support resolveSummaries')
+    }
+    return this.inner.resolveSummaries(dids)
   }
 
   /**
@@ -110,7 +128,7 @@ export class OfflineFirstDiscoveryAdapter implements DiscoveryAdapter {
       attestations?: PublicAttestationsData
     }>,
   ): Promise<void> {
-    const dirty = await this.syncStore.getDirtyFields(did)
+    const dirty = await this.publishState.getDirtyFields(did)
     if (dirty.size === 0) return
 
     const data = await getPublishData()
@@ -118,7 +136,7 @@ export class OfflineFirstDiscoveryAdapter implements DiscoveryAdapter {
     if (dirty.has('profile') && data.profile) {
       try {
         await this.inner.publishProfile(data.profile, identity)
-        await this.syncStore.clearDirty(did, 'profile')
+        await this.publishState.clearDirty(did, 'profile')
       } catch {
         // Will be retried on next syncPending() call
       }
@@ -127,7 +145,7 @@ export class OfflineFirstDiscoveryAdapter implements DiscoveryAdapter {
     if (dirty.has('verifications') && data.verifications) {
       try {
         await this.inner.publishVerifications(data.verifications, identity)
-        await this.syncStore.clearDirty(did, 'verifications')
+        await this.publishState.clearDirty(did, 'verifications')
       } catch {
         // Will be retried on next syncPending() call
       }
@@ -136,7 +154,7 @@ export class OfflineFirstDiscoveryAdapter implements DiscoveryAdapter {
     if (dirty.has('attestations') && data.attestations) {
       try {
         await this.inner.publishAttestations(data.attestations, identity)
-        await this.syncStore.clearDirty(did, 'attestations')
+        await this.publishState.clearDirty(did, 'attestations')
       } catch {
         // Will be retried on next syncPending() call
       }
