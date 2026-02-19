@@ -98,6 +98,48 @@ Detaillierte Prozessbeschreibungen aus Nutzer- und technischer Perspektive.
 
 ---
 
+## Architektur
+
+### 7-Adapter-System
+
+Das System basiert auf austauschbaren Adaptern — gleiche Interfaces, unterschiedliche Implementierungen je nach Kontext (POC vs. Produktion, Browser vs. Test).
+
+```text
+┌─────────────────────────────────────────────────────────┐
+│                    Demo App (React)                      │
+├──────────┬──────────┬──────────┬──────────┬─────────────┤
+│ Storage  │ Crypto   │Discovery │Messaging │ Replication  │
+│ Adapter  │ Adapter  │ Adapter  │ Adapter  │ Adapter      │
+├──────────┼──────────┼──────────┼──────────┼─────────────┤
+│ Evolu    │WebCrypto │HTTP/REST │WebSocket │ Automerge    │
+│ (SQLite) │(Ed25519  │(JWS-     │(Relay +  │ (CRDT +      │
+│          │ X25519   │ signiert)│ Outbox + │  E2EE +      │
+│          │ AES-GCM) │          │ ACK)     │  GroupKeys)  │
+└──────────┴──────────┴──────────┴──────────┴─────────────┘
+```
+
+| Adapter | Aufgabe | POC | Produktion |
+| ------- | ------- | --- | ---------- |
+| **StorageAdapter** | Lokale Persistenz | Evolu (SQLite/OPFS) | Evolu |
+| **ReactiveStorageAdapter** | Live Queries, Subscriptions | Evolu | Evolu |
+| **CryptoAdapter** | Signing, Encryption | WebCrypto (Ed25519, X25519, AES-256-GCM) | WebCrypto |
+| **DiscoveryAdapter** | "Wer ist diese DID?" | HttpDiscoveryAdapter + Offline-Cache | HttpDiscoveryAdapter |
+| **MessagingAdapter** | 1:1 Nachrichtendelivery | WebSocket Relay (ACK + Outbox) | Matrix |
+| **ReplicationAdapter** | Verschlüsselte CRDT Spaces | AutomergeReplicationAdapter | Automerge |
+| **AuthorizationAdapter** | Capabilities / Rechte | *spezifiziert* | UCAN-like |
+
+### Drei Achsen
+
+```text
+Discovery (öffentlich, pre-contact)     →  "Wer ist DID xyz?"
+Messaging (1:1, post-contact)           →  "Sende Nachricht an DID xyz"
+Replication (group, verschlüsselt)      →  "Synchronisiere Space xyz"
+```
+
+Details: [Adapter-Architektur v2](docs/protokolle/adapter-architektur-v2.md) | [Framework-Evaluation](docs/protokolle/framework-evaluation.md)
+
+---
+
 ## Entwicklung
 
 ### Monorepo-Struktur
