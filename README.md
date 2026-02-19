@@ -128,14 +128,6 @@ Das System basiert auf austauschbaren Adaptern — gleiche Interfaces, unterschi
 | **ReplicationAdapter** | Verschlüsselte CRDT Spaces | AutomergeReplicationAdapter | Automerge |
 | **AuthorizationAdapter** | Capabilities / Rechte | *spezifiziert* | UCAN-like |
 
-### Drei Achsen
-
-```text
-Discovery (öffentlich, pre-contact)     →  "Wer ist DID xyz?"
-Messaging (1:1, post-contact)           →  "Sende Nachricht an DID xyz"
-Replication (group, verschlüsselt)      →  "Synchronisiere Space xyz"
-```
-
 Details: [Adapter-Architektur v2](docs/protokolle/adapter-architektur-v2.md) | [Framework-Evaluation](docs/protokolle/framework-evaluation.md)
 
 ---
