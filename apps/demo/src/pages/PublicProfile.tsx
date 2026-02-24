@@ -182,12 +182,16 @@ export function PublicProfile() {
     // Check if it's one of my contacts (they have local names)
     const contact = contacts.find(c => c.did === targetDid)
     if (contact?.name) return contact.name + suffix
+    // Check if it's my own identity
+    if (targetDid === myDid && localIdentity?.profile.name) {
+      return localIdentity.profile.name + suffix
+    }
     // Check graph cache
     const cached = resolvedNames.get(targetDid)
     if (cached) return cached + suffix
     // Fall back to short DID
     return shortDidLabel(targetDid) + suffix
-  }, [contacts, resolvedNames, myDid])
+  }, [contacts, resolvedNames, myDid, localIdentity])
 
   const isKnownContact = useCallback((targetDid: string): boolean => {
     if (targetDid === myDid) return true
