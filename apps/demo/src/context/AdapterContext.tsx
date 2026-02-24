@@ -106,12 +106,14 @@ export function AdapterProvider({ children, identity }: AdapterProviderProps) {
           await new Promise(resolve => setTimeout(resolve, 2000))
           existing = await storage.getIdentity()
         }
+        let needsInitialSync = false
         if (!existing && did) {
           const profile = consumeInitialProfile() ?? { name: '' }
           await storage.createIdentity(did, profile)
           // Mark profile dirty so syncDiscovery() uploads it to wot-profiles
           if (profile.name) {
             await publishStateStore.markDirty(did, 'profile')
+            needsInitialSync = true
           }
         }
 
@@ -233,6 +235,13 @@ export function AdapterProvider({ children, identity }: AdapterProviderProps) {
                 reconnectRelay()
               }
             }, 10_000)
+          }
+
+          // After new identity creation, sync profile immediately.
+          // Short delay ensures Evolu's upsert (markDirty) is persisted
+          // before syncPending reads the dirty flags via loadQuery().
+          if (needsInitialSync && !cancelled) {
+            setTimeout(() => { syncDiscovery() }, 500)
           }
         }
       } catch (error) {

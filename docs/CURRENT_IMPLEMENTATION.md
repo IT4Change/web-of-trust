@@ -7,8 +7,11 @@ Dieses Dokument zeigt, was bereits implementiert ist und welche Entscheidungen g
 
 ## Letzte Aktualisierung
 
-**Datum:** 2026-02-18
+**Datum:** 2026-02-25
 **Phase:** Week 6++ - i18n + Offline Polish
+**Demo:** https://web-of-trust.de/demo/
+**Relay:** wss://relay.utopia-lab.org
+**Profiles:** https://profiles.utopia-lab.org
 
 ---
 

@@ -32,47 +32,62 @@ export interface DirtyState {
 }
 
 export class EvoluPublishStateStore implements PublishStateStore {
+  /**
+   * In-memory cache of dirty state.
+   * Avoids loadQuery() race conditions: markDirty writes to cache immediately,
+   * getDirtyFields reads from cache, so syncPending sees the flags instantly.
+   * Evolu upsert persists the state for page reloads.
+   */
+  private cache: Map<string, { profileDirty: boolean; verificationsDirty: boolean; attestationsDirty: boolean }> = new Map()
+  private cacheLoaded = false
+
   constructor(private evolu: AppEvolu, private did: string) {}
 
   async markDirty(did: string, field: PublishStateField): Promise<void> {
-    const current = await this.loadSyncState(did)
-    const update = { ...current }
-    if (field === 'profile') update.profileDirty = true
-    if (field === 'verifications') update.verificationsDirty = true
-    if (field === 'attestations') update.attestationsDirty = true
-
-    this.evolu.upsert('discoverySyncState', {
-      id: createIdFromString<'DiscoverySyncState'>(`sync-${did}`),
-      did: str(did),
-      profileDirty: booleanToSqliteBoolean(update.profileDirty),
-      verificationsDirty: booleanToSqliteBoolean(update.verificationsDirty),
-      attestationsDirty: booleanToSqliteBoolean(update.attestationsDirty),
-    })
+    const current = await this.getCachedState(did)
+    if (field === 'profile') current.profileDirty = true
+    if (field === 'verifications') current.verificationsDirty = true
+    if (field === 'attestations') current.attestationsDirty = true
+    this.persistState(did, current)
   }
 
   async clearDirty(did: string, field: PublishStateField): Promise<void> {
-    const current = await this.loadSyncState(did)
-    const update = { ...current }
-    if (field === 'profile') update.profileDirty = false
-    if (field === 'verifications') update.verificationsDirty = false
-    if (field === 'attestations') update.attestationsDirty = false
-
-    this.evolu.upsert('discoverySyncState', {
-      id: createIdFromString<'DiscoverySyncState'>(`sync-${did}`),
-      did: str(did),
-      profileDirty: booleanToSqliteBoolean(update.profileDirty),
-      verificationsDirty: booleanToSqliteBoolean(update.verificationsDirty),
-      attestationsDirty: booleanToSqliteBoolean(update.attestationsDirty),
-    })
+    const current = await this.getCachedState(did)
+    if (field === 'profile') current.profileDirty = false
+    if (field === 'verifications') current.verificationsDirty = false
+    if (field === 'attestations') current.attestationsDirty = false
+    this.persistState(did, current)
   }
 
   async getDirtyFields(did: string): Promise<Set<PublishStateField>> {
-    const state = await this.loadSyncState(did)
+    const state = await this.getCachedState(did)
     const fields = new Set<PublishStateField>()
     if (state.profileDirty) fields.add('profile')
     if (state.verificationsDirty) fields.add('verifications')
     if (state.attestationsDirty) fields.add('attestations')
     return fields
+  }
+
+  private async getCachedState(did: string) {
+    if (!this.cacheLoaded) {
+      const persisted = await this.loadSyncState(did)
+      if (!this.cache.has(did)) this.cache.set(did, persisted)
+      this.cacheLoaded = true
+    }
+    if (!this.cache.has(did)) {
+      this.cache.set(did, { profileDirty: false, verificationsDirty: false, attestationsDirty: false })
+    }
+    return this.cache.get(did)!
+  }
+
+  private persistState(did: string, state: { profileDirty: boolean; verificationsDirty: boolean; attestationsDirty: boolean }) {
+    this.evolu.upsert('discoverySyncState', {
+      id: createIdFromString<'DiscoverySyncState'>(`sync-${did}`),
+      did: str(did),
+      profileDirty: booleanToSqliteBoolean(state.profileDirty),
+      verificationsDirty: booleanToSqliteBoolean(state.verificationsDirty),
+      attestationsDirty: booleanToSqliteBoolean(state.attestationsDirty),
+    })
   }
 
   /**
