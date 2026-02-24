@@ -44,7 +44,7 @@ export function IdentityManagement({ onComplete }: IdentityManagementProps) {
     return (
       <RecoveryFlow
         onComplete={onComplete}
-        onCancel={() => setMode('unlock')}
+        onCancel={() => setMode(hasStoredIdentity ? 'unlock' : 'onboarding')}
       />
     )
   }
