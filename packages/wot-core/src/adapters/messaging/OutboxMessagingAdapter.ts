@@ -90,7 +90,7 @@ export class OutboxMessagingAdapter implements MessagingAdapter {
 
   // --- Receiving: delegate to inner ---
 
-  onMessage(callback: (envelope: MessageEnvelope) => void): () => void {
+  onMessage(callback: (envelope: MessageEnvelope) => void | Promise<void>): () => void {
     return this.inner.onMessage(callback)
   }
 

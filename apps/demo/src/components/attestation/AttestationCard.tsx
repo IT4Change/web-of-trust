@@ -1,5 +1,6 @@
-import { Award, User, Calendar, Globe, GlobeLock } from 'lucide-react'
+import { Award, User, Calendar, Globe, GlobeLock, Loader2, Clock, Check, CheckCheck, XCircle, RefreshCw } from 'lucide-react'
 import type { Attestation } from '@real-life/wot-core'
+import type { DeliveryStatus } from '../../services/AttestationService'
 import { useLanguage } from '../../i18n'
 
 interface AttestationCardProps {
@@ -9,6 +10,70 @@ interface AttestationCardProps {
   showFrom?: boolean | undefined
   isPublic?: boolean | undefined
   onTogglePublic?: (attestationId: string, publish: boolean) => void
+  deliveryStatus?: DeliveryStatus | undefined
+  onRetry?: (attestationId: string) => void
+}
+
+function DeliveryIndicator({ status, onRetry, attestationId, t }: {
+  status: DeliveryStatus
+  onRetry?: ((id: string) => void) | undefined
+  attestationId: string
+  t: any
+}) {
+  switch (status) {
+    case 'sending':
+      return (
+        <span className="text-blue-500" title={t.attestations.deliverySending}>
+          <Loader2 size={16} className="animate-spin" />
+        </span>
+      )
+    case 'queued':
+      return (
+        <div className="flex items-center gap-1">
+          <span className="text-amber-500" title={t.attestations.deliveryQueued}>
+            <Clock size={16} />
+          </span>
+          {onRetry && (
+            <button
+              onClick={() => onRetry(attestationId)}
+              className="p-1 text-amber-500 hover:text-amber-700 hover:bg-amber-50 rounded transition-colors"
+              title={t.attestations.retryButton}
+            >
+              <RefreshCw size={14} />
+            </button>
+          )}
+        </div>
+      )
+    case 'delivered':
+      return (
+        <span className="text-slate-400" title={t.attestations.deliveryDelivered}>
+          <Check size={16} />
+        </span>
+      )
+    case 'acknowledged':
+      return (
+        <span className="text-slate-400" title={t.attestations.deliveryAcknowledged}>
+          <CheckCheck size={16} />
+        </span>
+      )
+    case 'failed':
+      return (
+        <div className="flex items-center gap-1">
+          <span className="text-red-500" title={t.attestations.deliveryFailed}>
+            <XCircle size={16} />
+          </span>
+          {onRetry && (
+            <button
+              onClick={() => onRetry(attestationId)}
+              className="p-1 text-red-500 hover:text-red-700 hover:bg-red-50 rounded transition-colors"
+              title={t.attestations.retryButton}
+            >
+              <RefreshCw size={14} />
+            </button>
+          )}
+        </div>
+      )
+  }
 }
 
 export function AttestationCard({
@@ -18,6 +83,8 @@ export function AttestationCard({
   showFrom = true,
   isPublic,
   onTogglePublic,
+  deliveryStatus,
+  onRetry,
 }: AttestationCardProps) {
   const { t, formatDate } = useLanguage()
   const shortFromDid = attestation.from.slice(0, 20) + '...'
@@ -64,7 +131,15 @@ export function AttestationCard({
           </div>
         </div>
 
-        <div className="flex gap-1">
+        <div className="flex items-center gap-1">
+          {deliveryStatus && (
+            <DeliveryIndicator
+              status={deliveryStatus}
+              onRetry={onRetry}
+              attestationId={attestation.id}
+              t={t}
+            />
+          )}
           {onTogglePublic && (
             <button
               onClick={() => onTogglePublic(attestation.id, !isPublic)}
@@ -78,7 +153,6 @@ export function AttestationCard({
               {isPublic ? <Globe size={18} /> : <GlobeLock size={18} />}
             </button>
           )}
-
         </div>
       </div>
     </div>

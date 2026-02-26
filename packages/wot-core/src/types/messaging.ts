@@ -8,6 +8,7 @@ export type MessageType =
   | 'space-invite'
   | 'group-key-rotation'
   | 'profile-update'
+  | 'attestation-ack'
   | 'ack'
   | 'content'
 

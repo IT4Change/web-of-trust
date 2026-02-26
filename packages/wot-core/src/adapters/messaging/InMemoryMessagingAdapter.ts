@@ -20,7 +20,7 @@ export class InMemoryMessagingAdapter implements MessagingAdapter {
 
   private myDid: string | null = null
   private state: MessagingState = 'disconnected'
-  private messageCallbacks = new Set<(envelope: MessageEnvelope) => void>()
+  private messageCallbacks = new Set<(envelope: MessageEnvelope) => void | Promise<void>>()
   private receiptCallbacks = new Set<(receipt: DeliveryReceipt) => void>()
 
   async connect(myDid: string): Promise<void> {
@@ -33,7 +33,7 @@ export class InMemoryMessagingAdapter implements MessagingAdapter {
     if (queued && queued.length > 0) {
       InMemoryMessagingAdapter.offlineQueue.delete(myDid)
       for (const envelope of queued) {
-        this.deliverToSelf(envelope)
+        await this.deliverToSelf(envelope)
       }
     }
   }
@@ -60,7 +60,7 @@ export class InMemoryMessagingAdapter implements MessagingAdapter {
     // Try to deliver to connected recipient
     const recipient = InMemoryMessagingAdapter.registry.get(envelope.toDid)
     if (recipient) {
-      recipient.deliverToSelf(envelope)
+      await recipient.deliverToSelf(envelope)
 
       // Notify sender of delivered receipt
       const deliveredReceipt: DeliveryReceipt = {
@@ -91,7 +91,7 @@ export class InMemoryMessagingAdapter implements MessagingAdapter {
     }
   }
 
-  onMessage(callback: (envelope: MessageEnvelope) => void): () => void {
+  onMessage(callback: (envelope: MessageEnvelope) => void | Promise<void>): () => void {
     this.messageCallbacks.add(callback)
     return () => {
       this.messageCallbacks.delete(callback)
@@ -125,9 +125,13 @@ export class InMemoryMessagingAdapter implements MessagingAdapter {
     InMemoryMessagingAdapter.transportMap.clear()
   }
 
-  private deliverToSelf(envelope: MessageEnvelope): void {
+  private async deliverToSelf(envelope: MessageEnvelope): Promise<void> {
     for (const cb of this.messageCallbacks) {
-      cb(envelope)
+      try {
+        await cb(envelope)
+      } catch (err) {
+        console.error('Message callback error:', err)
+      }
     }
   }
 }

@@ -5,11 +5,19 @@ import type {
   Attestation,
   Proof,
   MessageEnvelope,
+  OutboxStore,
+  Subscribable,
 } from '@real-life/wot-core'
 import { createResourceRef } from '@real-life/wot-core'
 
+export type DeliveryStatus = 'sending' | 'queued' | 'delivered' | 'acknowledged' | 'failed'
+
 export class AttestationService {
   private messaging: MessagingAdapter | null = null
+  private deliveryStatus = new Map<string, DeliveryStatus>()
+  private statusSubscribers = new Set<(map: Map<string, DeliveryStatus>) => void>()
+  private receiptUnsubscribe: (() => void) | null = null
+  private messageUnsubscribe: (() => void) | null = null
 
   constructor(
     private storage: StorageAdapter,
@@ -20,10 +28,115 @@ export class AttestationService {
     this.messaging = messaging
   }
 
+  // --- Delivery Status Tracking ---
+
+  getDeliveryStatus(attestationId: string): DeliveryStatus | undefined {
+    return this.deliveryStatus.get(attestationId)
+  }
+
+  watchDeliveryStatus(): Subscribable<Map<string, DeliveryStatus>> {
+    const self = this
+    return {
+      getValue: () => self.deliveryStatus,
+      subscribe: (callback: (map: Map<string, DeliveryStatus>) => void) => {
+        self.statusSubscribers.add(callback)
+        return () => { self.statusSubscribers.delete(callback) }
+      },
+    }
+  }
+
+  private setStatus(attestationId: string, status: DeliveryStatus): void {
+    this.deliveryStatus = new Map(this.deliveryStatus)
+    this.deliveryStatus.set(attestationId, status)
+    for (const cb of this.statusSubscribers) {
+      cb(this.deliveryStatus)
+    }
+  }
+
+  /**
+   * Listen for delivery receipts and attestation-ack messages.
+   * Call once after setMessaging().
+   */
+  listenForReceipts(messaging: MessagingAdapter): void {
+    // Clean up previous listeners
+    this.receiptUnsubscribe?.()
+    this.messageUnsubscribe?.()
+
+    // Listen for relay delivery receipts
+    this.receiptUnsubscribe = messaging.onReceipt((receipt) => {
+      if (!this.deliveryStatus.has(receipt.messageId)) return
+      if (receipt.status === 'delivered') {
+        this.setStatus(receipt.messageId, 'delivered')
+      } else if (receipt.status === 'failed') {
+        this.setStatus(receipt.messageId, 'failed')
+      }
+    })
+
+    // Listen for attestation-ack messages from recipients
+    this.messageUnsubscribe = messaging.onMessage((envelope) => {
+      if (envelope.type !== 'attestation-ack') return
+      try {
+        const { attestationId } = JSON.parse(envelope.payload)
+        if (attestationId && this.deliveryStatus.has(attestationId)) {
+          this.setStatus(attestationId, 'acknowledged')
+        }
+      } catch {
+        // Invalid payload — ignore
+      }
+    })
+  }
+
+  /**
+   * Bootstrap delivery status from outbox (on app startup).
+   * Marks any pending attestation envelopes as 'queued'.
+   */
+  async initFromOutbox(outboxStore: OutboxStore): Promise<void> {
+    const pending = await outboxStore.getPending()
+    for (const entry of pending) {
+      if (entry.envelope.type === 'attestation') {
+        this.setStatus(entry.envelope.id, 'queued')
+      }
+    }
+  }
+
+  /**
+   * Retry sending a failed/queued attestation.
+   */
+  async retryAttestation(attestationId: string): Promise<void> {
+    if (!this.messaging) return
+    const attestation = await this.storage.getAttestation(attestationId)
+    if (!attestation) return
+
+    const envelope: MessageEnvelope = {
+      v: 1,
+      id: attestation.id,
+      type: 'attestation',
+      fromDid: attestation.from,
+      toDid: attestation.to,
+      createdAt: attestation.createdAt,
+      encoding: 'json',
+      payload: JSON.stringify(attestation),
+      signature: attestation.proof.proofValue,
+      ref: createResourceRef('attestation', attestation.id),
+    }
+
+    this.setStatus(attestationId, 'sending')
+    try {
+      const receipt = await this.messaging.send(envelope)
+      if (receipt.reason === 'queued-in-outbox') {
+        this.setStatus(attestationId, 'queued')
+      } else if (receipt.status === 'delivered' || receipt.status === 'accepted') {
+        this.setStatus(attestationId, 'delivered')
+      }
+    } catch {
+      this.setStatus(attestationId, 'failed')
+    }
+  }
+
+  // --- Attestation CRUD ---
+
   /**
    * Create an attestation (as the sender/from)
-   * Note: In a real app, this would be sent to the recipient for storage
-   * For demo purposes, we store it locally
    */
   async createAttestation(
     fromDid: string,
@@ -70,26 +183,28 @@ export class AttestationService {
 
     // Send to recipient via relay (Empfänger-Prinzip)
     if (this.messaging) {
-      try {
-        const envelope: MessageEnvelope = {
-          v: 1,
-          id: attestation.id,
-          type: 'attestation',
-          fromDid: fromDid,
-          toDid: toDid,
-          createdAt: attestation.createdAt,
-          encoding: 'json',
-          payload: JSON.stringify(attestation),
-          signature: attestation.proof.proofValue,
-          ref: createResourceRef('attestation', attestation.id),
-        }
-        // Non-blocking — outbox handles retry if offline/slow
-        this.messaging.send(envelope).catch((error) => {
-          console.warn('Failed to send attestation via relay:', error)
-        })
-      } catch (error) {
-        console.warn('Failed to prepare attestation envelope:', error)
+      const envelope: MessageEnvelope = {
+        v: 1,
+        id: attestation.id,
+        type: 'attestation',
+        fromDid: fromDid,
+        toDid: toDid,
+        createdAt: attestation.createdAt,
+        encoding: 'json',
+        payload: JSON.stringify(attestation),
+        signature: attestation.proof.proofValue,
+        ref: createResourceRef('attestation', attestation.id),
       }
+      this.setStatus(attestation.id, 'sending')
+      this.messaging.send(envelope).then((receipt) => {
+        if (receipt.reason === 'queued-in-outbox') {
+          this.setStatus(attestation.id, 'queued')
+        } else if (receipt.status === 'delivered' || receipt.status === 'accepted') {
+          this.setStatus(attestation.id, 'delivered')
+        }
+      }).catch(() => {
+        this.setStatus(attestation.id, 'failed')
+      })
     }
 
     return attestation

@@ -19,7 +19,7 @@ import type {
 export class WebSocketMessagingAdapter implements MessagingAdapter {
   private ws: WebSocket | null = null
   private state: MessagingState = 'disconnected'
-  private messageCallbacks = new Set<(envelope: MessageEnvelope) => void>()
+  private messageCallbacks = new Set<(envelope: MessageEnvelope) => void | Promise<void>>()
   private receiptCallbacks = new Set<(receipt: DeliveryReceipt) => void>()
   private stateCallbacks = new Set<(state: MessagingState) => void>()
   private transportMap = new Map<string, string>()
@@ -28,8 +28,11 @@ export class WebSocketMessagingAdapter implements MessagingAdapter {
   private heartbeatTimeout: ReturnType<typeof setTimeout> | null = null
   private readonly HEARTBEAT_INTERVAL_MS = 15_000
   private readonly HEARTBEAT_TIMEOUT_MS = 5_000
+  private readonly SEND_TIMEOUT_MS: number
 
-  constructor(private relayUrl: string) {}
+  constructor(private relayUrl: string, options?: { sendTimeoutMs?: number }) {
+    this.SEND_TIMEOUT_MS = options?.sendTimeoutMs ?? 10_000
+  }
 
   private setState(newState: MessagingState) {
     this.state = newState
@@ -67,23 +70,9 @@ export class WebSocketMessagingAdapter implements MessagingAdapter {
             resolve()
             break
 
-          case 'message': {
-            const envelope = msg.envelope as MessageEnvelope
-            let processed = false
-            for (const cb of this.messageCallbacks) {
-              try {
-                cb(envelope)
-                processed = true
-              } catch (err) {
-                console.error('Message callback error:', err)
-              }
-            }
-            // ACK: tell relay we processed the message
-            if (processed && this.ws) {
-              this.ws.send(JSON.stringify({ type: 'ack', messageId: envelope.id }))
-            }
+          case 'message':
+            this.handleIncomingMessage(msg.envelope as MessageEnvelope)
             break
-          }
 
           case 'receipt': {
             const receipt = msg.receipt as DeliveryReceipt
@@ -171,6 +160,26 @@ export class WebSocketMessagingAdapter implements MessagingAdapter {
     }
   }
 
+  /**
+   * Process incoming message: await all callbacks, then ACK.
+   * Extracted from onmessage handler so callbacks can be async.
+   */
+  private async handleIncomingMessage(envelope: MessageEnvelope): Promise<void> {
+    let processed = false
+    for (const cb of this.messageCallbacks) {
+      try {
+        await cb(envelope)
+        processed = true
+      } catch (err) {
+        console.error('Message callback error:', err)
+      }
+    }
+    // ACK: tell relay we processed the message (only after all callbacks resolved)
+    if (processed && this.ws) {
+      this.ws.send(JSON.stringify({ type: 'ack', messageId: envelope.id }))
+    }
+  }
+
   private handlePong(): void {
     // Pong received — connection is alive, clear timeout
     if (this.heartbeatTimeout) {
@@ -184,16 +193,26 @@ export class WebSocketMessagingAdapter implements MessagingAdapter {
       throw new Error('WebSocketMessagingAdapter: must call connect() before send()')
     }
 
-    return new Promise<DeliveryReceipt>((resolve) => {
+    return new Promise<DeliveryReceipt>((resolve, reject) => {
+      const timer = this.SEND_TIMEOUT_MS > 0
+        ? setTimeout(() => {
+            this.pendingReceipts.delete(envelope.id)
+            reject(new Error(`Send timeout: no receipt from relay after ${this.SEND_TIMEOUT_MS}ms`))
+          }, this.SEND_TIMEOUT_MS)
+        : null
+
       // Register pending receipt handler
-      this.pendingReceipts.set(envelope.id, resolve)
+      this.pendingReceipts.set(envelope.id, (receipt) => {
+        if (timer) clearTimeout(timer)
+        resolve(receipt)
+      })
 
       // Send to relay
       this.ws!.send(JSON.stringify({ type: 'send', envelope }))
     })
   }
 
-  onMessage(callback: (envelope: MessageEnvelope) => void): () => void {
+  onMessage(callback: (envelope: MessageEnvelope) => void | Promise<void>): () => void {
     this.messageCallbacks.add(callback)
     return () => {
       this.messageCallbacks.delete(callback)

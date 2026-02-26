@@ -9,7 +9,7 @@ import { Home, Identity, Contacts, Verify, Attestations, PublicProfile } from '.
 import { useProfileSync, useMessaging, useContacts, useVerification, useLocalIdentity } from './hooks'
 import { useVerificationStatus, getVerificationStatus } from './hooks/useVerificationStatus'
 import { VerificationHelper } from '@real-life/wot-core'
-import type { Verification, PublicProfile as PublicProfileType } from '@real-life/wot-core'
+import type { Attestation, Verification, PublicProfile as PublicProfileType } from '@real-life/wot-core'
 import { LanguageProvider, useLanguage } from './i18n'
 
 /**
@@ -77,6 +77,75 @@ function VerificationListenerEffect() {
     })
     return unsubscribe
   }, [onMessage, verificationService, did, setChallengeNonce, setPendingIncoming])
+
+  return null
+}
+
+/**
+ * Global listener for incoming attestation relay messages.
+ * Must be global (not inside useAttestations) so attestations are received
+ * regardless of which page is currently rendered.
+ */
+function AttestationListenerEffect() {
+  const { onMessage } = useMessaging()
+  const { attestationService, messaging } = useAdapters()
+  const { did } = useIdentity()
+  const { triggerAttestationDialog } = usePendingVerification()
+  const { activeContacts } = useContacts()
+
+  const didRef = useRef(did)
+  didRef.current = did
+  const messagingRef = useRef(messaging)
+  messagingRef.current = messaging
+  const activeContactsRef = useRef(activeContacts)
+  activeContactsRef.current = activeContacts
+
+  useEffect(() => {
+    const unsubscribe = onMessage(async (envelope) => {
+      if (envelope.type !== 'attestation') return
+      try {
+        const attestation: Attestation = JSON.parse(envelope.payload)
+
+        // Try to save — may throw on duplicate or invalid signature
+        let isNew = true
+        try {
+          await attestationService.saveIncomingAttestation(attestation)
+        } catch {
+          isNew = false
+        }
+
+        // Always send ACK (even for duplicates — so sender gets acknowledged status)
+        if (didRef.current && messagingRef.current) {
+          messagingRef.current.send({
+            v: 1,
+            id: `ack-${attestation.id}`,
+            type: 'attestation-ack',
+            fromDid: didRef.current,
+            toDid: attestation.from,
+            createdAt: new Date().toISOString(),
+            encoding: 'json',
+            payload: JSON.stringify({ attestationId: attestation.id }),
+            signature: '',
+          }).catch(() => {}) // best-effort
+        }
+
+        // Only show dialog for new attestations
+        if (isNew) {
+          const contact = activeContactsRef.current.find(c => c.did === attestation.from)
+          const name = contact?.name || 'Kontakt'
+          triggerAttestationDialog({
+            attestationId: attestation.id,
+            senderName: name,
+            senderDid: attestation.from,
+            claim: attestation.claim,
+          })
+        }
+      } catch (error) {
+        console.debug('Incoming attestation skipped:', error)
+      }
+    })
+    return unsubscribe
+  }, [onMessage, attestationService, triggerAttestationDialog])
 
   return null
 }
@@ -385,6 +454,7 @@ function RequireIdentity({ children }: { children: React.ReactNode }) {
       <PendingVerificationProvider>
         <ProfileSyncEffect />
         <VerificationListenerEffect />
+        <AttestationListenerEffect />
         <MutualVerificationEffect />
         <GlobalConfetti />
         <IncomingVerificationDialog />

@@ -257,6 +257,12 @@ export const de = {
     attestationPrivateTitle: 'Privat — klicken zum Veröffentlichen',
     fromLabel: 'Von: ',
     forLabel: 'Für: ',
+    deliverySending: 'Wird gesendet...',
+    deliveryQueued: 'In Warteschlange',
+    deliveryDelivered: 'Zugestellt',
+    deliveryAcknowledged: 'Empfangen & gespeichert',
+    deliveryFailed: 'Zustellung fehlgeschlagen',
+    retryButton: 'Erneut senden',
   },
 
   createAttestation: {

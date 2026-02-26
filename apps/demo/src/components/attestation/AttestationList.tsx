@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { Award } from 'lucide-react'
 import { Link } from 'react-router-dom'
-import { useAttestations, useContacts, useProfileSync } from '../../hooks'
+import { useAttestations, useContacts, useProfileSync, useAttestationDelivery } from '../../hooks'
 import { useIdentity, useAdapters, usePendingVerification } from '../../context'
 import { AttestationCard } from './AttestationCard'
 import { useLanguage } from '../../i18n'
@@ -14,6 +14,7 @@ export function AttestationList() {
   const { storage } = useAdapters()
   const { uploadVerificationsAndAttestations } = useProfileSync()
   const { incomingAttestation } = usePendingVerification()
+  const { deliveryStatusMap, retryAttestation } = useAttestationDelivery()
   const [publicMap, setPublicMap] = useState<Record<string, boolean>>({})
 
   // Load metadata for all received attestations
@@ -86,6 +87,8 @@ export function AttestationList() {
                 fromName={getContactName(attestation.from)}
                 toName={getContactName(attestation.to)}
                 showFrom={false}
+                deliveryStatus={deliveryStatusMap.get(attestation.id)}
+                onRetry={retryAttestation}
               />
             ))}
           </div>

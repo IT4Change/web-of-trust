@@ -86,7 +86,7 @@ export function AdapterProvider({ children, identity }: AdapterProviderProps) {
         const wsAdapter = new WebSocketMessagingAdapter(RELAY_URL)
         const outboxStore = new EvoluOutboxStore(evolu)
         outboxAdapter = new OutboxMessagingAdapter(wsAdapter, outboxStore, {
-          skipTypes: ['profile-update'],
+          skipTypes: ['profile-update', 'attestation-ack'],
           sendTimeoutMs: 15_000,
         })
         const httpDiscovery = new HttpDiscoveryAdapter(PROFILE_SERVICE_URL)
@@ -96,6 +96,8 @@ export function AdapterProvider({ children, identity }: AdapterProviderProps) {
 
         const attestationService = new AttestationService(storage, crypto)
         attestationService.setMessaging(outboxAdapter)
+        attestationService.listenForReceipts(outboxAdapter)
+        attestationService.initFromOutbox(outboxStore)
 
         // Ensure identity exists in Evolu.
         // On a new device (recovery/import), Evolu may still be syncing from relay,

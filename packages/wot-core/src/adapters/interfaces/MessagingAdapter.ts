@@ -23,8 +23,8 @@ export interface MessagingAdapter {
   // Sending — takes an envelope, returns receipt
   send(envelope: MessageEnvelope): Promise<DeliveryReceipt>
 
-  // Receiving — callback receives verified envelope
-  onMessage(callback: (envelope: MessageEnvelope) => void): () => void
+  // Receiving — callback may be async (ACK is deferred until callback resolves)
+  onMessage(callback: (envelope: MessageEnvelope) => void | Promise<void>): () => void
 
   // Receipt Updates (async: delivered/acknowledged come later)
   onReceipt(callback: (receipt: DeliveryReceipt) => void): () => void

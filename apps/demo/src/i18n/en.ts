@@ -259,6 +259,12 @@ export const en: Translations = {
     attestationPrivateTitle: 'Private — click to publish',
     fromLabel: 'From: ',
     forLabel: 'For: ',
+    deliverySending: 'Sending...',
+    deliveryQueued: 'In queue',
+    deliveryDelivered: 'Delivered',
+    deliveryAcknowledged: 'Received & saved',
+    deliveryFailed: 'Delivery failed',
+    retryButton: 'Retry',
   },
 
   createAttestation: {
