@@ -195,7 +195,8 @@ export function PublicProfile() {
   }
 
   const handleShareProfile = async () => {
-    const profileUrl = `${window.location.origin}/p/${encodeURIComponent(decodedDid)}`
+    const base = import.meta.env.BASE_URL.replace(/\/$/, '')
+    const profileUrl = `${window.location.origin}${base}/p/${encodeURIComponent(decodedDid)}`
     if (navigator.share) {
       try {
         await navigator.share({ title: profile?.name || 'Profil', url: profileUrl })

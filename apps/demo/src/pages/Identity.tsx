@@ -148,7 +148,8 @@ export function Identity() {
   }
 
   const handleShareProfile = async () => {
-    const profileUrl = `${window.location.origin}/p/${encodeURIComponent(did)}`
+    const base = import.meta.env.BASE_URL.replace(/\/$/, '')
+    const profileUrl = `${window.location.origin}${base}/p/${encodeURIComponent(did)}`
     if (navigator.share) {
       try {
         await navigator.share({ title: profileName || 'Profil', url: profileUrl })
