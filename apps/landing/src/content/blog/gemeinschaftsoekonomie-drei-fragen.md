@@ -79,7 +79,7 @@ Ein wichtiger Unterschied zu Ostrom: Sie braucht klare Grenzen — wer ist drin,
 
 Der offene Graph verbindet Communities miteinander. Der geschlossene Space schützt ihre innere Kohärenz. Das löst ein Problem das Ostrom offen gelassen hat.
 
-Ehrlich: Auch in dezentralen Netzwerken kann Einfluss sich konzentrieren. Das behalten wir im Design im Blick — aber die Struktur macht es deutlich schwerer als in zentralisierten Systemen.
+Ehrlich: Auch in dezentralen Netzwerken kann Einfluss sich konzentrieren — aber die Struktur macht es deutlich schwerer als in zentralisierten Systemen.
 
 ---
 
