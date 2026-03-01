@@ -8,7 +8,7 @@ Im Februar 2026 kursierte ein Artikel in unserer Gruppe. [The 2028 Global Intell
 
 Die Kernlogik: KI ersetzt Wissensarbeiter. Konsumnachfrage kollabiert. Kreditkrise folgt. Staatliche Einnahmen brechen ein. Das ganze System basiert auf Einkommensteuer und Lohnabgaben — genau das was wegfällt.
 
-Was mich daran am meisten beschäftigt: Alle vorgeschlagenen Lösungen sind zentralisiert. Staatliche Transfers, öffentliche Beteiligung an KI-Erträgen, Compute-Steuer. Niemand denkt an dezentrale Alternativen.
+Was uns daran am meisten beschäftigt: Alle vorgeschlagenen Lösungen sind zentralisiert. Staatliche Transfers, öffentliche Beteiligung an KI-Erträgen, Compute-Steuer. Niemand denkt an dezentrale Alternativen.
 
 Aus der Diskussion die folgte, kristallisierten sich drei Fragen heraus — präzise, unbequem, wichtig:
 
