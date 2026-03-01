@@ -67,6 +67,8 @@ export function PublicProfile() {
         name: localIdentity.profile.name,
         ...(localIdentity.profile.bio ? { bio: localIdentity.profile.bio } : {}),
         ...(localIdentity.profile.avatar ? { avatar: localIdentity.profile.avatar } : {}),
+        ...(localIdentity.profile.offers?.length ? { offers: localIdentity.profile.offers } : {}),
+        ...(localIdentity.profile.needs?.length ? { needs: localIdentity.profile.needs } : {}),
         updatedAt: new Date().toISOString(),
       })
       setState('loaded-offline')

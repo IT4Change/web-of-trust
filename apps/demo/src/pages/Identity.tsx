@@ -186,6 +186,7 @@ export function Identity() {
                   tags={profileOffers}
                   onChange={setProfileOffers}
                   placeholder="z.B. Gitarrenunterricht, Auto verleihen …"
+                  color="green"
                 />
               </div>
               <div>
@@ -194,6 +195,7 @@ export function Identity() {
                   tags={profileNeeds}
                   onChange={setProfileNeeds}
                   placeholder="z.B. Hilfe beim Umzug, Übernachtung …"
+                  color="amber"
                 />
               </div>
               <div className="flex items-center space-x-2">
@@ -232,6 +234,26 @@ export function Identity() {
                 </div>
                 {profileBio && (
                   <p className="text-sm text-slate-600 mb-2">{profileBio}</p>
+                )}
+                {profileOffers.length > 0 && (
+                  <div className="mb-2">
+                    <p className="text-xs font-medium text-slate-500 mb-1">Bietet an</p>
+                    <div className="flex flex-wrap gap-1">
+                      {profileOffers.map((tag) => (
+                        <span key={tag} className="inline-block px-2 py-0.5 bg-green-100 text-green-800 text-xs rounded-md">{tag}</span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {profileNeeds.length > 0 && (
+                  <div className="mb-2">
+                    <p className="text-xs font-medium text-slate-500 mb-1">Sucht / braucht</p>
+                    <div className="flex flex-wrap gap-1">
+                      {profileNeeds.map((tag) => (
+                        <span key={tag} className="inline-block px-2 py-0.5 bg-amber-100 text-amber-800 text-xs rounded-md">{tag}</span>
+                      ))}
+                    </div>
+                  </div>
                 )}
                 <p className="text-xs text-slate-400 font-mono">{shortDid}</p>
               </div>
