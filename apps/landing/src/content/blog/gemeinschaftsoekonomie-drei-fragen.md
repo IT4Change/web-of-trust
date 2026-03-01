@@ -10,7 +10,7 @@ Die Kernlogik: KI ersetzt Wissensarbeiter. Konsumnachfrage kollabiert. Kreditkri
 
 Was uns daran am meisten beschäftigt: Alle vorgeschlagenen Lösungen sind zentralisiert. Staatliche Transfers, öffentliche Beteiligung an KI-Erträgen, Compute-Steuer. Niemand denkt an dezentrale Alternativen.
 
-Aus der Diskussion die folgte, kristallisierten sich drei Fragen heraus — präzise, unbequem, wichtig:
+Aus der Diskussion die folgte, kristallisierten sich drei Fragen heraus:
 
 1. **Eigentumsfrage:** Wer hat im Konfliktfall das Letztentscheidungsrecht über ein Gut?
 2. **Anreizfrage:** Welche Verhaltensanreize erzeugt das gewählte Priorisierungskriterium?
