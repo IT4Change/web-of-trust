@@ -1,7 +1,7 @@
 import { useState, useRef, type KeyboardEvent } from 'react'
 import { X } from 'lucide-react'
 
-type ChipColor = 'green' | 'amber'
+type ChipColor = 'green' | 'amber' | 'blue'
 
 interface TagInputProps {
   tags: string[]
@@ -13,6 +13,7 @@ interface TagInputProps {
 const colorClasses: Record<ChipColor, { chip: string; x: string }> = {
   green: { chip: 'bg-green-100 text-green-800', x: 'text-green-500 hover:text-green-700' },
   amber: { chip: 'bg-amber-100 text-amber-800', x: 'text-amber-500 hover:text-amber-700' },
+  blue: { chip: 'bg-blue-100 text-blue-800', x: 'text-blue-500 hover:text-blue-700' },
 }
 
 export function TagInput({ tags, onChange, placeholder = 'Tag eingeben, Enter zum Bestätigen', color = 'green' }: TagInputProps) {

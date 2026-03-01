@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { ArrowLeft, Award } from 'lucide-react'
 import { useAttestations, useContacts } from '../../hooks'
+import { TagInput } from '../shared'
 import { useLanguage } from '../../i18n'
 
 export function CreateAttestation() {
@@ -15,7 +16,7 @@ export function CreateAttestation() {
 
   const [selectedContact, setSelectedContact] = useState(toDid || '')
   const [claim, setClaim] = useState('')
-  const [tags, setTags] = useState('')
+  const [tags, setTags] = useState<string[]>([])
   const [error, setError] = useState<string | null>(null)
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -33,12 +34,7 @@ export function CreateAttestation() {
 
     try {
       setError(null)
-      const tagList = tags
-        .split(',')
-        .map((tag) => tag.trim())
-        .filter((tag) => tag.length > 0)
-
-      await createAttestation(selectedContact, claim.trim(), tagList.length > 0 ? tagList : undefined)
+      await createAttestation(selectedContact, claim.trim(), tags.length > 0 ? tags : undefined)
       navigate('/attestations')
     } catch (e) {
       setError(e instanceof Error ? e.message : t.createAttestation.errorCreationFailed)
@@ -112,12 +108,11 @@ export function CreateAttestation() {
             <label className="block text-sm font-medium text-slate-700 mb-1">
               {t.createAttestation.tagsLabel}
             </label>
-            <input
-              type="text"
-              value={tags}
-              onChange={(e) => setTags(e.target.value)}
+            <TagInput
+              tags={tags}
+              onChange={setTags}
               placeholder={t.createAttestation.tagsPlaceholder}
-              className="w-full px-4 py-3 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent"
+              color="blue"
             />
           </div>
 

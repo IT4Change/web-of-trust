@@ -339,6 +339,8 @@ export const en: Translations = {
     joinButton: 'Get started',
     verifyPerson: 'Verify person',
     verifyButton: 'Verify',
+    attestPerson: 'Write an attestation',
+    attestButton: 'Create',
   },
 
   app: {

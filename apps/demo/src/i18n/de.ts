@@ -337,6 +337,8 @@ export const de = {
     joinButton: 'Jetzt starten',
     verifyPerson: 'Person verifizieren',
     verifyButton: 'Verifizieren',
+    attestPerson: 'Attestation erstellen',
+    attestButton: 'Erstellen',
   },
 
   app: {

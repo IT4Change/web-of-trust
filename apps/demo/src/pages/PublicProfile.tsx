@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import { useParams, Link } from 'react-router-dom'
-import { User, Shield, UserPlus, Copy, Check, AlertCircle, Loader2, LogIn, Award, Users, WifiOff } from 'lucide-react'
+import { User, ShieldCheck, UserPlus, Copy, Check, AlertCircle, Loader2, LogIn, Award, Users, WifiOff, Share2, Link as LinkIcon } from 'lucide-react'
 import { HttpDiscoveryAdapter, type PublicProfile as PublicProfileType, type Verification, type Attestation, type Contact, type Identity, type Subscribable } from '@real-life/wot-core'
 import { Avatar } from '../components/shared'
 import { useLanguage, plural } from '../i18n'
@@ -45,6 +45,9 @@ export function PublicProfile() {
   const [attestations, setAttestations] = useState<Attestation[]>([])
   const [state, setState] = useState<LoadState>('loading')
   const [copiedDid, setCopiedDid] = useState(false)
+  const [shared, setShared] = useState(false)
+  const [showVerifiedHint, setShowVerifiedHint] = useState(false)
+  const verifiedHintRef = useRef<HTMLDivElement>(null)
   const [resolvedNames, setResolvedNames] = useState<Map<string, string>>(new Map())
   const [mutualContacts, setMutualContacts] = useState<string[]>([])
 
@@ -91,6 +94,18 @@ export function PublicProfile() {
 
     return false
   }, [decodedDid, myDid, localIdentity, contacts])
+
+  // Close verified tooltip on outside click
+  useEffect(() => {
+    if (!showVerifiedHint) return
+    const handler = (e: MouseEvent) => {
+      if (verifiedHintRef.current && !verifiedHintRef.current.contains(e.target as Node)) {
+        setShowVerifiedHint(false)
+      }
+    }
+    document.addEventListener('click', handler, true)
+    return () => document.removeEventListener('click', handler, true)
+  }, [showVerifiedHint])
 
   // Ref to access tryLocalFallback inside useEffect without it being a dependency.
   // This prevents reactive data changes (contacts, localIdentity) from re-triggering fetchAll.
@@ -177,6 +192,19 @@ export function PublicProfile() {
     await navigator.clipboard.writeText(decodedDid)
     setCopiedDid(true)
     setTimeout(() => setCopiedDid(false), 2000)
+  }
+
+  const handleShareProfile = async () => {
+    const profileUrl = `${window.location.origin}/p/${encodeURIComponent(decodedDid)}`
+    if (navigator.share) {
+      try {
+        await navigator.share({ title: profile?.name || 'Profil', url: profileUrl })
+        return
+      } catch { /* user cancelled or not supported */ }
+    }
+    await navigator.clipboard.writeText(profileUrl)
+    setShared(true)
+    setTimeout(() => setShared(false), 2000)
   }
 
   const displayName = useCallback((targetDid: string): string => {
@@ -274,46 +302,78 @@ export function PublicProfile() {
 
       {/* Profile Card */}
       <div className="bg-white border border-slate-200 rounded-lg p-6">
-        <div className="flex items-start space-x-4">
-          <Avatar name={profile?.name} avatar={profile?.avatar} size="lg" />
-          <div className="flex-1 min-w-0">
-            <h2 className="text-lg font-semibold text-slate-900 mb-1">
-              {profile?.name || <span className="text-slate-400 italic font-normal">{t.publicProfile.unknown}</span>}
-            </h2>
-            {profile?.bio && (
-              <p className="text-sm text-slate-600 mb-2">{profile.bio}</p>
-            )}
-            {profile?.offers && profile.offers.length > 0 && (
-              <div className="mb-2">
-                <p className="text-xs font-medium text-slate-500 mb-1">Bietet an</p>
-                <div className="flex flex-wrap gap-1">
-                  {profile.offers.map((tag) => (
-                    <span key={tag} className="inline-block px-2 py-0.5 bg-green-100 text-green-800 text-xs rounded-md">{tag}</span>
-                  ))}
-                </div>
+        <div>
+          {/* Header: Avatar + Name + Actions */}
+          <div className="flex items-start gap-4">
+            <Avatar name={profile?.name} avatar={profile?.avatar} size="lg" />
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center gap-2">
+                <h2 className="text-lg font-semibold text-slate-900 truncate">
+                  {profile?.name || <span className="text-slate-400 italic font-normal">{t.publicProfile.unknown}</span>}
+                </h2>
+                {state === 'loaded' && (
+                  <div ref={verifiedHintRef} className="relative flex-shrink-0 translate-y-0.5">
+                    <button
+                      onClick={() => setShowVerifiedHint(!showVerifiedHint)}
+                      className="text-green-500 hover:text-green-600 transition-colors peer"
+                    >
+                      <ShieldCheck size={16} />
+                    </button>
+                    <div className={`absolute left-1/2 -translate-x-1/2 top-full mt-2 w-64 px-3 py-2 bg-slate-800 text-white text-xs rounded-lg shadow-lg z-50 transition-opacity duration-150 ${showVerifiedHint ? 'opacity-100' : 'opacity-0 pointer-events-none'} peer-hover:opacity-100 peer-hover:pointer-events-auto`}>
+                      {t.publicProfile.verifiedBanner}
+                      <div className="absolute left-1/2 -translate-x-1/2 -top-1 w-2 h-2 bg-slate-800 rotate-45" />
+                    </div>
+                  </div>
+                )}
+                <button
+                  onClick={handleShareProfile}
+                  className="p-1.5 text-slate-400 hover:text-blue-600 hover:bg-slate-100 rounded-lg transition-colors ml-auto flex-shrink-0"
+                  title="Profil teilen"
+                >
+                  {shared ? <Check size={15} className="text-green-500" /> : <Share2 size={15} />}
+                </button>
               </div>
-            )}
-            {profile?.needs && profile.needs.length > 0 && (
-              <div className="mb-2">
-                <p className="text-xs font-medium text-slate-500 mb-1">Sucht / braucht</p>
-                <div className="flex flex-wrap gap-1">
-                  {profile.needs.map((tag) => (
-                    <span key={tag} className="inline-block px-2 py-0.5 bg-amber-100 text-amber-800 text-xs rounded-md">{tag}</span>
-                  ))}
-                </div>
+              {profile?.bio && (
+                <p className="text-sm text-slate-600 leading-relaxed mt-0.5">{profile.bio}</p>
+              )}
+              <div className="flex items-center gap-2 mt-1">
+                <p className="text-xs text-slate-400 font-mono truncate flex-1 min-w-0">{shortDid}</p>
+                <button
+                  onClick={handleCopyDid}
+                  className="text-slate-400 hover:text-blue-600 transition-colors flex-shrink-0 p-1.5"
+                  title={t.publicProfile.copyDid}
+                >
+                  {copiedDid ? <Check size={12} /> : <Copy size={12} />}
+                </button>
               </div>
-            )}
-            <div className="flex items-center gap-2">
-              <p className="text-xs text-slate-400 font-mono">{shortDid}</p>
-              <button
-                onClick={handleCopyDid}
-                className="text-slate-400 hover:text-blue-600 transition-colors"
-                title={t.publicProfile.copyDid}
-              >
-                {copiedDid ? <Check size={12} /> : <Copy size={12} />}
-              </button>
             </div>
           </div>
+
+          {/* Offers & Needs */}
+          {((profile?.offers && profile.offers.length > 0) || (profile?.needs && profile.needs.length > 0)) && (
+            <div className="mt-4 pt-4 border-t border-slate-100 grid grid-cols-1 gap-3 sm:grid-cols-2">
+              {profile?.offers && profile.offers.length > 0 && (
+                <div>
+                  <p className="text-xs font-medium text-slate-500 mb-1.5">Angebote</p>
+                  <div className="flex flex-wrap gap-1.5">
+                    {profile.offers.map((tag) => (
+                      <span key={tag} className="inline-block px-2.5 py-1 bg-green-50 text-green-700 text-xs rounded-full border border-green-200">{tag}</span>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {profile?.needs && profile.needs.length > 0 && (
+                <div>
+                  <p className="text-xs font-medium text-slate-500 mb-1.5">Bedürfnisse</p>
+                  <div className="flex flex-wrap gap-1.5">
+                    {profile.needs.map((tag) => (
+                      <span key={tag} className="inline-block px-2.5 py-1 bg-amber-50 text-amber-700 text-xs rounded-full border border-amber-200">{tag}</span>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
         </div>
       </div>
 
@@ -324,18 +384,6 @@ export function PublicProfile() {
             <WifiOff className="w-5 h-5 text-amber-600 flex-shrink-0 mt-0.5" />
             <div className="text-sm text-amber-800">
               {t.publicProfile.offlineBanner}
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Verification status */}
-      {state === 'loaded' && (
-        <div className="bg-green-50 border border-green-200 rounded-lg p-4">
-          <div className="flex items-start space-x-3">
-            <Shield className="w-5 h-5 text-green-600 flex-shrink-0 mt-0.5" />
-            <div className="text-sm text-green-800">
-              {t.publicProfile.verifiedBanner}
             </div>
           </div>
         </div>
@@ -456,6 +504,34 @@ export function PublicProfile() {
             >
               {t.publicProfile.verifyButton}
             </Link>
+          </div>
+        </div>
+      )}
+      {isLoggedIn && !isMyProfile && isContact && (
+        <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <Award size={16} className="text-blue-600" />
+              <span className="text-sm text-blue-800">
+                {t.publicProfile.attestPerson}
+              </span>
+            </div>
+            <Link
+              to={`/attestations/new?to=${encodeURIComponent(decodedDid)}`}
+              className="text-sm font-medium text-blue-700 hover:text-blue-900 transition-colors"
+            >
+              {t.publicProfile.attestButton}
+            </Link>
+          </div>
+        </div>
+      )}
+
+      {/* Share toast */}
+      {shared && (
+        <div className="fixed top-4 left-1/2 -translate-x-1/2 z-50 animate-toast-in">
+          <div className="flex items-center gap-2 px-4 py-2.5 bg-slate-800 text-white text-sm rounded-lg shadow-lg">
+            <LinkIcon size={14} />
+            <span>Link kopiert</span>
           </div>
         </div>
       )}

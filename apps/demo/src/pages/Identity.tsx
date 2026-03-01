@@ -1,9 +1,9 @@
 import { useIdentity, usePendingVerification } from '../context'
 import { useAdapters } from '../context'
 import { useLanguage, plural } from '../i18n'
-import { useState, useEffect, useMemo } from 'react'
+import { useState, useEffect, useMemo, useRef } from 'react'
 import { Link } from 'react-router-dom'
-import { Copy, Check, Fingerprint, Shield, Trash2, Pencil, ChevronDown, ChevronRight, Users, Award, Globe, GlobeLock } from 'lucide-react'
+import { Copy, Check, Fingerprint, ShieldCheck, Trash2, Pencil, ChevronDown, ChevronRight, Users, Award, Globe, GlobeLock, Share2, Link as LinkIcon } from 'lucide-react'
 import { Avatar, AvatarUpload, TagInput } from '../components/shared'
 import { resetEvolu } from '../db'
 import { useProfile, useProfileSync, useAttestations, useContacts } from '../hooks'
@@ -37,6 +37,21 @@ export function Identity() {
   const [profileSaved, setProfileSaved] = useState(false)
   const [showDetails, setShowDetails] = useState(false)
   const [justSaved, setJustSaved] = useState(false)
+  const [shared, setShared] = useState(false)
+  const [showSecurityHint, setShowSecurityHint] = useState(false)
+  const securityHintRef = useRef<HTMLDivElement>(null)
+
+  // Close security tooltip on outside click
+  useEffect(() => {
+    if (!showSecurityHint) return
+    const handler = (e: MouseEvent) => {
+      if (securityHintRef.current && !securityHintRef.current.contains(e.target as Node)) {
+        setShowSecurityHint(false)
+      }
+    }
+    document.addEventListener('click', handler, true)
+    return () => document.removeEventListener('click', handler, true)
+  }, [showSecurityHint])
 
   // Sync profile from Evolu (reactive — updates when synced from other device)
   // Skip when justSaved is true to avoid overwriting with stale Evolu snapshot
@@ -132,6 +147,19 @@ export function Identity() {
     }
   }
 
+  const handleShareProfile = async () => {
+    const profileUrl = `${window.location.origin}/p/${encodeURIComponent(did)}`
+    if (navigator.share) {
+      try {
+        await navigator.share({ title: profileName || 'Profil', url: profileUrl })
+        return
+      } catch { /* user cancelled or not supported */ }
+    }
+    await navigator.clipboard.writeText(profileUrl)
+    setShared(true)
+    setTimeout(() => setShared(false), 2000)
+  }
+
   const shortDid = did.length > 30
     ? `${did.slice(0, 16)}...${did.slice(-8)}`
     : did
@@ -149,126 +177,163 @@ export function Identity() {
         {/* Profile Card */}
         <div className="bg-white border border-slate-200 rounded-lg p-6">
           {isEditingProfile ? (
-            <div className="space-y-4">
-              <AvatarUpload
-                name={profileName}
-                avatar={profileAvatar}
-                onAvatarChange={setProfileAvatar}
-              />
-              <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1">{t.identity.nameLabel}</label>
-                <input
-                  type="text"
-                  value={profileName}
-                  onChange={(e) => setProfileName(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') handleSaveProfile()
-                    if (e.key === 'Escape') setIsEditingProfile(false)
-                  }}
-                  className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm"
-                  placeholder={t.identity.namePlaceholder}
-                  autoFocus
+            <div>
+              {/* Header: Avatar + Name/Bio fields */}
+              <div className="flex items-start gap-4">
+                <AvatarUpload
+                  name={profileName}
+                  avatar={profileAvatar}
+                  onAvatarChange={setProfileAvatar}
                 />
+                <div className="flex-1 min-w-0 space-y-3">
+                  <div>
+                    <label className="block text-xs font-medium text-slate-500 mb-1">{t.identity.nameLabel}</label>
+                    <input
+                      type="text"
+                      value={profileName}
+                      onChange={(e) => setProfileName(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Escape') setIsEditingProfile(false)
+                      }}
+                      className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm"
+                      placeholder={t.identity.namePlaceholder}
+                      autoFocus
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-slate-500 mb-1">{t.identity.aboutLabel}</label>
+                    <textarea
+                      value={profileBio}
+                      onChange={(e) => setProfileBio(e.target.value)}
+                      className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm"
+                      rows={2}
+                      placeholder={t.identity.aboutPlaceholder}
+                    />
+                  </div>
+                </div>
               </div>
-              <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1">{t.identity.aboutLabel}</label>
-                <textarea
-                  value={profileBio}
-                  onChange={(e) => setProfileBio(e.target.value)}
-                  className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm"
-                  rows={2}
-                  placeholder={t.identity.aboutPlaceholder}
-                />
+
+              {/* Offers & Needs fields */}
+              <div className="mt-4 pt-4 border-t border-slate-100 grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <div>
+                  <label className="block text-xs font-medium text-slate-500 mb-1.5">Angebote</label>
+                  <TagInput
+                    tags={profileOffers}
+                    onChange={setProfileOffers}
+                    placeholder="z.B. Gitarrenunterricht …"
+                    color="green"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-slate-500 mb-1.5">Bedürfnisse</label>
+                  <TagInput
+                    tags={profileNeeds}
+                    onChange={setProfileNeeds}
+                    placeholder="z.B. Hilfe beim Umzug …"
+                    color="amber"
+                  />
+                </div>
               </div>
-              <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1">Ich biete an</label>
-                <TagInput
-                  tags={profileOffers}
-                  onChange={setProfileOffers}
-                  placeholder="z.B. Gitarrenunterricht, Auto verleihen …"
-                  color="green"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-slate-700 mb-1">Ich suche / brauche</label>
-                <TagInput
-                  tags={profileNeeds}
-                  onChange={setProfileNeeds}
-                  placeholder="z.B. Hilfe beim Umzug, Übernachtung …"
-                  color="amber"
-                />
-              </div>
-              <div className="flex items-center space-x-2">
+
+              {/* Actions */}
+              <div className="flex items-center gap-2 mt-4 pt-4 border-t border-slate-100">
                 <button
                   onClick={handleSaveProfile}
-                  className="px-3 py-2 bg-blue-600 text-white text-sm rounded-lg hover:bg-blue-700 transition-colors"
+                  className="px-4 py-2 bg-blue-600 text-white text-sm rounded-lg hover:bg-blue-700 transition-colors"
                 >
                   {t.common.save}
                 </button>
                 <button
                   onClick={() => setIsEditingProfile(false)}
-                  className="px-3 py-2 text-slate-500 text-sm hover:text-slate-700 transition-colors"
+                  className="px-4 py-2 text-slate-500 text-sm hover:text-slate-700 transition-colors"
                 >
                   {t.common.cancel}
                 </button>
               </div>
             </div>
           ) : (
-            <div className="flex items-start space-x-4">
-              <Avatar name={profileName} avatar={profileAvatar} size="lg" />
-              <div className="flex-1 min-w-0">
-                <div className="flex items-center space-x-2 mb-1">
-                  <h3 className="text-lg font-semibold text-slate-900">
-                    {profileName || <span className="text-slate-400 italic font-normal">{t.identity.noNameSet}</span>}
-                  </h3>
-                  {profileSaved ? (
-                    <Check size={16} className="text-green-500" />
-                  ) : (
+            <div>
+              {/* Header: Avatar + Name + Actions */}
+              <div className="flex items-start gap-4">
+                <Avatar name={profileName} avatar={profileAvatar} size="lg" />
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 mb-0.5">
+                    <h3 className="text-lg font-semibold text-slate-900 truncate">
+                      {profileName || <span className="text-slate-400 italic font-normal">{t.identity.noNameSet}</span>}
+                    </h3>
+                    <div ref={securityHintRef} className="relative flex-shrink-0 translate-y-0.5">
+                      <button
+                        onClick={() => setShowSecurityHint(!showSecurityHint)}
+                        className="text-green-500 hover:text-green-600 transition-colors peer"
+                      >
+                        <ShieldCheck size={16} />
+                      </button>
+                      <div className={`absolute left-1/2 -translate-x-1/2 top-full mt-2 w-64 px-3 py-2 bg-slate-800 text-white text-xs rounded-lg shadow-lg z-50 transition-opacity duration-150 ${showSecurityHint ? 'opacity-100' : 'opacity-0 pointer-events-none'} peer-hover:opacity-100 peer-hover:pointer-events-auto`}>
+                        {t.identity.securityInfo}
+                        <div className="absolute left-1/2 -translate-x-1/2 -top-1 w-2 h-2 bg-slate-800 rotate-45" />
+                      </div>
+                    </div>
+                    {profileSaved && <Check size={16} className="text-green-500 flex-shrink-0" />}
+                    <div className="flex items-center gap-1 ml-auto flex-shrink-0">
+                      <button
+                        onClick={() => setIsEditingProfile(true)}
+                        className="p-1.5 text-slate-400 hover:text-blue-600 hover:bg-slate-100 rounded-lg transition-colors"
+                        title="Profil bearbeiten"
+                      >
+                        <Pencil size={15} />
+                      </button>
+                      <button
+                        onClick={handleShareProfile}
+                        className="p-1.5 text-slate-400 hover:text-blue-600 hover:bg-slate-100 rounded-lg transition-colors"
+                        title="Profil teilen"
+                      >
+                        {shared ? <Check size={15} className="text-green-500" /> : <Share2 size={15} />}
+                      </button>
+                    </div>
+                  </div>
+                  {profileBio && (
+                    <p className="text-sm text-slate-600 leading-relaxed">{profileBio}</p>
+                  )}
+                  <div className="flex items-center gap-2 mt-1">
+                    <p className="text-xs text-slate-400 font-mono truncate flex-1 min-w-0">{shortDid}</p>
                     <button
-                      onClick={() => setIsEditingProfile(true)}
-                      className="text-slate-400 hover:text-blue-600 transition-colors"
+                      onClick={handleCopyDid}
+                      className="text-slate-400 hover:text-blue-600 transition-colors flex-shrink-0 p-1.5"
+                      title={t.common.copy}
                     >
-                      <Pencil size={14} />
+                      {copiedDid ? <Check size={12} /> : <Copy size={12} />}
                     </button>
+                  </div>
+                </div>
+              </div>
+
+              {/* Offers & Needs */}
+              {(profileOffers.length > 0 || profileNeeds.length > 0) && (
+                <div className="mt-4 pt-4 border-t border-slate-100 grid grid-cols-1 gap-3 sm:grid-cols-2">
+                  {profileOffers.length > 0 && (
+                    <div>
+                      <p className="text-xs font-medium text-slate-500 mb-1.5">Angebote</p>
+                      <div className="flex flex-wrap gap-1.5">
+                        {profileOffers.map((tag) => (
+                          <span key={tag} className="inline-block px-2.5 py-1 bg-green-50 text-green-700 text-xs rounded-full border border-green-200">{tag}</span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  {profileNeeds.length > 0 && (
+                    <div>
+                      <p className="text-xs font-medium text-slate-500 mb-1.5">Bedürfnisse</p>
+                      <div className="flex flex-wrap gap-1.5">
+                        {profileNeeds.map((tag) => (
+                          <span key={tag} className="inline-block px-2.5 py-1 bg-amber-50 text-amber-700 text-xs rounded-full border border-amber-200">{tag}</span>
+                        ))}
+                      </div>
+                    </div>
                   )}
                 </div>
-                {profileBio && (
-                  <p className="text-sm text-slate-600 mb-2">{profileBio}</p>
-                )}
-                {profileOffers.length > 0 && (
-                  <div className="mb-2">
-                    <p className="text-xs font-medium text-slate-500 mb-1">Bietet an</p>
-                    <div className="flex flex-wrap gap-1">
-                      {profileOffers.map((tag) => (
-                        <span key={tag} className="inline-block px-2 py-0.5 bg-green-100 text-green-800 text-xs rounded-md">{tag}</span>
-                      ))}
-                    </div>
-                  </div>
-                )}
-                {profileNeeds.length > 0 && (
-                  <div className="mb-2">
-                    <p className="text-xs font-medium text-slate-500 mb-1">Sucht / braucht</p>
-                    <div className="flex flex-wrap gap-1">
-                      {profileNeeds.map((tag) => (
-                        <span key={tag} className="inline-block px-2 py-0.5 bg-amber-100 text-amber-800 text-xs rounded-md">{tag}</span>
-                      ))}
-                    </div>
-                  </div>
-                )}
-                <p className="text-xs text-slate-400 font-mono">{shortDid}</p>
-              </div>
+              )}
             </div>
           )}
-        </div>
-
-        {/* Security Info */}
-        <div className="bg-green-50 border border-green-200 rounded-lg p-4">
-          <div className="flex items-start space-x-3">
-            <Shield className="w-5 h-5 text-green-600 flex-shrink-0 mt-0.5" />
-            <div className="text-sm text-green-800">
-              {t.identity.securityInfo}
-            </div>
-          </div>
         </div>
 
         {/* Verifications */}
@@ -435,6 +500,16 @@ export function Identity() {
           )}
         </div>
       </div>
+
+      {/* Share toast */}
+      {shared && (
+        <div className="fixed top-4 left-1/2 -translate-x-1/2 z-50 animate-toast-in">
+          <div className="flex items-center gap-2 px-4 py-2.5 bg-slate-800 text-white text-sm rounded-lg shadow-lg">
+            <LinkIcon size={14} />
+            <span>Link kopiert</span>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
