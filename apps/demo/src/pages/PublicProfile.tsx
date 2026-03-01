@@ -281,6 +281,26 @@ export function PublicProfile() {
             {profile?.bio && (
               <p className="text-sm text-slate-600 mb-2">{profile.bio}</p>
             )}
+            {profile?.offers && profile.offers.length > 0 && (
+              <div className="mb-2">
+                <p className="text-xs font-medium text-slate-500 mb-1">Bietet an</p>
+                <div className="flex flex-wrap gap-1">
+                  {profile.offers.map((tag) => (
+                    <span key={tag} className="inline-block px-2 py-0.5 bg-green-100 text-green-800 text-xs rounded-md">{tag}</span>
+                  ))}
+                </div>
+              </div>
+            )}
+            {profile?.needs && profile.needs.length > 0 && (
+              <div className="mb-2">
+                <p className="text-xs font-medium text-slate-500 mb-1">Sucht / braucht</p>
+                <div className="flex flex-wrap gap-1">
+                  {profile.needs.map((tag) => (
+                    <span key={tag} className="inline-block px-2 py-0.5 bg-amber-100 text-amber-800 text-xs rounded-md">{tag}</span>
+                  ))}
+                </div>
+              </div>
+            )}
             <div className="flex items-center gap-2">
               <p className="text-xs text-slate-400 font-mono">{shortDid}</p>
               <button

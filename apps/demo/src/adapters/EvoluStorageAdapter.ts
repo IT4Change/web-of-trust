@@ -48,6 +48,8 @@ export class EvoluStorageAdapter implements StorageAdapter, ReactiveStorageAdapt
       name: profile.name ? str(profile.name) : null,
       bio: profile.bio ? str(profile.bio) : null,
       avatar: profile.avatar ? longStr(profile.avatar) : null,
+      offersJson: profile.offers?.length ? str(JSON.stringify(profile.offers)) : null,
+      needsJson: profile.needs?.length ? str(JSON.stringify(profile.needs)) : null,
     })
 
     this.cachedIdentity = identity
@@ -76,6 +78,8 @@ export class EvoluStorageAdapter implements StorageAdapter, ReactiveStorageAdapt
       name: identity.profile.name ? str(identity.profile.name) : null,
       bio: identity.profile.bio ? str(identity.profile.bio) : null,
       avatar: identity.profile.avatar ? longStr(identity.profile.avatar) : null,
+      offersJson: identity.profile.offers?.length ? str(JSON.stringify(identity.profile.offers)) : null,
+      needsJson: identity.profile.needs?.length ? str(JSON.stringify(identity.profile.needs)) : null,
     })
 
     this.cachedIdentity = identity
@@ -95,6 +99,8 @@ export class EvoluStorageAdapter implements StorageAdapter, ReactiveStorageAdapt
       name: (row.name as string) ?? '',
       ...(row.bio != null ? { bio: row.bio as string } : {}),
       ...(row.avatar != null ? { avatar: row.avatar as string } : {}),
+      ...(row.offersJson != null ? { offers: JSON.parse(row.offersJson as string) } : {}),
+      ...(row.needsJson != null ? { needs: JSON.parse(row.needsJson as string) } : {}),
     }
   }
 
@@ -334,11 +340,15 @@ export class EvoluStorageAdapter implements StorageAdapter, ReactiveStorageAdapt
         name: (row.name as string) ?? '',
         ...(row.bio != null ? { bio: row.bio as string } : {}),
         ...(row.avatar != null ? { avatar: row.avatar as string } : {}),
+        ...(row.offersJson != null ? { offers: JSON.parse(row.offersJson as string) } : {}),
+        ...(row.needsJson != null ? { needs: JSON.parse(row.needsJson as string) } : {}),
       }
     }
 
     const profileChanged = (a: Profile, b: Profile) =>
-      a.name !== b.name || a.bio !== b.bio || a.avatar !== b.avatar
+      a.name !== b.name || a.bio !== b.bio || a.avatar !== b.avatar ||
+      JSON.stringify(a.offers) !== JSON.stringify(b.offers) ||
+      JSON.stringify(a.needs) !== JSON.stringify(b.needs)
 
     let snapshot: Profile = rowToProfile()
 
@@ -384,6 +394,8 @@ export class EvoluStorageAdapter implements StorageAdapter, ReactiveStorageAdapt
         name: (row.name as string) ?? '',
         ...(row.bio != null ? { bio: row.bio as string } : {}),
         ...(row.avatar != null ? { avatar: row.avatar as string } : {}),
+        ...(row.offersJson != null ? { offers: JSON.parse(row.offersJson as string) } : {}),
+        ...(row.needsJson != null ? { needs: JSON.parse(row.needsJson as string) } : {}),
       }
       // Use cachedIdentity timestamps if available, otherwise empty strings.
       // IMPORTANT: Do NOT use new Date() here — getValue() must return
@@ -399,7 +411,9 @@ export class EvoluStorageAdapter implements StorageAdapter, ReactiveStorageAdapt
 
     const identityChanged = (a: Identity | null, b: Identity | null) => {
       if (a === null || b === null) return a !== b
-      return a.profile.name !== b.profile.name || a.profile.bio !== b.profile.bio || a.profile.avatar !== b.profile.avatar
+      return a.profile.name !== b.profile.name || a.profile.bio !== b.profile.bio || a.profile.avatar !== b.profile.avatar ||
+        JSON.stringify(a.profile.offers) !== JSON.stringify(b.profile.offers) ||
+        JSON.stringify(a.profile.needs) !== JSON.stringify(b.profile.needs)
     }
 
     let snapshot: Identity | null = rowToIdentity()

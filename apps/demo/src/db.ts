@@ -63,6 +63,8 @@ const Schema = {
     name: nullOr(NonEmptyString1000),
     bio: nullOr(NonEmptyString1000),
     avatar: nullOr(NonEmptyString), // Data URLs can be large, use unbounded string
+    offersJson: nullOr(NonEmptyString1000), // JSON-serialized string[]
+    needsJson: nullOr(NonEmptyString1000),  // JSON-serialized string[]
   },
   contact: {
     id: ContactId,

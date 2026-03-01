@@ -4,7 +4,7 @@ import { useLanguage, plural } from '../i18n'
 import { useState, useEffect, useMemo } from 'react'
 import { Link } from 'react-router-dom'
 import { Copy, Check, Fingerprint, Shield, Trash2, Pencil, ChevronDown, ChevronRight, Users, Award, Globe, GlobeLock } from 'lucide-react'
-import { Avatar, AvatarUpload } from '../components/shared'
+import { Avatar, AvatarUpload, TagInput } from '../components/shared'
 import { resetEvolu } from '../db'
 import { useProfile, useProfileSync, useAttestations, useContacts } from '../hooks'
 import { useSubscribable } from '../hooks/useSubscribable'
@@ -31,6 +31,8 @@ export function Identity() {
   const [profileName, setProfileName] = useState('')
   const [profileBio, setProfileBio] = useState('')
   const [profileAvatar, setProfileAvatar] = useState<string | undefined>(undefined)
+  const [profileOffers, setProfileOffers] = useState<string[]>([])
+  const [profileNeeds, setProfileNeeds] = useState<string[]>([])
   const [isEditingProfile, setIsEditingProfile] = useState(false)
   const [profileSaved, setProfileSaved] = useState(false)
   const [showDetails, setShowDetails] = useState(false)
@@ -43,6 +45,8 @@ export function Identity() {
       setProfileName(syncedProfile.name)
       setProfileBio(syncedProfile.bio || '')
       setProfileAvatar(syncedProfile.avatar)
+      setProfileOffers(syncedProfile.offers || [])
+      setProfileNeeds(syncedProfile.needs || [])
     }
   }, [syncedProfile, isEditingProfile, justSaved])
 
@@ -85,6 +89,8 @@ export function Identity() {
           name: profileName.trim(),
           ...(profileBio.trim() ? { bio: profileBio.trim() } : {}),
           ...(profileAvatar ? { avatar: profileAvatar } : {}),
+          ...(profileOffers.length ? { offers: profileOffers } : {}),
+          ...(profileNeeds.length ? { needs: profileNeeds } : {}),
         },
       })
     }
@@ -172,6 +178,22 @@ export function Identity() {
                   className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm"
                   rows={2}
                   placeholder={t.identity.aboutPlaceholder}
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">Ich biete an</label>
+                <TagInput
+                  tags={profileOffers}
+                  onChange={setProfileOffers}
+                  placeholder="z.B. Gitarrenunterricht, Auto verleihen …"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">Ich suche / brauche</label>
+                <TagInput
+                  tags={profileNeeds}
+                  onChange={setProfileNeeds}
+                  placeholder="z.B. Hilfe beim Umzug, Übernachtung …"
                 />
               </div>
               <div className="flex items-center space-x-2">
