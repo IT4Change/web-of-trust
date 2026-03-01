@@ -170,7 +170,7 @@ export function VerificationFlow() {
     return (
       <div className="space-y-6">
         <div className="text-center">
-          <h2 className="text-xl font-bold text-slate-900">{t.verification.title}</h2>
+          <h2 className="text-2xl font-bold text-slate-900">{t.verification.title}</h2>
           <p className="text-sm text-slate-500 mt-1">
             {t.verification.subtitle}
           </p>
