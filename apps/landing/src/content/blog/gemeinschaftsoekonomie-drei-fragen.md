@@ -22,13 +22,13 @@ Diese Fragen sind nicht neu. Aber sie sind dringlicher denn je.
 
 ## Die Tragik der Allmende — und ihre Widerlegung
 
-1968 schrieb Garrett Hardin einen einflussreichen Aufsatz: *The Tragedy of the Commons*. Seine These: Wenn eine Ressource allen gehört, wird sie zwangsläufig übernutzt. Jeder hat einen Anreiz so viel wie möglich zu nehmen — weil der Nutzen ihm alleine zukommt aber die Kosten alle tragen. Ergebnis: Kollaps.
+1968 schrieb Garrett Hardin einen einflussreichen Aufsatz: *[The Tragedy of the Commons](https://de.wikipedia.org/wiki/Tragik_der_Allmende)*. Seine These: Wenn eine Ressource allen gehört, wird sie zwangsläufig übernutzt. Jeder hat einen Anreiz so viel wie möglich zu nehmen — weil der Nutzen ihm alleine zukommt aber die Kosten alle tragen. Ergebnis: Kollaps.
 
 Sein Schluss: Entweder Privateigentum oder staatliche Regulierung. Tertium non datur.
 
 Das wurde zur Grundlage für jahrzehntelange Politik. Privatisierung von allem.
 
-Dann kam Elinor Ostrom.
+Dann kam [Elinor Ostrom](https://de.wikipedia.org/wiki/Elinor_Ostrom).
 
 Sie hat sich einfach die Realität angeschaut. Und die sah anders aus. Hunderte von Gemeinschaften weltweit — Schweizer Bergbauern seit dem 13. Jahrhundert, japanische Dorfgemeinschaften, spanische Bewässerungssysteme — verwalten knappe Ressourcen seit Jahrhunderten erfolgreich. Ohne Privatisierung. Ohne Staat. Ohne Kollaps.
 
