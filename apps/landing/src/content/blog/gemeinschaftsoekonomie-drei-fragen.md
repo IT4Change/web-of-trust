@@ -1,4 +1,4 @@
-# Drei Fragen die jeder stellen sollte — und unsere Antworten
+# Von der Tragik der Allmende zur Gemeinschaftsökonomie
 
 *1. März 2026 — Anton Tranelis und Eli*
 
