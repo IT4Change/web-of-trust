@@ -22,9 +22,8 @@ export default function Header() {
 
   const navItems = [
     { label: t.nav.concept, href: isLandingPage ? '#konzept' : '/#konzept' },
-    { label: t.nav.howItWorks, href: isLandingPage ? '#how-it-works' : '/#how-it-works' },
     { label: t.nav.apps, href: isLandingPage ? '#apps' : '/#apps' },
-    { label: t.nav.faq, href: isLandingPage ? '#faq' : '/#faq' },
+    { label: t.architecture?.nav || 'Architecture', href: '/architecture', isRoute: true },
     { label: t.nav.blog, href: '/blog', isRoute: true },
   ]
 

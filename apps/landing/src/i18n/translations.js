@@ -223,6 +223,213 @@ export const translations = {
       note: 'Dies ist ein Forschungsprojekt - wir lernen und verbessern kontinuierlich',
     },
 
+    // Architecture
+    architecture: {
+      nav: 'Architektur',
+      title: 'Wie es funktioniert',
+      subtitle: 'Was dezentral ist, was (noch) Server braucht \u2014 und warum deine Daten trotzdem dir gehören.',
+      backToHome: 'Zurück zur Startseite',
+
+      // Three Pillars
+      pillars: {
+        title: 'Drei Säulen',
+        items: [
+          {
+            title: 'Deine Identität gehört dir',
+            description: 'Deine Identität wird auf deinem Gerät erzeugt \u2014 nicht auf einem Server. 12 Wörter, die nur du kennst, sind dein Schlüssel zu allem. Keine Registrierung, keine E-Mail, kein Anbieter.',
+            technical: 'Dein Identifier (DID) enthält deinen öffentlichen Schlüssel. Jeder kann prüfen, ob eine Nachricht wirklich von dir kommt \u2014 ohne einen Server zu fragen.',
+          },
+          {
+            title: 'Vertrauen durch echte Begegnung',
+            description: 'Zwei Menschen treffen sich. Sie scannen gegenseitig einen QR-Code. Ab jetzt sind sie kryptografisch verifiziert \u2014 nicht weil ein Algorithmus es entschieden hat, sondern weil sie sich in die Augen geschaut haben.',
+            technical: 'Attestations (Bestätigungen) werden Ende-zu-Ende verschlüsselt übertragen. Nicht einmal der Relay-Server kann mitlesen.',
+          },
+          {
+            title: 'Deine Daten auf deinem Gerät',
+            description: 'Alles wird lokal auf deinem Gerät gespeichert. Server helfen bei der Zustellung \u2014 aber sie sind nicht der Speicher.',
+            technical: 'Wenn ein Server ausfällt, hast du immer noch all deine Daten, Kontakte und Verifikationen.',
+          },
+        ],
+      },
+
+      // Decentralized vs Server
+      decentralized: {
+        title: 'Was ist dezentral, was nutzt Server?',
+        fullyDecentralized: {
+          title: 'Vollständig dezentral',
+          subtitle: 'Kein Server nötig',
+          items: [
+            { what: 'Identität', how: 'DID (did:key)', detail: 'Wird auf deinem Gerät erzeugt, aus 12 Wörtern ableitbar. Kein Server beteiligt.' },
+            { what: 'Schlüssel', how: 'Ed25519 + X25519', detail: 'Signieren und Verschlüsseln \u2014 alles lokal, Private Key verlässt nie dein Gerät.' },
+            { what: 'Verifikation', how: 'QR-Code / Challenge-Response', detail: 'Zwei Geräte kommunizieren direkt. Kein Server verifiziert \u2014 ihr verifiziert euch gegenseitig.' },
+            { what: 'Datenspeicherung', how: 'Lokale Datenbank', detail: 'Kontakte, Verifikationen, Attestations \u2014 alles auf deinem Gerät.' },
+            { what: 'Verschlüsselung', how: 'E2E (AES-256-GCM, ECIES)', detail: 'Nachrichten werden auf deinem Gerät verschlüsselt, bevor sie irgendwohin gehen.' },
+          ],
+        },
+        serverAsHelper: {
+          title: 'Server als Helfer',
+          subtitle: 'Optional, austauschbar',
+          items: [
+            {
+              what: 'Relay',
+              description: 'Nachrichtenzustellung',
+              why: 'Damit Nachrichten ankommen, wenn der Empfänger offline ist. Wie ein Briefkasten.',
+              protection: 'Nachrichten sind E2E-verschlüsselt. Der Relay sieht nur: \u201EVon A an B\u201C \u2014 nicht den Inhalt.',
+              roadmap: 'Ziel: P2P-Transport als dezentrale Alternative.',
+            },
+            {
+              what: 'Profil-Service',
+              description: 'Öffentliche Profile',
+              why: 'Damit andere dein öffentliches Profil finden können, auch wenn du offline bist.',
+              protection: 'Profile sind mit deinem Schlüssel signiert. Der Server kann sie nicht fälschen. Jeder Client verifiziert die Signatur.',
+              roadmap: 'Ziel: Dezentrales Netzwerk als Alternative.',
+            },
+          ],
+        },
+        planned: {
+          title: 'Geplant',
+          subtitle: 'Noch nicht implementiert',
+          items: [
+            { what: 'Social Recovery', status: 'Finanziert (NLNet)', goal: 'Gerät verloren? Deine Vertrauenspersonen bestätigen dein neues Profil \u2014 dein Web of Trust schützt dich.' },
+            { what: 'Biometrie / Passkeys', status: 'Geplant', goal: 'Fingerabdruck statt Passphrase im Alltag. 12 Wörter als Fallback.' },
+            { what: 'Key Rotation', status: 'Geplant', goal: 'Schlüssel wechseln, ohne Kontakte zu verlieren. Grundlage für Social Recovery.' },
+            { what: 'Dezentrale Discovery', status: 'Geplant', goal: 'Profile in einem dezentralen Netzwerk statt auf einem Server.' },
+            { what: 'P2P Messaging', status: 'Langfristig', goal: 'Direkte Zustellung ohne Relay, wenn beide online sind.' },
+          ],
+        },
+      },
+
+      // Server Protection
+      serverProtection: {
+        title: 'Auch mit Server: Deine Daten sind geschützt',
+        question: '\u201EAber wenn es einen Server gibt, ist es doch nicht sicher?\u201C',
+        answer: 'Doch. Und hier ist warum:',
+        reasons: [
+          {
+            title: 'Der Server sieht nur verschlüsselte Daten.',
+            description: 'Nachrichten werden auf deinem Gerät verschlüsselt, bevor sie an den Relay gehen. Der Server-Betreiber kann sie nicht lesen \u2014 selbst wenn er wollte.',
+          },
+          {
+            title: 'Der Server kann deine Identität nicht fälschen.',
+            description: 'Deine DID enthält deinen öffentlichen Schlüssel. Profile sind kryptografisch signiert. Ein kompromittierter Server kann keine Nachricht in deinem Namen schicken \u2014 die Signatur würde nicht passen.',
+          },
+          {
+            title: 'Der Server ist austauschbar.',
+            description: 'Du kannst jeden beliebigen Relay nutzen \u2014 oder deinen eigenen betreiben. Die Software ist Open Source. Es gibt keinen \u201Eden einen\u201C Server.',
+          },
+          {
+            title: 'Der Server ist optional.',
+            description: 'Wenn der Server ausfällt: Verifikation funktioniert weiter (QR-Code, direkt). Deine Daten sind lokal. Nur die Zustellung wartet, bis wieder ein Relay verfügbar ist.',
+          },
+        ],
+        comparison: {
+          title: 'Vergleich',
+          items: [
+            { name: 'Signal', detail: 'Server kennt deine Telefonnummer. Ohne Server = kein Signal.' },
+            { name: 'WhatsApp', detail: 'Server kennt alles außer Nachrichteninhalt. Ohne Server = kein WhatsApp.' },
+            { name: 'Web of Trust', detail: 'Server kennt verschlüsselte Briefumschläge. Ohne Server = alles funktioniert, nur langsamer.' },
+          ],
+        },
+      },
+
+      // Roadmap
+      roadmap: {
+        title: 'Der Weg zur vollständigen Dezentralisierung',
+        phases: {
+          today: 'Heute',
+          tomorrow: 'Morgen',
+          vision: 'Vision',
+        },
+        categories: [
+          {
+            name: 'Identität',
+            today: { status: 'decentralized', label: 'Dezentral', detail: 'Auf deinem Gerät erzeugt' },
+            tomorrow: { status: 'decentralized', label: 'Dezentral', detail: '+ Key Rotation' },
+            vision: { status: 'decentralized', label: 'Dezentral', detail: 'Methoden-agnostisch' },
+          },
+          {
+            name: 'Verifikation',
+            today: { status: 'decentralized', label: 'Dezentral', detail: 'QR-Code, direkt' },
+            tomorrow: { status: 'decentralized', label: 'Dezentral', detail: '' },
+            vision: { status: 'decentralized', label: 'Dezentral', detail: '' },
+          },
+          {
+            name: 'Datenspeicherung',
+            today: { status: 'decentralized', label: 'Lokal', detail: 'Dein Gerät' },
+            tomorrow: { status: 'decentralized', label: 'Lokal', detail: '' },
+            vision: { status: 'decentralized', label: 'Lokal', detail: '' },
+          },
+          {
+            name: 'Verschlüsselung',
+            today: { status: 'decentralized', label: 'E2E', detail: 'AES-256, ECIES' },
+            tomorrow: { status: 'decentralized', label: 'E2E', detail: '' },
+            vision: { status: 'decentralized', label: 'E2E', detail: '' },
+          },
+          {
+            name: 'Nachrichtenzustellung',
+            today: { status: 'server', label: 'Relay-Server', detail: 'E2E-verschlüsselt' },
+            tomorrow: { status: 'server', label: 'Relay + P2P', detail: '' },
+            vision: { status: 'decentralized', label: 'Dezentral', detail: 'P2P / Federation' },
+          },
+          {
+            name: 'Profil-Discovery',
+            today: { status: 'server', label: 'HTTP-Server', detail: 'Kryptografisch signiert' },
+            tomorrow: { status: 'server', label: 'Server + dezentral', detail: '' },
+            vision: { status: 'decentralized', label: 'Dezentrales Netzwerk', detail: '' },
+          },
+          {
+            name: 'Recovery',
+            today: { status: 'manual', label: '12 Wörter', detail: 'Aufschreiben' },
+            tomorrow: { status: 'wot', label: 'Social Recovery', detail: 'Dein Netzwerk bürgt' },
+            vision: { status: 'wot', label: 'Web of Trust', detail: 'Schützt dich' },
+          },
+        ],
+        legend: {
+          decentralized: 'Vollständig dezentral',
+          server: 'Server als Helfer, Daten geschützt',
+          manual: 'Manuell',
+          wot: 'Web of Trust basiert',
+        },
+      },
+
+      // Tech Badges
+      techBadges: [
+        'Ed25519 Signaturen',
+        'X25519 Verschlüsselung',
+        'AES-256-GCM',
+        'BIP39 Recovery',
+        'Decentralized Identifiers',
+        'HKDF Key Derivation',
+        'JWS Signaturen',
+        'Automerge CRDT',
+        'Offline-First',
+        'Open Source (MIT)',
+      ],
+
+      // FAQ
+      faq: {
+        title: 'Häufige Fragen zur Architektur',
+        items: [
+          {
+            q: 'Ist das wirklich sicher?',
+            a: 'Die Kryptografie basiert auf denselben Standards wie Signal und Bitcoin. Ed25519 für Signaturen, AES-256-GCM für Verschlüsselung. Der Code ist Open Source \u2014 jeder kann ihn prüfen.',
+          },
+          {
+            q: 'Was wenn der Server gehackt wird?',
+            a: 'Der Angreifer sieht verschlüsselte Nachrichten und signierte Profile. Er kann sie nicht lesen und nicht fälschen. Im schlimmsten Fall kann er die Zustellung stören \u2014 aber nicht deine Daten kompromittieren.',
+          },
+          {
+            q: 'Was wenn ich mein Handy verliere?',
+            a: 'Heute: Mit deinen 12 Wörtern kannst du deine Identität auf jedem Gerät wiederherstellen. Bald: Social Recovery \u2014 deine Vertrauenspersonen aus dem Web of Trust bestätigen dein neues Profil.',
+          },
+          {
+            q: 'Warum nicht einfach Blockchain?',
+            a: 'Blockchain löst ein anderes Problem (globaler Konsens). Wir brauchen keinen globalen Konsens \u2014 wir brauchen lokales Vertrauen zwischen Menschen, die sich kennen. Dezentral heißt nicht Blockchain.',
+          },
+        ],
+      },
+    },
+
     // FAQ
     faq: {
       title: 'Häufig gestellte Fragen',
@@ -554,6 +761,207 @@ export const translations = {
         'No blockchain or crypto tokens',
       ],
       note: 'This is a research project - we learn and improve continuously',
+    },
+
+    // Architecture
+    architecture: {
+      nav: 'Architecture',
+      title: 'How it works',
+      subtitle: 'What\u2019s decentralized, what (still) needs servers \u2014 and why your data belongs to you regardless.',
+      backToHome: 'Back to home',
+
+      pillars: {
+        title: 'Three Pillars',
+        items: [
+          {
+            title: 'Your identity belongs to you',
+            description: 'Your identity is created on your device \u2014 not on a server. 12 words that only you know are your key to everything. No registration, no email, no provider.',
+            technical: 'Your identifier (DID) contains your public key. Anyone can verify whether a message really comes from you \u2014 without asking a server.',
+          },
+          {
+            title: 'Trust through real encounter',
+            description: 'Two people meet. They scan each other\u2019s QR code. From now on they are cryptographically verified \u2014 not because an algorithm decided, but because they looked each other in the eyes.',
+            technical: 'Attestations (confirmations) are transmitted end-to-end encrypted. Not even the relay server can read along.',
+          },
+          {
+            title: 'Your data on your device',
+            description: 'Everything is stored locally on your device. Servers help with delivery \u2014 but they are not the storage.',
+            technical: 'If a server goes down, you still have all your data, contacts, and verifications.',
+          },
+        ],
+      },
+
+      decentralized: {
+        title: 'What\u2019s decentralized, what uses servers?',
+        fullyDecentralized: {
+          title: 'Fully decentralized',
+          subtitle: 'No server needed',
+          items: [
+            { what: 'Identity', how: 'DID (did:key)', detail: 'Created on your device, derivable from 12 words. No server involved.' },
+            { what: 'Keys', how: 'Ed25519 + X25519', detail: 'Signing and encrypting \u2014 all local, private key never leaves your device.' },
+            { what: 'Verification', how: 'QR Code / Challenge-Response', detail: 'Two devices communicate directly. No server verifies \u2014 you verify each other.' },
+            { what: 'Data storage', how: 'Local database', detail: 'Contacts, verifications, attestations \u2014 all on your device.' },
+            { what: 'Encryption', how: 'E2E (AES-256-GCM, ECIES)', detail: 'Messages are encrypted on your device before they go anywhere.' },
+          ],
+        },
+        serverAsHelper: {
+          title: 'Server as helper',
+          subtitle: 'Optional, replaceable',
+          items: [
+            {
+              what: 'Relay',
+              description: 'Message delivery',
+              why: 'So messages arrive when the recipient is offline. Like a mailbox.',
+              protection: 'Messages are E2E encrypted. The relay only sees: \u201CFrom A to B\u201D \u2014 not the content.',
+              roadmap: 'Goal: P2P transport as decentralized alternative.',
+            },
+            {
+              what: 'Profile Service',
+              description: 'Public profiles',
+              why: 'So others can find your public profile even when you\u2019re offline.',
+              protection: 'Profiles are signed with your key. The server can\u2019t forge them. Every client verifies the signature.',
+              roadmap: 'Goal: Decentralized network as alternative.',
+            },
+          ],
+        },
+        planned: {
+          title: 'Planned',
+          subtitle: 'Not yet implemented',
+          items: [
+            { what: 'Social Recovery', status: 'Funded (NLNet)', goal: 'Lost your device? Your trusted contacts confirm your new profile \u2014 your Web of Trust protects you.' },
+            { what: 'Biometrics / Passkeys', status: 'Planned', goal: 'Fingerprint instead of passphrase in daily use. 12 words as fallback.' },
+            { what: 'Key Rotation', status: 'Planned', goal: 'Change keys without losing contacts. Foundation for Social Recovery.' },
+            { what: 'Decentralized Discovery', status: 'Planned', goal: 'Profiles in a decentralized network instead of on a server.' },
+            { what: 'P2P Messaging', status: 'Long-term', goal: 'Direct delivery without relay when both are online.' },
+          ],
+        },
+      },
+
+      serverProtection: {
+        title: 'Even with servers: Your data is protected',
+        question: '\u201CBut if there\u2019s a server, it\u2019s not secure, right?\u201D',
+        answer: 'It is. And here\u2019s why:',
+        reasons: [
+          {
+            title: 'The server only sees encrypted data.',
+            description: 'Messages are encrypted on your device before going to the relay. The server operator can\u2019t read them \u2014 even if they wanted to.',
+          },
+          {
+            title: 'The server can\u2019t forge your identity.',
+            description: 'Your DID contains your public key. Profiles are cryptographically signed. A compromised server can\u2019t send a message in your name \u2014 the signature wouldn\u2019t match.',
+          },
+          {
+            title: 'The server is replaceable.',
+            description: 'You can use any relay \u2014 or run your own. The software is open source. There is no \u201Cone\u201D server.',
+          },
+          {
+            title: 'The server is optional.',
+            description: 'If the server goes down: Verification still works (QR code, direct). Your data is local. Only delivery waits until a relay is available again.',
+          },
+        ],
+        comparison: {
+          title: 'Comparison',
+          items: [
+            { name: 'Signal', detail: 'Server knows your phone number. No server = no Signal.' },
+            { name: 'WhatsApp', detail: 'Server knows everything except message content. No server = no WhatsApp.' },
+            { name: 'Web of Trust', detail: 'Server knows encrypted envelopes. No server = everything works, just slower.' },
+          ],
+        },
+      },
+
+      roadmap: {
+        title: 'The path to full decentralization',
+        phases: {
+          today: 'Today',
+          tomorrow: 'Tomorrow',
+          vision: 'Vision',
+        },
+        categories: [
+          {
+            name: 'Identity',
+            today: { status: 'decentralized', label: 'Decentralized', detail: 'Created on your device' },
+            tomorrow: { status: 'decentralized', label: 'Decentralized', detail: '+ Key Rotation' },
+            vision: { status: 'decentralized', label: 'Decentralized', detail: 'Method-agnostic' },
+          },
+          {
+            name: 'Verification',
+            today: { status: 'decentralized', label: 'Decentralized', detail: 'QR code, direct' },
+            tomorrow: { status: 'decentralized', label: 'Decentralized', detail: '' },
+            vision: { status: 'decentralized', label: 'Decentralized', detail: '' },
+          },
+          {
+            name: 'Data Storage',
+            today: { status: 'decentralized', label: 'Local', detail: 'Your device' },
+            tomorrow: { status: 'decentralized', label: 'Local', detail: '' },
+            vision: { status: 'decentralized', label: 'Local', detail: '' },
+          },
+          {
+            name: 'Encryption',
+            today: { status: 'decentralized', label: 'E2E', detail: 'AES-256, ECIES' },
+            tomorrow: { status: 'decentralized', label: 'E2E', detail: '' },
+            vision: { status: 'decentralized', label: 'E2E', detail: '' },
+          },
+          {
+            name: 'Message Delivery',
+            today: { status: 'server', label: 'Relay Server', detail: 'E2E encrypted' },
+            tomorrow: { status: 'server', label: 'Relay + P2P', detail: '' },
+            vision: { status: 'decentralized', label: 'Decentralized', detail: 'P2P / Federation' },
+          },
+          {
+            name: 'Profile Discovery',
+            today: { status: 'server', label: 'HTTP Server', detail: 'Cryptographically signed' },
+            tomorrow: { status: 'server', label: 'Server + decentralized', detail: '' },
+            vision: { status: 'decentralized', label: 'Decentralized network', detail: '' },
+          },
+          {
+            name: 'Recovery',
+            today: { status: 'manual', label: '12 words', detail: 'Write down' },
+            tomorrow: { status: 'wot', label: 'Social Recovery', detail: 'Your network vouches' },
+            vision: { status: 'wot', label: 'Web of Trust', detail: 'Protects you' },
+          },
+        ],
+        legend: {
+          decentralized: 'Fully decentralized',
+          server: 'Server as helper, data protected',
+          manual: 'Manual',
+          wot: 'Web of Trust based',
+        },
+      },
+
+      techBadges: [
+        'Ed25519 Signatures',
+        'X25519 Encryption',
+        'AES-256-GCM',
+        'BIP39 Recovery',
+        'Decentralized Identifiers',
+        'HKDF Key Derivation',
+        'JWS Signatures',
+        'Automerge CRDT',
+        'Offline-First',
+        'Open Source (MIT)',
+      ],
+
+      faq: {
+        title: 'Architecture FAQ',
+        items: [
+          {
+            q: 'Is this really secure?',
+            a: 'The cryptography is based on the same standards as Signal and Bitcoin. Ed25519 for signatures, AES-256-GCM for encryption. The code is open source \u2014 anyone can audit it.',
+          },
+          {
+            q: 'What if the server gets hacked?',
+            a: 'The attacker sees encrypted messages and signed profiles. They can\u2019t read or forge them. In the worst case, they can disrupt delivery \u2014 but not compromise your data.',
+          },
+          {
+            q: 'What if I lose my phone?',
+            a: 'Today: With your 12 words you can restore your identity on any device. Soon: Social Recovery \u2014 your trusted contacts from the Web of Trust confirm your new profile.',
+          },
+          {
+            q: 'Why not just use blockchain?',
+            a: 'Blockchain solves a different problem (global consensus). We don\u2019t need global consensus \u2014 we need local trust between people who know each other. Decentralized doesn\u2019t mean blockchain.',
+          },
+        ],
+      },
     },
 
     // FAQ
