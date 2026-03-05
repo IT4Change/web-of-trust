@@ -41,8 +41,8 @@ export class OfflineFirstDiscoveryAdapter implements DiscoveryAdapter {
     try {
       await this.inner.publishProfile(data, identity)
       await this.publishState.clearDirty(data.did, 'profile')
-    } catch {
-      // Flag remains set — will be retried via syncPending()
+    } catch (e) {
+      console.warn('[Discovery] Profile publish failed, will retry:', e instanceof Error ? e.message : e)
     }
   }
 
@@ -51,8 +51,8 @@ export class OfflineFirstDiscoveryAdapter implements DiscoveryAdapter {
     try {
       await this.inner.publishVerifications(data, identity)
       await this.publishState.clearDirty(data.did, 'verifications')
-    } catch {
-      // Flag remains set — will be retried via syncPending()
+    } catch (e) {
+      console.warn('[Discovery] Verifications publish failed, will retry:', e instanceof Error ? e.message : e)
     }
   }
 
@@ -61,8 +61,8 @@ export class OfflineFirstDiscoveryAdapter implements DiscoveryAdapter {
     try {
       await this.inner.publishAttestations(data, identity)
       await this.publishState.clearDirty(data.did, 'attestations')
-    } catch {
-      // Flag remains set — will be retried via syncPending()
+    } catch (e) {
+      console.warn('[Discovery] Attestations publish failed, will retry:', e instanceof Error ? e.message : e)
     }
   }
 
@@ -140,8 +140,8 @@ export class OfflineFirstDiscoveryAdapter implements DiscoveryAdapter {
       try {
         await this.inner.publishProfile(data.profile, identity)
         await this.publishState.clearDirty(did, 'profile')
-      } catch {
-        // Will be retried on next syncPending() call
+      } catch (e) {
+        console.warn('[Discovery] syncPending profile failed:', e instanceof Error ? e.message : e)
       }
     }
 
@@ -149,8 +149,8 @@ export class OfflineFirstDiscoveryAdapter implements DiscoveryAdapter {
       try {
         await this.inner.publishVerifications(data.verifications, identity)
         await this.publishState.clearDirty(did, 'verifications')
-      } catch {
-        // Will be retried on next syncPending() call
+      } catch (e) {
+        console.warn('[Discovery] syncPending verifications failed:', e instanceof Error ? e.message : e)
       }
     }
 
@@ -158,8 +158,8 @@ export class OfflineFirstDiscoveryAdapter implements DiscoveryAdapter {
       try {
         await this.inner.publishAttestations(data.attestations, identity)
         await this.publishState.clearDirty(did, 'attestations')
-      } catch {
-        // Will be retried on next syncPending() call
+      } catch (e) {
+        console.warn('[Discovery] syncPending attestations failed:', e instanceof Error ? e.message : e)
       }
     }
   }

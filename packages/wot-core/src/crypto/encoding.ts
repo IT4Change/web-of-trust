@@ -53,7 +53,12 @@ export function decodeBase58(str: string): Uint8Array {
 }
 
 export function encodeBase64Url(bytes: Uint8Array): string {
-  const binary = String.fromCharCode(...bytes)
+  // Build binary string in chunks to avoid stack overflow from spread operator
+  // (Safari/WebKit has a low limit on Function.apply arguments)
+  let binary = ''
+  for (let i = 0; i < bytes.length; i++) {
+    binary += String.fromCharCode(bytes[i])
+  }
   return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
 }
 
