@@ -10,7 +10,7 @@ export function Home() {
   const { activeContacts } = useContacts()
   const { myAttestations, receivedAttestations } = useAttestations()
   const { state: relayState, isConnected } = useMessaging()
-  const { hasPendingSync } = useSyncStatus()
+  const { hasPendingSync, discoveryError } = useSyncStatus()
   const { pendingCount, hasPendingMessages } = useOutboxStatus()
 
   const { t, fmt } = useLanguage()
@@ -70,7 +70,12 @@ export function Home() {
             <>
               <span className="text-slate-300">|</span>
               <CloudOff size={14} className="text-amber-500" />
-              <span className="text-amber-600">{t.home.profileSyncPending}</span>
+              <span className="text-amber-600">
+                {t.home.profileSyncPending}
+                {discoveryError && (
+                  <span className="text-red-500 ml-1">({discoveryError})</span>
+                )}
+              </span>
             </>
           )}
           {hasPendingMessages && (

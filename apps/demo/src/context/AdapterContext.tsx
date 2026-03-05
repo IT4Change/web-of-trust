@@ -9,7 +9,6 @@ import {
   type ReactiveStorageAdapter,
   type CryptoAdapter,
   type MessagingAdapter,
-  type DiscoveryAdapter,
   type MessagingState,
   type WotIdentity,
   type PublicProfile,
@@ -36,7 +35,7 @@ interface AdapterContextValue {
   reactiveStorage: ReactiveStorageAdapter
   crypto: CryptoAdapter
   messaging: MessagingAdapter
-  discovery: DiscoveryAdapter
+  discovery: OfflineFirstDiscoveryAdapter
   publishStateStore: EvoluPublishStateStore
   graphCacheStore: EvoluGraphCacheStore
   outboxStore: EvoluOutboxStore
