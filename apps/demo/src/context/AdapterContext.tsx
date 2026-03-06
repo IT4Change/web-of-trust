@@ -96,6 +96,11 @@ export function AdapterProvider({ children, identity }: AdapterProviderProps) {
         const attestationService = new AttestationService(storage, crypto)
         attestationService.setMessaging(outboxAdapter)
         attestationService.listenForReceipts(outboxAdapter)
+        attestationService.setPersistDeliveryStatus((id, status) => storage.setDeliveryStatus(id, status))
+
+        // Restore persisted delivery statuses, then overlay outbox state
+        const savedStatuses = await storage.getAllDeliveryStatuses()
+        attestationService.restoreDeliveryStatuses(savedStatuses)
         attestationService.initFromOutbox(outboxStore)
 
         // Ensure identity exists in Evolu.

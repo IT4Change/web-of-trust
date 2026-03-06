@@ -100,6 +100,7 @@ const Schema = {
     attestationId: NonEmptyString1000,
     accepted: SqliteBoolean,
     acceptedAt: nullOr(NonEmptyString1000),
+    deliveryStatus: nullOr(NonEmptyString1000), // 'sending' | 'queued' | 'delivered' | 'acknowledged' | 'failed'
   },
   discoverySyncState: {
     id: DiscoverySyncStateId,

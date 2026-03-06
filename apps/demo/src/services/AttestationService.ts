@@ -18,11 +18,27 @@ export class AttestationService {
   private statusSubscribers = new Set<(map: Map<string, DeliveryStatus>) => void>()
   private receiptUnsubscribe: (() => void) | null = null
   private messageUnsubscribe: (() => void) | null = null
+  private persistFn: ((attestationId: string, status: string) => Promise<void>) | null = null
 
   constructor(
     private storage: StorageAdapter,
     private crypto: CryptoAdapter
   ) {}
+
+  /** Set a persistence callback for delivery status (called on every status change) */
+  setPersistDeliveryStatus(fn: (attestationId: string, status: string) => Promise<void>): void {
+    this.persistFn = fn
+  }
+
+  /** Restore delivery statuses from persistent storage (call on app startup) */
+  restoreDeliveryStatuses(statuses: Map<string, string>): void {
+    for (const [id, status] of statuses) {
+      if (['sending', 'queued', 'delivered', 'acknowledged', 'failed'].includes(status)) {
+        this.deliveryStatus.set(id, status as DeliveryStatus)
+      }
+    }
+    this.notifySubscribers()
+  }
 
   setMessaging(messaging: MessagingAdapter): void {
     this.messaging = messaging
@@ -48,6 +64,11 @@ export class AttestationService {
   private setStatus(attestationId: string, status: DeliveryStatus): void {
     this.deliveryStatus = new Map(this.deliveryStatus)
     this.deliveryStatus.set(attestationId, status)
+    this.notifySubscribers()
+    this.persistFn?.(attestationId, status).catch(() => {})
+  }
+
+  private notifySubscribers(): void {
     for (const cb of this.statusSubscribers) {
       cb(this.deliveryStatus)
     }
@@ -88,13 +109,22 @@ export class AttestationService {
 
   /**
    * Bootstrap delivery status from outbox (on app startup).
-   * Marks any pending attestation envelopes as 'queued'.
+   * Marks pending attestation envelopes as 'queued'.
+   * Marks stale 'sending' statuses (not in outbox) as 'failed'.
    */
   async initFromOutbox(outboxStore: OutboxStore): Promise<void> {
     const pending = await outboxStore.getPending()
+    const outboxIds = new Set<string>()
     for (const entry of pending) {
       if (entry.envelope.type === 'attestation') {
+        outboxIds.add(entry.envelope.id)
         this.setStatus(entry.envelope.id, 'queued')
+      }
+    }
+    // Any 'sending' status not in the outbox means the send was interrupted — mark as failed
+    for (const [id, status] of this.deliveryStatus) {
+      if (status === 'sending' && !outboxIds.has(id)) {
+        this.setStatus(id, 'failed')
       }
     }
   }

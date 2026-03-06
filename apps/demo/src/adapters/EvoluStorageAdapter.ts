@@ -314,6 +314,32 @@ export class EvoluStorageAdapter implements StorageAdapter, ReactiveStorageAdapt
     })
   }
 
+  async setDeliveryStatus(attestationId: string, status: string): Promise<void> {
+    // Must read existing accepted state since upsert requires all non-null fields
+    const existing = await this.getAttestationMetadata(attestationId)
+    this.evolu.upsert('attestationMetadata', {
+      id: createIdFromString<'AttestationMetadata'>(`meta-${attestationId}`),
+      attestationId: str(attestationId),
+      accepted: booleanToSqliteBoolean(existing?.accepted ?? false),
+      deliveryStatus: str(status),
+    })
+  }
+
+  async getAllDeliveryStatuses(): Promise<Map<string, string>> {
+    const query = this.evolu.createQuery((db) =>
+      db.selectFrom('attestationMetadata')
+        .select(['attestationId', 'deliveryStatus'])
+        .where('isDeleted', 'is not', booleanToSqliteBoolean(true))
+        .where('deliveryStatus', 'is not', null)
+    )
+    const rows = await this.evolu.loadQuery(query)
+    const map = new Map<string, string>()
+    for (const row of rows) {
+      map.set(row.attestationId as string, row.deliveryStatus as string)
+    }
+    return map
+  }
+
   // --- Lifecycle ---
 
   async init(): Promise<void> {}
