@@ -199,13 +199,18 @@ export function PublicProfile() {
     const profileUrl = `${window.location.origin}${base}/p/${encodeURIComponent(decodedDid)}`
     if (navigator.share) {
       try {
-        await navigator.share({ title: profile?.name || 'Profil', url: profileUrl })
+        await navigator.share({ title: profile?.name || 'Profil', text: profileUrl, url: profileUrl })
         return
-      } catch { /* user cancelled or not supported */ }
+      } catch (e) {
+        // User cancelled share dialog — don't fall through to clipboard
+        if (e instanceof Error && e.name === 'AbortError') return
+      }
     }
-    await navigator.clipboard.writeText(profileUrl)
-    setShared(true)
-    setTimeout(() => setShared(false), 2000)
+    try {
+      await navigator.clipboard.writeText(profileUrl)
+      setShared(true)
+      setTimeout(() => setShared(false), 2000)
+    } catch { /* clipboard blocked — ignore silently */ }
   }
 
   const displayName = useCallback((targetDid: string): string => {
