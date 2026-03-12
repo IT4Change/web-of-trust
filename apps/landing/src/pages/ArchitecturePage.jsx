@@ -20,6 +20,7 @@ import {
   ShieldCheck,
   Mailbox,
   ArrowRightLeft,
+  Blocks,
 } from 'lucide-react'
 import { Card } from '@real-life-stack/toolkit'
 import { useLanguage } from '../i18n/LanguageContext'
@@ -28,7 +29,23 @@ import Header from '../components/Header'
 import Footer from '../components/Footer'
 
 const pillarIcons = [Key, Users, Smartphone]
+const pillarColors = [
+  { bg: 'bg-primary/10', text: 'text-primary', border: 'border-primary/20' },
+  { bg: 'bg-secondary/10', text: 'text-secondary', border: 'border-secondary/20' },
+  { bg: 'bg-warning/10', text: 'text-warning', border: 'border-warning/20' },
+]
 const localFirstIcons = [HardDrive, ShieldCheck, Mailbox]
+const localFirstColors = [
+  { bg: 'bg-primary/10', text: 'text-primary' },
+  { bg: 'bg-secondary/10', text: 'text-secondary' },
+  { bg: 'bg-warning/10', text: 'text-warning' },
+]
+const protectionColors = [
+  { bg: 'bg-warning/10', text: 'text-warning' },
+  { bg: 'bg-primary/10', text: 'text-primary' },
+  { bg: 'bg-secondary/10', text: 'text-secondary' },
+  { bg: 'bg-warning/10', text: 'text-warning' },
+]
 
 const statusColors = {
   decentralized: { bg: 'bg-green-500/10', text: 'text-green-600', dot: 'bg-green-500' },
@@ -72,16 +89,17 @@ export default function ArchitecturePage() {
           <div className="grid gap-6">
             {arch.pillars.items.map((pillar, i) => {
               const Icon = pillarIcons[i]
+              const colors = pillarColors[i]
               return (
                 <Card key={i} className="px-6 gap-0">
                   <div className="flex items-start gap-4">
-                    <div className="w-12 h-12 bg-primary/10 rounded-xl flex items-center justify-center shrink-0">
-                      <Icon className="text-primary" size={24} />
+                    <div className={`w-12 h-12 ${colors.bg} rounded-xl flex items-center justify-center shrink-0`}>
+                      <Icon className={colors.text} size={24} />
                     </div>
                     <div>
                       <h3 className="text-lg font-semibold text-foreground mb-2">{pillar.title}</h3>
                       <p className="text-muted-foreground mb-3">{pillar.description}</p>
-                      <p className="text-sm text-muted-foreground/80 border-l-2 border-primary/20 pl-3">
+                      <p className={`text-sm text-muted-foreground/80 border-l-2 ${colors.border} pl-3`}>
                         {pillar.technical}
                       </p>
                     </div>
@@ -195,10 +213,11 @@ export default function ArchitecturePage() {
           <div className="grid sm:grid-cols-3 gap-4 mb-8">
             {arch.localFirst.items.map((item, i) => {
               const Icon = localFirstIcons[i]
+              const colors = localFirstColors[i]
               return (
                 <div key={i} className="bg-muted rounded-xl p-5 border border-border">
-                  <div className="w-10 h-10 bg-primary/10 rounded-lg flex items-center justify-center mb-3">
-                    <Icon className="text-primary" size={20} />
+                  <div className={`w-10 h-10 ${colors.bg} rounded-lg flex items-center justify-center mb-3`}>
+                    <Icon className={colors.text} size={20} />
                   </div>
                   <h3 className="font-semibold text-foreground mb-2">{item.title}</h3>
                   <p className="text-sm text-muted-foreground">{item.description}</p>
@@ -220,6 +239,42 @@ export default function ArchitecturePage() {
           </div>
         </section>
 
+        {/* Adapter Architecture */}
+        {arch.adapters && (
+          <section className="bg-muted py-16 mb-20">
+            <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8">
+              <h2 className="text-2xl font-bold text-foreground mb-4">{arch.adapters.title}</h2>
+              <p className="text-lg text-muted-foreground mb-8">{arch.adapters.intro}</p>
+
+              <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4 mb-6">
+                {arch.adapters.items.map((adapter, i) => (
+                  <div key={i} className="bg-background rounded-lg p-4 border border-border">
+                    <div className="flex items-center gap-3 mb-2">
+                      <span className="text-sm font-mono text-primary">{adapter.name}</span>
+                    </div>
+                    <p className="text-sm text-muted-foreground">{adapter.description}</p>
+                    {adapter.current && (
+                      <p className="text-xs text-muted-foreground/70 mt-2 border-t border-border pt-2">
+                        Aktuell: {adapter.link ? (
+                          <a href={adapter.link} target="_blank" rel="noopener noreferrer" className="font-mono text-primary hover:underline">
+                            {adapter.current}
+                          </a>
+                        ) : (
+                          <span className="font-mono">{adapter.current}</span>
+                        )}
+                      </p>
+                    )}
+                  </div>
+                ))}
+              </div>
+
+              <p className="text-sm text-muted-foreground/80 text-center">
+                {arch.adapters.footer}
+              </p>
+            </div>
+          </section>
+        )}
+
         {/* Server Protection */}
         <section className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 mb-20">
           <h2 className="text-2xl font-bold text-foreground mb-4">{arch.serverProtection.title}</h2>
@@ -229,11 +284,12 @@ export default function ArchitecturePage() {
           <div className="grid sm:grid-cols-2 gap-4 mb-10">
             {arch.serverProtection.reasons.map((reason, i) => {
               const Icon = protectionIcons[i]
+              const colors = protectionColors[i]
               return (
                 <Card key={i} className="px-5 gap-0">
                   <div className="flex items-start gap-3">
-                    <div className="w-8 h-8 bg-primary/10 rounded-lg flex items-center justify-center shrink-0 mt-0.5">
-                      <Icon className="text-primary" size={16} />
+                    <div className={`w-8 h-8 ${colors.bg} rounded-lg flex items-center justify-center shrink-0 mt-0.5`}>
+                      <Icon className={colors.text} size={16} />
                     </div>
                     <div>
                       <h4 className="font-semibold text-foreground text-sm mb-1">{reason.title}</h4>

@@ -12,15 +12,15 @@ export const translations = {
 
     // Hero
     hero: {
-      badge: 'Für Gemeinschaften',
+      badge: 'Eine App für lokale Verbindung und Kooperation',
       titleStart: 'Vertrauen durch',
       titleHighlight: 'echte Begegnungen',
-      subtitle: 'Eine digitale Infrastruktur für echte Gemeinschaften. Selbstorganisiert, verschlüsselt, in deiner Hand.',
+      subtitle: 'Ein wachsendes Netzwerk aus echten Beziehungen. Jede Verbindung basiert auf einer persönlichen Begegnung. Vertrauen wächst aus gegenseitiger Unterstützung und gemeinsamem Handeln.',
       cta: 'Mehr erfahren',
       demo: 'Demo ausprobieren',
       github: 'Auf GitHub ansehen',
       features: {
-        verification: 'Persönliche Verifizierung',
+        verification: 'Persönliche Verbindung',
         encrypted: 'Ende-zu-Ende verschlüsselt',
         offline: 'Funktioniert offline',
       },
@@ -59,7 +59,7 @@ export const translations = {
       ],
       note: {
         title: 'Verbinden ≠ Vertrauen',
-        text: 'Die Verbindung bestätigt nur: "Das ist wirklich diese Person." Das eigentliche Vertrauen entsteht durch Bestätigungen über Zeit.',
+        text: 'Die Verbindung bestätigt nur: "Das ist wirklich diese Person." Das eigentliche Vertrauen entsteht durch Kooperation und Bestätigungen mit der Zeit.',
       },
     },
 
@@ -221,6 +221,10 @@ export const translations = {
         'Keine Blockchain oder Crypto-Token',
       ],
       note: 'Dies ist ein Forschungsprojekt - wir lernen und verbessern kontinuierlich',
+      architectureCta: {
+        text: 'Du willst wissen, wie es unter der Haube funktioniert?',
+        button: 'Architektur ansehen',
+      },
     },
 
     // Architecture
@@ -262,8 +266,8 @@ export const translations = {
             description: 'Alles wird direkt auf deinem Gerät gespeichert. Lesen und Schreiben passiert sofort — ohne Netzwerk, ohne Wartezeit.',
           },
           {
-            title: 'Kein Server kann überschreiben',
-            description: 'Anders als bei Cloud-Apps entscheidet kein Server, was die "richtige" Version ist. Änderungen von verschiedenen Geräten werden automatisch zusammengeführt (CRDT) — nichts geht verloren.',
+            title: 'Automatische Synchronisation',
+            description: 'Änderungen von verschiedenen Geräten werden per CRDT automatisch zusammengeführt — konfliktfrei und ohne dass ein Server entscheidet, was die "richtige" Version ist.',
           },
           {
             title: 'Der Server ist nur ein Briefkasten',
@@ -274,6 +278,56 @@ export const translations = {
           title: 'Die Brücke zu Peer-to-Peer',
           description: 'Weil die gesamte Logik auf deinem Gerät läuft, ist der Sync-Server nur ein Transportweg — und Transportwege kann man austauschen. Morgen könnten die Geräte direkt miteinander reden: per Bluetooth, WLAN oder WebRTC. Am Code ändert sich nichts. Local-First macht den Server optional — und öffnet die Tür zu echtem P2P.',
         },
+      },
+
+      // Adapter Architecture
+      adapters: {
+        title: 'Modulare Adapter-Architektur',
+        intro: 'Jede Komponente ist als austauschbarer Adapter gebaut. Heute nutzen wir Automerge und WebSocket — morgen kann jede Schicht unabhängig ersetzt werden, ohne den Rest zu ändern.',
+        items: [
+          {
+            name: 'StorageAdapter',
+            description: 'Persistente Datenhaltung auf dem Gerät. Speichert Kontakte, Attestations und lokale Einstellungen.',
+            current: 'Automerge',
+            link: 'https://automerge.org',
+          },
+          {
+            name: 'CryptoAdapter',
+            description: 'Signieren, Verschlüsseln, Schlüssel ableiten. Private Keys verlassen nie das Gerät.',
+            current: 'Web Crypto API (Ed25519 + X25519 + AES-256-GCM)',
+            link: 'https://developer.mozilla.org/en-US/docs/Web/API/Web_Crypto_API',
+          },
+          {
+            name: 'DiscoveryAdapter',
+            description: 'Öffentliche Profile finden und abrufen — auch wenn die Person gerade offline ist.',
+            current: 'HTTP (wot-profiles)',
+            link: 'https://github.com/antontranelis/web-of-trust/tree/main/packages/wot-profiles',
+          },
+          {
+            name: 'MessagingAdapter',
+            description: '1:1-Zustellung von verschlüsselten Nachrichten und Attestations zwischen Geräten.',
+            current: 'WebSocket (wot-relay)',
+            link: 'https://github.com/antontranelis/web-of-trust/tree/main/packages/wot-relay',
+          },
+          {
+            name: 'ReplicationAdapter',
+            description: 'CRDT-Synchronisation für geteilte Daten in Gruppen — verschlüsselt und konfliktfrei.',
+            current: 'Automerge + GroupKeyService',
+            link: 'https://automerge.org',
+          },
+          {
+            name: 'AuthorizationAdapter',
+            description: 'Capabilities für Zugriffsrechte: Wer darf was lesen, schreiben oder delegieren?',
+            current: 'UCAN-inspiriert',
+            link: 'https://ucan.xyz',
+          },
+          {
+            name: 'ReactiveStorageAdapter',
+            description: 'Echtzeit-Updates für die UI: Beobachtet Änderungen und benachrichtigt Komponenten automatisch.',
+            current: 'Observable Pattern',
+          },
+        ],
+        footer: 'Aktuell setzen wir auf Automerge (CRDT), Ed25519 (Kryptografie) und einen WebSocket-Relay. Aber jeder Adapter kann unabhängig ausgetauscht werden.',
       },
 
       // Decentralized vs Server
@@ -295,10 +349,10 @@ export const translations = {
           subtitle: 'Optional, austauschbar',
           items: [
             {
-              what: 'Relay',
-              description: 'Nachrichtenzustellung',
-              why: 'Damit Nachrichten ankommen, wenn der Empfänger offline ist. Wie ein Briefkasten.',
-              protection: 'Nachrichten sind E2E-verschlüsselt. Der Relay sieht nur: \u201EVon A an B\u201C \u2014 nicht den Inhalt.',
+              what: 'Relay-Server',
+              description: 'Nachrichtenzustellung & verschlüsseltes Backup',
+              why: 'Stellt Nachrichten zu, wenn der Empfänger offline ist, und synchronisiert verschlüsselte Dokumente zwischen Geräten. Wie ein Briefkasten mit Tresor.',
+              protection: 'Alles ist Ende-zu-Ende verschlüsselt. Der Server sieht nur: \u201EVon A an B\u201C \u2014 weder Nachrichteninhalt noch Dokumente.',
               roadmap: 'Ziel: P2P-Transport als dezentrale Alternative.',
             },
             {
@@ -390,9 +444,9 @@ export const translations = {
             vision: { status: 'decentralized', label: 'E2E', detail: '' },
           },
           {
-            name: 'Nachrichtenzustellung',
-            today: { status: 'server', label: 'Relay-Server', detail: 'E2E-verschlüsselt' },
-            tomorrow: { status: 'server', label: 'Relay + P2P', detail: '' },
+            name: 'Relay-Server',
+            today: { status: 'server', label: 'Relay + Vault', detail: 'E2E-verschlüsselt' },
+            tomorrow: { status: 'server', label: 'Relay + P2P', detail: 'Automerge Sync' },
             vision: { status: 'decentralized', label: 'Dezentral', detail: 'P2P / Federation' },
           },
           {
@@ -838,6 +892,57 @@ export const translations = {
         },
       },
 
+      // Adapter Architecture
+      adapters: {
+        title: 'Modular Adapter Architecture',
+        intro: 'Every component is built as a swappable adapter. Today we use Automerge and WebSocket — tomorrow any layer can be independently replaced without changing the rest.',
+        items: [
+          {
+            name: 'StorageAdapter',
+            description: 'Persistent data storage on your device. Stores contacts, attestations, and local settings.',
+            current: 'Automerge',
+            link: 'https://automerge.org',
+          },
+          {
+            name: 'CryptoAdapter',
+            description: 'Signing, encrypting, key derivation. Private keys never leave your device.',
+            current: 'Web Crypto API (Ed25519 + X25519 + AES-256-GCM)',
+            link: 'https://developer.mozilla.org/en-US/docs/Web/API/Web_Crypto_API',
+          },
+          {
+            name: 'DiscoveryAdapter',
+            description: 'Find and retrieve public profiles — even when the person is offline.',
+            current: 'HTTP (wot-profiles)',
+            link: 'https://github.com/antontranelis/web-of-trust/tree/main/packages/wot-profiles',
+          },
+          {
+            name: 'MessagingAdapter',
+            description: '1:1 delivery of encrypted messages and attestations between devices.',
+            current: 'WebSocket (wot-relay)',
+            link: 'https://github.com/antontranelis/web-of-trust/tree/main/packages/wot-relay',
+          },
+          {
+            name: 'ReplicationAdapter',
+            description: 'CRDT synchronization for shared data in groups — encrypted and conflict-free.',
+            current: 'Automerge + GroupKeyService',
+            link: 'https://automerge.org',
+          },
+          {
+            name: 'AuthorizationAdapter',
+            description: 'Capabilities for access rights: Who can read, write, or delegate what?',
+            current: 'UCAN-inspiriert',
+            link: 'https://ucan.xyz',
+          },
+          {
+            name: 'ReactiveStorageAdapter',
+            description: 'Real-time updates for the UI: Observes changes and notifies components automatically.',
+            current: 'Observable Pattern',
+          },
+        ],
+        footer: 'Currently we use Automerge (CRDT), Ed25519 (cryptography), and a WebSocket relay. But every adapter can be independently replaced.',
+      },
+
+      // Decentralized vs Server
       decentralized: {
         title: 'What\u2019s decentralized, what uses servers?',
         fullyDecentralized: {
@@ -4388,6 +4493,57 @@ export const translations = {
         },
       },
 
+      // Adapter Architecture
+      adapters: {
+        title: 'Architecture modulaire d’adaptateurs',
+        intro: 'Chaque composant est construit comme un adaptateur interchangeable. Aujourd’hui nous utilisons Automerge et WebSocket — demain n’importe quelle couche peut être remplacée indépendamment sans modifier le reste.',
+        items: [
+          {
+            name: 'StorageAdapter',
+            description: 'Stockage persistant sur votre appareil. Enregistre les contacts, attestations et paramètres locaux.',
+            current: 'Automerge',
+            link: 'https://automerge.org',
+          },
+          {
+            name: 'CryptoAdapter',
+            description: 'Signature, chiffrement, dérivation de clés. Les clés privées ne quittent jamais votre appareil.',
+            current: 'Web Crypto API (Ed25519 + X25519 + AES-256-GCM)',
+            link: 'https://developer.mozilla.org/en-US/docs/Web/API/Web_Crypto_API',
+          },
+          {
+            name: 'DiscoveryAdapter',
+            description: 'Trouver et récupérer des profils publics — même lorsque la personne est hors ligne.',
+            current: 'HTTP (wot-profiles)',
+            link: 'https://github.com/antontranelis/web-of-trust/tree/main/packages/wot-profiles',
+          },
+          {
+            name: 'MessagingAdapter',
+            description: 'Livraison 1:1 de messages chiffrés et d’attestations entre appareils.',
+            current: 'WebSocket (wot-relay)',
+            link: 'https://github.com/antontranelis/web-of-trust/tree/main/packages/wot-relay',
+          },
+          {
+            name: 'ReplicationAdapter',
+            description: 'Synchronisation CRDT pour les données partagées en groupes — chiffrée et sans conflit.',
+            current: 'Automerge + GroupKeyService',
+            link: 'https://automerge.org',
+          },
+          {
+            name: 'AuthorizationAdapter',
+            description: 'Capacités pour les droits d’accès : Qui peut lire, écrire ou déléguer quoi ?',
+            current: 'UCAN-inspiriert',
+            link: 'https://ucan.xyz',
+          },
+          {
+            name: 'ReactiveStorageAdapter',
+            description: 'Mises à jour en temps réel pour l’UI : Observe les changements et notifie les composants automatiquement.',
+            current: 'Observable Pattern',
+          },
+        ],
+        footer: 'Actuellement nous utilisons Automerge (CRDT), Ed25519 (cryptographie) et un relay WebSocket. Mais chaque adaptateur peut être remplacé indépendamment.',
+      },
+
+      // Decentralized vs Server
       decentralized: {
         title: 'Qu\'est-ce qui est décentralisé, qu\'est-ce qui utilise des serveurs ?',
         fullyDecentralized: {

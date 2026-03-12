@@ -116,7 +116,7 @@ export default function HowItWorks() {
     </section>
 
     {/* Network Result Section */}
-    <section className="py-16 md:py-24 bg-background">
+    <section className="pt-0 pb-16 md:pb-24 bg-muted">
       <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8">
         <div className="max-w-4xl mx-auto">
           {/* Text above graph */}
@@ -189,45 +189,45 @@ export default function HowItWorks() {
             </g>
 
             {/* Nodes — open ends (small, fading) — mixed colors */}
-            <circle cx="40" cy="80" r="2.5" className="fill-secondary" opacity="0.15" />
-            <circle cx="60" cy="150" r="2" className="fill-warning" opacity="0.12" />
-            <circle cx="50" cy="15" r="2" className="fill-warning" opacity="0.12" />
-            <circle cx="220" cy="15" r="2.5" className="fill-secondary" opacity="0.15" />
-            <circle cx="430" cy="10" r="2" className="fill-primary" opacity="0.12" />
-            <circle cx="580" cy="20" r="2.5" className="fill-warning" opacity="0.15" />
-            <circle cx="740" cy="90" r="2.5" className="fill-primary" opacity="0.12" />
-            <circle cx="730" cy="150" r="2" className="fill-secondary" opacity="0.12" />
-            <circle cx="670" cy="220" r="2" className="fill-primary" opacity="0.1" />
-            <circle cx="140" cy="220" r="2" className="fill-warning" opacity="0.1" />
-            <circle cx="320" cy="225" r="2" className="fill-secondary" opacity="0.1" />
-            <circle cx="440" cy="225" r="2" className="fill-primary" opacity="0.1" />
-            <circle cx="530" cy="230" r="2" className="fill-warning" opacity="0.1" />
+            <circle cx="40" cy="80" r="4" className="fill-secondary" opacity="0.15" />
+            <circle cx="60" cy="150" r="3.5" className="fill-warning" opacity="0.12" />
+            <circle cx="50" cy="15" r="3.5" className="fill-warning" opacity="0.12" />
+            <circle cx="220" cy="15" r="4" className="fill-secondary" opacity="0.15" />
+            <circle cx="430" cy="10" r="3.5" className="fill-primary" opacity="0.12" />
+            <circle cx="580" cy="20" r="4" className="fill-warning" opacity="0.15" />
+            <circle cx="740" cy="90" r="4" className="fill-primary" opacity="0.12" />
+            <circle cx="730" cy="150" r="3.5" className="fill-secondary" opacity="0.12" />
+            <circle cx="670" cy="220" r="3.5" className="fill-primary" opacity="0.1" />
+            <circle cx="140" cy="220" r="3.5" className="fill-warning" opacity="0.1" />
+            <circle cx="320" cy="225" r="3.5" className="fill-secondary" opacity="0.1" />
+            <circle cx="440" cy="225" r="3.5" className="fill-primary" opacity="0.1" />
+            <circle cx="530" cy="230" r="3.5" className="fill-warning" opacity="0.1" />
 
             {/* Nodes — inner: bg circle + colored circle — mixed colors */}
-            <circle cx="80" cy="45" r="6" className="fill-background" />
-            <circle cx="80" cy="45" r="4" className="fill-warning" opacity="0.3" />
-            <circle cx="190" cy="170" r="6" className="fill-background" />
-            <circle cx="190" cy="170" r="4" className="fill-secondary" opacity="0.3" />
-            <circle cx="310" cy="170" r="6" className="fill-background" />
-            <circle cx="310" cy="170" r="4" className="fill-warning" opacity="0.3" />
-            <circle cx="450" cy="45" r="6" className="fill-background" />
-            <circle cx="450" cy="45" r="4" className="fill-primary" opacity="0.3" />
-            <circle cx="500" cy="180" r="6" className="fill-background" />
-            <circle cx="500" cy="180" r="4" className="fill-primary" opacity="0.3" />
-            <circle cx="610" cy="175" r="6" className="fill-background" />
-            <circle cx="610" cy="175" r="4" className="fill-secondary" opacity="0.3" />
+            <circle cx="80" cy="45" r="9" className="fill-muted" />
+            <circle cx="80" cy="45" r="6" className="fill-warning" opacity="0.3" />
+            <circle cx="190" cy="170" r="9" className="fill-muted" />
+            <circle cx="190" cy="170" r="6" className="fill-secondary" opacity="0.3" />
+            <circle cx="310" cy="170" r="9" className="fill-muted" />
+            <circle cx="310" cy="170" r="6" className="fill-warning" opacity="0.3" />
+            <circle cx="450" cy="45" r="9" className="fill-muted" />
+            <circle cx="450" cy="45" r="6" className="fill-primary" opacity="0.3" />
+            <circle cx="500" cy="180" r="9" className="fill-muted" />
+            <circle cx="500" cy="180" r="6" className="fill-primary" opacity="0.3" />
+            <circle cx="610" cy="175" r="9" className="fill-muted" />
+            <circle cx="610" cy="175" r="6" className="fill-secondary" opacity="0.3" />
 
             {/* Nodes — main: bg circle + colored circle — mixed colors */}
-            <circle cx="120" cy="100" r="8" className="fill-background" />
-            <circle cx="120" cy="100" r="5" className="fill-primary" opacity="0.4" />
-            <circle cx="260" cy="65" r="9" className="fill-background" />
-            <circle cx="260" cy="65" r="6" className="fill-secondary" opacity="0.45" />
-            <circle cx="400" cy="120" r="10" className="fill-background" />
-            <circle cx="400" cy="120" r="7" className="fill-warning" opacity="0.5" />
-            <circle cx="540" cy="75" r="9" className="fill-background" />
-            <circle cx="540" cy="75" r="6" className="fill-primary" opacity="0.45" />
-            <circle cx="660" cy="110" r="8" className="fill-background" />
-            <circle cx="660" cy="110" r="5" className="fill-secondary" opacity="0.4" />
+            <circle cx="120" cy="100" r="12" className="fill-muted" />
+            <circle cx="120" cy="100" r="8" className="fill-primary" opacity="0.4" />
+            <circle cx="260" cy="65" r="13" className="fill-muted" />
+            <circle cx="260" cy="65" r="9" className="fill-secondary" opacity="0.45" />
+            <circle cx="400" cy="120" r="14" className="fill-muted" />
+            <circle cx="400" cy="120" r="10" className="fill-warning" opacity="0.5" />
+            <circle cx="540" cy="75" r="13" className="fill-muted" />
+            <circle cx="540" cy="75" r="9" className="fill-primary" opacity="0.45" />
+            <circle cx="660" cy="110" r="12" className="fill-muted" />
+            <circle cx="660" cy="110" r="8" className="fill-secondary" opacity="0.4" />
 
             {/*
               Heartbeat chain: 12s cycle, keyTimes approach
@@ -238,108 +238,108 @@ export default function HowItWorks() {
             */}
 
             {/* === Node A (120,100) — PRIMARY (blue) === */}
-            <circle cx="120" cy="100" r="5" fill="oklch(0.55 0.21 264)" opacity="0">
+            <circle cx="120" cy="100" r="8" fill="oklch(0.55 0.21 264)" opacity="0">
               <animate attributeName="opacity" dur="12s" repeatCount="indefinite"
                 keyTimes="0;0.042;0.083;1" values="0;0.8;0;0" />
               <animate attributeName="r" dur="12s" repeatCount="indefinite"
-                keyTimes="0;0.042;0.083;1" values="5;8;5;5" />
+                keyTimes="0;0.042;0.083;1" values="8;12;8;8" />
             </circle>
-            <circle cx="120" cy="100" r="5" fill="none" stroke="oklch(0.55 0.21 264)" strokeWidth="1" opacity="0">
+            <circle cx="120" cy="100" r="8" fill="none" stroke="oklch(0.55 0.21 264)" strokeWidth="1" opacity="0">
               <animate attributeName="r" dur="12s" repeatCount="indefinite"
-                keyTimes="0;0.083;0.084;1" values="5;22;5;5" />
+                keyTimes="0;0.083;0.084;1" values="8;28;8;8" />
               <animate attributeName="opacity" dur="12s" repeatCount="indefinite"
                 keyTimes="0;0.083;0.084;1" values="0.3;0;0;0" />
             </circle>
 
             {/* Inner (80,45) warning — ripples after A */}
-            <circle cx="80" cy="45" r="4" fill="oklch(0.70 0.17 55)" opacity="0">
+            <circle cx="80" cy="45" r="6" fill="oklch(0.70 0.17 55)" opacity="0">
               <animate attributeName="opacity" dur="12s" repeatCount="indefinite"
                 keyTimes="0;0.058;0.083;0.117;1" values="0;0;0.35;0;0" />
             </circle>
             {/* Inner (190,170) secondary — ripples after A */}
-            <circle cx="190" cy="170" r="4" fill="oklch(0.55 0.17 142)" opacity="0">
+            <circle cx="190" cy="170" r="6" fill="oklch(0.55 0.17 142)" opacity="0">
               <animate attributeName="opacity" dur="12s" repeatCount="indefinite"
                 keyTimes="0;0.067;0.092;0.125;1" values="0;0;0.35;0;0" />
             </circle>
 
             {/* === Node B (260,65) — SECONDARY (green) === */}
-            <circle cx="260" cy="65" r="6" fill="oklch(0.55 0.17 142)" opacity="0">
+            <circle cx="260" cy="65" r="9" fill="oklch(0.55 0.17 142)" opacity="0">
               <animate attributeName="opacity" dur="12s" repeatCount="indefinite"
                 keyTimes="0;0.167;0.208;0.25;1" values="0;0;0.8;0;0" />
               <animate attributeName="r" dur="12s" repeatCount="indefinite"
-                keyTimes="0;0.167;0.208;0.25;1" values="6;6;9;6;6" />
+                keyTimes="0;0.167;0.208;0.25;1" values="9;9;13;9;9" />
             </circle>
-            <circle cx="260" cy="65" r="6" fill="none" stroke="oklch(0.55 0.17 142)" strokeWidth="1" opacity="0">
+            <circle cx="260" cy="65" r="9" fill="none" stroke="oklch(0.55 0.17 142)" strokeWidth="1" opacity="0">
               <animate attributeName="r" dur="12s" repeatCount="indefinite"
-                keyTimes="0;0.167;0.25;0.251;1" values="6;6;24;6;6" />
+                keyTimes="0;0.167;0.25;0.251;1" values="9;9;30;9;9" />
               <animate attributeName="opacity" dur="12s" repeatCount="indefinite"
                 keyTimes="0;0.167;0.25;0.251;1" values="0;0.3;0;0;0" />
             </circle>
 
             {/* Inner (310,170) warning — ripples after B */}
-            <circle cx="310" cy="170" r="4" fill="oklch(0.70 0.17 55)" opacity="0">
+            <circle cx="310" cy="170" r="6" fill="oklch(0.70 0.17 55)" opacity="0">
               <animate attributeName="opacity" dur="12s" repeatCount="indefinite"
                 keyTimes="0;0.233;0.258;0.292;1" values="0;0;0.35;0;0" />
             </circle>
             {/* Inner (450,45) primary — ripples after B */}
-            <circle cx="450" cy="45" r="4" fill="oklch(0.55 0.21 264)" opacity="0">
+            <circle cx="450" cy="45" r="6" fill="oklch(0.55 0.21 264)" opacity="0">
               <animate attributeName="opacity" dur="12s" repeatCount="indefinite"
                 keyTimes="0;0.233;0.258;0.292;1" values="0;0;0.35;0;0" />
             </circle>
 
             {/* === Node C (400,120) — WARNING (amber), center === */}
-            <circle cx="400" cy="120" r="7" fill="oklch(0.70 0.17 55)" opacity="0">
+            <circle cx="400" cy="120" r="10" fill="oklch(0.70 0.17 55)" opacity="0">
               <animate attributeName="opacity" dur="12s" repeatCount="indefinite"
                 keyTimes="0;0.333;0.375;0.417;1" values="0;0;0.9;0;0" />
               <animate attributeName="r" dur="12s" repeatCount="indefinite"
-                keyTimes="0;0.333;0.375;0.417;1" values="7;7;11;7;7" />
+                keyTimes="0;0.333;0.375;0.417;1" values="10;10;15;10;10" />
             </circle>
-            <circle cx="400" cy="120" r="7" fill="none" stroke="oklch(0.70 0.17 55)" strokeWidth="1" opacity="0">
+            <circle cx="400" cy="120" r="10" fill="none" stroke="oklch(0.70 0.17 55)" strokeWidth="1" opacity="0">
               <animate attributeName="r" dur="12s" repeatCount="indefinite"
-                keyTimes="0;0.333;0.417;0.418;1" values="7;7;28;7;7" />
+                keyTimes="0;0.333;0.417;0.418;1" values="10;10;35;10;10" />
               <animate attributeName="opacity" dur="12s" repeatCount="indefinite"
                 keyTimes="0;0.333;0.417;0.418;1" values="0;0.35;0;0;0" />
             </circle>
-            <circle cx="400" cy="120" r="16" fill="url(#glowWarning)" opacity="0">
+            <circle cx="400" cy="120" r="22" fill="url(#glowWarning)" opacity="0">
               <animate attributeName="opacity" dur="12s" repeatCount="indefinite"
                 keyTimes="0;0.333;0.375;0.417;1" values="0;0;0.4;0;0" />
             </circle>
 
             {/* === Node D (540,75) — PRIMARY (blue) === */}
-            <circle cx="540" cy="75" r="6" fill="oklch(0.55 0.21 264)" opacity="0">
+            <circle cx="540" cy="75" r="9" fill="oklch(0.55 0.21 264)" opacity="0">
               <animate attributeName="opacity" dur="12s" repeatCount="indefinite"
                 keyTimes="0;0.5;0.542;0.583;1" values="0;0;0.8;0;0" />
               <animate attributeName="r" dur="12s" repeatCount="indefinite"
-                keyTimes="0;0.5;0.542;0.583;1" values="6;6;9;6;6" />
+                keyTimes="0;0.5;0.542;0.583;1" values="9;9;13;9;9" />
             </circle>
-            <circle cx="540" cy="75" r="6" fill="none" stroke="oklch(0.55 0.21 264)" strokeWidth="1" opacity="0">
+            <circle cx="540" cy="75" r="9" fill="none" stroke="oklch(0.55 0.21 264)" strokeWidth="1" opacity="0">
               <animate attributeName="r" dur="12s" repeatCount="indefinite"
-                keyTimes="0;0.5;0.583;0.584;1" values="6;6;24;6;6" />
+                keyTimes="0;0.5;0.583;0.584;1" values="9;9;30;9;9" />
               <animate attributeName="opacity" dur="12s" repeatCount="indefinite"
                 keyTimes="0;0.5;0.583;0.584;1" values="0;0.3;0;0;0" />
             </circle>
 
             {/* Inner (500,180) primary — ripples after D */}
-            <circle cx="500" cy="180" r="4" fill="oklch(0.55 0.21 264)" opacity="0">
+            <circle cx="500" cy="180" r="6" fill="oklch(0.55 0.21 264)" opacity="0">
               <animate attributeName="opacity" dur="12s" repeatCount="indefinite"
                 keyTimes="0;0.567;0.592;0.625;1" values="0;0;0.35;0;0" />
             </circle>
             {/* Inner (610,175) secondary — ripples after D */}
-            <circle cx="610" cy="175" r="4" fill="oklch(0.55 0.17 142)" opacity="0">
+            <circle cx="610" cy="175" r="6" fill="oklch(0.55 0.17 142)" opacity="0">
               <animate attributeName="opacity" dur="12s" repeatCount="indefinite"
                 keyTimes="0;0.575;0.6;0.633;1" values="0;0;0.35;0;0" />
             </circle>
 
             {/* === Node E (660,110) — SECONDARY (green) === */}
-            <circle cx="660" cy="110" r="5" fill="oklch(0.55 0.17 142)" opacity="0">
+            <circle cx="660" cy="110" r="8" fill="oklch(0.55 0.17 142)" opacity="0">
               <animate attributeName="opacity" dur="12s" repeatCount="indefinite"
                 keyTimes="0;0.667;0.708;0.75;1" values="0;0;0.7;0;0" />
               <animate attributeName="r" dur="12s" repeatCount="indefinite"
-                keyTimes="0;0.667;0.708;0.75;1" values="5;5;8;5;5" />
+                keyTimes="0;0.667;0.708;0.75;1" values="8;8;12;8;8" />
             </circle>
-            <circle cx="660" cy="110" r="5" fill="none" stroke="oklch(0.55 0.17 142)" strokeWidth="1" opacity="0">
+            <circle cx="660" cy="110" r="8" fill="none" stroke="oklch(0.55 0.17 142)" strokeWidth="1" opacity="0">
               <animate attributeName="r" dur="12s" repeatCount="indefinite"
-                keyTimes="0;0.667;0.75;0.751;1" values="5;5;20;5;5" />
+                keyTimes="0;0.667;0.75;0.751;1" values="8;8;26;8;8" />
               <animate attributeName="opacity" dur="12s" repeatCount="indefinite"
                 keyTimes="0;0.667;0.75;0.751;1" values="0;0.3;0;0;0" />
             </circle>
