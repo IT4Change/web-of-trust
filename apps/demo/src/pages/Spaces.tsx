@@ -10,7 +10,7 @@ function SpacesIndex() {
   const { t } = useLanguage()
   const { spaces, loading } = useSpaces()
   const { did } = useIdentity()
-  const mySpaces = useMemo(() => spaces.filter(s => s.members.includes(did)), [spaces, did])
+  const mySpaces = useMemo(() => did ? spaces.filter(s => s.members.includes(did)) : [], [spaces, did])
 
   if (loading) {
     return <div className="text-stone-500">{t.common.loading}</div>
