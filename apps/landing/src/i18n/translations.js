@@ -689,23 +689,23 @@ export const translations = {
       steps: [
         {
           title: 'Meet & connect',
-          description: 'Anna and Ben meet. Ben scans Anna\'s QR code with the app.',
-          detail: 'The QR code contains Anna\'s digital identity. Ben\'s app automatically creates his own.',
+          description: 'Alice and Bob meet. Bob scans Alice\'s QR code with the app.',
+          detail: 'The QR code contains Alice\'s digital identity. Bob\'s app automatically creates his own.',
         },
         {
           title: 'Confirm identity',
-          description: 'Ben confirms: "I have personally met Anna."',
+          description: 'Bob confirms: "I have personally met Alice."',
           detail: 'This verification is digitally signed and securely stored.',
         },
         {
           title: 'Get active together',
-          description: 'Ben can now see Anna\'s shared content.',
-          detail: 'Calendar, map markers, projects — everything Anna shares with her contacts becomes visible for Ben.',
+          description: 'Bob can now see Alice\'s shared content.',
+          detail: 'Calendar, map markers, projects — everything Alice shares with her contacts becomes visible for Bob.',
         },
         {
           title: 'Give confirmation',
-          description: 'After working together: Anna confirms Ben\'s help.',
-          detail: '"Ben helped 3 hours in the garden" — this confirmation becomes part of Ben\'s profile.',
+          description: 'After working together: Alice confirms Bob\'s help.',
+          detail: '"Bob helped 3 hours in the garden" — this confirmation becomes part of Bob\'s profile.',
         },
       ],
       result: {
@@ -1297,23 +1297,23 @@ export const translations = {
       steps: [
         {
           title: 'Conocerse & conectar',
-          description: 'Anna y Ben se encuentran. Ben escanea el código QR de Anna con la app.',
-          detail: 'El código QR contiene la identidad digital de Anna. La app de Ben crea automáticamente la suya.',
+          description: 'Ana y Bruno se encuentran. Bruno escanea el código QR de Ana con la app.',
+          detail: 'El código QR contiene la identidad digital de Ana. La app de Bruno crea automáticamente la suya.',
         },
         {
           title: 'Confirmar identidad',
-          description: 'Ben confirma: "He conocido personalmente a Anna."',
+          description: 'Bruno confirma: "He conocido personalmente a Ana."',
           detail: 'Esta verificación se firma digitalmente y se almacena de forma segura.',
         },
         {
           title: 'Actuar juntos',
-          description: 'Ben ahora puede ver el contenido compartido de Anna.',
-          detail: 'Calendario, marcadores de mapa, proyectos — todo lo que Anna comparte con sus contactos se vuelve visible para Ben.',
+          description: 'Bruno ahora puede ver el contenido compartido de Ana.',
+          detail: 'Calendario, marcadores de mapa, proyectos — todo lo que Ana comparte con sus contactos se vuelve visible para Bruno.',
         },
         {
           title: 'Dar confirmación',
-          description: 'Después de trabajar juntos: Anna confirma la ayuda de Ben.',
-          detail: '"Ben ayudó 3 horas en el jardín" — esta confirmación se convierte en parte del perfil de Ben.',
+          description: 'Después de trabajar juntos: Ana confirma la ayuda de Bruno.',
+          detail: '"Bruno ayudó 3 horas en el jardín" — esta confirmación se convierte en parte del perfil de Bruno.',
         },
       ],
       result: {
@@ -1630,23 +1630,23 @@ export const translations = {
       steps: [
         {
           title: 'Conhecer & conectar',
-          description: 'Anna e Ben se encontram. Ben escaneia o código QR de Anna com o app.',
-          detail: 'O código QR contém a identidade digital de Anna. O app de Ben cria automaticamente a sua.',
+          description: 'Ana e Bernardo se encontram. Bernardo escaneia o código QR de Ana com o app.',
+          detail: 'O código QR contém a identidade digital de Ana. O app de Bernardo cria automaticamente a sua.',
         },
         {
           title: 'Confirmar identidade',
-          description: 'Ben confirma: "Conheci Anna pessoalmente."',
+          description: 'Bernardo confirma: "Conheci Ana pessoalmente."',
           detail: 'Esta verificação é assinada digitalmente e armazenada com segurança.',
         },
         {
           title: 'Agir juntos',
-          description: 'Ben agora pode ver o conteúdo compartilhado de Anna.',
-          detail: 'Calendário, marcadores de mapa, projetos — tudo que Anna compartilha com seus contatos se torna visível para Ben.',
+          description: 'Bernardo agora pode ver o conteúdo compartilhado de Ana.',
+          detail: 'Calendário, marcadores de mapa, projetos — tudo que Ana compartilha com seus contatos se torna visível para Bernardo.',
         },
         {
           title: 'Dar confirmação',
-          description: 'Depois de trabalhar juntos: Anna confirma a ajuda de Ben.',
-          detail: '"Ben ajudou 3 horas no jardim" — esta confirmação se torna parte do perfil de Ben.',
+          description: 'Depois de trabalhar juntos: Ana confirma a ajuda de Bernardo.',
+          detail: '"Bernardo ajudou 3 horas no jardim" — esta confirmação se torna parte do perfil de Bernardo.',
         },
       ],
       result: {
@@ -1962,23 +1962,23 @@ export const translations = {
       steps: [
         {
           title: 'التعارف والتواصل',
-          description: 'آنا وبن يلتقيان. بن يمسح رمز QR الخاص بآنا بالتطبيق.',
-          detail: 'رمز QR يحتوي على الهوية الرقمية لآنا. تطبيق بن ينشئ تلقائياً هويته الخاصة.',
+          description: 'أمينة وبدر يلتقيان. بدر يمسح رمز QR الخاص بأمينة بالتطبيق.',
+          detail: 'رمز QR يحتوي على الهوية الرقمية لأمينة. تطبيق بدر ينشئ تلقائياً هويته الخاصة.',
         },
         {
           title: 'تأكيد الهوية',
-          description: 'بن يؤكد: "لقد قابلت آنا شخصياً."',
+          description: 'بدر يؤكد: "لقد قابلت أمينة شخصياً."',
           detail: 'هذا التحقق يتم توقيعه رقمياً وتخزينه بشكل آمن.',
         },
         {
           title: 'النشاط معاً',
-          description: 'بن يمكنه الآن رؤية محتوى آنا المشارك.',
-          detail: 'التقويم، علامات الخريطة، المشاريع — كل ما تشاركه آنا مع جهات اتصالها يصبح مرئياً لبن.',
+          description: 'بدر يمكنه الآن رؤية محتوى أمينة المشارك.',
+          detail: 'التقويم، علامات الخريطة، المشاريع — كل ما تشاركه أمينة مع جهات اتصالها يصبح مرئياً لبدر.',
         },
         {
           title: 'تقديم تأكيد',
-          description: 'بعد العمل معاً: آنا تؤكد مساعدة بن.',
-          detail: '"بن ساعد 3 ساعات في الحديقة" — هذا التأكيد يصبح جزءاً من ملف بن.',
+          description: 'بعد العمل معاً: أمينة تؤكد مساعدة بدر.',
+          detail: '"بدر ساعد 3 ساعات في الحديقة" — هذا التأكيد يصبح جزءاً من ملف بدر.',
         },
       ],
       result: {
@@ -2294,23 +2294,23 @@ export const translations = {
       steps: [
         {
           title: '相识与连接',
-          description: 'Anna和Ben见面。Ben用应用扫描Anna的二维码。',
-          detail: '二维码包含Anna的数字身份。Ben的应用自动创建他自己的。',
+          description: '安安和博文见面。博文用应用扫描安安的二维码。',
+          detail: '二维码包含安安的数字身份。博文的应用自动创建他自己的。',
         },
         {
           title: '确认身份',
-          description: 'Ben确认："我亲自见过Anna。"',
+          description: '博文确认："我亲自见过安安。"',
           detail: '这个验证被数字签名并安全存储。',
         },
         {
           title: '一起行动',
-          description: 'Ben现在可以看到Anna分享的内容。',
-          detail: '日历、地图标记、项目——Anna与联系人分享的一切对Ben变得可见。',
+          description: '博文现在可以看到安安分享的内容。',
+          detail: '日历、地图标记、项目——安安与联系人分享的一切对博文变得可见。',
         },
         {
           title: '给予确认',
-          description: '一起工作后：Anna确认Ben的帮助。',
-          detail: '"Ben在花园帮忙了3小时"——这个确认成为Ben个人资料的一部分。',
+          description: '一起工作后：安安确认博文的帮助。',
+          detail: '"博文在花园帮忙了3小时"——这个确认成为博文个人资料的一部分。',
         },
       ],
       result: {
@@ -2627,23 +2627,23 @@ export const translations = {
       steps: [
         {
           title: 'Познакомиться и связаться',
-          description: 'Анна и Бен встречаются. Бен сканирует QR-код Анны приложением.',
-          detail: 'QR-код содержит цифровую идентичность Анны. Приложение Бена автоматически создаёт его собственную.',
+          description: 'Аня и Борис встречаются. Борис сканирует QR-код Ани приложением.',
+          detail: 'QR-код содержит цифровую идентичность Ани. Приложение Бориса автоматически создаёт его собственную.',
         },
         {
           title: 'Подтвердить личность',
-          description: 'Бен подтверждает: "Я лично встретил Анну."',
+          description: 'Борис подтверждает: "Я лично встретил Аню."',
           detail: 'Эта верификация подписана цифровой подписью и надёжно сохранена.',
         },
         {
           title: 'Действовать вместе',
-          description: 'Бен теперь может видеть контент Анны.',
-          detail: 'Календарь, метки на карте, проекты — всё, чем Анна делится с контактами, становится видимым для Бена.',
+          description: 'Борис теперь может видеть контент Ани.',
+          detail: 'Календарь, метки на карте, проекты — всё, чем Аня делится с контактами, становится видимым для Бориса.',
         },
         {
           title: 'Дать подтверждение',
-          description: 'После совместной работы: Анна подтверждает помощь Бена.',
-          detail: '"Бен помог 3 часа в саду" — это подтверждение становится частью профиля Бена.',
+          description: 'После совместной работы: Аня подтверждает помощь Бориса.',
+          detail: '"Борис помог 3 часа в саду" — это подтверждение становится частью профиля Бориса.',
         },
       ],
       result: {
@@ -2960,23 +2960,23 @@ export const translations = {
       steps: [
         {
           title: 'Познайомитися й з\'єднатися',
-          description: 'Анна і Бен зустрічаються. Бен сканує QR-код Анни додатком.',
-          detail: 'QR-код містить цифрову ідентичність Анни. Додаток Бена автоматично створює його власну.',
+          description: 'Аня і Богдан зустрічаються. Богдан сканує QR-код Ані додатком.',
+          detail: 'QR-код містить цифрову ідентичність Ані. Додаток Богдана автоматично створює його власну.',
         },
         {
           title: 'Підтвердити особу',
-          description: 'Бен підтверджує: "Я особисто зустрів Анну."',
+          description: 'Богдан підтверджує: "Я особисто зустрів Аню."',
           detail: 'Ця верифікація підписана цифровим підписом і надійно збережена.',
         },
         {
           title: 'Діяти разом',
-          description: 'Бен тепер може бачити контент Анни.',
-          detail: 'Календар, мітки на карті, проєкти — все, чим Анна ділиться з контактами, стає видимим для Бена.',
+          description: 'Богдан тепер може бачити контент Ані.',
+          detail: 'Календар, мітки на карті, проєкти — все, чим Аня ділиться з контактами, стає видимим для Богдана.',
         },
         {
           title: 'Дати підтвердження',
-          description: 'Після спільної роботи: Анна підтверджує допомогу Бена.',
-          detail: '"Бен допоміг 3 години в саду" — це підтвердження стає частиною профілю Бена.',
+          description: 'Після спільної роботи: Аня підтверджує допомогу Богдана.',
+          detail: '"Богдан допоміг 3 години в саду" — це підтвердження стає частиною профілю Богдана.',
         },
       ],
       result: {
@@ -3292,23 +3292,23 @@ export const translations = {
       steps: [
         {
           title: 'להיפגש ולהתחבר',
-          description: 'אנה ובן נפגשים. בן סורק את קוד ה-QR של אנה עם האפליקציה.',
-          detail: 'קוד ה-QR מכיל את הזהות הדיגיטלית של אנה. האפליקציה של בן יוצרת אוטומטית את שלו.',
+          description: 'אביגיל ובועז נפגשים. בועז סורק את קוד ה-QR של אביגיל עם האפליקציה.',
+          detail: 'קוד ה-QR מכיל את הזהות הדיגיטלית של אביגיל. האפליקציה של בועז יוצרת אוטומטית את שלו.',
         },
         {
           title: 'אשר זהות',
-          description: 'בן מאשר: "פגשתי את אנה באופן אישי."',
+          description: 'בועז מאשר: "פגשתי את אביגיל באופן אישי."',
           detail: 'האימות הזה נחתם דיגיטלית ונשמר בצורה מאובטחת.',
         },
         {
           title: 'לפעול יחד',
-          description: 'בן יכול עכשיו לראות את התוכן שאנה משתפת.',
-          detail: 'לוח שנה, סמנים במפה, פרויקטים — כל מה שאנה משתפת עם אנשי הקשר שלה הופך לנראה עבור בן.',
+          description: 'בועז יכול עכשיו לראות את התוכן שאביגיל משתפת.',
+          detail: 'לוח שנה, סמנים במפה, פרויקטים — כל מה שאביגיל משתפת עם אנשי הקשר שלה הופך לנראה עבור בועז.',
         },
         {
           title: 'לתת אישור',
-          description: 'אחרי עבודה משותפת: אנה מאשרת את העזרה של בן.',
-          detail: '"בן עזר 3 שעות בגינה" — האישור הזה הופך לחלק מהפרופיל של בן.',
+          description: 'אחרי עבודה משותפת: אביגיל מאשרת את העזרה של בועז.',
+          detail: '"בועז עזר 3 שעות בגינה" — האישור הזה הופך לחלק מהפרופיל של בועז.',
         },
       ],
       result: {
@@ -3625,23 +3625,23 @@ export const translations = {
       steps: [
         {
           title: 'Incontrarsi e connettersi',
-          description: 'Anna e Ben si incontrano. Ben scansiona il codice QR di Anna con l\'app.',
-          detail: 'Il codice QR contiene l\'identità digitale di Anna. L\'app di Ben crea automaticamente la sua.',
+          description: 'Anna e Bruno si incontrano. Bruno scansiona il codice QR di Anna con l\'app.',
+          detail: 'Il codice QR contiene l\'identità digitale di Anna. L\'app di Bruno crea automaticamente la sua.',
         },
         {
           title: 'Conferma l\'identità',
-          description: 'Ben conferma: "Ho incontrato Anna di persona."',
+          description: 'Bruno conferma: "Ho incontrato Anna di persona."',
           detail: 'Questa verifica viene firmata digitalmente e conservata in modo sicuro.',
         },
         {
           title: 'Agire insieme',
-          description: 'Ben ora può vedere i contenuti condivisi di Anna.',
-          detail: 'Calendario, marcatori sulla mappa, progetti — tutto ciò che Anna condivide con i suoi contatti diventa visibile per Ben.',
+          description: 'Bruno ora può vedere i contenuti condivisi di Anna.',
+          detail: 'Calendario, marcatori sulla mappa, progetti — tutto ciò che Anna condivide con i suoi contatti diventa visibile per Bruno.',
         },
         {
           title: 'Dare una conferma',
-          description: 'Dopo aver lavorato insieme: Anna conferma l\'aiuto di Ben.',
-          detail: '"Ben ha aiutato 3 ore in giardino" — questa conferma diventa parte del profilo di Ben.',
+          description: 'Dopo aver lavorato insieme: Anna conferma l\'aiuto di Bruno.',
+          detail: '"Bruno ha aiutato 3 ore in giardino" — questa conferma diventa parte del profilo di Bruno.',
         },
       ],
       result: {
@@ -3957,23 +3957,23 @@ export const translations = {
       steps: [
         {
           title: 'Tanışmak ve bağlanmak',
-          description: 'Anna ve Ben buluşur. Ben, uygulama ile Anna\'nın QR kodunu tarar.',
-          detail: 'QR kod Anna\'nın dijital kimliğini içerir. Ben\'in uygulaması otomatik olarak kendisininkini oluşturur.',
+          description: 'Ayşe ve Burak buluşur. Burak, uygulama ile Ayşe\'nin QR kodunu tarar.',
+          detail: 'QR kod Ayşe\'nin dijital kimliğini içerir. Burak\'ın uygulaması otomatik olarak kendisininkini oluşturur.',
         },
         {
           title: 'Kimliği onayla',
-          description: 'Ben onaylar: "Anna ile şahsen tanıştım."',
+          description: 'Burak onaylar: "Ayşe ile şahsen tanıştım."',
           detail: 'Bu doğrulama dijital olarak imzalanır ve güvenli bir şekilde saklanır.',
         },
         {
           title: 'Birlikte harekete geçmek',
-          description: 'Ben artık Anna\'nın paylaştığı içeriği görebilir.',
-          detail: 'Takvim, harita işaretleri, projeler — Anna\'nın kişileriyle paylaştığı her şey Ben için görünür hale gelir.',
+          description: 'Burak artık Ayşe\'nin paylaştığı içeriği görebilir.',
+          detail: 'Takvim, harita işaretleri, projeler — Ayşe\'nin kişileriyle paylaştığı her şey Burak için görünür hale gelir.',
         },
         {
           title: 'Onay vermek',
-          description: 'Birlikte çalıştıktan sonra: Anna, Ben\'in yardımını onaylar.',
-          detail: '"Ben bahçede 3 saat yardım etti" — bu onay Ben\'in profilinin bir parçası olur.',
+          description: 'Birlikte çalıştıktan sonra: Ayşe, Burak\'ın yardımını onaylar.',
+          detail: '"Burak bahçede 3 saat yardım etti" — bu onay Burak\'ın profilinin bir parçası olur.',
         },
       ],
       result: {
@@ -4290,23 +4290,23 @@ export const translations = {
       steps: [
         {
           title: 'Se rencontrer & se connecter',
-          description: 'Anna et Ben se rencontrent. Ben scanne le QR code d\'Anna avec l\'application.',
-          detail: 'Le QR code contient l\'identité numérique d\'Anna. L\'application de Ben crée automatiquement la sienne.',
+          description: 'Amélie et Baptiste se rencontrent. Baptiste scanne le QR code d\'Amélie avec l\'application.',
+          detail: 'Le QR code contient l\'identité numérique d\'Amélie. L\'application de Baptiste crée automatiquement la sienne.',
         },
         {
           title: 'Confirmer l\'identité',
-          description: 'Ben confirme : « J\'ai rencontré Anna en personne. »',
+          description: 'Baptiste confirme : « J\'ai rencontré Amélie en personne. »',
           detail: 'Cette vérification est signée numériquement et stockée en toute sécurité.',
         },
         {
           title: 'Agir ensemble',
-          description: 'Ben peut maintenant voir le contenu partagé par Anna.',
-          detail: 'Calendrier, marqueurs sur la carte, projets — tout ce qu\'Anna partage avec ses contacts devient visible pour Ben.',
+          description: 'Baptiste peut maintenant voir le contenu partagé par Amélie.',
+          detail: 'Calendrier, marqueurs sur la carte, projets — tout ce qu\'Amélie partage avec ses contacts devient visible pour Baptiste.',
         },
         {
           title: 'Donner une confirmation',
-          description: 'Après avoir travaillé ensemble : Anna confirme l\'aide de Ben.',
-          detail: '« Ben a aidé 3 heures au jardin » — cette confirmation fait partie du profil de Ben.',
+          description: 'Après avoir travaillé ensemble : Amélie confirme l\'aide de Baptiste.',
+          detail: '« Baptiste a aidé 3 heures au jardin » — cette confirmation fait partie du profil de Baptiste.',
         },
       ],
       result: {
