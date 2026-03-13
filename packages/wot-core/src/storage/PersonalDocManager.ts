@@ -415,6 +415,27 @@ export async function initPersonalDoc(identity: WotIdentity, messaging?: Messagi
       }
     } catch (err) {
       console.warn('[personal-doc] IndexedDB load failed/timeout:', err)
+      // WASM crash (capacity overflow) or timeout = IndexedDB data is corrupt/too fragmented.
+      // Delete the IDB so the next load starts clean instead of crashing again.
+      try {
+        await new Promise<void>((resolve) => {
+          const req = indexedDB.deleteDatabase('automerge-personal')
+          req.onsuccess = () => resolve()
+          req.onerror = () => resolve()
+          req.onblocked = () => resolve()
+        })
+        console.log('[personal-doc] Deleted corrupt IndexedDB after load failure')
+        // Re-create repo with fresh storage
+        const { IndexedDBStorageAdapter } = await import('@automerge/automerge-repo-storage-indexeddb')
+        personalRepo = new Repo({
+          storage: new IndexedDBStorageAdapter('automerge-personal'),
+          network: [],
+          peerId: `${did}-personal` as any,
+          sharePolicy: async () => true,
+        })
+      } catch (cleanupErr) {
+        console.debug('[personal-doc] IDB cleanup failed:', cleanupErr)
+      }
     }
   }
 
