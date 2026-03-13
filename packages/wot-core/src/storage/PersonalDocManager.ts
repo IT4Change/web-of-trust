@@ -377,65 +377,64 @@ export async function initPersonalDoc(identity: WotIdentity, messaging?: Messagi
     sharePolicy: async () => true,
   })
 
-  // Strategy: Try vault first (compact snapshot, fast), then IndexedDB (may have many incrementals)
+  // Strategy: IndexedDB first (local, no network), vault as fallback (compact but requires HTTP)
   let handle!: DocHandle<PersonalDoc>
   let loadedFrom = ''
 
-  // 1) Try vault restore first — single compact binary, much faster than 44+ IndexedDB incrementals
-  if (vaultClient && vaultPersonalKey) {
+  // 1) Try local IndexedDB first — fastest path, no network needed
+  try {
+    const t0 = Date.now()
+    handle = await Promise.race([
+      personalRepo.find<PersonalDoc>(documentUrl),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('find timeout')), 5000)),
+    ])
+    const doc = handle.doc()
+    if (doc && typeof doc === 'object') {
+      loadedFrom = 'indexeddb'
+      console.log(`[personal-doc] Loaded from IndexedDB in ${Date.now() - t0}ms — contacts: ${Object.keys(doc.contacts ?? {}).length}`)
+    } else {
+      throw new Error('Doc loaded but empty')
+    }
+  } catch (err) {
+    console.warn('[personal-doc] IndexedDB load failed/timeout:', err)
+    // WASM crash (capacity overflow) or timeout = IndexedDB data is corrupt/too fragmented.
+    // Delete the IDB so the next load starts clean instead of crashing again.
+    try {
+      await new Promise<void>((resolve) => {
+        const req = indexedDB.deleteDatabase('automerge-personal')
+        req.onsuccess = () => resolve()
+        req.onerror = () => resolve()
+        req.onblocked = () => resolve()
+      })
+      console.log('[personal-doc] Deleted corrupt IndexedDB after load failure')
+      // Re-create repo with fresh storage
+      const { IndexedDBStorageAdapter } = await import('@automerge/automerge-repo-storage-indexeddb')
+      personalRepo = new Repo({
+        storage: new IndexedDBStorageAdapter('automerge-personal'),
+        network: [],
+        peerId: `${did}-personal` as any,
+        sharePolicy: async () => true,
+      })
+    } catch (cleanupErr) {
+      console.debug('[personal-doc] IDB cleanup failed:', cleanupErr)
+    }
+  }
+
+  // 2) Fallback: try vault (compact snapshot over HTTP)
+  if (!loadedFrom && vaultClient && vaultPersonalKey) {
+    const t0 = Date.now()
     const vaultBinary = await restoreFromVault(vaultClient, vaultPersonalKey)
     if (vaultBinary && vaultBinary.length > 0) {
-      // Vault snapshots are already compact (pushed via Automerge.save()),
-      // so we can import directly without any compaction step
       handle = personalRepo.import<PersonalDoc>(vaultBinary, { docId: documentId })
       if (!handle.isReady()) handle.doneLoading()
 
       const doc = handle.doc()
       if (doc && typeof doc === 'object') {
         loadedFrom = 'vault'
-        console.log(`[personal-doc] Restored from vault — contacts: ${Object.keys(doc.contacts ?? {}).length}, spaces: ${Object.keys(doc.spaces ?? {}).length}`)
+        console.log(`[personal-doc] Restored from vault in ${Date.now() - t0}ms — contacts: ${Object.keys(doc.contacts ?? {}).length}`)
       }
     } else {
       console.log('[personal-doc] Vault has no data')
-    }
-  }
-
-  // 2) Fallback: load from local IndexedDB
-  if (!loadedFrom) {
-    try {
-      handle = await Promise.race([
-        personalRepo.find<PersonalDoc>(documentUrl),
-        new Promise<never>((_, reject) => setTimeout(() => reject(new Error('find timeout')), 5000)),
-      ])
-      const doc = handle.doc()
-      if (doc && typeof doc === 'object') {
-        loadedFrom = 'indexeddb'
-      } else {
-        throw new Error('Doc loaded but empty')
-      }
-    } catch (err) {
-      console.warn('[personal-doc] IndexedDB load failed/timeout:', err)
-      // WASM crash (capacity overflow) or timeout = IndexedDB data is corrupt/too fragmented.
-      // Delete the IDB so the next load starts clean instead of crashing again.
-      try {
-        await new Promise<void>((resolve) => {
-          const req = indexedDB.deleteDatabase('automerge-personal')
-          req.onsuccess = () => resolve()
-          req.onerror = () => resolve()
-          req.onblocked = () => resolve()
-        })
-        console.log('[personal-doc] Deleted corrupt IndexedDB after load failure')
-        // Re-create repo with fresh storage
-        const { IndexedDBStorageAdapter } = await import('@automerge/automerge-repo-storage-indexeddb')
-        personalRepo = new Repo({
-          storage: new IndexedDBStorageAdapter('automerge-personal'),
-          network: [],
-          peerId: `${did}-personal` as any,
-          sharePolicy: async () => true,
-        })
-      } catch (cleanupErr) {
-        console.debug('[personal-doc] IDB cleanup failed:', cleanupErr)
-      }
     }
   }
 
@@ -461,12 +460,11 @@ export async function initPersonalDoc(identity: WotIdentity, messaging?: Messagi
     await personalRepo.flush([documentId])
   }
 
-  // Compact IndexedDB (replaces many incrementals with 1 snapshot for fast next load)
+  // Compact IndexedDB in background (replaces many incrementals with 1 snapshot for fast next load)
   if (loadedFrom === 'vault' || loadedFrom === 'indexeddb') {
-    try {
-      await personalRepo.flush([documentId])
+    personalRepo.flush([documentId]).then(() => {
       console.log(`[personal-doc] IndexedDB compacted after ${loadedFrom} load`)
-    } catch {}
+    }).catch(() => {})
   }
 
   // Push to vault when it's empty or was just cleaned up (corrupt snapshot deleted)
