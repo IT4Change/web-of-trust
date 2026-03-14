@@ -445,8 +445,8 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
   }
 
   /**
-   * Save snapshot to the CompactStore.
-   * Includes change history (<10% overhead), avoids 5s+ main thread block on mobile.
+   * Save a history-free snapshot to the CompactStore.
+   * Uses Automerge.from(plain) to strip change history.
    */
   private async _saveToCompactStore(spaceState: SpaceState): Promise<void> {
     if (!this.compactStore) return
@@ -455,7 +455,9 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
     const doc = docHandle?.doc()
     if (!doc) return
 
-    const binary = Automerge.save(doc)
+    // History-free compaction: Automerge.from(plain) creates a fresh doc without change history
+    const plain = JSON.parse(JSON.stringify(doc))
+    const binary = Automerge.save(Automerge.from(plain))
     await this.compactStore.save(spaceState.info.id, binary)
   }
 
@@ -465,11 +467,13 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
     const groupKey = this.groupKeyService.getCurrentKey(spaceState.info.id)
     if (!groupKey) return
 
-    // Automerge.save(doc) with history — <10% overhead, avoids 5s+ main thread block on mobile.
+    // Automerge.from(plain) creates a history-free compact snapshot for vault.
+    // Automerge.save(doc) would include the full change history.
     const docHandle = this.repo.handles[spaceState.documentId]
     const doc = docHandle?.doc()
     if (!doc) return
-    const docBinary = Automerge.save(doc)
+    const plain = JSON.parse(JSON.stringify(doc))
+    const docBinary = Automerge.save(Automerge.from(plain))
 
     const generation = this.groupKeyService.getCurrentGeneration(spaceState.info.id)
     const encrypted = await EncryptedSyncService.encryptChange(

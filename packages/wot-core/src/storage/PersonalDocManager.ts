@@ -388,11 +388,13 @@ async function pushToCompactStore(): Promise<void> {
     const doc = docHandle.doc()
     if (!doc) return
 
-    // Automerge.save(doc) includes change history, but measured overhead is <10%
-    // for our doc types (contacts, attestations, spaces). Acceptable trade-off
-    // vs. Automerge.from(JSON.parse(...)) which blocks the main thread for 5s+ on mobile.
+    // Automerge.save() includes the full change history which grows unboundedly.
+    // Automerge.clone() does NOT strip history (same size as save()).
+    // Only Automerge.from(plainState) creates a history-free snapshot.
+    // JSON roundtrip extracts the plain state from the Automerge proxy object.
     const t0save = Date.now()
-    const docBinary = Automerge.save(doc)
+    const plain = JSON.parse(JSON.stringify(doc))
+    const docBinary = Automerge.save(Automerge.from(plain))
     const blockedUiMs = Date.now() - t0save
     if (!docBinary || docBinary.length === 0) return
 
@@ -421,8 +423,9 @@ async function pushToVault(): Promise<void> {
       return
     }
 
-    // Automerge.save(doc) with history — <10% overhead, avoids 5s+ main thread block on mobile.
-    const docBinary = Automerge.save(doc)
+    // Automerge.from(plain) creates a history-free compact snapshot for vault storage.
+    const plain = JSON.parse(JSON.stringify(doc))
+    const docBinary = Automerge.save(Automerge.from(plain))
     if (!docBinary || docBinary.length === 0) return
 
     const encrypted = await EncryptedSyncService.encryptChange(
@@ -514,29 +517,6 @@ export async function initPersonalDoc(identity: WotIdentity, messaging?: Messagi
           Object.keys(doc.attestations ?? {}).length,
           Object.keys(doc.spaces ?? {}).length,
         )
-
-        // Deferred compaction: if snapshot has accumulated significant history,
-        // strip it and save back after init completes. This keeps subsequent
-        // loads fast without blocking the current init or every save.
-        if (snapshot.length > 50_000) {
-          const snapshotLen = snapshot.length
-          const compactStoreRef = compactStore
-          const docRef = doc
-          setTimeout(() => {
-            try {
-              const t0c = Date.now()
-              const plain = JSON.parse(JSON.stringify(docRef))
-              const compactBinary = Automerge.save(Automerge.from(plain))
-              const blockedMs = Date.now() - t0c
-              if (snapshotLen > compactBinary.length * 1.5) {
-                console.debug(`[personal-doc] Deferred compaction: ${snapshotLen}B → ${compactBinary.length}B (blocked ${blockedMs}ms)`)
-                compactStoreRef.save(VAULT_PERSONAL_DOC_ID, compactBinary).catch(() => {})
-              }
-            } catch (err) {
-              console.warn('[personal-doc] Deferred compaction failed:', err)
-            }
-          }, 5000) // Run 5s after init, when UI is idle
-        }
       }
     }
   } catch (err) {

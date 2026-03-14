@@ -951,7 +951,7 @@ describe('AutomergeReplicationAdapter', () => {
       await adapter2.stop()
     })
 
-    it('should save snapshots to CompactStore with bounded size growth', async () => {
+    it('should use history-free compaction for CompactStore snapshots', async () => {
       const metadataStorage = new InMemorySpaceMetadataStorage()
       const compactStore = new InMemoryCompactStore()
       const groupKeyService = new GroupKeyService()
@@ -984,7 +984,6 @@ describe('AutomergeReplicationAdapter', () => {
       await new Promise(r => setTimeout(r, 500))
 
       const snapshotSize = compactStore.size(space.id)
-      expect(snapshotSize).toBeGreaterThan(0)
 
       // Make 20 more changes
       for (let i = 20; i < 40; i++) {
@@ -998,11 +997,14 @@ describe('AutomergeReplicationAdapter', () => {
 
       const snapshotSize2 = compactStore.size(space.id)
 
-      // Snapshot includes history but should still grow roughly linearly
-      // with data, not exponentially. History overhead is <10% for typical docs.
-      // For 40 items of simple data, snapshot should stay reasonable.
-      expect(snapshotSize2).toBeLessThan(4096)
-      // Size should grow roughly proportionally (not exponentially)
+      // With history-free compaction, size should grow roughly linearly
+      // with data, NOT exponentially with change count.
+      // The key test: snapshot size should be MUCH smaller than a full
+      // Automerge.save() with history would be. With 40 transact() calls,
+      // history-based save would be significantly larger.
+      // Snapshot with compaction should stay under 1KB for this simple data.
+      expect(snapshotSize2).toBeLessThan(1024)
+      // And it should grow roughly proportionally (not exponentially)
       expect(snapshotSize2).toBeLessThan(snapshotSize * 5)
 
       handle.close()
