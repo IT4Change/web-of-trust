@@ -16,6 +16,7 @@ import * as Automerge from '@automerge/automerge'
 import type { WotIdentity } from '../identity'
 import type { MessagingAdapter } from '../adapters/interfaces/MessagingAdapter'
 import { VaultClient, base64ToUint8 } from '../services/VaultClient'
+import { VaultPushScheduler } from '../services/VaultPushScheduler'
 import { EncryptedSyncService } from '../services/EncryptedSyncService'
 import { PersonalNetworkAdapter } from '../adapters/replication/PersonalNetworkAdapter'
 import { getMetrics, registerDebugApi } from './PersistenceMetrics'
@@ -256,10 +257,8 @@ let localChangeInProgress = false
 /** Vault client for persistent encrypted storage of personal doc */
 let vaultClient: VaultClient | null = null
 let vaultPersonalKey: Uint8Array | null = null
-let vaultPushTimer: ReturnType<typeof setTimeout> | null = null
 let vaultSeq = 0
-/** Automerge heads at the time of the last vault push — used to skip redundant saves */
-let lastSavedHeads: string | null = null
+let vaultScheduler: VaultPushScheduler | null = null
 const VAULT_PERSONAL_DOC_ID = '__personal__'
 
 function emptyPersonalDoc(): PersonalDoc {
@@ -344,6 +343,7 @@ async function restoreFromVault(vault: VaultClient, key: Uint8Array): Promise<Ui
 
 /**
  * Push the current personal doc snapshot to the vault (encrypted).
+ * Called by VaultPushScheduler — dirty check is done by the scheduler.
  */
 async function pushToVault(): Promise<void> {
   if (!vaultClient || !vaultPersonalKey || !personalRepo || !docHandle) return
@@ -355,13 +355,6 @@ async function pushToVault(): Promise<void> {
     const hasData = doc.profile || Object.keys(doc.contacts).length > 0 || Object.keys(doc.spaces).length > 0
     if (!hasData) {
       console.debug('[personal-doc] Skip vault push — no meaningful data yet')
-      return
-    }
-
-    // Skip push if doc hasn't changed since last save (sync handshakes trigger change events without new data)
-    const currentHeads = Automerge.getHeads(doc).join(',')
-    if (currentHeads === lastSavedHeads) {
-      console.debug('[personal-doc] Skip vault push — heads unchanged')
       return
     }
 
@@ -380,23 +373,10 @@ async function pushToVault(): Promise<void> {
     vaultSeq++
     const t0 = Date.now()
     await vaultClient.putSnapshot(VAULT_PERSONAL_DOC_ID, encrypted.ciphertext, encrypted.nonce, vaultSeq)
-    lastSavedHeads = currentHeads
     getMetrics().logSave('vault', Date.now() - t0, docBinary.length)
   } catch (err) {
     getMetrics().logError('save:vault', err)
   }
-}
-
-/**
- * Schedule a debounced vault push (5s after last change).
- */
-function debouncedVaultPush(): void {
-  if (!vaultClient) return
-  if (vaultPushTimer) clearTimeout(vaultPushTimer)
-  vaultPushTimer = setTimeout(() => {
-    vaultPushTimer = null
-    pushToVault()
-  }, 5_000)
 }
 
 // --- Public API ---
@@ -564,20 +544,28 @@ export async function initPersonalDoc(identity: WotIdentity, messaging?: Messagi
     }).catch(() => {})
   }
 
-  // Track initial heads so we can detect actual changes vs. sync handshakes
-  const initialDoc = handle.doc()
-  if (initialDoc) {
-    // If loaded from vault, vault already has this state — mark as saved
-    // Otherwise, we want the first push to go through
-    if (loadedFrom === 'vault') {
-      lastSavedHeads = Automerge.getHeads(initialDoc).join(',')
-    }
-  }
+  // Create VaultPushScheduler (replaces manual debounce + dirty check)
+  if (vaultClient) {
+    vaultScheduler = new VaultPushScheduler({
+      pushFn: pushToVault,
+      getHeadsFn: () => {
+        const d = handle.doc()
+        return d ? Automerge.getHeads(d).join(',') : null
+      },
+      debounceMs: 5000,
+    })
 
-  // Push to vault when it's empty or was just cleaned up (corrupt snapshot deleted)
-  // Also covers migration from old format
-  if (loadedFrom !== 'vault' && loadedFrom !== 'new' && vaultClient) {
-    debouncedVaultPush()
+    // If loaded from vault, vault already has this state — mark as saved
+    const initialDoc = handle.doc()
+    if (initialDoc && loadedFrom === 'vault') {
+      vaultScheduler.setLastPushedHeads(Automerge.getHeads(initialDoc).join(','))
+    }
+
+    // Push to vault when it's empty or was just cleaned up (corrupt snapshot deleted)
+    // Also covers migration from old format
+    if (loadedFrom !== 'vault' && loadedFrom !== 'new') {
+      vaultScheduler.pushDebounced()
+    }
   }
 
   docHandle = handle
@@ -597,12 +585,7 @@ export async function initPersonalDoc(identity: WotIdentity, messaging?: Messagi
     if (!localChangeInProgress) {
       console.debug('[personal-doc] Remote change detected, notifying listeners')
       notifyListeners()
-    }
-    // Push to vault on any change (debounced) — but only if doc has real data
-    // (avoid overwriting vault with empty doc before restore completes)
-    const doc = handle.doc()
-    if (doc && (doc.profile || Object.keys(doc.contacts).length > 0 || Object.keys(doc.spaces).length > 0)) {
-      debouncedVaultPush()
+      // No vault push here — the sender already pushed to vault.
     }
   })
 
@@ -657,7 +640,7 @@ export function changePersonalDoc(fn: (doc: PersonalDoc) => void): PersonalDoc {
     localChangeInProgress = false
   }
   notifyListeners()
-  debouncedVaultPush()
+  vaultScheduler?.pushImmediate()
   const doc = docHandle.doc()
   if (!doc) throw new Error('Doc disappeared after change')
   return doc
@@ -694,8 +677,7 @@ export async function resetPersonalDoc(): Promise<void> {
   vaultClient = null
   vaultPersonalKey = null
   vaultSeq = 0
-  lastSavedHeads = null
-  if (vaultPushTimer) { clearTimeout(vaultPushTimer); vaultPushTimer = null }
+  if (vaultScheduler) { vaultScheduler.destroy(); vaultScheduler = null }
   changeListeners.clear()
   // Shutdown after clearing refs (so nothing retries during shutdown)
   try {

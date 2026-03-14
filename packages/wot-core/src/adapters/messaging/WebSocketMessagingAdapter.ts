@@ -47,6 +47,7 @@ export class WebSocketMessagingAdapter implements MessagingAdapter {
   }
 
   private connectedDid: string | null = null
+  private peerCount = 0
 
   async connect(myDid: string): Promise<void> {
     // Idempotent: if already connected with the same DID, skip reconnect
@@ -93,6 +94,7 @@ export class WebSocketMessagingAdapter implements MessagingAdapter {
         switch (msg.type) {
           case 'registered':
             this.connectedDid = myDid
+            this.peerCount = typeof msg.peers === 'number' ? msg.peers : 0
             this.setState('connected')
             this.startHeartbeat()
             resolve()
@@ -155,6 +157,10 @@ export class WebSocketMessagingAdapter implements MessagingAdapter {
 
   getState(): MessagingState {
     return this.state
+  }
+
+  getPeerCount(): number {
+    return this.peerCount
   }
 
   private startHeartbeat(): void {

@@ -2,6 +2,14 @@ import type { SpaceInfo, SpaceMemberChange, ReplicationState } from '../../types
 import type { Subscribable } from './Subscribable'
 
 /**
+ * Options for SpaceHandle.transact().
+ */
+export interface TransactOptions {
+  /** Use debounced vault push instead of immediate. For streaming input (e.g. text editing). */
+  stream?: boolean
+}
+
+/**
  * SpaceHandle — typed access to a CRDT space.
  *
  * Wraps the underlying CRDT doc (e.g. Automerge) and provides
@@ -15,7 +23,7 @@ export interface SpaceHandle<T = unknown> {
   getDoc(): T
 
   /** Apply a transactional change to the doc. Encrypts + broadcasts to members. */
-  transact(fn: (doc: T) => void): void
+  transact(fn: (doc: T) => void, options?: TransactOptions): void
 
   /** Fires when remote changes arrive and are applied. */
   onRemoteUpdate(callback: () => void): () => void

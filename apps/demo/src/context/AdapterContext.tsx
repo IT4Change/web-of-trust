@@ -333,7 +333,7 @@ export function AdapterProvider({ children, identity }: AdapterProviderProps) {
             await outboxAdapter!.connect(did)
             if (!cancelled) {
               setMessagingState('connected')
-              metrics.setRelayStatus(true, RELAY_URL, 0)
+              metrics.setRelayStatus(true, RELAY_URL, wsAdapter.getPeerCount())
             }
           } catch (error) {
             console.warn('Relay reconnect failed:', error)
@@ -379,7 +379,7 @@ export function AdapterProvider({ children, identity }: AdapterProviderProps) {
             outboxAdapter.onStateChange((state) => {
               if (!cancelled) {
                 setMessagingState(state)
-                metrics.setRelayStatus(state === 'connected', RELAY_URL, 0)
+                metrics.setRelayStatus(state === 'connected', RELAY_URL, wsAdapter.getPeerCount())
                 // Flush outbox + retry profile sync on reconnect
                 if (state === 'connected') {
                   outboxAdapter!.flushOutbox()
@@ -394,7 +394,7 @@ export function AdapterProvider({ children, identity }: AdapterProviderProps) {
               await outboxAdapter.connect(did)
               if (!cancelled) {
                 setMessagingState('connected')
-                metrics.setRelayStatus(true, RELAY_URL, 0)
+                metrics.setRelayStatus(true, RELAY_URL, wsAdapter.getPeerCount())
               }
               console.log(`Relay connected: ${RELAY_URL} (${did.slice(0, 20)}...)`)
             } catch (error) {

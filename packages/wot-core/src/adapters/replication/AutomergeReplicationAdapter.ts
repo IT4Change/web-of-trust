@@ -2,7 +2,7 @@ import { Repo, parseAutomergeUrl, type DocumentId, type AutomergeUrl, type PeerI
 import type { StorageAdapterInterface } from '@automerge/automerge-repo'
 import type { DocHandle } from '@automerge/automerge-repo'
 import * as Automerge from '@automerge/automerge'
-import type { ReplicationAdapter, SpaceHandle } from '../interfaces/ReplicationAdapter'
+import type { ReplicationAdapter, SpaceHandle, TransactOptions } from '../interfaces/ReplicationAdapter'
 import type { Subscribable } from '../interfaces/Subscribable'
 import type { MessagingAdapter } from '../interfaces/MessagingAdapter'
 import type { MessageEnvelope } from '../../types/messaging'
@@ -13,6 +13,7 @@ import type { SpaceMetadataStorage } from '../interfaces/SpaceMetadataStorage'
 import type { WotIdentity } from '../../identity/WotIdentity'
 import { EncryptedMessagingNetworkAdapter } from './EncryptedMessagingNetworkAdapter'
 import { VaultClient, base64ToUint8 } from '../../services/VaultClient'
+import { VaultPushScheduler } from '../../services/VaultPushScheduler'
 import { signEnvelope, verifyEnvelope } from '../../crypto/envelope-auth'
 
 // Keep old import for backwards compatibility
@@ -43,15 +44,17 @@ class AutomergeSpaceHandle<T> implements SpaceHandle<T> {
   readonly id: string
   private spaceState: SpaceState
   private docHandle: DocHandle<T>
+  private vaultScheduler: VaultPushScheduler | null
   private remoteUpdateCallbacks = new Set<() => void>()
   private closed = false
   private localChanging = false
   private unsubChange?: () => void
 
-  constructor(spaceState: SpaceState, docHandle: DocHandle<T>) {
+  constructor(spaceState: SpaceState, docHandle: DocHandle<T>, vaultScheduler: VaultPushScheduler | null) {
     this.id = spaceState.info.id
     this.spaceState = spaceState
     this.docHandle = docHandle
+    this.vaultScheduler = vaultScheduler
 
     // Listen for doc changes — distinguish local from remote via flag
     const handler = () => {
@@ -71,13 +74,21 @@ class AutomergeSpaceHandle<T> implements SpaceHandle<T> {
     return this.docHandle.doc() as T
   }
 
-  transact(fn: (doc: T) => void): void {
+  transact(fn: (doc: T) => void, options?: TransactOptions): void {
     if (this.closed) throw new Error('Handle is closed')
     this.localChanging = true
     try {
       this.docHandle.change(fn as any)
     } finally {
       this.localChanging = false
+    }
+    // Schedule vault push — immediate for explicit actions, debounced for streaming
+    if (this.vaultScheduler) {
+      if (options?.stream) {
+        this.vaultScheduler.pushDebounced()
+      } else {
+        this.vaultScheduler.pushImmediate()
+      }
     }
   }
 
@@ -89,6 +100,7 @@ class AutomergeSpaceHandle<T> implements SpaceHandle<T> {
   }
 
   _notifyRemoteUpdate(): void {
+    // No vault push here — the sender already pushed to vault.
     for (const cb of this.remoteUpdateCallbacks) {
       cb()
     }
@@ -114,12 +126,10 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
   private memberChangeCallbacks = new Set<(change: SpaceMemberChange) => void>()
   private spacesSubscribers = new Set<(value: SpaceInfo[]) => void>()
   private unsubscribeMessaging: (() => void) | null = null
-  /** Debounce timers for vault snapshot pushes per space */
-  private vaultPushTimers = new Map<string, ReturnType<typeof setTimeout>>()
   /** Local seq counter per doc — avoids a getDocInfo HTTP call (and its 404) on first push */
   private vaultSeqs = new Map<string, number>()
-  /** Change listeners for vault sync on open spaces */
-  private vaultChangeListeners = new Map<string, () => void>()
+  /** VaultPushScheduler per space — handles immediate/debounced vault pushes */
+  private vaultSchedulers = new Map<string, VaultPushScheduler>()
   /** Optional filter to restrict which spaces are restored (e.g. by appTag) */
   private spaceFilter: ((info: SpaceInfo) => boolean) | null
 
@@ -374,24 +384,6 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
     return false
   }
 
-  /**
-   * Push the current doc snapshot to the vault (encrypted).
-   */
-  /**
-   * Debounced vault push — waits 5s after last change before pushing.
-   */
-  private _debouncedVaultPush(spaceState: SpaceState): void {
-    const existing = this.vaultPushTimers.get(spaceState.info.id)
-    if (existing) clearTimeout(existing)
-    this.vaultPushTimers.set(
-      spaceState.info.id,
-      setTimeout(() => {
-        this.vaultPushTimers.delete(spaceState.info.id)
-        this._pushSnapshotToVault(spaceState).catch(() => {})
-      }, 5000),
-    )
-  }
-
   private async _pushSnapshotToVault(spaceState: SpaceState): Promise<void> {
     if (!this.vault) return
 
@@ -455,12 +447,10 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
       this.unsubscribeMessaging()
       this.unsubscribeMessaging = null
     }
-    // Clear vault timers and change listeners
-    for (const timer of this.vaultPushTimers.values()) clearTimeout(timer)
-    this.vaultPushTimers.clear()
+    // Destroy vault schedulers
+    for (const scheduler of this.vaultSchedulers.values()) scheduler.destroy()
+    this.vaultSchedulers.clear()
     this.vaultSeqs.clear()
-    for (const unsub of this.vaultChangeListeners.values()) unsub()
-    this.vaultChangeListeners.clear()
     // Close all handles
     for (const space of this.spaces.values()) {
       for (const handle of space.handles) {
@@ -577,17 +567,22 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
       throw new Error(`Space document not ready: ${spaceId}`)
     }
 
-    const handle = new AutomergeSpaceHandle<T>(space, docHandle)
-    space.handles.add(handle)
-
-    // Register debounced vault push on doc changes (once per space)
-    if (this.vault && !this.vaultChangeListeners.has(spaceId)) {
-      const listener = () => {
-        this._debouncedVaultPush(space)
-      }
-      docHandle.on('change', listener)
-      this.vaultChangeListeners.set(spaceId, () => docHandle.off('change', listener))
+    // Create or reuse VaultPushScheduler for this space
+    let scheduler = this.vaultSchedulers.get(spaceId) ?? null
+    if (!scheduler && this.vault) {
+      scheduler = new VaultPushScheduler({
+        pushFn: () => this._pushSnapshotToVault(space),
+        getHeadsFn: () => {
+          const doc = docHandle.doc()
+          return doc ? Automerge.getHeads(doc).join(',') : null
+        },
+        debounceMs: 5000,
+      })
+      this.vaultSchedulers.set(spaceId, scheduler)
     }
+
+    const handle = new AutomergeSpaceHandle<T>(space, docHandle, scheduler)
+    space.handles.add(handle)
 
     return handle
   }
@@ -1001,11 +996,11 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
         await this.metadataStorage.deleteGroupKeys(payload.spaceId)
       }
 
-      // Clear vault push timer if any
-      const timer = this.vaultPushTimers.get(payload.spaceId)
-      if (timer) {
-        clearTimeout(timer)
-        this.vaultPushTimers.delete(payload.spaceId)
+      // Destroy vault scheduler if any
+      const scheduler = this.vaultSchedulers.get(payload.spaceId)
+      if (scheduler) {
+        scheduler.destroy()
+        this.vaultSchedulers.delete(payload.spaceId)
       }
       this.vaultSeqs.delete(payload.spaceId)
 

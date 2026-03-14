@@ -65,7 +65,7 @@ export type {
   PublicAttestationsData,
   ProfileSummary,
 } from './adapters/interfaces/DiscoveryAdapter'
-export type { ReplicationAdapter, SpaceHandle } from './adapters/interfaces/ReplicationAdapter'
+export type { ReplicationAdapter, SpaceHandle, TransactOptions } from './adapters/interfaces/ReplicationAdapter'
 export type { PublishStateStore, PublishStateField } from './adapters/interfaces/PublishStateStore'
 export type { GraphCacheStore, CachedGraphEntry } from './adapters/interfaces/GraphCacheStore'
 export type { OutboxStore, OutboxEntry } from './adapters/interfaces/OutboxStore'
@@ -130,6 +130,8 @@ export type { GraphCacheOptions } from './services/GraphCacheService'
 export { AttestationDeliveryService } from './services/AttestationDeliveryService'
 export type { DeliveryStatus } from './services/AttestationDeliveryService'
 export { VaultClient, base64ToUint8 } from './services/VaultClient'
+export { VaultPushScheduler } from './services/VaultPushScheduler'
+export type { VaultPushSchedulerConfig } from './services/VaultPushScheduler'
 
 // Adapter Implementations
 export { WebCryptoAdapter } from './adapters/crypto/WebCryptoAdapter'

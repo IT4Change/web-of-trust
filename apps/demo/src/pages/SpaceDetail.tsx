@@ -88,7 +88,7 @@ export function SpaceDetail() {
     if (handleRef.current) {
       handleRef.current.transact(doc => {
         doc.notes = value
-      })
+      }, { stream: true })
     }
   }, [])
 
