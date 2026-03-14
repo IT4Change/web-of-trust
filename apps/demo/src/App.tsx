@@ -11,6 +11,7 @@ import { useVerificationStatus, getVerificationStatus } from './hooks/useVerific
 import { VerificationHelper } from '@real-life/wot-core'
 import type { Attestation, Verification, PublicProfile as PublicProfileType } from '@real-life/wot-core'
 import { LanguageProvider, useLanguage } from './i18n'
+import { DebugPanel } from './components/debug/DebugPanel'
 
 /**
  * Mounts useProfileSync globally so profile-update listeners
@@ -654,6 +655,7 @@ export default function App() {
       <LanguageProvider>
         <IdentityProvider>
           <AppRoutes />
+          <DebugPanel />
         </IdentityProvider>
       </LanguageProvider>
     </BrowserRouter>

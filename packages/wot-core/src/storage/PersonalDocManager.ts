@@ -18,6 +18,7 @@ import type { MessagingAdapter } from '../adapters/interfaces/MessagingAdapter'
 import { VaultClient, base64ToUint8 } from '../services/VaultClient'
 import { EncryptedSyncService } from '../services/EncryptedSyncService'
 import { PersonalNetworkAdapter } from '../adapters/replication/PersonalNetworkAdapter'
+import { getMetrics, registerDebugApi } from './PersistenceMetrics'
 
 // --- Personal Document Schema ---
 
@@ -194,8 +195,12 @@ async function checkIdbHealth(dbName: string, storeName: string): Promise<boolea
         }
       }
     })
+    const metrics = getMetrics()
+    metrics.setIdbChunkCount(count)
     console.log(`[personal-doc] IndexedDB chunk count: ${count}`)
-    return count <= MAX_IDB_CHUNKS
+    const healthy = count <= MAX_IDB_CHUNKS
+    metrics.setHealthCheckResult(healthy)
+    return healthy
   } catch {
     return true // If check fails, try loading anyway
   }
@@ -324,12 +329,12 @@ async function restoreFromVault(vault: VaultClient, key: Uint8Array): Promise<Ui
     // a corrupt snapshot. It's irrecoverable data — safe to delete.
     // The next local change will push a fresh snapshot via debouncedVaultPush().
     // If another device has newer data, Automerge sync via relay will merge it first.
-    console.error('[personal-doc] Vault snapshot corrupt, deleting:', err)
+    getMetrics().logError('load:vault:corrupt', err)
     try {
       await vault.deleteDoc(VAULT_PERSONAL_DOC_ID)
-      console.log('[personal-doc] Deleted corrupt vault snapshot')
+      console.debug('[personal-doc] Deleted corrupt vault snapshot')
     } catch (delErr) {
-      console.debug('[personal-doc] Could not delete corrupt vault doc:', delErr)
+      getMetrics().logError('delete:vault:corrupt', delErr)
     }
   }
   return null
@@ -364,9 +369,11 @@ async function pushToVault(): Promise<void> {
     )
 
     vaultSeq++
+    const t0 = Date.now()
     await vaultClient.putSnapshot(VAULT_PERSONAL_DOC_ID, encrypted.ciphertext, encrypted.nonce, vaultSeq)
+    getMetrics().logSave('vault', Date.now() - t0, docBinary.length)
   } catch (err) {
-    console.debug('[personal-doc] Vault push failed:', err)
+    getMetrics().logError('save:vault', err)
   }
 }
 
@@ -422,6 +429,8 @@ export async function initPersonalDoc(identity: WotIdentity, messaging?: Messagi
   })
 
   // Strategy: Check IDB health first, then decide: healthy IDB → use it, else vault → else new
+  const metrics = getMetrics()
+  registerDebugApi(metrics)
   let handle!: DocHandle<PersonalDoc>
   let loadedFrom = ''
 
@@ -439,15 +448,28 @@ export async function initPersonalDoc(identity: WotIdentity, messaging?: Messagi
       const doc = handle.doc()
       if (doc && typeof doc === 'object') {
         loadedFrom = 'indexeddb'
-        console.log(`[personal-doc] Loaded from IndexedDB in ${Date.now() - t0}ms — contacts: ${Object.keys(doc.contacts ?? {}).length}`)
+        const timeMs = Date.now() - t0
+        const sizeBytes = Automerge.save(doc).length
+        metrics.setFindDuration(timeMs)
+        metrics.logLoad('indexeddb', timeMs, sizeBytes, {
+          contacts: Object.keys(doc.contacts ?? {}).length,
+          attestations: Object.keys(doc.attestations ?? {}).length,
+          spaces: Object.keys(doc.spaces ?? {}).length,
+        })
+        metrics.setDocStats(
+          sizeBytes,
+          Object.keys(doc.contacts ?? {}).length,
+          Object.keys(doc.attestations ?? {}).length,
+          Object.keys(doc.spaces ?? {}).length,
+        )
       } else {
         throw new Error('Doc loaded but empty')
       }
     } catch (err) {
-      console.warn('[personal-doc] IndexedDB load failed:', err)
+      metrics.logError('load:indexeddb', err)
     }
   } else {
-    console.warn('[personal-doc] IndexedDB has too many chunks, skipping (would crash WASM)')
+    metrics.logError('load:indexeddb', 'Too many chunks, skipping (would crash WASM)')
   }
 
   // If IDB failed or was skipped, delete it and re-create clean repo
@@ -459,7 +481,7 @@ export async function initPersonalDoc(identity: WotIdentity, messaging?: Messagi
         req.onerror = () => resolve()
         req.onblocked = () => resolve()
       })
-      console.log('[personal-doc] Deleted fragmented IndexedDB')
+      console.debug('[personal-doc] Deleted fragmented IndexedDB')
       const { IndexedDBStorageAdapter } = await import('@automerge/automerge-repo-storage-indexeddb')
       personalRepo = new Repo({
         storage: new IndexedDBStorageAdapter('automerge-personal'),
@@ -483,10 +505,21 @@ export async function initPersonalDoc(identity: WotIdentity, messaging?: Messagi
       const doc = handle.doc()
       if (doc && typeof doc === 'object') {
         loadedFrom = 'vault'
-        console.log(`[personal-doc] Restored from vault in ${Date.now() - t0}ms — contacts: ${Object.keys(doc.contacts ?? {}).length}`)
+        const timeMs = Date.now() - t0
+        metrics.logLoad('vault', timeMs, vaultBinary.length, {
+          contacts: Object.keys(doc.contacts ?? {}).length,
+          attestations: Object.keys(doc.attestations ?? {}).length,
+          spaces: Object.keys(doc.spaces ?? {}).length,
+        })
+        metrics.setDocStats(
+          vaultBinary.length,
+          Object.keys(doc.contacts ?? {}).length,
+          Object.keys(doc.attestations ?? {}).length,
+          Object.keys(doc.spaces ?? {}).length,
+        )
       }
     } else {
-      console.log('[personal-doc] Vault has no data')
+      console.debug('[personal-doc] Vault has no data')
     }
   }
 
@@ -500,22 +533,24 @@ export async function initPersonalDoc(identity: WotIdentity, messaging?: Messagi
       if (!handle.isReady()) handle.doneLoading()
       handle.change(doc => { Object.assign(doc, migratedDoc) })
       loadedFrom = 'migration'
-      console.log('[personal-doc] Migrated from old IndexedDB format')
+      metrics.logLoad('migration', 0, 0, { source: 'old-idb' })
       await deleteOldIDB()
     } else {
       handle = personalRepo.import<PersonalDoc>(new Uint8Array(0), { docId: documentId })
       if (!handle.isReady()) handle.doneLoading()
       handle.change(doc => { Object.assign(doc, emptyPersonalDoc()) })
       loadedFrom = 'new'
-      console.log('[personal-doc] Created new Automerge doc')
+      metrics.logLoad('new', 0, 0)
     }
     await personalRepo.flush([documentId])
   }
 
   // Compact IndexedDB in background (replaces many incrementals with 1 snapshot for fast next load)
   if (loadedFrom === 'vault' || loadedFrom === 'indexeddb') {
+    const flushT0 = Date.now()
     personalRepo.flush([documentId]).then(() => {
-      console.log(`[personal-doc] IndexedDB compacted after ${loadedFrom} load`)
+      metrics.setFlushDuration(Date.now() - flushT0)
+      console.debug(`[personal-doc] IndexedDB compacted after ${loadedFrom} load`)
     }).catch(() => {})
   }
 
@@ -540,7 +575,7 @@ export async function initPersonalDoc(identity: WotIdentity, messaging?: Messagi
   // (local changes are handled in changePersonalDoc which sets localChangeInProgress)
   handle.on('change', () => {
     if (!localChangeInProgress) {
-      console.log('[personal-doc] Remote change detected, notifying listeners')
+      console.debug('[personal-doc] Remote change detected, notifying listeners')
       notifyListeners()
     }
     // Push to vault on any change (debounced) — but only if doc has real data

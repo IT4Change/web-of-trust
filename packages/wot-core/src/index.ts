@@ -175,6 +175,8 @@ export type {
   CachedGraphVerificationDoc,
   CachedGraphAttestationDoc,
 } from './storage/PersonalDocManager'
+export { PersistenceMetrics, getMetrics, registerDebugApi } from './storage/PersistenceMetrics'
+export type { DebugSnapshot, ImplTag, LoadSource, SaveTarget } from './storage/PersistenceMetrics'
 export { PersonalNetworkAdapter } from './adapters/replication/PersonalNetworkAdapter'
 export { AutomergeSpaceMetadataStorage } from './adapters/storage/AutomergeSpaceMetadataStorage'
 export { AutomergeOutboxStore } from './adapters/messaging/AutomergeOutboxStore'

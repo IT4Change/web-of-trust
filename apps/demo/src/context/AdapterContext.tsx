@@ -8,6 +8,7 @@ import {
   AutomergeReplicationAdapter,
   GroupKeyService,
   encodeBase64Url,
+  getMetrics,
   type StorageAdapter,
   type ReactiveStorageAdapter,
   type CryptoAdapter,
@@ -321,16 +322,25 @@ export function AdapterProvider({ children, identity }: AdapterProviderProps) {
           }
         }
 
+        const metrics = getMetrics()
+
         const reconnectRelay = async () => {
           const currentState = outboxAdapter!.getState()
           if (!did || currentState === 'connected' || currentState === 'connecting') return
           try {
             setMessagingState('connecting')
+            metrics.setRelayStatus(false, RELAY_URL, 0)
             await outboxAdapter!.connect(did)
-            if (!cancelled) setMessagingState('connected')
+            if (!cancelled) {
+              setMessagingState('connected')
+              metrics.setRelayStatus(true, RELAY_URL, 0)
+            }
           } catch (error) {
             console.warn('Relay reconnect failed:', error)
-            if (!cancelled) setMessagingState('error')
+            if (!cancelled) {
+              setMessagingState('error')
+              metrics.setRelayStatus(false, RELAY_URL, 0)
+            }
           }
         }
 
@@ -369,6 +379,7 @@ export function AdapterProvider({ children, identity }: AdapterProviderProps) {
             outboxAdapter.onStateChange((state) => {
               if (!cancelled) {
                 setMessagingState(state)
+                metrics.setRelayStatus(state === 'connected', RELAY_URL, 0)
                 // Flush outbox + retry profile sync on reconnect
                 if (state === 'connected') {
                   outboxAdapter!.flushOutbox()
@@ -379,12 +390,19 @@ export function AdapterProvider({ children, identity }: AdapterProviderProps) {
 
             try {
               setMessagingState('connecting')
+              metrics.setRelayStatus(false, RELAY_URL, 0)
               await outboxAdapter.connect(did)
-              if (!cancelled) setMessagingState('connected')
+              if (!cancelled) {
+                setMessagingState('connected')
+                metrics.setRelayStatus(true, RELAY_URL, 0)
+              }
               console.log(`Relay connected: ${RELAY_URL} (${did.slice(0, 20)}...)`)
             } catch (error) {
               console.warn('Relay connection failed:', error)
-              if (!cancelled) setMessagingState('error')
+              if (!cancelled) {
+                setMessagingState('error')
+                metrics.setRelayStatus(false, RELAY_URL, 0)
+              }
             }
 
             // Immediately disconnect WebSocket when browser goes offline
@@ -392,6 +410,7 @@ export function AdapterProvider({ children, identity }: AdapterProviderProps) {
               if (!cancelled) {
                 outboxAdapter!.disconnect()
                 setMessagingState('disconnected')
+                metrics.setRelayStatus(false, RELAY_URL, 0)
               }
             }
             window.addEventListener('offline', offlineHandler)
