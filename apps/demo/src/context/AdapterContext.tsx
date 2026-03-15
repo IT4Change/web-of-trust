@@ -60,7 +60,7 @@ interface AdapterContextValue {
   crypto: CryptoAdapter
   messaging: MessagingAdapter
   discovery: OfflineFirstDiscoveryAdapter
-  replication: AutomergeReplicationAdapter
+  replication: AutomergeReplicationAdapter | YjsReplicationAdapter
   publishStateStore: AutomergePublishStateStore
   graphCacheStore: AutomergeGraphCacheStore
   outboxStore: AutomergeOutboxStore
