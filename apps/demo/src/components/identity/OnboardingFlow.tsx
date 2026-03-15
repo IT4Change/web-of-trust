@@ -186,7 +186,7 @@ export function OnboardingFlow({ onComplete }: OnboardingFlowProps) {
           }}
         >
           <div className="text-center">
-            <div className="w-16 h-16 bg-primary-100 rounded-full flex items-center justify-center mx-auto mb-4">
+            <div className="w-16 h-16 bg-primary-600/15 rounded-full flex items-center justify-center mx-auto mb-4">
               <Sparkles className="w-8 h-8 text-primary-600" />
             </div>
             <h1 className="text-3xl font-bold text-foreground mb-2">{t.onboarding.welcomeTitle}</h1>
@@ -195,12 +195,12 @@ export function OnboardingFlow({ onComplete }: OnboardingFlowProps) {
             </p>
           </div>
 
-          <div className="bg-primary-50 border border-primary-200 rounded-lg p-4 space-y-3">
-            <h3 className="font-medium text-primary-900 flex items-center space-x-2">
+          <div className="bg-primary-600/10 border border-primary-600/20 rounded-lg p-4 space-y-3">
+            <h3 className="font-medium text-foreground flex items-center space-x-2">
               <Shield className="w-5 h-5" />
               <span>{t.onboarding.whatHappensTitle}</span>
             </h3>
-            <ol className="space-y-2 text-sm text-primary-800 ml-7">
+            <ol className="space-y-2 text-sm text-foreground/70 ml-7">
               <li>{t.onboarding.whatHappens1}</li>
               <li>{t.onboarding.whatHappens2}</li>
               <li>{t.onboarding.whatHappens3}</li>
@@ -470,8 +470,8 @@ export function OnboardingFlow({ onComplete }: OnboardingFlowProps) {
             </p>
           </div>
 
-          <div className="bg-primary-50 border border-primary-200 rounded-lg p-4 text-sm text-primary-800">
-            <strong>{t.onboarding.tipLabel}</strong> {t.onboarding.tipText}
+          <div className="bg-primary-600/10 border border-primary-600/20 rounded-lg p-4 text-sm text-foreground/70">
+            <strong className="text-foreground">{t.onboarding.tipLabel}</strong> {t.onboarding.tipText}
           </div>
 
           <div className="space-y-4">

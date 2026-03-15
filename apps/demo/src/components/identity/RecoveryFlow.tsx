@@ -128,7 +128,7 @@ export function RecoveryFlow({ onComplete, onCancel }: RecoveryFlowProps) {
       {step === 'import' && (
         <div className="space-y-6">
           <div className="text-center">
-            <div className="w-16 h-16 bg-primary-100 rounded-full flex items-center justify-center mx-auto mb-4">
+            <div className="w-16 h-16 bg-primary-600/15 rounded-full flex items-center justify-center mx-auto mb-4">
               <KeyRound className="w-8 h-8 text-primary-600" />
             </div>
             <h1 className="text-3xl font-bold text-foreground mb-2">
@@ -180,12 +180,12 @@ export function RecoveryFlow({ onComplete, onCancel }: RecoveryFlowProps) {
               </div>
             )}
 
-            <div className="bg-primary-50 border border-primary-200 rounded-lg p-4 space-y-2">
-              <h3 className="text-sm font-medium text-primary-900 flex items-center space-x-2">
+            <div className="bg-primary-600/10 border border-primary-600/20 rounded-lg p-4 space-y-2">
+              <h3 className="text-sm font-medium text-foreground flex items-center space-x-2">
                 <Shield className="w-4 h-4" />
                 <span>{t.recovery.whatHappensTitle}</span>
               </h3>
-              <ol className="space-y-1 text-xs text-primary-800 ml-6">
+              <ol className="space-y-1 text-xs text-foreground/70 ml-6">
                 <li>{t.recovery.whatHappens1}</li>
                 <li>{t.recovery.whatHappens2}</li>
                 <li>{t.recovery.whatHappens3}</li>
