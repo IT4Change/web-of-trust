@@ -340,10 +340,15 @@ async function restoreFromVault(): Promise<boolean> {
     if (!response) return false
 
     // Restore snapshot if available
-    if (response.snapshot) {
-      const snapshotBytes = base64ToUint8(response.snapshot.data)
+    if (response.snapshot?.data) {
+      // Vault stores packed format: [nonceLen(1 byte)][nonce][ciphertext]
+      const packed = base64ToUint8(response.snapshot.data)
+      const nonceLen = packed[0]
+      const nonce = packed.slice(1, 1 + nonceLen)
+      const ciphertext = packed.slice(1 + nonceLen)
+
       const decrypted = await EncryptedSyncService.decryptChange(
-        { ciphertext: snapshotBytes, nonce: new Uint8Array(0), spaceId: VAULT_PERSONAL_DOC_ID, generation: 0, fromDid: '' },
+        { ciphertext, nonce, spaceId: VAULT_PERSONAL_DOC_ID, generation: 0, fromDid: '' },
         vaultPersonalKey,
       )
       Y.applyUpdate(ydoc, decrypted)
@@ -351,11 +356,15 @@ async function restoreFromVault(): Promise<boolean> {
       console.debug('[yjs-personal-doc] Restored from vault snapshot')
     }
 
-    // Apply incremental changes
+    // Apply incremental changes (same packed format)
     for (const change of response.changes) {
-      const changeBytes = base64ToUint8(change.data)
+      const packed = base64ToUint8(change.data)
+      const nonceLen = packed[0]
+      const nonce = packed.slice(1, 1 + nonceLen)
+      const ciphertext = packed.slice(1 + nonceLen)
+
       const decrypted = await EncryptedSyncService.decryptChange(
-        { ciphertext: changeBytes, nonce: new Uint8Array(0), spaceId: VAULT_PERSONAL_DOC_ID, generation: 0, fromDid: '' },
+        { ciphertext, nonce, spaceId: VAULT_PERSONAL_DOC_ID, generation: 0, fromDid: '' },
         vaultPersonalKey,
       )
       Y.applyUpdate(ydoc, decrypted)
@@ -517,10 +526,12 @@ export function onYjsPersonalDocChange(callback: () => void): () => void {
 
 /**
  * Force-flush to CompactStore and Vault immediately.
+ * Waits for any in-progress pushes to complete, then does a final push.
  */
 export async function flushYjsPersonalDoc(): Promise<void> {
-  await compactScheduler?.flush()
-  await vaultScheduler?.flush()
+  // Direct push (bypasses scheduler) to ensure data is persisted
+  await pushToCompactStore()
+  await pushToVault()
 }
 
 /**
