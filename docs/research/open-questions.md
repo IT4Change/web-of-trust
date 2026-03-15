@@ -24,7 +24,7 @@
 | MLS (RFC 9420) | Standard, FS+PCS | Server-Ordering nötig | Produktion denkbar |
 | Keyhive/BeeKEM | Local-First native | Noch Forschung | Langfristig beobachten |
 
-→ Siehe [Verschlüsselung](../protocols/verschluesselung.md)
+→ Siehe [Verschlüsselung](../architecture/encryption.md)
 
 ### Sync-Protokoll
 
@@ -79,7 +79,7 @@
 - Andere zu Admins machen
 - Module aktivieren/deaktivieren
 
-**Später:** Quorum-basiertes Modell als Alternative → [Quorum-Konzept](quorum-konzept.md)
+**Später:** Quorum-basiertes Modell als Alternative → [Quorum Concept](quorum-concept.md)
 
 ### Offline-Verifizierung
 
@@ -149,7 +149,7 @@ Ablauf:
 2. **CRDT-Framework**: Evolu (lokal, Single-User) + Automerge (cross-user Spaces)
 3. **Messaging**: WebSocket Relay (POC), Matrix (Produktion)
 4. **Verschlüsselung**: Item-Keys für POC
-5. **Framework-Evaluation**: 16 Frameworks evaluiert, 6 eliminiert → [Ergebnis](../protocols/framework-evaluation.md)
+5. **Framework-Evaluation**: 16 Frameworks evaluiert, 6 eliminiert → [Ergebnis](../research/framework-evaluation.md)
 
 ### 2025-02-02
 

@@ -269,7 +269,7 @@ Konsistent mit [Privacy](../security/privacy.md):
 
 ### Sync-Protokoll
 
-Konsistent mit [Sync-Protokoll](../protocols/sync-protokoll.md):
+Konsistent mit [Sync-Protokoll](../architecture/sync-protocol.md):
 
 - Verifizierungen werden wie andere Daten synchronisiert
 - CRDTs für konfliktfreie Zusammenführung
@@ -287,7 +287,7 @@ Konsistent mit [Sync-Protokoll](../protocols/sync-protokoll.md):
 | Föderiert | Mehrere Server, DID-basierte Auflösung | Nicht ausgeschlossen |
 | P2P | Kein Server, nur direkte Übertragung | Für später |
 
-→ Entscheidung bei Implementierung, siehe [Offene Fragen](../appendix/offene-fragen.md)
+→ Entscheidung bei Implementierung, siehe [Offene Fragen](../research/open-questions.md)
 
 ### Tiefe der Sichtbarkeit
 
@@ -326,4 +326,4 @@ Frage: Soll das erweiterbar sein auf Tiefe 2+?
 - [Entitäten](entitaeten.md) - Datenstrukturen
 - [Verifizierung](../flows/02-verifizierung-nutzer-flow.md) - Wie Kontakte entstehen
 - [Privacy](../security/privacy.md) - Datenschutz-Überlegungen
-- [Sync-Protokoll](../protocols/sync-protokoll.md) - Wie Daten synchronisiert werden
+- [Sync-Protokoll](../architecture/sync-protocol.md) - Wie Daten synchronisiert werden
