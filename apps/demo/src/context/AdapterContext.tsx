@@ -6,6 +6,7 @@ import {
   OfflineFirstDiscoveryAdapter,
   OutboxMessagingAdapter,
   AutomergeReplicationAdapter,
+  YjsReplicationAdapter,
   CompactStorageManager,
   SyncOnlyStorageAdapter,
   GroupKeyService,
@@ -94,7 +95,7 @@ export function AdapterProvider({ children, identity }: AdapterProviderProps) {
   useEffect(() => {
     let cancelled = false
     let outboxAdapter: OutboxMessagingAdapter | null = null
-    let replicationAdapter: AutomergeReplicationAdapter | null = null
+    let replicationAdapter: AutomergeReplicationAdapter | YjsReplicationAdapter | null = null
     let localCacheStore: LocalCacheStore | null = null
     let spaceCompactStore: CompactStorageManager | null = null
     let spaceSyncStorage: SyncOnlyStorageAdapter | null = null
@@ -217,15 +218,24 @@ export function AdapterProvider({ children, identity }: AdapterProviderProps) {
         spaceCompactStore = new CompactStorageManager('wot-space-compact-store')
         await spaceCompactStore.open()
         spaceSyncStorage = new SyncOnlyStorageAdapter('wot-space-sync-states')
-        replicationAdapter = new AutomergeReplicationAdapter({
-          identity,
-          messaging: outboxAdapter,
-          groupKeyService,
-          metadataStorage: spaceMetadataStorage,
-          repoStorage: spaceSyncStorage,
-          compactStore: spaceCompactStore,
-          vaultUrl: VAULT_URL,
-        })
+        replicationAdapter = USE_YJS
+          ? new YjsReplicationAdapter({
+              identity,
+              messaging: outboxAdapter,
+              groupKeyService,
+              metadataStorage: spaceMetadataStorage,
+              compactStore: spaceCompactStore,
+              vaultUrl: VAULT_URL,
+            })
+          : new AutomergeReplicationAdapter({
+              identity,
+              messaging: outboxAdapter,
+              groupKeyService,
+              metadataStorage: spaceMetadataStorage,
+              repoStorage: spaceSyncStorage,
+              compactStore: spaceCompactStore,
+              vaultUrl: VAULT_URL,
+            })
 
         // Ensure identity exists in personal doc.
         // If identity exists but has no name, restore from server (Evolu→Automerge migration).

@@ -190,6 +190,8 @@ export {
 } from './storage/YjsPersonalDocManager'
 export type { YjsPersonalDoc } from './storage/YjsPersonalDocManager'
 export { YjsPersonalSyncAdapter } from './adapters/replication/YjsPersonalSyncAdapter'
+export { YjsReplicationAdapter } from './adapters/replication/YjsReplicationAdapter'
+export type { YjsCompactStore } from './adapters/replication/YjsReplicationAdapter'
 export type { DebugSnapshot, SpaceMetric, ImplTag, LoadSource, SaveTarget } from './storage/PersistenceMetrics'
 export { PersonalNetworkAdapter } from './adapters/replication/PersonalNetworkAdapter'
 export { AutomergeSpaceMetadataStorage } from './adapters/storage/AutomergeSpaceMetadataStorage'
