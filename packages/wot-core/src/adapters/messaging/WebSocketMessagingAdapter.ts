@@ -24,6 +24,8 @@ export class WebSocketMessagingAdapter implements MessagingAdapter {
   private stateCallbacks = new Set<(state: MessagingState) => void>()
   private transportMap = new Map<string, string>()
   private pendingReceipts = new Map<string, (receipt: DeliveryReceipt) => void>()
+  /** Buffer for messages that arrive before any onMessage handler is registered */
+  private earlyMessageBuffer: MessageEnvelope[] = []
   private heartbeatInterval: ReturnType<typeof setInterval> | null = null
   private heartbeatTimeout: ReturnType<typeof setTimeout> | null = null
   private readonly HEARTBEAT_INTERVAL_MS = 15_000
@@ -148,6 +150,7 @@ export class WebSocketMessagingAdapter implements MessagingAdapter {
   async disconnect(): Promise<void> {
     this.stopHeartbeat()
     this.connectedDid = null
+    this.earlyMessageBuffer.length = 0
     if (this.ws) {
       this.ws.close()
       this.ws = null
@@ -197,9 +200,15 @@ export class WebSocketMessagingAdapter implements MessagingAdapter {
 
   /**
    * Process incoming message: await all callbacks, then ACK.
-   * Extracted from onmessage handler so callbacks can be async.
+   * If no handlers are registered yet, buffer the message for later delivery.
    */
   private async handleIncomingMessage(envelope: MessageEnvelope): Promise<void> {
+    if (this.messageCallbacks.size === 0) {
+      // No handlers yet — buffer for delivery when first handler registers
+      this.earlyMessageBuffer.push(envelope)
+      return
+    }
+
     let processed = false
     for (const cb of this.messageCallbacks) {
       try {
@@ -249,6 +258,15 @@ export class WebSocketMessagingAdapter implements MessagingAdapter {
 
   onMessage(callback: (envelope: MessageEnvelope) => void | Promise<void>): () => void {
     this.messageCallbacks.add(callback)
+
+    // Flush buffered messages that arrived before any handler was registered
+    if (this.earlyMessageBuffer.length > 0) {
+      const buffered = this.earlyMessageBuffer.splice(0)
+      for (const envelope of buffered) {
+        void this.handleIncomingMessage(envelope)
+      }
+    }
+
     return () => {
       this.messageCallbacks.delete(callback)
     }
