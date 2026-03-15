@@ -37,16 +37,16 @@ The system is built on swappable adapters — same interfaces, different impleme
 
 ```text
 ┌──────────────────────────────────────────────────────────────┐
-│                     Demo App (React 19)                       │
+│                     Demo App (React 19)                      │
 │   Hooks: useContacts, useProfile, useAttestations, ...       │
 ├──────────────────────────────────────────────────────────────┤
-│                      StorageAdapter                           │
-│         YjsStorageAdapter  |  AutomergeStorageAdapter         │
+│                      StorageAdapter                          │
+│         YjsStorageAdapter  |  AutomergeStorageAdapter        │
 ├───────┬───────┬───────┬───────┬────────┬────────┬────────────┤
 │Storage│Reactiv│Crypto │Discov.│Messag. │Replic. │ Authoriz.  │
 │       │Storage│       │       │        │        │            │
 ├───────┴───────┴───────┴───────┴────────┴────────┴────────────┤
-│               Infrastructure (CRDT-agnostic)                  │
+│               Infrastructure (CRDT-agnostic)                 │
 │   Relay (WebSocket)  │  Vault (HTTP)  │  Profiles (HTTP)     │
 └──────────────────────────────────────────────────────────────┘
 ```
@@ -224,8 +224,6 @@ All 7 E2E tests pass with **both** CRDT adapters (Yjs and Automerge).
 ## Related Projects
 
 - **[Real Life Stack](https://github.com/antontranelis/real-life-stack)** — Modular app toolkit for local communities, built on Web of Trust
-- **[NextGraph](https://nextgraph.org)** — Decentralized framework with Graph CRDT, Yjs, and Automerge support
-- **[Allelo](https://allelo.eco)** — Networked Adaptive Organism, building a Web of Trust on NextGraph
 
 ## Contributing
 
@@ -238,7 +236,3 @@ We're looking for:
 ## License
 
 [AGPL-3.0](LICENSE)
-
----
-
-*This project is funded in part by [NLNet](https://nlnet.nl) (NGI Zero Commons Fund, pending).*

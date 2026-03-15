@@ -1,12 +1,12 @@
 # Current Implementation
 
-> **Hinweis:** Dies ist KEINE Spezifikation, sondern dokumentiert den aktuellen Implementierungsstand.
-> Die Spezifikation findest du in [docs/flows/](./flows/) und anderen Spec-Dokumenten.
+> **Note:** This is NOT a specification — it documents the current implementation status.
+> The specification can be found in [docs/flows/](./flows/) and other spec documents.
 
-## Letzte Aktualisierung
+## Last Updated
 
-**Datum:** 2026-03-15
-**Phase:** Yjs Migration + CRDT-Benchmarks
+**Date:** 2026-03-15
+**Phase:** Yjs Migration + CRDT Benchmarks
 **Demo:** https://web-of-trust.de/demo/
 **Relay:** wss://relay.utopia-lab.org
 **Profiles:** https://profiles.utopia-lab.org
@@ -14,56 +14,56 @@
 
 ---
 
-## Architektur-Überblick
+## Architecture Overview
 
-### 7-Adapter Architektur (v2)
+### 7-Adapter Architecture (v2)
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                      Demo App (React)                    │
-│  Hooks: useContacts, useProfile, useAttestations, ...   │
-├─────────────────────────────────────────────────────────┤
-│                    StorageAdapter                         │
-│  AutomergeStorageAdapter | YjsStorageAdapter              │
-├──────┬──────┬──────┬──────┬──────┬──────┬───────────────┤
-│Storag│React.│Crypto│Discov│Messag│Replic│Authori-       │
-│  e   │Storag│      │ery   │ing   │ation │zation         │
-├──────┴──────┴──────┴──────┴──────┴──────┴───────────────┤
-│              Infrastructure (CRDT-agnostisch)            │
-│  Relay (WebSocket) │ Vault (HTTP) │ Profiles (HTTP)     │
-└─────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────┐
+│                      Demo App (React)                        │
+│  Hooks: useContacts, useProfile, useAttestations, ...       │
+├─────────────────────────────────────────────────────────────┤
+│                    StorageAdapter                             │
+│  AutomergeStorageAdapter | YjsStorageAdapter                 │
+├───────┬───────┬───────┬───────┬────────┬────────┬───────────┤
+│Storage│Reactiv│Crypto │Discov.│Messag. │Replic. │ Authoriz. │
+│       │Storage│       │       │        │        │           │
+├───────┴───────┴───────┴───────┴────────┴────────┴───────────┤
+│               Infrastructure (CRDT-agnostic)                 │
+│   Relay (WebSocket)  │  Vault (HTTP)  │  Profiles (HTTP)    │
+└─────────────────────────────────────────────────────────────┘
 ```
 
-### CRDT-Wahl: Yjs (Default) + Automerge (Option)
+### CRDT Choice: Yjs (Default) + Automerge (Option)
 
-**Yjs ist seit 2026-03-15 der Default-CRDT.** Automerge bleibt als Option (`VITE_CRDT=automerge`).
+**Yjs has been the default CRDT since 2026-03-15.** Automerge remains available via `VITE_CRDT=automerge`.
 
-**Grund:** Automerge (Rust→WASM) blockiert den Main Thread auf Mobile:
-- `repo.import()`: ~5s für 163KB auf Android (Vanadium)
-- `Automerge.from()` Compaction: ~6.5s
-- Gesamt: 30s+ UI-Freeze
+**Reason:** Automerge (Rust→WASM) blocks the main thread on mobile:
+- `repo.import()`: ~5s for 163KB on Android
+- `Automerge.from()` compaction: ~6.5s
+- Total: 30s+ UI freeze
 
-**Yjs (pure JavaScript)** löst das Problem:
-- 76x schneller Init auf Mobile (85ms vs 6.4s)
-- 632x schneller bei Batch-Mutationen (3ms vs 1.9s)
-- 69KB Bundle statt 1.7MB
-- Eingebaute Garbage Collection (kein History-Strip-Hack nötig)
-- In-Browser Benchmark: `/benchmark`
+**Yjs (pure JavaScript)** solves the problem:
+- 76x faster init on mobile (85ms vs 6.4s)
+- 632x faster batch mutations (3ms vs 1.9s)
+- 69KB bundle instead of 1.7MB
+- Built-in garbage collection (no history-strip hack needed)
+- In-browser benchmark: `/benchmark`
 
-### Vier-Wege-Architektur
+### Four-Way Architecture
 
-| Komponente | Zweck | CRDT-agnostisch? |
+| Component | Purpose | CRDT-agnostic? |
 |---|---|---|
-| **CompactStore** (IDB) | Lokale Snapshots | Ja — speichert Bytes |
-| **Relay** (WebSocket) | Echtzeit-Sync | Ja — leitet Envelopes weiter |
-| **Vault** (HTTP) | Encrypted Backup | Ja — speichert verschlüsselte Bytes |
-| **wot-profiles** (HTTP) | Discovery | Ja — Profile-Server |
+| **CompactStore** (IDB) | Local snapshots | Yes — stores bytes |
+| **Relay** (WebSocket) | Real-time sync | Yes — forwards envelopes |
+| **Vault** (HTTP) | Encrypted backup | Yes — stores encrypted bytes |
+| **wot-profiles** (HTTP) | Discovery | Yes — profile server |
 
-### Drei Sharing-Patterns
+### Three Sharing Patterns
 
-1. **Group Spaces** — CRDT-basierte Kollaboration (ReplicationAdapter)
-2. **Selective Sharing** — Item-Keys für einzelne Elemente
-3. **1:1 Delivery** — Attestationen, Verifications via Relay
+1. **Group Spaces** — CRDT-based collaboration (ReplicationAdapter)
+2. **Selective Sharing** — Item-level encryption keys
+3. **1:1 Delivery** — Attestations, verifications via Relay
 
 ---
 
@@ -71,12 +71,12 @@
 
 ### WotIdentity (`packages/wot-core/src/identity/WotIdentity.ts`)
 
-- **BIP39 Mnemonic** — 12-Wort Recovery-Phrase (128-bit), deutsche Wortliste (dys2p/wordlists-de)
-- **HKDF Master Key** — Non-extractable CryptoKey, Hardware-Isolation wenn verfügbar
+- **BIP39 Mnemonic** — 12-word recovery phrase (128-bit), German wordlist (dys2p/wordlists-de)
+- **HKDF Master Key** — Non-extractable CryptoKey, hardware isolation when available
 - **Ed25519** — Signing (@noble/ed25519)
-- **X25519** — Key Agreement (ECDH, separater HKDF-Pfad)
+- **X25519** — Key agreement (ECDH, separate HKDF path)
 - **did:key** — Standard W3C Decentralized Identifier
-- **JWS Signing** — `signJws()` für Profile, Capabilities
+- **JWS Signing** — `signJws()` for profiles, capabilities
 - **Encrypted Seed Storage** — PBKDF2 (600k) + AES-GCM in IndexedDB
 
 ```typescript
@@ -93,15 +93,15 @@ deriveFrameworkKey(info): Promise<Uint8Array>
 
 ### Multi-Device
 
-Gleicher BIP39-Seed auf allen Geräten → gleiche DID, gleicher Key. Kein Login-Token, kein Server.
+Same BIP39 seed on all devices → same DID, same key. No login token, no server.
 
 ---
 
 ## Personal Document (PersonalDoc)
 
-### Datenmodell
+### Data Model
 
-Das PersonalDoc speichert alle privaten Daten eines Users als CRDT-Dokument:
+The PersonalDoc stores all private user data as a CRDT document:
 
 ```typescript
 PersonalDoc {
@@ -116,35 +116,35 @@ PersonalDoc {
 }
 ```
 
-### Zwei Implementierungen
+### Two Implementations
 
 #### YjsPersonalDocManager (Default)
 
 `packages/wot-core/src/storage/YjsPersonalDocManager.ts`
 
-- **Pure JavaScript** — kein WASM, kein Worker nötig
-- **Y.Doc** mit Y.Maps für jede Sub-Collection
-- **Proxy-basierte API** — `doc.contacts[did] = {...}` funktioniert wie gewohnt
-- **Eingebaute GC** — `ydoc.gc = true`, kein History-Strip, kein CompactionService
-- **Serialisierung:** `Y.encodeStateAsUpdate()` → CompactStore (IDB)
-- **Multi-Device Sync:** `YjsPersonalSyncAdapter` (verschlüsselte Updates via Relay)
-- **Vault Integration:** Snapshot Push/Restore
+- **Pure JavaScript** — no WASM, no worker needed
+- **Y.Doc** with Y.Maps for each sub-collection
+- **Proxy-based API** — `doc.contacts[did] = {...}` works as expected
+- **Built-in GC** — `ydoc.gc = true`, no history-strip, no CompactionService
+- **Serialization:** `Y.encodeStateAsUpdate()` → CompactStore (IDB)
+- **Multi-device sync:** `YjsPersonalSyncAdapter` (encrypted updates via Relay)
+- **Vault integration:** Snapshot push/restore
 
 #### PersonalDocManager (Automerge, Option)
 
 `packages/wot-core/src/storage/PersonalDocManager.ts`
 
 - **Rust→WASM** — Automerge.load(), Automerge.save()
-- **CompactionService** — Zwei-Phasen-Save mit Yields (UI-Freeze reduziert)
-- **Multi-Device Sync:** `PersonalNetworkAdapter` (automerge-repo Sync)
-- **Vault Integration:** Snapshot Push/Restore
+- **CompactionService** — Two-phase save with yields (reduces UI freeze)
+- **Multi-device sync:** `PersonalNetworkAdapter` (automerge-repo sync)
+- **Vault integration:** Snapshot push/restore
 
-### Persistenz-Kette
+### Persistence Chain
 
 ```
-App ändern → CRDT mutieren → CompactStore (IDB, sofort)
-                            → Relay (verschlüsselt, sofort)
-                            → Vault (verschlüsselt, 5s Debounce)
+App change → CRDT mutate → CompactStore (IDB, immediate)
+                          → Relay (encrypted, immediate)
+                          → Vault (encrypted, 5s debounce)
 ```
 
 ---
@@ -153,95 +153,95 @@ App ändern → CRDT mutieren → CompactStore (IDB, sofort)
 
 ### 1. StorageAdapter + ReactiveStorageAdapter
 
-Interface für CRUD auf Identity, Contacts, Verifications, Attestations.
+Interface for CRUD on Identity, Contacts, Verifications, Attestations.
 
-**Implementierungen:**
-- `AutomergeStorageAdapter` (Demo App) — nutzt PersonalDocManager
-- `YjsStorageAdapter` (Demo App) — nutzt YjsPersonalDocManager
+**Implementations:**
+- `AutomergeStorageAdapter` (Demo App) — uses PersonalDocManager
+- `YjsStorageAdapter` (Demo App) — uses YjsPersonalDocManager
 
 ### 2. CryptoAdapter
 
-`WebCryptoAdapter` — Ed25519 Sign/Verify, X25519 ECDH, AES-256-GCM Symmetric, HKDF.
+`WebCryptoAdapter` — Ed25519 sign/verify, X25519 ECDH, AES-256-GCM symmetric, HKDF.
 
 ### 3. DiscoveryAdapter
 
-Öffentliche Profile finden und publizieren.
+Find and publish public profiles.
 
-- `HttpDiscoveryAdapter` — HTTP REST gegen wot-profiles Server
-- `OfflineFirstDiscoveryAdapter` — Cache-Wrapper mit Dirty-Flags
+- `HttpDiscoveryAdapter` — HTTP REST against wot-profiles server
+- `OfflineFirstDiscoveryAdapter` — Cache wrapper with dirty flags
 
 ### 4. MessagingAdapter
 
-Cross-User Messaging via WebSocket Relay.
+Cross-user messaging via WebSocket Relay.
 
-- `WebSocketMessagingAdapter` — WebSocket Client, Heartbeat (Ping/Pong), **Message Buffer** (CRDT-agnostisch, buffert frühe Messages bevor Handler registriert)
-- `OutboxMessagingAdapter` — Decorator, queued Messages bis Relay erreichbar
-- `InMemoryMessagingAdapter` — Shared-Bus für Tests
+- `WebSocketMessagingAdapter` — WebSocket client, heartbeat (ping/pong), **message buffer** (CRDT-agnostic, buffers early messages before handlers are registered)
+- `OutboxMessagingAdapter` — Decorator, queues messages until relay is reachable
+- `InMemoryMessagingAdapter` — Shared bus for tests
 
 ### 5. ReplicationAdapter
 
-CRDT-basierte Group Spaces mit E2EE.
+CRDT-based group spaces with E2EE.
 
 - `AutomergeReplicationAdapter` — Automerge + EncryptedSyncService + GroupKeyService
 - `YjsReplicationAdapter` — Yjs + EncryptedSyncService + GroupKeyService
 
-Interface: `SpaceHandle<T>` mit `getDoc()`, `transact()`, `onRemoteUpdate()`, `close()`.
+Interface: `SpaceHandle<T>` with `getDoc()`, `transact()`, `onRemoteUpdate()`, `close()`.
 
 ### 6. AuthorizationAdapter
 
-UCAN-inspirierte Capabilities.
+UCAN-inspired capabilities.
 
-- `InMemoryAuthorizationAdapter` — für Tests/POC
-- `crypto/capabilities.ts` — create, verify, delegate, extract. SignFn-Pattern (Private Key bleibt gekapselt).
+- `InMemoryAuthorizationAdapter` — for tests/POC
+- `crypto/capabilities.ts` — create, verify, delegate, extract. SignFn pattern (private key stays encapsulated).
 
 ### 7. SpaceMetadataStorage
 
-Persistenz für Space-Infos und Group Keys.
+Persistence for space info and group keys.
 
-- `IndexedDBSpaceMetadataStorage` — CRDT-agnostisch, eigene IDB
-- `AutomergeSpaceMetadataStorage` — im PersonalDoc (Legacy)
+- `IndexedDBSpaceMetadataStorage` — CRDT-agnostic, own IDB
+- `AutomergeSpaceMetadataStorage` — in PersonalDoc (legacy)
 
 ---
 
 ## Services
 
 ### ProfileService
-JWS-signierte Profile publizieren und verifizieren (`signProfile`, `verifyProfile`).
+Publish and verify JWS-signed profiles (`signProfile`, `verifyProfile`).
 
 ### EncryptedSyncService
-Encrypt/Decrypt CRDT-Changes mit AES-256-GCM. CRDT-agnostisch.
+Encrypt/decrypt CRDT changes with AES-256-GCM. CRDT-agnostic.
 
 ### GroupKeyService
-Group Key Management — Generierung, Rotation, Generationen. Pro Space ein Key.
+Group key management — generation, rotation, generations. One key per space.
 
 ### GraphCacheService
-Batch Profile Resolution für Trust-Graph Visualisierung.
+Batch profile resolution for trust graph visualization.
 
 ### AttestationDeliveryService
-Attestation → verschlüsseln → via Messaging senden → Delivery Status tracken.
+Attestation → encrypt → send via messaging → track delivery status.
 
 ### VaultClient
-HTTP Client für wot-vault Server (Snapshots, Changes, Info, Delete).
+HTTP client for wot-vault server (snapshots, changes, info, delete).
 
 ### VaultPushScheduler
-5s-Debounce Push zum Vault. Dirty-Detection via injizierte `getHeadsFn`.
+5s-debounce push to vault. Dirty detection via injected `getHeadsFn`.
 
 ---
 
 ## Crypto
 
 ### Envelope Auth (`crypto/envelope-auth.ts`)
-Ed25519-signierte Message-Envelopes. Sender-Authentifizierung für alle Relay-Messages.
+Ed25519-signed message envelopes. Sender authentication for all relay messages.
 
 ### Capabilities (`crypto/capabilities.ts`)
-UCAN-inspirierte Capability Tokens:
+UCAN-inspired capability tokens:
 - `createCapability(issuer, audience, permissions, signFn)`
 - `verifyCapability(token, issuerPublicKey)`
 - `delegateCapability(parent, audience, permissions, signFn)`
-- Offline-verifizierbar, delegierbar, attenuierbar
+- Offline-verifiable, delegatable, attenuatable
 
 ### Encoding (`crypto/encoding.ts`)
-Base58, Base64Url, Multibase, `toBuffer()` Utility.
+Base58, Base64Url, Multibase, `toBuffer()` utility.
 
 ### DID (`crypto/did.ts`)
 `createDid()`, `didToPublicKeyBytes()`, `isValidDid()`, `getDefaultDisplayName()`.
@@ -253,81 +253,81 @@ Base58, Base64Url, Multibase, `toBuffer()` Utility.
 ### wot-relay (`packages/wot-relay/`)
 
 WebSocket Relay Server:
-- **Message Forwarding** — DID-basiertes Routing
-- **Delivery ACK** — Persistiert Messages bis Client ACK, Redelivery bei Reconnect
-- **Multi-Device** — Mehrere Connections pro DID
-- **Heartbeat** — Ping/Pong, tote Verbindungen erkennen
-- **SQLite** — Message-Persistenz
-- **Live:** `wss://relay.utopia-lab.org` (deployed by Anton)
-- **Tests:** 24 Tests
+- **Message forwarding** — DID-based routing
+- **Delivery ACK** — Persists messages until client ACK, redelivery on reconnect
+- **Multi-device** — Multiple connections per DID
+- **Heartbeat** — Ping/pong, detects dead connections
+- **SQLite** — Message persistence
+- **Live:** `wss://relay.utopia-lab.org`
+- **Tests:** 24 tests
 
 ### wot-vault (`packages/wot-vault/`)
 
 Encrypted Document Store:
-- **Append-only Change Log** + Snapshots
-- **Auth via signierte Capability-Tokens**
+- **Append-only change log** + snapshots
+- **Auth via signed capability tokens**
 - **HTTP REST:** POST/GET changes, PUT snapshot, GET info, DELETE doc
-- **SQLite** — Persistenz
+- **SQLite** — Persistence
 - **Port:** 8789
-- **Tests:** 27 Tests
+- **Tests:** 27 tests
 
 ### wot-profiles (`packages/wot-profiles/`)
 
 Public Profile Server:
 - **HTTP REST:** GET/PUT `/p/{did}`, GET `/p/batch`
-- **JWS Verification** — Standalone, keine wot-core Dependency
-- **SQLite** — Persistenz
+- **JWS verification** — Standalone, no wot-core dependency
+- **SQLite** — Persistence
 - **Live:** `https://profiles.utopia-lab.org`
-- **Tests:** 25 Tests
+- **Tests:** 25 tests
 
 ---
 
 ## Demo App (`apps/demo/`)
 
-### CRDT-Switch
+### CRDT Switch
 
 ```bash
 pnpm dev:demo                    # Default: Yjs
 VITE_CRDT=automerge pnpm dev:demo  # Automerge
 ```
 
-Environment Variable `VITE_CRDT` steuert welcher StorageAdapter + PersonalDocManager geladen wird.
+Environment variable `VITE_CRDT` controls which StorageAdapter + PersonalDocManager is loaded.
 
 ### Features
 
-- **Onboarding** — Identity erstellen (Magische Wörter + Passphrase)
-- **Recovery** — Identity aus Seed wiederherstellen
-- **Unlock** — Passphrase-geschützter Login
-- **QR-Verification** — In-Person Verification via Kamera
-- **Kontakte** — Verifizierte Kontakte verwalten
-- **Attestations** — Fähigkeiten/Eigenschaften attestieren, empfangen, veröffentlichen
-- **Spaces** — Verschlüsselte Group Spaces (CRDT-Kollaboration)
-- **Profile Sync** — JWS-signierte Profile auf wot-profiles publizieren
-- **Public Profile** — Öffentliche Profilseite (auch ohne Login)
+- **Onboarding** — Create identity (Magic Words + passphrase)
+- **Recovery** — Restore identity from seed
+- **Unlock** — Passphrase-protected login
+- **QR Verification** — In-person verification via camera
+- **Contacts** — Manage verified contacts
+- **Attestations** — Attest skills/properties, receive, publish
+- **Spaces** — Encrypted group spaces (CRDT collaboration)
+- **Profile Sync** — JWS-signed profiles published to wot-profiles
+- **Public Profile** — Public profile page (viewable without login)
 - **Multi-Device** — Sync via Relay + Vault
-- **Offline-First** — Lokale Daten, Offline-Banner, Outbox
-- **i18n** — Deutsch + Englisch
-- **Dark Mode** — Vollständig unterstützt
-- **Debug Panel** — Persistence-Metriken, Relay-Status, CRDT-Info
-- **Benchmark** — In-Browser CRDT-Performance-Messung (`/benchmark`)
+- **Offline-First** — Local data, offline banner, outbox
+- **i18n** — German + English
+- **Dark Mode** — Fully supported
+- **Debug Panel** — Persistence metrics, relay status, CRDT info
+- **Benchmark** — In-browser CRDT performance measurement (`/benchmark`)
 
-### Seiten
+### Routes
 
-| Route | Seite |
+| Route | Page |
 |---|---|
 | `/` | Home (Stats, Quick Actions) |
 | `/identity` | Identity Management |
-| `/verify` | QR-Verification |
-| `/contacts` | Kontaktliste |
+| `/verify` | QR Verification |
+| `/contacts` | Contact List |
 | `/attestations` | Attestations |
 | `/spaces` | Group Spaces |
 | `/spaces/:id` | Space Detail |
 | `/profile/:did` | Public Profile |
-| `/benchmark` | CRDT-Benchmark |
+| `/benchmark` | CRDT Benchmark |
 
 ### E2E Tests (Playwright)
 
-7 E2E-Tests, alle grün mit **beiden** CRDT-Adaptern:
+7 E2E tests, all passing with **both** CRDT adapters:
 
 1. **Onboarding** — Generate → Verify → Profile → Protect → Complete
 2. **Unlock** — Reload → Passphrase → Logged In
@@ -341,7 +341,7 @@ Environment Variable `VITE_CRDT` steuert welcher StorageAdapter + PersonalDocMan
 
 ## Tests
 
-### Übersicht
+### Overview
 
 | Package | Tests | Vitest |
 |---|---|---|
@@ -351,9 +351,9 @@ Environment Variable `VITE_CRDT` steuert welcher StorageAdapter + PersonalDocMan
 | wot-profiles | 25 | 4.1.0 |
 | Demo (Unit) | 59 | 4.1.0 |
 | Demo (E2E) | 7 | Playwright |
-| **Gesamt** | **534** | |
+| **Total** | **534** | |
 
-### wot-core Test-Dateien (29)
+### wot-core Test Files (29)
 
 ```
 tests/
@@ -400,7 +400,7 @@ packages/wot-core/src/
 │   ├── WotIdentity.ts              # Ed25519 + X25519 + JWS + HKDF
 │   └── SeedStorage.ts              # Encrypted seed in IndexedDB
 ├── verification/
-│   └── VerificationHelper.ts       # Challenge-Response-Protokoll
+│   └── VerificationHelper.ts       # Challenge-response protocol
 ├── crypto/
 │   ├── did.ts                      # DID utilities
 │   ├── encoding.ts                 # Base64/Multibase
@@ -470,8 +470,8 @@ packages/wot-core/src/
 │   ├── space.ts, resource-ref.ts
 │   └── index.ts
 ├── wordlists/
-│   └── german-positive.ts          # 2048 deutsche BIP39-Wörter
-└── index.ts                        # 100+ Exports
+│   └── german-positive.ts          # 2048 German BIP39 words
+└── index.ts                        # 100+ exports
 ```
 
 ### Demo App
@@ -488,46 +488,46 @@ apps/demo/src/
 │   ├── LocalCacheStore.ts
 │   └── PersonalNetworkAdapter.ts
 ├── context/
-│   ├── AdapterContext.tsx           # CRDT Switch + alle Adapter init
+│   ├── AdapterContext.tsx           # CRDT Switch + all adapter init
 │   ├── IdentityContext.tsx
 │   └── PendingVerificationContext.tsx
 ├── hooks/                          # 14 React Hooks
-├── pages/                          # 9 Seiten + Benchmark
+├── pages/                          # 9 pages + Benchmark
 ├── components/                     # UI Components
 │   ├── identity/                   # Onboarding, Recovery, Unlock
-│   ├── verification/               # QR-Code, Confetti
+│   ├── verification/               # QR Code, Confetti
 │   ├── contacts/                   # ContactCard, ContactList
 │   ├── attestation/                # AttestationCard, Create, Import
 │   ├── debug/                      # DebugPanel
 │   ├── shared/                     # Avatar, Tooltip, etc.
 │   └── layout/                     # AppShell, Navigation
 ├── services/                       # Verification, Contact, Attestation
-├── i18n/                           # Deutsch + Englisch
-├── personalDocManager.ts           # CRDT-Switch Shim
+├── i18n/                           # German + English
+├── personalDocManager.ts           # CRDT switch shim
 ├── App.tsx
 └── main.tsx
 ```
 
 ---
 
-## Technische Entscheidungen
+## Technical Decisions
 
-### DID: did:key (bestätigt)
+### DID: did:key (confirmed)
 
-Nach Evaluation von 6 Methoden (did:key, did:peer, did:web, did:webvh, did:dht, did:plc). Keine Infrastruktur nötig, offline-fähig, BIP39→deterministic DID.
+After evaluating 6 methods (did:key, did:peer, did:web, did:webvh, did:dht, did:plc). No infrastructure needed, offline-capable, BIP39→deterministic DID.
 
 ### CRDT: Yjs Default, Automerge Option
 
-**Entscheidung (2026-03-15):** Yjs ist Default nach umfangreicher Evaluierung.
+**Decision (2026-03-15):** Yjs is default after extensive evaluation.
 
-**Geschichte:**
-1. Evolu (SQLite WASM) — erste Iteration, entfernt wegen Einschränkungen
-2. Automerge (Rust WASM) — zweite Iteration, WASM-Performance auf Mobile unhaltbar
-3. Yjs (pure JavaScript) — aktuelle Lösung, 76x schneller auf Mobile
+**History:**
+1. Evolu (SQLite WASM) — first iteration, removed due to limitations
+2. Automerge (Rust WASM) — second iteration, WASM performance on mobile untenable
+3. Yjs (pure JavaScript) — current solution, 76x faster on mobile
 
-**Benchmark-Ergebnisse (Large: 500 Kontakte, 1000 Attestations):**
+**Benchmark results (Large: 500 contacts, 1000 attestations):**
 
-| Metrik | Yjs | Automerge | Speedup |
+| Metric | Yjs | Automerge | Speedup |
 |---|---|---|---|
 | Init (Android) | 85ms | 6.4s | 76x |
 | Mutate 100 | 3ms | 1.9s | 632x |
@@ -536,90 +536,90 @@ Nach Evaluation von 6 Methoden (did:key, did:peer, did:web, did:webvh, did:dht, 
 
 ### Crypto: WebCrypto API + @noble/ed25519
 
-Native WebCrypto für HKDF, PBKDF2, AES-GCM, X25519 ECDH. @noble/ed25519 für Signing (WebCrypto Ed25519 hat Browser-Kompatibilitätsprobleme).
+Native WebCrypto for HKDF, PBKDF2, AES-GCM, X25519 ECDH. @noble/ed25519 for signing (WebCrypto Ed25519 has browser compatibility issues).
 
 ### Storage: IndexedDB via CompactStorageManager
 
-Eigener CompactStorageManager statt automerge-repo (das bei 40+ IDB-Chunks WASM OOM verursachte).
+Custom CompactStorageManager instead of automerge-repo (which caused WASM OOM at 40+ IDB chunks).
 
 ### Encryption: Encrypt-then-sync
 
-CRDT-Updates werden **vor** dem Sync verschlüsselt. Der Relay sieht nur Ciphertext. Inspiriert von Keyhive/NextGraph.
+CRDT updates are encrypted **before** sync. The relay only sees ciphertext. Inspired by Keyhive/NextGraph.
 
 ---
 
-## Unterschiede zur Spezifikation
+## Deviations from Specification
 
-| Aspekt | Spezifikation | Implementiert | Grund |
+| Aspect | Specification | Implemented | Reason |
 |---|---|---|---|
-| DID Format | `did:wot:...` | `did:key:z6Mk...` | W3C-Standard, keine eigene Infra |
-| Master Key | BIP39→PBKDF2→Ed25519 | BIP39→HKDF (non-extractable) | Hardware-Isolation, Framework-Key-Derivation |
-| Wortliste | Englisch | Deutsch (dys2p) | Deutschsprachige Zielgruppe |
-| Mnemonic | 24 Wörter | 12 Wörter | 128-bit reicht, bessere UX |
-| Storage | Nicht spezifiziert | Passphrase + IndexedDB | Browser hat keine OS-Keychain |
+| DID format | `did:wot:...` | `did:key:z6Mk...` | W3C standard, no custom infra |
+| Master key | BIP39→PBKDF2→Ed25519 | BIP39→HKDF (non-extractable) | Hardware isolation, framework key derivation |
+| Wordlist | English | German (dys2p) | German-speaking target audience |
+| Mnemonic | 24 words | 12 words | 128-bit sufficient, better UX |
+| Storage | Not specified | Passphrase + IndexedDB | Browser has no OS keychain |
 
 ---
 
-## Nächste Schritte
+## Next Steps
 
-### Priorität 1: Offline E2E-Tests
+### Priority 1: Offline E2E Tests
 
-19 geplante Szenarien:
-- Offline-Start, Offline-Aktionen (Profil, Attestation, Space, Verification)
-- Reconnect-Sync, Eingehende Messages während Offline
-- Tab schließen + wiederkommen, Vault-Fallback
-- Verification in der Höhle (beide offline, QR-Scan)
-- Seed-Restore offline → Vault-Merge bei Reconnect
+19 planned scenarios:
+- Offline start, offline actions (profile, attestation, space, verification)
+- Reconnect sync, incoming messages while offline
+- Close tab + return later, vault fallback
+- Verification in a cave (both offline, QR scan)
+- Seed restore offline → vault merge on reconnect
 
-### Priorität 2: WoT Connector für Real Life Stack
+### Priority 2: WoT Connector for Real Life Stack
 
-`real-life-stack/packages/wot-connector/` — Integration mit Yjs-Adapter, CompactStore, neue Architektur.
+`real-life-stack/packages/wot-connector/` — Integration with Yjs adapter, CompactStore, new architecture.
 
-### Priorität 3: CRDT Adapter Library
+### Priority 3: CRDT Adapter Library
 
-Austauschbare CRDT-Packages für externe Entwickler:
+Swappable CRDT packages for external developers:
 ```
 @real-life/wot-core           → Interfaces, Crypto, Identity
 @real-life/adapter-yjs        → YjsReplicationAdapter (Default)
 @real-life/adapter-automerge  → AutomergeReplicationAdapter (Option)
 ```
 
-### Zurückgestellt
+### Deferred
 
-- **Matrix Integration** — Erst wenn Federation nötig
-- **Social Recovery (Shamir)** — Seed-Backup über verifizierte Kontakte
-- **NextGraph Evaluation** — Telefonat mit Nicos (Maintainer) ausstehend
-- **Keyhive/BeeKEM** — Frühestens Ende 2027 produktionsreif
+- **Matrix Integration** — Only when federation is needed
+- **Social Recovery (Shamir)** — Seed backup via verified contacts
+- **NextGraph Evaluation** — Call with Nicos (maintainer) pending
+- **Keyhive/BeeKEM** — Earliest production-ready end of 2027
 
 ---
 
-## Architektur-Entscheidungen (Forschung)
+## Architecture Decisions (Research)
 
 ### Framework Evaluation v2 (2026-02-08)
 
-16 Frameworks evaluiert, 6 eliminiert:
-- Eliminiert: ActivityPub (no E2EE), Nostr (secp256k1), DXOS (P-256), DIDComm (stale), Iroh (networking only), p2panda (no JS)
-- Best CRDT: Yjs (gewählt nach Automerge-Performance-Problemen)
-- Best Messaging: Matrix (Ed25519, Megolm, Federation) — für Produktion
-- Best Capabilities: Willow/Meadowcap (Inspiration)
+16 frameworks evaluated, 6 eliminated:
+- Eliminated: ActivityPub (no E2EE), Nostr (secp256k1), DXOS (P-256), DIDComm (stale), Iroh (networking only), p2panda (no JS)
+- Best CRDT: Yjs (chosen after Automerge performance issues)
+- Best Messaging: Matrix (Ed25519, Megolm, Federation) — for production
+- Best Capabilities: Willow/Meadowcap (inspiration)
 
 ### CRDT Evaluation (2026-03-15)
 
-| CRDT | Sprache | Bundle | Mobile Init (163KB) | E2EE | Status |
+| CRDT | Language | Bundle | Mobile Init (163KB) | E2EE | Status |
 |---|---|---|---|---|---|
-| **Yjs** | Pure JS | 69KB | ~85ms | Selbst gebaut | **Default** |
+| **Yjs** | Pure JS | 69KB | ~85ms | Self-built | **Default** |
 | Automerge | Rust→WASM | 1.7MB | ~6.4s | Keyhive (2027?) | Option |
-| NextGraph | Rust→WASM | ~7.9MB | ? | Eingebaut | Alpha |
-| Loro | Rust→WASM | ~500KB | ? | Nein | Neu |
+| NextGraph | Rust→WASM | ~7.9MB | ? | Built-in | Alpha |
+| Loro | Rust→WASM | ~500KB | ? | No | New |
 
 ### Vault Sync Patterns
 
-Drei Patterns dokumentiert (`docs/konzepte/vault-sync-architektur.md`):
-1. **Peer-Sync** — Inkrementell via Relay
-2. **Vault** — Snapshot-Replace, 5s Debounce
-3. **Invite** — Snapshot bei Space-Einladung
+Three patterns documented (`docs/konzepte/vault-sync-architektur.md`):
+1. **Peer Sync** — Incremental via Relay
+2. **Vault** — Snapshot replace, 5s debounce
+3. **Invite** — Snapshot on space invitation
 
 ---
 
-*Dieses Dokument wird bei signifikanten Änderungen aktualisiert.*
-*Letzte Änderung: Yjs Migration (2026-03-15)*
+*This document is updated on significant changes.*
+*Last change: Yjs Migration (2026-03-15)*
