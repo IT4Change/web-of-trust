@@ -35,6 +35,17 @@ export class YjsPersonalSyncAdapter {
     if (this.started) return
     this.started = true
 
+    // Send full state on start and on every reconnect — other devices may have
+    // missed earlier updates (e.g., Device 2 joins after Device 1 already has data)
+    this.sendFullState()
+
+    // Re-send full state whenever messaging reconnects
+    if ('onReconnect' in this.messaging && typeof (this.messaging as any).onReconnect === 'function') {
+      (this.messaging as any).onReconnect(() => {
+        if (this.started) this.sendFullState()
+      })
+    }
+
     // Listen for local Y.Doc changes → encrypt and send to other devices
     const updateHandler = (update: Uint8Array, origin: any) => {
       // Only send local changes (not changes received from remote)
@@ -57,6 +68,12 @@ export class YjsPersonalSyncAdapter {
       try {
         const payload = JSON.parse(envelope.payload)
 
+        // Handle sync-request: another device asks for our full state
+        if (payload.syncRequest) {
+          this.sendFullState()
+          return
+        }
+
         const encryptedChange = {
           ciphertext: new Uint8Array(payload.ciphertext),
           nonce: new Uint8Array(payload.nonce),
@@ -73,6 +90,36 @@ export class YjsPersonalSyncAdapter {
         console.debug('[YjsPersonalSync] Failed to process message:', err)
       }
     })
+
+    // Request full state from other devices (they may have data we missed)
+    this.sendSyncRequest()
+  }
+
+  private sendSyncRequest(): void {
+    const messageId = crypto.randomUUID()
+    this.sentMessageIds.add(messageId)
+    setTimeout(() => this.sentMessageIds.delete(messageId), 30_000)
+
+    const envelope = {
+      v: 1 as const,
+      id: messageId,
+      type: 'personal-sync' as const,
+      fromDid: this.myDid,
+      toDid: this.myDid,
+      createdAt: new Date().toISOString(),
+      encoding: 'json' as const,
+      payload: JSON.stringify({ syncRequest: true }),
+      signature: '',
+    }
+
+    void this.messaging.send(envelope).catch(() => {})
+  }
+
+  private sendFullState(): void {
+    const fullState = Y.encodeStateAsUpdate(this.doc)
+    if (fullState.length > 1) {
+      void this.sendUpdate(fullState)
+    }
   }
 
   private async sendUpdate(update: Uint8Array): Promise<void> {
