@@ -48,7 +48,7 @@ import {
   resetYjsPersonalDoc,
 } from '@real-life/wot-core'
 
-const USE_YJS = import.meta.env.VITE_CRDT === 'yjs'
+const USE_YJS = import.meta.env.VITE_CRDT !== 'automerge'
 import { useIdentity } from './IdentityContext'
 
 const RELAY_URL = import.meta.env.VITE_RELAY_URL ?? 'wss://relay.utopia-lab.org'
