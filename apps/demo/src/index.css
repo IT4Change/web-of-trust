@@ -33,6 +33,10 @@
   --border: oklch(90% 0.008 265);
   --input: oklch(90% 0.008 265);
   --ring: oklch(55% 0.21 264);
+
+  /* Tooltip */
+  --tooltip: oklch(22% 0.02 265);
+  --tooltip-foreground: oklch(95% 0.01 247);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -60,6 +64,9 @@
     --border: oklch(30% 0.02 265);
     --input: oklch(30% 0.02 265);
     --ring: oklch(65% 0.19 264);
+
+    --tooltip: oklch(90% 0.01 247);
+    --tooltip-foreground: oklch(15% 0.02 265);
   }
 }
 
@@ -81,6 +88,8 @@
   --color-border: var(--border);
   --color-input: var(--input);
   --color-ring: var(--ring);
+  --color-tooltip: var(--tooltip);
+  --color-tooltip-foreground: var(--tooltip-foreground);
 
   /* Keep primary scale for gradients/specific shades */
   --color-primary-50: oklch(97% 0.02 264);

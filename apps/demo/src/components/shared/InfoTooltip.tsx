@@ -21,8 +21,8 @@ export function InfoTooltip({ content }: InfoTooltipProps) {
         <HelpCircle size={16} />
       </button>
       {isVisible && (
-        <div className="absolute z-10 w-64 p-3 bg-stone-800 text-stone-100 dark:bg-stone-200 dark:text-stone-900 text-sm rounded-lg shadow-lg -top-2 left-8" role="tooltip">
-          <div className="absolute -left-1 top-3 w-2 h-2 bg-stone-800 dark:bg-stone-200 transform rotate-45" />
+        <div className="absolute z-10 w-64 p-3 bg-tooltip text-tooltip-foreground text-sm rounded-lg shadow-lg -top-2 left-8" role="tooltip">
+          <div className="absolute -left-1 top-3 w-2 h-2 bg-tooltip transform rotate-45" />
           {content}
         </div>
       )}
