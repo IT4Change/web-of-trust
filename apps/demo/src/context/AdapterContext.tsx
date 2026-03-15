@@ -330,6 +330,7 @@ export function AdapterProvider({ children, identity }: AdapterProviderProps) {
               }
 
               console.log('[restore] Restored data from wot-profiles server:', restoredProfile.name || '(no name)')
+              getMetrics().logLoad('wot-profiles', 0, 0)
             } catch (err) {
               console.warn('[restore] Could not restore from server (offline?):', err)
               // Fallback: create empty identity only if none exists
