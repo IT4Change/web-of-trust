@@ -1,169 +1,169 @@
-# Onboarding-Flow (Nutzer-Perspektive)
+# Onboarding Flow (User Perspective)
 
-> Wie ein neuer Nutzer ins Netzwerk kommt
+> How a new user joins the network
 
-## Übersicht: Zwei Wege ins Netzwerk
+## Overview: Two Paths into the Network
 
 ```mermaid
 flowchart TD
-    Start(["Neue Person will beitreten"]) --> How{"Wie?"}
-    
-    How -->|Eingeladen| Invited["Wird von bestehendem Nutzer gescannt"]
-    How -->|Selbstständig| Solo["Erstellt ID alleine"]
-    
-    Invited --> Verify["Gegenseitige Verifizierung"]
-    Verify --> Connected["Sofort vernetzt - Sieht Content"]
-    
-    Solo --> Alone["Hat ID aber leeres Netzwerk"]
-    Alone --> Later["Muss später Menschen treffen"]
+    Start(["New person wants to join"]) --> How{"How?"}
+
+    How -->|Invited| Invited["Scanned by an existing user"]
+    How -->|Independent| Solo["Creates identity alone"]
+
+    Invited --> Verify["Mutual verification"]
+    Verify --> Connected["Immediately connected — sees content"]
+
+    Solo --> Alone["Has identity but empty network"]
+    Alone --> Later["Must meet people in person later"]
     Later --> Connected
-    
-    style Connected fill:#90EE90
-    style Alone fill:#FFE4B5
+
+    style Connected stroke:#22c55e,stroke-width:2px
+    style Alone stroke:#f59e0b,stroke-width:2px
 ```
 
-## Hauptflow: Onboarding durch Einladung
+## Main Flow: Onboarding via Invitation
 
 ```mermaid
 sequenceDiagram
-    participant A as Anna - Einladende
-    participant B as Ben - Neu
+    participant A as Anna — Inviting
+    participant B as Ben — New
 
-    Note over A,B: Persönliches Treffen
+    Note over A,B: In-person meeting
 
-    A->>B: Kennst du Web of Trust? Ich kann dich einladen
-    B->>A: Nee, was ist das?
-    A->>B: Eine App für unsere Nachbarschaft. Scann mal.
-    
+    A->>B: Have you heard of Web of Trust? I can invite you.
+    B->>A: No, what is it?
+    A->>B: An app for our neighbourhood. Scan this.
+
     rect rgb(230, 245, 255)
-        Note over A,B: Phase 1 - App installieren
-        A->>A: Zeigt QR-Code
-        B->>B: Scannt mit Handy-Kamera
-        B->>B: Link öffnet App Store
-        B->>B: Installiert App
-        B->>B: Öffnet App
+        Note over A,B: Phase 1 — Install the app
+        A->>A: Shows QR code
+        B->>B: Scans with phone camera
+        B->>B: Link opens app store
+        B->>B: Installs app
+        B->>B: Opens app
     end
 
     rect rgb(255, 245, 230)
-        Note over A,B: Phase 2 - Annas Profil sehen
-        B->>B: App erkennt Du wurdest eingeladen
-        B->>B: Sieht Annas Profil
-        Note over B: Name, Foto, Bio, 23 Attestationen
+        Note over A,B: Phase 2 — See Anna's profile
+        B->>B: App shows: You were invited by…
+        B->>B: Sees Anna's profile
+        Note over B: Name, photo, bio, 23 attestations
     end
 
     rect rgb(245, 230, 255)
-        Note over A,B: Phase 3 - Eigene ID erstellen
-        B->>B: Um beizutreten erstelle deine Identität
-        B->>B: Gibt Namen ein
-        B->>B: Optional Foto und Bio
-        B->>B: Tippt ID erstellen
-        Note over B: Schlüssel werden generiert
+        Note over A,B: Phase 3 — Create own identity
+        B->>B: To join, create your identity
+        B->>B: Enters name
+        B->>B: Optional: photo and bio
+        B->>B: Taps Create identity
+        Note over B: Keys are generated
     end
 
     rect rgb(255, 230, 230)
-        Note over A,B: Phase 4 - Recovery-Phrase sichern VERPFLICHTEND
-        B->>B: Sieht Recovery-Phrase mit 12 Wörtern
-        Note over B: KRITISCH - NUR JETZT angezeigt!
-        B->>B: Schreibt Wörter auf
-        B->>B: Tippt Weiter
-        B->>B: Quiz: Welches ist Wort 3?
-        B->>B: Quiz: Welches ist Wort 7?
-        B->>B: Quiz: Welches ist Wort 11?
-        Note over B: Erst nach 3 richtigen Antworten weiter
+        Note over A,B: Phase 4 — Save recovery phrase (REQUIRED)
+        B->>B: Sees 12-word recovery phrase
+        Note over B: CRITICAL — shown ONLY NOW!
+        B->>B: Writes words down
+        B->>B: Taps Continue
+        B->>B: Quiz: which is word 3?
+        B->>B: Quiz: which is word 7?
+        B->>B: Quiz: which is word 11?
+        Note over B: Must answer all 3 correctly to proceed
     end
 
     rect rgb(230, 255, 230)
-        Note over A,B: Phase 5 - Gegenseitige Verifizierung
-        B->>B: Tippt Anna bestätigen
-        B->>B: Zeigt eigenen QR-Code
-        B->>A: Jetzt scannst du mich
-        A->>B: Scannt Bens QR
-        A->>A: Sieht Bens neues Profil
-        A->>A: Tippt Identität bestätigen
+        Note over A,B: Phase 5 — Mutual verification
+        B->>B: Taps Confirm Anna
+        B->>B: Shows own QR code
+        B->>A: Now you scan me
+        A->>B: Scans Ben's QR
+        A->>A: Sees Ben's new profile
+        A->>A: Taps Confirm identity
     end
 
-    Note over A,B: Ben ist im Netzwerk!
-    Note over B: Sieht Annas Content - Kann eigenen Content teilen
+    Note over A,B: Ben is in the network!
+    Note over B: Sees Anna's content — can share own content
 ```
 
-## Variante: Selbstständiges Onboarding
+## Variant: Independent Onboarding
 
 ```mermaid
 sequenceDiagram
-    participant B as Ben - alleine
+    participant B as Ben — alone
 
-    Note over B: Findet App im Store
+    Note over B: Finds app in store
 
-    B->>B: Installiert App
-    B->>B: Öffnet App
-    
+    B->>B: Installs app
+    B->>B: Opens app
+
     rect rgb(245, 230, 255)
-        Note over B: Eigene ID erstellen
-        B->>B: Willkommen bei Web of Trust
-        B->>B: Erstelle deine Identität
-        B->>B: Gibt Namen ein
-        B->>B: Optional Foto und Bio
-        B->>B: Tippt ID erstellen
+        Note over B: Create own identity
+        B->>B: Welcome to Web of Trust
+        B->>B: Create your identity
+        B->>B: Enters name
+        B->>B: Optional: photo and bio
+        B->>B: Taps Create identity
     end
 
     rect rgb(255, 230, 230)
-        Note over B: Recovery-Phrase sichern VERPFLICHTEND
-        B->>B: Sieht Recovery-Phrase
-        B->>B: Schreibt sie auf
-        B->>B: Quiz mit 3 Wörtern bestehen
+        Note over B: Save recovery phrase (REQUIRED)
+        B->>B: Sees recovery phrase
+        B->>B: Writes it down
+        B->>B: Passes 3-word quiz
     end
 
     rect rgb(255, 250, 230)
-        Note over B: Leeres Netzwerk
-        B->>B: Sieht Dashboard
-        Note over B: Du hast noch keine Kontakte
-        B->>B: Kann eigenes Profil bearbeiten
-        B->>B: Kann QR-Code zeigen
-        B->>B: Sieht keinen Content
+        Note over B: Empty network
+        B->>B: Sees dashboard
+        Note over B: You have no contacts yet
+        B->>B: Can edit own profile
+        B->>B: Can show QR code
+        B->>B: Sees no content
     end
 
-    Note over B: Wartet auf echte Begegnungen
+    Note over B: Waits for real-world encounters
 ```
 
-## Was der Nutzer sieht
+## What the User Sees
 
-### Willkommens-Screen (eingeladen)
+### Welcome Screen (invited)
 
 ```
 ┌─────────────────────────────────┐
 │                                 │
 │      🌐 Web of Trust            │
 │                                 │
-│   Du wurdest eingeladen von:    │
+│   You were invited by:          │
 │                                 │
-│         📷 [Profilbild]         │
+│         📷 [Profile photo]      │
 │          Anna Müller            │
 │                                 │
-│   "Aktiv im Gemeinschafts-      │
-│    garten Sonnenberg"           │
+│   "Active in the Sonnenberg     │
+│    community garden"            │
 │                                 │
-│   ✅ 23 Attestationen           │
-│   ✅ 47 Verifizierungen         │
+│   ✅ 23 attestations            │
+│   ✅ 47 verifications           │
 │                                 │
 ├─────────────────────────────────┤
 │                                 │
-│   [ Jetzt beitreten ]           │
+│   [ Join now ]                  │
 │                                 │
-│   Was ist Web of Trust? ℹ️       │
+│   What is Web of Trust? ℹ️       │
 │                                 │
 └─────────────────────────────────┘
 ```
 
-### Profil erstellen
+### Create profile
 
 ```
 ┌─────────────────────────────────┐
 │                                 │
-│   Erstelle dein Profil          │
+│   Create your profile           │
 │                                 │
 │   ┌─────────────────────────┐   │
 │   │                         │   │
-│   │     📷 Foto hinzufügen  │   │
+│   │     📷 Add photo        │   │
 │   │       (optional)        │   │
 │   │                         │   │
 │   └─────────────────────────┘   │
@@ -173,120 +173,120 @@ sequenceDiagram
 │   │ Ben Schmidt             │   │
 │   └─────────────────────────┘   │
 │                                 │
-│   Über mich (optional)          │
+│   About me (optional)           │
 │   ┌─────────────────────────┐   │
-│   │ Neu in der Gegend,      │   │
-│   │ interessiert an...      │   │
+│   │ New to the area,        │   │
+│   │ interested in...        │   │
 │   └─────────────────────────┘   │
 │                                 │
-│   [ Weiter ]                    │
+│   [ Continue ]                  │
 │                                 │
 └─────────────────────────────────┘
 ```
 
-### Recovery-Phrase (VERPFLICHTEND)
+### Recovery phrase (REQUIRED)
 
 ```
 ┌─────────────────────────────────┐
 │                                 │
-│   🔐 Deine Recovery-Phrase      │
+│   🔐 Your recovery phrase       │
 │                                 │
-│   ⚠️  WICHTIG - LIES DAS!       │
+│   ⚠️  IMPORTANT — READ THIS!    │
 │                                 │
-│   Diese 12 Wörter werden dir    │
-│   NUR JETZT angezeigt.          │
-│   Sie können NICHT erneut       │
-│   abgerufen werden!             │
+│   These 12 words are shown      │
+│   to you ONLY NOW.              │
+│   They CANNOT be retrieved      │
+│   again!                        │
 │                                 │
 │   ┌─────────────────────────┐   │
 │   │                         │   │
-│   │  1. apple    7. forest  │   │
-│   │  2. banana   8. garden  │   │
-│   │  3. cherry   9. house   │   │
-│   │  4. delta   10. iron    │   │
-│   │  5. echo    11. jungle  │   │
-│   │  6. frog    12. kite    │   │
+│   │  1. absurd   7. fenster │   │
+│   │  2. banane   8. garten  │   │
+│   │  3. chaos    9. haus    │   │
+│   │  4. dichte  10. irrtum  │   │
+│   │  5. eiche   11. jagd    │   │
+│   │  6. fluss   12. kiefer  │   │
 │   │                         │   │
 │   └─────────────────────────┘   │
 │                                 │
-│   📝 Schreib sie JETZT auf      │
-│   🚫 Mach keinen Screenshot     │
-│   🔒 Bewahre sie sicher auf     │
+│   📝 Write them down NOW        │
+│   🚫 Do not take a screenshot   │
+│   🔒 Store them somewhere safe  │
 │                                 │
-│   [ Weiter zum Quiz ]           │
+│   [ Continue to quiz ]          │
 │                                 │
 └─────────────────────────────────┘
 ```
 
-### Phrase verifizieren (VERPFLICHTEND)
+### Verify phrase (REQUIRED)
 
 ```
 ┌─────────────────────────────────┐
 │                                 │
-│   Bestätige deine Sicherung     │
+│   Confirm your backup           │
 │                                 │
-│   Welches ist Wort Nummer 4?    │
+│   Which is word number 4?       │
 │                                 │
 │   ┌─────────┐ ┌─────────┐       │
-│   │  delta  │ │  echo   │       │
+│   │ dichte  │ │  eiche  │       │
 │   └─────────┘ └─────────┘       │
 │   ┌─────────┐ ┌─────────┐       │
-│   │  frog   │ │  apple  │       │
+│   │ fluss   │ │ absurd  │       │
 │   └─────────┘ └─────────┘       │
 │                                 │
 │   ━━━━━━━━━━━━━━━━━━━━━━━━━━━   │
-│   Frage 1 von 3                 │
+│   Question 1 of 3               │
 │                                 │
 └─────────────────────────────────┘
 ```
 
-Bei falscher Antwort:
+On wrong answer:
 
 ```
 ┌─────────────────────────────────┐
 │                                 │
-│   ❌ Leider falsch              │
+│   ❌ Incorrect                  │
 │                                 │
-│   Wort 4 ist "delta"            │
+│   Word 4 is "dichte"            │
 │                                 │
-│   Bitte prüfe deine Notizen     │
-│   und versuche es erneut.       │
+│   Please check your notes       │
+│   and try again.                │
 │                                 │
-│   [ Zurück zur Phrase ]         │
+│   [ Back to phrase ]            │
 │                                 │
 └─────────────────────────────────┘
 ```
 
-### Erster Kontakt bestätigen
+### Confirm first contact
 
 ```
 ┌─────────────────────────────────┐
 │                                 │
-│   ✅ Deine ID wurde erstellt!   │
+│   ✅ Your identity was created! │
 │                                 │
-│   Jetzt noch Anna bestätigen:   │
+│   Now confirm Anna:             │
 │                                 │
-│         📷 [Annas Bild]         │
+│         📷 [Anna's photo]       │
 │          Anna Müller            │
 │                                 │
-│   Ist das die Person, die       │
-│   dir gerade gegenübersteht?    │
+│   Is this the person standing   │
+│   in front of you right now?    │
 │                                 │
-│   [ Ja, Identität bestätigen ]  │
+│   [ Yes, confirm identity ]     │
 │                                 │
-│   [ Nein, abbrechen ]           │
+│   [ No, cancel ]                │
 │                                 │
 └─────────────────────────────────┘
 ```
 
-### QR-Code zeigen
+### Show QR code
 
 ```
 ┌─────────────────────────────────┐
 │                                 │
-│   Fast geschafft!               │
+│   Almost done!                  │
 │                                 │
-│   Zeig Anna diesen Code:        │
+│   Show Anna this code:          │
 │                                 │
 │   ┌─────────────────────────┐   │
 │   │                         │   │
@@ -298,144 +298,145 @@ Bei falscher Antwort:
 │   └─────────────────────────┘   │
 │                                 │
 │   Ben Schmidt                   │
-│   did:wot:b3n5chm1dt...        │
+│   did:key:z6MkpTHz...          │
 │                                 │
-│   "Jetzt scannst du mich"       │
+│   "Now you scan me"             │
 │                                 │
 └─────────────────────────────────┘
 ```
 
-### Willkommen im Netzwerk
+### Welcome to the network
 
 ```
 ┌─────────────────────────────────┐
 │                                 │
-│   🎉 Willkommen im Netzwerk!    │
+│   🎉 Welcome to the network!    │
 │                                 │
-│   Du bist jetzt verbunden mit:  │
+│   You are now connected with:   │
 │                                 │
 │   👩 Anna Müller                │
 │                                 │
 ├─────────────────────────────────┤
 │                                 │
-│   Nächste Schritte:             │
+│   Next steps:                   │
 │                                 │
-│   📅 Annas Termine ansehen      │
+│   📅 See Anna's events          │
 │                                 │
-│   🗺️  Orte in der Nähe          │
+│   🗺️  Places nearby             │
 │                                 │
-│   👥 Mehr Menschen treffen      │
+│   👥 Meet more people           │
 │                                 │
-│   [ Los geht's ]                │
+│   [ Let's go ]                  │
 │                                 │
 └─────────────────────────────────┘
 ```
 
-## Personas im Onboarding
+## Personas During Onboarding
 
-### Greta (62) - braucht Hilfe
+### Greta (62) — needs help
 
 ```mermaid
 sequenceDiagram
-    participant T as Tom - Nachbar hilft
-    participant G as Greta - nicht technikaffin
+    participant T as Tom — neighbour helping
+    participant G as Greta — not tech-savvy
 
-    T->>G: Greta, ich zeig dir die neue Garten-App
-    G->>T: Ich bin nicht so gut mit Technik...
-    T->>G: Kein Problem, ich helfe dir durch
-    
-    T->>T: Zeigt QR-Code
-    T->>G: Halt dein Handy hier drauf
-    G->>G: Scannt mit Hilfe
-    
-    Note over G: App Store öffnet
-    T->>G: Jetzt auf Installieren
-    G->>G: Installiert
-    
-    Note over G: App öffnet
-    T->>G: Siehst du mein Bild? Tipp auf Beitreten
-    G->>G: Tippt
-    
-    Note over G: Name eingeben
-    T->>G: Gib deinen Namen ein
-    G->>G: Greta eingeben
-    
-    Note over G: Recovery-Phrase VERPFLICHTEND
-    T->>G: Jetzt kommt das Wichtigste. Hast du Stift und Papier?
-    G->>G: Holt Notizbuch
-    T->>G: Diese 12 Wörter werden nur JETZT angezeigt
-    G->>G: Schreibt auf
-    T->>G: Prüf nochmal ob alles richtig ist
-    T->>G: Gleich fragt die App 3 Wörter ab
-    G->>G: Beantwortet Quiz mit Toms Hilfe
-    T->>G: Bewahr das gut auf, getrennt vom Handy
-    
-    Note over T,G: Rest wie normaler Flow
+    T->>G: Greta, let me show you the neighbourhood app
+    G->>T: I'm not very good with technology...
+    T->>G: No problem, I'll guide you through it
+
+    T->>T: Shows QR code
+    T->>G: Hold your phone up here
+    G->>G: Scans with help
+
+    Note over G: App store opens
+    T->>G: Now tap Install
+    G->>G: Installs
+
+    Note over G: App opens
+    T->>G: Can you see my photo? Tap Join
+    G->>G: Taps
+
+    Note over G: Enter name
+    T->>G: Type in your name
+    G->>G: Types Greta
+
+    Note over G: Recovery phrase — REQUIRED
+    T->>G: Now comes the important part. Do you have pen and paper?
+    G->>G: Gets notebook
+    T->>G: These 12 words are only shown ONCE
+    G->>G: Writes them down
+    T->>G: Double-check that everything is correct
+    T->>G: In a moment the app will ask for 3 words
+    G->>G: Answers quiz with Tom's help
+    T->>G: Keep that safe, separate from your phone
+
+    Note over T,G: Rest follows normal flow
 ```
 
-### Familie Yilmaz - Straßenfest
+### The Yilmaz family — street festival
 
 ```mermaid
 sequenceDiagram
-    participant K as Kemal - Organisator
-    participant F as Familie Yilmaz
+    participant K as Kemal — organiser
+    participant F as Yilmaz family
 
-    Note over K,F: Straßenfest Info-Stand
+    Note over K,F: Street festival information stand
 
-    K->>F: Neu in der Gegend? Willkommen!
-    F->>K: Ja, wir kennen noch niemanden
-    K->>F: Wir haben eine App für Nachbarschaftshilfe
-    
-    K->>K: Zeigt QR-Code
-    F->>F: Ein Familienmitglied scannt
-    F->>F: Durchläuft Onboarding
-    
-    K->>K: Verifiziert Familie
-    
-    K->>F: Jetzt seht ihr wer was anbieten kann
-    K->>F: Wenn ihr Hilfe braucht oder anbieten wollt...
-    
-    Note over F: Sieht sofort Gartengruppe und mehr
+    K->>F: New to the area? Welcome!
+    F->>K: Yes, we don't know anyone yet
+    K->>F: We have an app for neighbourhood help
+
+    K->>K: Shows QR code
+    F->>F: One family member scans
+    F->>F: Goes through onboarding
+
+    K->>K: Verifies the family
+
+    K->>F: Now you can see who offers what
+    K->>F: If you need help or want to offer some...
+
+    Note over F: Immediately sees the garden group and more
 ```
 
 ## Edge Cases
 
-### Abbruch während Onboarding
+### Cancelling during onboarding
 
 ```mermaid
 flowchart TD
-    Start(["Onboarding startet"]) --> Step1["App installiert"]
-    Step1 --> Step2["Profil angelegt"]
-    Step2 --> Step3["ID generiert"]
-    Step3 --> Step4["Recovery-Phrase angezeigt"]
-    Step4 --> Step5["Quiz bestanden"]
-    Step5 --> Step6["Verifizierung"]
-    
-    Step1 -->|Abbruch| Cancel1["Kein Problem"]
-    Step2 -->|Abbruch| Cancel2["Profil verworfen"]
-    
-    Step3 -->|Abbruch| Cancel3["KRITISCH - ID existiert aber Phrase nicht angezeigt"]
-    
-    Step4 -->|Abbruch| Cancel4["KRITISCH - Phrase angezeigt, Quiz nicht bestanden"]
-    
-    Step5 -->|Abbruch| Cancel5["ID und Backup bestätigt - OK"]
-    Step6 -->|Abbruch| Cancel6["Status Pending - OK"]
-    
-    style Cancel3 fill:#FFB6C1
-    style Cancel4 fill:#FFB6C1
+    Start(["Onboarding starts"]) --> Step1["App installed"]
+    Step1 --> Step2["Profile entered"]
+    Step2 --> Step3["Identity generated"]
+    Step3 --> Step4["Recovery phrase shown"]
+    Step4 --> Step5["Quiz passed"]
+    Step5 --> Step6["Verification"]
+
+    Step1 -->|Cancel| Cancel1["No problem"]
+    Step2 -->|Cancel| Cancel2["Profile discarded"]
+
+    Step3 -->|Cancel| Cancel3["CRITICAL — identity exists but phrase not shown"]
+
+    Step4 -->|Cancel| Cancel4["CRITICAL — phrase shown, quiz not completed"]
+
+    Step5 -->|Cancel| Cancel5["Identity and backup confirmed — OK"]
+    Step6 -->|Cancel| Cancel6["Status pending — OK"]
+
+    style Cancel3 stroke:#ef4444,stroke-width:2px
+    style Cancel4 stroke:#ef4444,stroke-width:2px
 ```
 
-**Wichtig:** 
-- Nach Schritt 3 (ID generiert) blockiert die App das Schließen/Zurückgehen
-- Der Nutzer MUSS das Quiz bestehen um fortzufahren
-- Bei Abbruch während Phrase-Anzeige oder Quiz: App zeigt beim nächsten Start die Phrase erneut an und fordert Quiz-Abschluss
+**Important:**
 
-### Quiz nicht bestanden
+- After step 3 (identity generated) the app blocks navigation away
+- The user MUST pass the quiz to continue
+- If the app is closed during phrase display or quiz: on next launch the app shows the phrase again and requires quiz completion
 
-Wenn der Nutzer eine falsche Antwort gibt:
+### Quiz not passed
 
-1. Fehlermeldung mit korrekter Antwort
-2. Zurück zur Phrase-Anzeige
-3. Quiz startet von vorne mit neuen zufälligen Wort-Positionen
+If the user gives a wrong answer:
 
-Es gibt **keine Möglichkeit**, das Quiz zu überspringen.
+1. Error message with correct answer
+2. Back to phrase display
+3. Quiz restarts with new random word positions
+
+There is **no way** to skip the quiz.

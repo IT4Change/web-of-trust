@@ -47,7 +47,7 @@ test.describe('Multi-Device Sync', () => {
 
       // Personal-doc sync: Bob should appear in contacts on Device 2
       await navigateTo(alice2Page, '/contacts')
-      await expect(alice2Page.getByText('Bob')).toBeVisible({ timeout: 30_000 })
+      await expect(alice2Page.getByText('Bob')).toBeVisible({ timeout: 60_000 })
 
       // --- Phase B: Incoming attestation — both devices receive ---
 

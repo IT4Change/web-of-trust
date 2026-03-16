@@ -1,156 +1,156 @@
-# Verifizierungs-Flow (Nutzer-Perspektive)
+# Verification Flow (User Perspective)
 
-> Was Anna und Ben erleben
+> What Anna and Ben experience
 
-## Hauptflow: Gegenseitige Verifizierung
+## Main Flow: Mutual Verification
 
 ```mermaid
 sequenceDiagram
     participant A as Anna
     participant B as Ben
 
-    Note over A,B: Treffen sich auf Straßenfest
+    Note over A,B: Meet at a street festival
 
-    A->>B: Bist du auch bei Web of Trust?
-    B->>A: Ja! Lass uns connecten
-    
+    A->>B: Are you on Web of Trust?
+    B->>A: Yes! Let's connect.
+
     rect rgb(230, 245, 255)
-        Note over A,B: Phase 1 - Ben verifiziert Anna
-        A->>A: Zeigt QR-Code
-        B->>A: Scannt, sieht Profil
-        B->>B: Sieht 8 deiner Kontakte haben Anna verifiziert
-        B->>B: Tippt Identität bestätigen
+        Note over A,B: Phase 1 — Ben verifies Anna
+        A->>A: Shows QR code
+        B->>A: Scans, sees profile
+        B->>B: Sees: 8 of your contacts have verified Anna
+        B->>B: Taps Confirm identity
     end
-    
+
     rect rgb(255, 245, 230)
-        Note over A,B: Phase 2 - Anna verifiziert Ben
-        B->>B: Zeigt QR-Code
-        A->>B: Scannt, sieht Profil
-        A->>A: Sieht 12 deiner Kontakte haben Ben verifiziert
-        A->>A: Tippt Identität bestätigen
+        Note over A,B: Phase 2 — Anna verifies Ben
+        B->>B: Shows QR code
+        A->>B: Scans, sees profile
+        A->>A: Sees: 12 of your contacts have verified Ben
+        A->>A: Taps Confirm identity
     end
-    
+
     rect rgb(230, 255, 230)
-        Note over A,B: Verbindung hergestellt
-        Note over A: Ben ist jetzt in Meine Kontakte
-        Note over A: Bens Verifizierung erscheint in Annas Profil
-        Note over B: Anna ist jetzt in Meine Kontakte
-        Note over B: Annas Verifizierung erscheint in Bens Profil
+        Note over A,B: Connection established
+        Note over A: Ben is now in My contacts
+        Note over A: Ben's verification appears on Anna's profile
+        Note over B: Anna is now in My contacts
+        Note over B: Anna's verification appears on Ben's profile
     end
 ```
 
-> **Hinweis:** Die Verifizierungen werden beim Empfänger gespeichert. In Annas Profil steht "Verifiziert von: Ben". In Bens Profil steht "Verifiziert von: Anna".
+> **Note:** Verifications are stored at the recipient's side. Anna's profile reads "Verified by: Ben". Ben's profile reads "Verified by: Anna".
 
-## Variante: Nur einseitige Verifizierung - Pending
+## Variant: One-Sided Verification — Pending
 
 ```mermaid
 sequenceDiagram
     participant A as Anna
     participant B as Ben
 
-    Note over A,B: Kurzes Treffen - Ben muss zum Zug
+    Note over A,B: Brief encounter — Ben has to catch a train
 
-    A->>A: Zeigt QR-Code
-    B->>A: Scannt QR-Code
-    B->>B: Verifiziert Anna
-    
-    Note over B: Ben muss los!
-    
+    A->>A: Shows QR code
+    B->>A: Scans QR code
+    B->>B: Verifies Anna
+
+    Note over B: Ben has to go!
+
     rect rgb(255, 250, 230)
-        Note over A,B: Pending-Status
-        Note over B: Anna ist verifiziert in Bens Kontakten
-        Note over A: Ben erscheint als Ausstehende Anfrage
+        Note over A,B: Pending status
+        Note over B: Anna is verified in Ben's contacts
+        Note over A: Ben appears as pending request
     end
 
-    Note over A,B: Später beim nächsten Treffen
+    Note over A,B: Later at the next meeting
 
-    B->>B: Zeigt QR-Code
-    A->>B: Scannt Bens QR-Code
-    A->>A: Verifiziert Ben
-    
+    B->>B: Shows QR code
+    A->>B: Scans Ben's QR code
+    A->>A: Verifies Ben
+
     rect rgb(230, 255, 230)
-        Note over A,B: Jetzt vollständig verbunden
+        Note over A,B: Now fully connected
     end
 ```
 
-## Was der Nutzer sieht
+## What the User Sees
 
-### Beim Scannen (Online)
+### When scanning (online)
 
 ```
 ┌─────────────────────────────────┐
 │                                 │
-│         📷 [Profilbild]         │
+│         📷 [Profile photo]      │
 │                                 │
 │          Anna Müller            │
 │                                 │
-│   "Aktiv im Gemeinschafts-      │
-│    garten Sonnenberg"           │
+│   "Active in the Sonnenberg     │
+│    community garden"            │
 │                                 │
 ├─────────────────────────────────┤
-│ ✅ 12 deiner Kontakte haben     │
-│    diese Person verifiziert     │
+│ ✅ 12 of your contacts have     │
+│    verified this person         │
 ├─────────────────────────────────┤
 │                                 │
-│   [ Identität bestätigen ]      │
+│   [ Confirm identity ]          │
 │                                 │
-│   [ Abbrechen ]                 │
+│   [ Cancel ]                    │
 │                                 │
 └─────────────────────────────────┘
 ```
 
-### Beim Scannen (Offline)
+### When scanning (offline)
 
 ```
 ┌─────────────────────────────────┐
 │                                 │
 │         ⚠️ Offline              │
 │                                 │
-│   Profil kann nicht geladen     │
-│   werden.                       │
+│   Profile cannot be loaded.     │
+│                                 │
 │                                 │
 ├─────────────────────────────────┤
 │                                 │
-│   ID-Prüfwert:                  │
+│   ID check value:               │
 │   ┌─────────────────────────┐   │
 │   │  a7f3-82b1-c9d4-e5f6    │   │
 │   └─────────────────────────┘   │
 │                                 │
-│   Frage dein Gegenüber:         │
-│   "Was zeigt deine App als      │
-│    ID-Prüfwert an?"             │
+│   Ask the other person:         │
+│   "What does your app show      │
+│    as the ID check value?"      │
 │                                 │
 ├─────────────────────────────────┤
 │                                 │
-│   [ Identität bestätigen ]      │
+│   [ Confirm identity ]          │
 │                                 │
-│   [ Abbrechen ]                 │
+│   [ Cancel ]                    │
 │                                 │
 └─────────────────────────────────┘
 ```
 
-### Kontaktliste danach
+### Contact list afterwards
 
 ```
 ┌─────────────────────────────────┐
-│  Meine Kontakte                 │
+│  My contacts                    │
 ├─────────────────────────────────┤
 │                                 │
 │  👩 Anna Müller          ✅     │
-│     Verifiziert am 08.01.25     │
+│     Verified on 08.01.25        │
 │                                 │
 │  👨 Ben Schmidt          ✅     │
-│     Verifiziert am 08.01.25     │
+│     Verified on 08.01.25        │
 │                                 │
 │  👴 Tom Wagner           ✅     │
-│     Verifiziert am 03.01.25     │
+│     Verified on 03.01.25        │
 │                                 │
 ├─────────────────────────────────┤
-│  Ausstehend                     │
+│  Pending                        │
 ├─────────────────────────────────┤
 │                                 │
 │  👩 Carla Braun          ⏳     │
-│     Wartet auf Bestätigung      │
+│     Waiting for confirmation    │
 │                                 │
 └─────────────────────────────────┘
 ```

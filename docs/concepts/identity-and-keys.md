@@ -101,6 +101,48 @@ graph TD
     style H stroke:#ff9800,stroke-width:2px
 ```
 
+### DID Document
+
+Although no resolver is needed, a DID Document can be derived from any `did:key`:
+
+```json
+{
+  "@context": [
+    "https://www.w3.org/ns/did/v1",
+    "https://w3id.org/security/suites/ed25519-2020/v1"
+  ],
+  "id": "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK",
+  "verificationMethod": [{
+    "id": "did:key:z6Mk...#z6Mk...",
+    "type": "Ed25519VerificationKey2020",
+    "controller": "did:key:z6Mk...",
+    "publicKeyMultibase": "z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK"
+  }],
+  "authentication": ["did:key:z6Mk...#z6Mk..."],
+  "assertionMethod": ["did:key:z6Mk...#z6Mk..."],
+  "keyAgreement": [{
+    "id": "did:key:z6Mk...#z6LS...",
+    "type": "X25519KeyAgreementKey2020",
+    "controller": "did:key:z6Mk...",
+    "publicKeyMultibase": "z6LSbysY2xFMRpGMhb7tFTLMpeuPRaqaWM1yECx2AtzE3KCc"
+  }]
+}
+```
+
+The `keyAgreement` entry contains the **X25519 public key** derived from the Ed25519 key — used for ECIES encryption (key exchange without revealing private keys).
+
+### Cryptographic Primitives
+
+| Purpose | Algorithm | Standard |
+| --- | --- | --- |
+| Signatures | Ed25519 | RFC 8032 |
+| Key Agreement | X25519 | RFC 7748 |
+| Symmetric Encryption | AES-256-GCM | NIST SP 800-38D |
+| Key Derivation | HKDF | RFC 5869 |
+| Hashing | SHA-256 | FIPS 180-4 |
+| Multibase Encoding | base58btc | Multibase Spec |
+| Multicodec Prefix | 0xed01 (Ed25519) | Multicodec Table |
+
 ### Wordlist
 
 We use the **dys2p German BIP39 wordlist** — not the standard English wordlist. This makes the mnemonic more accessible for our primarily German-speaking community.

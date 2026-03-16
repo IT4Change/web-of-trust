@@ -1,409 +1,420 @@
-# Onboarding-Flow (Technische Perspektive)
+# Onboarding Flow (Technical Perspective)
 
-> Wie eine neue Identität erstellt und ins Netzwerk integriert wird
+> How a new identity is created and integrated into the network
 
-## Detailflow: ID-Erstellung
+## Detail Flow: Identity Creation
 
 ```mermaid
 flowchart TD
-    Start(["Nutzer tippt ID erstellen"]) --> Entropy["Sammle Entropie CSPRNG"]
-    
-    Entropy --> GenMnemonic["Generiere BIP39 Mnemonic 12 Wörter"]
-    
-    GenMnemonic --> DeriveSeed["Derive Seed von Mnemonic PBKDF2"]
-    
-    DeriveSeed --> GenKeyPair["Generiere Ed25519 KeyPair von Seed"]
-    
-    GenKeyPair --> CreateDID["Erstelle DID did:wot:hash"]
-    
-    CreateDID --> StorePrivate["Speichere Private Key in Secure Storage"]
-    
-    StorePrivate --> BlockNav["Blockiere Navigation"]
-    
-    BlockNav --> ShowMnemonic["Zeige Mnemonic EINMALIG"]
-    
-    ShowMnemonic --> StartQuiz["Starte Quiz: 3 zufällige Wort-Positionen"]
-    
-    StartQuiz --> Question{"Frage N von 3"}
-    
-    Question -->|Richtig| NextQ{"Alle 3 richtig?"}
-    NextQ -->|Nein| Question
-    NextQ -->|Ja| MarkSecured["Markiere als gesichert"]
-    
-    Question -->|Falsch| ShowError["Zeige Fehler und korrekte Antwort"]
+    Start(["User taps Create identity"]) --> Entropy["Collect entropy — CSPRNG"]
+
+    Entropy --> GenMnemonic["Generate BIP39 mnemonic — 12 words, German wordlist"]
+
+    GenMnemonic --> DeriveSeed["Derive master key from mnemonic — HKDF (non-extractable)"]
+
+    DeriveSeed --> GenKeyPair["Derive Ed25519 key pair from master key"]
+
+    GenKeyPair --> CreateDID["Create DID — did:key:z6Mk..."]
+
+    CreateDID --> StorePrivate["Store key in Secure Storage (non-extractable CryptoKey)"]
+
+    StorePrivate --> BlockNav["Block navigation"]
+
+    BlockNav --> ShowMnemonic["Show mnemonic ONCE"]
+
+    ShowMnemonic --> StartQuiz["Start quiz — 3 random word positions"]
+
+    StartQuiz --> Question{"Question N of 3"}
+
+    Question -->|Correct| NextQ{"All 3 correct?"}
+    NextQ -->|No| Question
+    NextQ -->|Yes| MarkSecured["Mark backup as verified"]
+
+    Question -->|Wrong| ShowError["Show error and correct answer"]
     ShowError --> ShowMnemonic
-    
-    MarkSecured --> CreateProfile["Erstelle lokales Profil-Dokument"]
-    
-    CreateProfile --> SignProfile["Signiere Profil mit Private Key"]
-    
-    SignProfile --> Ready(["ID bereit"])
-    
-    style ShowMnemonic fill:#FFF3CD
-    style BlockNav fill:#FFE4E4
+
+    MarkSecured --> CreateProfile["Create PersonalDoc CRDT (Y.Map)"]
+
+    CreateProfile --> SignProfile["Sign profile with private key (JWS)"]
+
+    SignProfile --> Ready(["Identity ready"])
+
+    style ShowMnemonic stroke:#f59e0b,stroke-width:2px
+    style BlockNav stroke:#ef4444,stroke-width:2px
 ```
 
-## Sequenzdiagramm: Vollständiges Onboarding
+## Sequence Diagram: Full Onboarding
 
 ```mermaid
 sequenceDiagram
     participant A_App as Anna App
-    participant QR as QR-Code
-    participant B_Cam as Ben Kamera
+    participant QR as QR Code
+    participant B_Cam as Ben Camera
     participant Store as App Store
     participant B_App as Ben App
     participant B_Secure as Ben Secure Storage
-    participant Sync as Sync Server
+    participant Relay as Relay (WebSocket)
 
-    Note over A_App,Sync: Phase 1 Einladung
+    Note over A_App,Relay: Phase 1 — Invitation
 
     A_App->>QR: generateInviteQR()
-    Note over QR: App Store Link plus Anna DID und Public Key
-    
+    Note over QR: App store link + Anna DID + public key
+
     B_Cam->>QR: scan()
     B_Cam->>B_Cam: parseQR()
-    
-    alt App nicht installiert
+
+    alt App not installed
         B_Cam->>Store: openAppStore(link)
         Store->>B_App: install()
-        B_App->>B_App: launch mit deeplink
-    else App installiert
-        B_Cam->>B_App: openApp mit deeplink
+        B_App->>B_App: launch with deep link
+    else App already installed
+        B_Cam->>B_App: openApp with deep link
     end
 
-    Note over A_App,Sync: Phase 2 Annas Profil laden
+    Note over A_App,Relay: Phase 2 — Load Anna's profile
 
     alt Online
-        B_App->>Sync: fetchProfile(anna.did)
-        Sync->>B_App: name photo bio sig
-        B_App->>B_App: verifySignature(profile, anna.pk)
+        B_App->>Relay: fetchProfile(anna.did)
+        Relay->>B_App: name, photo, bio, JWS signature
+        B_App->>B_App: verifyJws(profile, anna.publicKey)
     else Offline
-        B_App->>B_App: Zeige nur DID und Public Key Info
+        B_App->>B_App: Show DID and public key info only
     end
-    
+
     B_App->>B_App: displayInviter(anna)
 
-    Note over A_App,Sync: Phase 3 ID erstellen
+    Note over A_App,Relay: Phase 3 — Create identity
 
-    B_App->>B_App: collectUserInput() name photo bio
-    B_App->>B_App: generateEntropy(256bit)
-    B_App->>B_App: createMnemonic(entropy) 12 words BIP39
-    B_App->>B_App: deriveSeed(mnemonic) PBKDF2
-    B_App->>B_App: generateKeyPair(seed) Ed25519
-    B_App->>B_App: createDID(publicKey)
-    
-    B_App->>B_Secure: storePrivateKey(pk)
+    B_App->>B_App: collectUserInput() — name, photo, bio
+    B_App->>B_App: generateEntropy(256 bit)
+    B_App->>B_App: createMnemonic(entropy) — 12 words, German BIP39
+    B_App->>B_App: deriveMasterKey(mnemonic) — HKDF, non-extractable
+    B_App->>B_App: deriveKeyPair(masterKey) — Ed25519
+    B_App->>B_App: createDid(publicKey) — did:key:z6Mk...
+
+    B_App->>B_Secure: storeKey(non-extractable CryptoKey)
     B_Secure->>B_App: ok
-    
-    B_App->>B_App: displayMnemonic() EINMALIG
-    B_App->>B_App: startQuiz() 3 zufaellige Positionen
-    
-    loop Quiz bis 3 richtige Antworten
+
+    B_App->>B_App: displayMnemonic() — ONCE ONLY
+    B_App->>B_App: startQuiz() — 3 random positions
+
+    loop Quiz until 3 correct answers
         B_App->>B_App: showQuestion()
-        alt Richtig
+        alt Correct
             B_App->>B_App: nextQuestion()
-        else Falsch
+        else Wrong
             B_App->>B_App: showError()
-            B_App->>B_App: displayMnemonic() erneut
-            B_App->>B_App: startQuiz() neue Positionen
+            B_App->>B_App: displayMnemonic() — again
+            B_App->>B_App: startQuiz() — new positions
         end
     end
-    
+
     B_App->>B_App: markBackupVerified()
 
-    Note over A_App,Sync: Phase 4 Profil erstellen
+    Note over A_App,Relay: Phase 4 — Create profile document
 
-    B_App->>B_App: createProfile()
-    B_App->>B_App: signProfile(privateKey)
-    B_App->>B_App: storeProfile(local)
+    B_App->>B_App: createPersonalDoc() — Y.Doc with Y.Maps
+    B_App->>B_App: signProfile(privateKey) — JWS
+    B_App->>B_App: persistToCompactStore(local IDB)
 
-    Note over A_App,Sync: Phase 5 Gegenseitige Verifizierung
+    Note over A_App,Relay: Phase 5 — Mutual verification
 
     B_App->>B_App: createVerification(anna.did)
     B_App->>B_App: storeContact(anna, pending)
-    
-    B_App->>B_App: generateQR(ben.did, ben.pk)
-    B_App->>A_App: physischer QR-Scan
-    
-    A_App->>A_App: parseQR() ben.did ben.pk
+
+    B_App->>B_App: generateQR(ben.did, ben.publicKey)
+    B_App->>A_App: physical QR scan
+
+    A_App->>A_App: parseQR() — ben.did, ben.publicKey
     A_App->>A_App: createVerification(ben.did)
     A_App->>A_App: storeContact(ben, active)
     A_App->>A_App: addToAutoGroup(ben)
-    A_App->>A_App: reencryptItemsForNewContact(ben)
+    A_App->>A_App: reencryptItemKeysForNewContact(ben)
 
-    Note over A_App,Sync: Phase 6 Sync
+    Note over A_App,Relay: Phase 6 — Sync
 
-    A_App->>Sync: push verification profile itemKeys
-    B_App->>Sync: push verification profile
-    
-    Sync->>B_App: pull anna verification
+    A_App->>Relay: push verification, profile, itemKeys
+    B_App->>Relay: push verification, profile
+
+    Relay->>B_App: pull anna verification
     B_App->>B_App: updateContact(anna, active)
     B_App->>B_App: addToAutoGroup(anna)
-    
-    Sync->>B_App: pull anna itemKeys for ben
-    B_App->>B_App: Now can decrypt anna content
+
+    Relay->>B_App: pull anna itemKeys for ben
+    B_App->>B_App: Can now decrypt Anna's content
 ```
 
-## Kryptographische Details
+## Cryptographic Details
 
 ### Key Generation
 
 ```mermaid
 flowchart LR
     subgraph Input
-        CSPRNG["CSPRNG 256 bit entropy"]
+        CSPRNG["CSPRNG — 256 bit entropy"]
     end
-    
+
     subgraph BIP39["BIP39 Process"]
-        Checksum["Add checksum 8 bits"]
+        Checksum["Add checksum (8 bits)"]
         Split["Split into 11-bit chunks"]
-        Words["Map to wordlist"]
+        Words["Map to German wordlist"]
     end
-    
+
     subgraph KeyDerivation["Key Derivation"]
-        PBKDF2["PBKDF2 2048 rounds"]
-        Seed["512-bit seed"]
+        HKDF["HKDF (non-extractable CryptoKey)"]
+        MasterKey["Master Key"]
         Ed25519["Ed25519 derive"]
+        X25519["X25519 derive (separate path)"]
     end
-    
+
     subgraph Output
-        PrivKey["Private Key 32 bytes"]
-        PubKey["Public Key 32 bytes"]
-        DID["DID did:wot:..."]
+        PrivKey["Private Key (32 bytes)"]
+        PubKey["Public Key (32 bytes)"]
+        DID["DID — did:key:z6Mk..."]
     end
-    
+
     CSPRNG --> Checksum --> Split --> Words
-    Words -->|12 words| PBKDF2
-    PBKDF2 --> Seed --> Ed25519
+    Words -->|12 words| HKDF
+    HKDF --> MasterKey --> Ed25519
+    MasterKey --> X25519
     Ed25519 --> PrivKey
     Ed25519 --> PubKey
-    PubKey -->|hash and encode| DID
+    PubKey -->|multibase encode| DID
 ```
 
 ### DID Structure
 
 ```
-did:wot:7Hy3kPqR9mNx2Wb5vLz8
-     │   └──────────────────── Base58 encoded
-     │                         first 16 bytes of
-     │                         SHA256(publicKey)
-     └────────────────────────── Method name
+did:key:z6MkpTHz8SrJgQi3oWFG7Ahs7pFHCmzCyMFVMdBr9ZFm
+        └──────────────────────────────────────────── Multibase-encoded
+                                                       Ed25519 public key
+                                                       (W3C did:key spec)
 ```
 
-### Profil-Signatur
+The `z6Mk...` prefix indicates Ed25519 in the multicodec registry. No custom infrastructure required — any W3C DID resolver can verify it.
+
+### Profile Signature
+
+Profiles are published as JWS (JSON Web Signature):
 
 ```json
 {
-  "@context": "https://w3id.org/weboftrust/v1",
   "type": "Profile",
-  "id": "did:wot:7Hy3kPqR9mNx2Wb5vLz8",
+  "id": "did:key:z6MkpTHz8SrJgQi3oWFG7Ahs7pFHCmzCyMFVMdBr9ZFm",
   "name": "Ben Schmidt",
   "photo": "ipfs://Qm...",
-  "bio": "Neu in der Gegend",
+  "bio": "New to the area",
   "publicKey": {
     "type": "Ed25519VerificationKey2020",
-    "publicKeyMultibase": "z6Mkf..."
+    "publicKeyMultibase": "z6MkpTHz8SrJgQi3oWFG7..."
   },
-  "updated": "2025-01-08T14:30:00Z",
-  "proof": {
-    "type": "Ed25519Signature2020",
-    "verificationMethod": "did:wot:7Hy3kPqR9mNx2Wb5vLz8#key-1",
-    "proofPurpose": "assertionMethod",
-    "proofValue": "z58DAdFfa9..."
-  }
+  "updated": "2025-01-08T14:30:00Z"
 }
 ```
 
-## Invite-QR vs. Standard-QR
+The JWS proof is a detached Ed25519 signature produced by `WotIdentity.signJws()`. The private key never leaves the device.
 
-### Standard-QR (für bestehende Nutzer)
+## Invite QR vs. Standard QR
+
+### Standard QR (for existing users)
 
 ```json
 {
   "type": "wot-identity",
-  "did": "did:wot:anna123",
-  "pk": "ed25519:base64..."
+  "did": "did:key:z6MkpTHz8SrJgQi3oWFG7...",
+  "pk": "z6MkpTHz8SrJgQi3oWFG7..."
 }
 ```
 
-### Invite-QR (für Onboarding)
+### Invite QR (for onboarding)
 
 ```json
 {
   "type": "wot-invite",
-  "app": "https://weboftrust.app/download",
-  "did": "did:wot:anna123",
-  "pk": "ed25519:base64...",
+  "app": "https://web-of-trust.de/download",
+  "did": "did:key:z6MkpTHz8SrJgQi3oWFG7...",
+  "pk": "z6MkpTHz8SrJgQi3oWFG7...",
   "token": "optional-invite-token"
 }
 ```
 
-Das `token` könnte für Analytics oder spezielle Invite-Flows genutzt werden.
+The optional `token` can be used for analytics or special invite flows.
 
 ## Secure Storage
 
-### Platform-spezifisch
+### Platform-specific
 
 | Platform | Storage | Details |
-|----------|---------|---------|
-| iOS | Keychain | kSecClassKey, Hardware-backed wenn verfügbar |
-| Android | Keystore | AndroidKeyStore, TEE/Strongbox wenn verfügbar |
-| Web | Web Crypto API + IndexedDB | extractable: false, Key nie als Raw exportierbar |
+| -------- | ------- | ------- |
+| iOS | Keychain | `kSecClassKey`, hardware-backed when available |
+| Android | Keystore | AndroidKeyStore, TEE/Strongbox when available |
+| Web | Web Crypto API + IndexedDB | `extractable: false`, key never exportable as raw bytes |
 
 ### Web Crypto API Details
 
-```javascript
-// Non-extractable Key generieren
-const keyPair = await crypto.subtle.generateKey(
-  { name: "Ed25519" },
+```typescript
+// Derive non-extractable master key from mnemonic via HKDF
+const masterKey = await crypto.subtle.importKey(
+  "raw",
+  mnemonicBytes,
+  { name: "HKDF" },
   false,  // extractable = false
-  ["sign", "verify"]
+  ["deriveKey", "deriveBits"]
 );
 
-// In IndexedDB speichern (CryptoKey-Objekt direkt)
-const db = await openDB('wot-keys', 1);
-await db.put('keys', keyPair.privateKey, 'privateKey');
-await db.put('keys', keyPair.publicKey, 'publicKey');
+// Derive framework-specific sub-key (e.g. for signing)
+const signingKey = await crypto.subtle.deriveKey(
+  { name: "HKDF", hash: "SHA-256", salt, info },
+  masterKey,
+  { name: "Ed25519" },
+  false,  // still non-extractable
+  ["sign"]
+);
 
-// Key kann nur für sign/verify verwendet werden
+// Store CryptoKey object directly in IndexedDB
+const db = await openDB("wot-keys", 1);
+await db.put("keys", signingKey, "signingKey");
+
+// Key can only be used for signing — never exported
 const signature = await crypto.subtle.sign(
   { name: "Ed25519" },
-  keyPair.privateKey,
+  signingKey,
   data
 );
 ```
 
-### Web-spezifische Risiken
+### Web-specific risks
 
-| Risiko | Mitigation |
-|--------|------------|
-| Browserdaten löschen löscht Keys | Recovery-Phrase ist EINZIGER Weg zurück |
-| Kein Cross-Device Sync | Nutzer muss auf jedem Gerät recovern |
-| Browser-Update könnte brechen | Unwahrscheinlich, aber Monitoring nötig |
+| Risk | Mitigation |
+| ---- | ---------- |
+| Clearing browser data deletes keys | Recovery phrase is the ONLY way back |
+| No cross-device sync via browser | User must restore on each new device |
+| Browser update could break storage | Unlikely, but monitoring recommended |
 
-**Konsequenz:** Recovery-Phrase-Sicherung ist im Web noch kritischer als bei nativen Apps!
+**Consequence:** Recovery phrase backup is even more critical on the web than on native apps.
 
-### Was wird gespeichert
+### What is stored
 
 ```mermaid
 flowchart TD
-    subgraph NeverStored["NIE gespeichert"]
-        Mnemonic["Recovery-Phrase"]
+    subgraph NeverStored["NEVER stored"]
+        Mnemonic["Recovery phrase"]
     end
-    
-    subgraph LocalDB["Lokale Datenbank"]
-        Profile["Eigenes Profil"]
-        Contacts["Kontakte + Public Keys"]
-        Items["Items + Item Keys"]
-        Groups["Gruppen + Group Keys"]
+
+    subgraph PersonalDoc["PersonalDoc CRDT (Y.Map)"]
+        Profile["Own profile"]
+        Contacts["Contacts + public keys"]
+        Items["Items + item keys"]
+        Groups["Groups + group keys"]
     end
-    
+
     subgraph SecureStorage["Secure Storage"]
-        PrivKey["Private Key"]
+        PrivKey["Private key (non-extractable CryptoKey)"]
     end
-    
-    style NeverStored fill:#FFE4E4,stroke:#FF0000
-    style SecureStorage fill:#E4FFE4,stroke:#00AA00
+
+    style NeverStored stroke:#ef4444,stroke-width:2px
+    style SecureStorage stroke:#22c55e,stroke-width:2px
 ```
 
-**KRITISCH:** Die Recovery-Phrase wird nirgendwo gespeichert. Sie wird **exakt einmal** bei der ID-Erstellung angezeigt. Der Nutzer MUSS das Quiz bestehen um fortzufahren - es gibt keine ungesicherten Accounts.
+**CRITICAL:** The recovery phrase is never stored anywhere. It is displayed **exactly once** during identity creation. The user MUST pass the quiz to continue — there are no unsecured accounts.
 
-## Fehlerbehandlung
+## Error Handling
 
-### Onboarding-Abbruch
+### Onboarding cancellation
 
 ```mermaid
 stateDiagram-v2
     [*] --> NotStarted
-    
-    NotStarted --> AppInstalled: App installieren
-    AppInstalled --> ProfileEntered: Profil eingeben
-    ProfileEntered --> KeysGenerated: Keys generieren
-    KeysGenerated --> MnemonicShown: Mnemonic anzeigen
-    MnemonicShown --> QuizPassed: Quiz bestehen
-    QuizPassed --> VerificationDone: Verifizierung
-    VerificationDone --> [*]: Fertig
-    
-    NotStarted --> [*]: Abbruch OK
-    AppInstalled --> [*]: Abbruch OK
-    ProfileEntered --> [*]: Abbruch OK
-    
-    KeysGenerated --> BLOCKED: Abbruch blockiert
-    MnemonicShown --> BLOCKED: Abbruch blockiert
-    
+
+    NotStarted --> AppInstalled: Install app
+    AppInstalled --> ProfileEntered: Enter profile
+    ProfileEntered --> KeysGenerated: Generate keys
+    KeysGenerated --> MnemonicShown: Show mnemonic
+    MnemonicShown --> QuizPassed: Pass quiz
+    QuizPassed --> VerificationDone: Verification
+    VerificationDone --> [*]: Done
+
+    NotStarted --> [*]: Cancel OK
+    AppInstalled --> [*]: Cancel OK
+    ProfileEntered --> [*]: Cancel OK
+
+    KeysGenerated --> BLOCKED: Cancel blocked
+    MnemonicShown --> BLOCKED: Cancel blocked
+
     state BLOCKED {
         [*] --> MustComplete
-        MustComplete: Navigation blockiert bis Quiz bestanden
+        MustComplete: Navigation blocked until quiz passed
     }
-    
-    QuizPassed --> PartialSetup: Abbruch OK
+
+    QuizPassed --> PartialSetup: Cancel OK
     state PartialSetup {
         [*] --> HasID
-        HasID: ID und Backup verifiziert - Keine Kontakte!
+        HasID: Identity and backup verified — no contacts yet
     }
 ```
 
-### Quiz-Ablauf im Detail
+### Quiz flow in detail
 
 ```mermaid
 flowchart TD
-    ShowPhrase(["Zeige 12 Wörter"]) --> UserReady["Nutzer tippt Weiter"]
-    
-    UserReady --> Q1["Frage 1: Welches ist Wort X?"]
-    Q1 -->|Richtig| Q2["Frage 2: Welches ist Wort Y?"]
-    Q1 -->|Falsch| Error1["Fehler anzeigen"]
+    ShowPhrase(["Show 12 words"]) --> UserReady["User taps Continue"]
+
+    UserReady --> Q1["Question 1: Which is word X?"]
+    Q1 -->|Correct| Q2["Question 2: Which is word Y?"]
+    Q1 -->|Wrong| Error1["Show error"]
     Error1 --> ShowPhrase
-    
-    Q2 -->|Richtig| Q3["Frage 3: Welches ist Wort Z?"]
-    Q2 -->|Falsch| Error2["Fehler anzeigen"]
+
+    Q2 -->|Correct| Q3["Question 3: Which is word Z?"]
+    Q2 -->|Wrong| Error2["Show error"]
     Error2 --> ShowPhrase
-    
-    Q3 -->|Richtig| Success(["Quiz bestanden - Weiter"])
-    Q3 -->|Falsch| Error3["Fehler anzeigen"]
+
+    Q3 -->|Correct| Success(["Quiz passed — Continue"])
+    Q3 -->|Wrong| Error3["Show error"]
     Error3 --> ShowPhrase
 ```
 
-**Wichtig:**
-- X, Y, Z sind zufällige Positionen (1-12)
-- Bei jedem Neustart werden neue Positionen gewählt
-- Multiple-Choice mit 4 Optionen (1 richtig, 3 falsch aus der Wortliste)
-- Kein Überspringen möglich
+**Notes:**
 
-## Sicherheitsüberlegungen
+- X, Y, Z are random positions (1–12)
+- New positions are chosen on every restart
+- Multiple choice with 4 options (1 correct, 3 wrong from the wordlist)
+- No skipping possible
+
+## Security Considerations
 
 ### Threat Model
 
 | Threat | Mitigation |
-|--------|------------|
-| Mnemonic abfotografiert | Warnung Kein Screenshot plus OS-Screenshot-Schutz |
-| Shoulder Surfing | Privater Raum empfohlen |
-| Malware auf Gerät | Secure Storage / Web Crypto nutzt Hardware-Isolation |
-| Server-Kompromittierung | Private Key verlässt nie das Gerät |
-| QR-Code-Fälschung | Profil ist signiert, Fälschung erkennbar |
-| Browser-Daten gelöscht Web | Recovery über Mnemonic - einziger Weg! |
+| ------ | ---------- |
+| Mnemonic photographed | Warning + OS screenshot protection on mnemonic screen |
+| Shoulder surfing | Private environment recommended |
+| Malware on device | Secure Storage / Web Crypto uses hardware isolation |
+| Server compromise | Private key never leaves the device |
+| QR code forgery | Profile is JWS-signed — forgery is detectable |
+| Browser data cleared (web) | Recovery via mnemonic — only way back |
 
 ### Best Practices
 
-1. **Mnemonic NUR EINMAL anzeigen** - Wird nirgendwo gespeichert
-2. **Quiz ist VERPFLICHTEND** - Kein Fortfahren ohne 3 richtige Antworten
-3. **Navigation blockieren** - Zwischen Key-Generierung und Quiz-Abschluss
-4. **Kein Cloud-Backup des Keys** - Nur Mnemonic auf Papier
-5. **Biometrie optional** - Für App-Entsperrung, nicht für Key-Zugriff
+1. **Mnemonic shown ONLY ONCE** — never stored anywhere
+2. **Quiz is MANDATORY** — no continuing without 3 correct answers
+3. **Block navigation** — between key generation and quiz completion
+4. **No cloud key backup** — only mnemonic on paper
+5. **Biometrics optional** — for app unlock, not for key access
 
-### Recovery-Szenario
+### Recovery Scenario
 
 ```mermaid
 flowchart TD
-    Loss(["Gerät verloren oder Daten gelöscht"]) --> HasPhrase{"Recovery-Phrase gesichert?"}
-    
-    HasPhrase -->|Ja| Recover["Neue App installieren und Wiederherstellen"]
-    Recover --> Restored["Identität wiederhergestellt"]
-    
-    HasPhrase -->|Nein| Lost["Identität VERLOREN"]
-    Lost --> NewID["Einzige Option: Neue ID erstellen"]
-    NewID --> Reverify["Alle Kontakte müssen neu verifizieren"]
-    NewID --> LostAttestations["Alte Attestationen verloren"]
-    
-    style Lost fill:#FF6B6B
-    style LostAttestations fill:#FF6B6B
+    Loss(["Device lost or data cleared"]) --> HasPhrase{"Recovery phrase saved?"}
+
+    HasPhrase -->|Yes| Recover["Install new app and restore"]
+    Recover --> Restored["Identity restored"]
+
+    HasPhrase -->|No| Lost["Identity LOST"]
+    Lost --> NewID["Only option: create new identity"]
+    NewID --> Reverify["All contacts must verify again"]
+    NewID --> LostAttestations["Old attestations lost"]
+
+    style Lost stroke:#ef4444,stroke-width:2px
+    style LostAttestations stroke:#ef4444,stroke-width:2px
 ```
