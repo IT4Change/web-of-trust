@@ -63,13 +63,13 @@ The system is built on swappable adapters — same interfaces, different impleme
 
 | Adapter | Purpose | Implementation |
 | ------- | ------- | -------------- |
-| [**StorageAdapter**](packages/wot-core#storageadapter) | Local persistence, CRUD | Yjs (default) or Automerge |
-| [**ReactiveStorageAdapter**](packages/wot-core#reactivestorageadapter) | Live queries, subscriptions | Observables on CRDT changes |
-| [**CryptoAdapter**](packages/wot-core#cryptoadapter) | Signing, encryption | WebCrypto (Ed25519, X25519, AES-256-GCM) |
-| [**DiscoveryAdapter**](packages/wot-core#discoveryadapter) | Public profile lookup | HTTP + offline cache |
-| [**MessagingAdapter**](packages/wot-core#messagingadapter) | 1:1 message delivery | WebSocket Relay (ACK + Outbox) |
-| [**ReplicationAdapter**](packages/wot-core#replicationadapter) | Encrypted CRDT Spaces | Yjs or Automerge + E2EE + GroupKeys |
-| [**AuthorizationAdapter**](packages/wot-core#authorizationadapter) | Capabilities / permissions | UCAN-inspired, offline-verifiable |
+| [**StorageAdapter**](packages/wot-core/README.md#storageadapter) | Local persistence, CRUD | Yjs (default) or Automerge |
+| [**ReactiveStorageAdapter**](packages/wot-core/README.md#reactivestorageadapter) | Live queries, subscriptions | Observables on CRDT changes |
+| [**CryptoAdapter**](packages/wot-core/README.md#cryptoadapter) | Signing, encryption | WebCrypto (Ed25519, X25519, AES-256-GCM) |
+| [**DiscoveryAdapter**](packages/wot-core/README.md#discoveryadapter) | Public profile lookup | HTTP + offline cache |
+| [**MessagingAdapter**](packages/wot-core/README.md#messagingadapter) | 1:1 message delivery | WebSocket Relay (ACK + Outbox) |
+| [**ReplicationAdapter**](packages/wot-core/README.md#replicationadapter) | Encrypted CRDT Spaces | Yjs or Automerge + E2EE + GroupKeys |
+| [**AuthorizationAdapter**](packages/wot-core/README.md#authorizationadapter) | Capabilities / permissions | UCAN-inspired, offline-verifiable |
 
 ### Infrastructure
 
@@ -90,7 +90,7 @@ Data is also persisted locally in IndexedDB (CompactStore) for offline access.
 | **adapter-yjs** | Yjs | Pure JavaScript (69KB) | Default. Fast on all devices. |
 | **adapter-automerge** | Automerge | Rust → WASM (1.7MB) | Alternative. Heavier on mobile. |
 
-Switch at startup with `VITE_CRDT=automerge`. Both pass the same 7 end-to-end tests. Try the [in-browser benchmark](https://web-of-trust.de/demo/benchmark) to compare on your device.
+Switch at startup with `VITE_CRDT=automerge`. Both pass the same 11 end-to-end tests. Try the [in-browser benchmark](https://web-of-trust.de/demo/benchmark) to compare on your device.
 
 ### Identity
 
@@ -212,7 +212,7 @@ console.log(identity.getDid()) // did:key:z6Mk...
 | Demo (E2E) | 7 | Playwright |
 | **Total** | **534** | |
 
-All 7 E2E tests pass with **both** CRDT adapters (Yjs and Automerge).
+All 11 E2E tests pass with **both** CRDT adapters (Yjs and Automerge).
 
 ## Demo App Features
 

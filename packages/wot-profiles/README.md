@@ -1,112 +1,127 @@
-# @real-life/wot-profiles
+# wot-profiles
 
-Server-Implementierung des **DiscoveryAdapter** — das öffentliche Verzeichnis des Web of Trust.
+HTTP service for public profile discovery in the Web of Trust.
 
-## Rolle in der Architektur
+Stores and serves JWS-signed public profiles, verified contacts, and published attestations. Implements the server side of the `HttpDiscoveryAdapter` — the answer to "who is this DID?" before you are in direct contact with someone.
 
-wot-profiles ist die POC-Implementierung (`HttpDiscoveryAdapter`) des [DiscoveryAdapter](../../docs/architecture/adapters.md) — einer der 7 Adapter im WoT-Ecosystem. Der DiscoveryAdapter beantwortet die Frage: **"Wer ist diese DID?"** — bevor man mit der Person in Kontakt ist.
+All data is Ed25519-signed by the profile owner. The server verifies the signature on write and rejects mismatches between the URL DID and the payload DID. Clients re-verify signatures on read. No account system — the cryptographic signature is the authorisation.
 
-```text
-Discovery (wot-profiles)  →  Messaging (wot-relay)  →  Replication (Automerge)
-VOR dem Kontakt               ZWISCHEN bekannten DIDs   INNERHALB einer Gruppe
-öffentlich, signiert          privat, E2EE              Group Key, CRDT
+## Key Features
+
+- **JWS-signed profiles** — Ed25519, `did:key` based; server validates on every PUT
+- **Standalone JWS verification** — `jws-verify.ts` implements Ed25519 + `did:key` resolution using only the Web Crypto API; no `wot-core` runtime dependency
+- **Three resource types** per DID: profile, verifications, attestations (separate endpoints)
+- **Batch summary endpoint** — resolve up to 100 DIDs in a single request
+- **SQLite** — three tables (`profiles`, `verifications`, `attestations`) via `better-sqlite3`
+- **Default port:** 8788
+- **Deployed at:** `https://profiles.utopia-lab.org`
+
+## REST API
+
+All endpoints support CORS (`*`). Bodies are compact JWS strings (`application/jws`).
+
+### Endpoints
+
+| Method | Path           | Description                        |
+|--------|----------------|------------------------------------|
+| `GET`  | `/p/{did}`     | Fetch signed profile               |
+| `PUT`  | `/p/{did}`     | Publish signed profile             |
+| `GET`  | `/p/{did}/v`   | Fetch signed verifications list    |
+| `PUT`  | `/p/{did}/v`   | Publish signed verifications list  |
+| `GET`  | `/p/{did}/a`   | Fetch signed attestations list     |
+| `PUT`  | `/p/{did}/a`   | Publish signed attestations list   |
+| `GET`  | `/s?dids=...`  | Batch summaries (comma-separated)  |
+
+### Publish a profile
+
+```http
+PUT /p/did:key:z6Mk... HTTP/1.1
+Content-Type: application/jws
+
+eyJhbGciOiJFZERTQSJ9.eyJkaWQiOiJkaWQ6a2V5Oi4uLiIsIm5hbWUiOiJBbGljZSJ9.<sig>
 ```
 
-Der Service ist austauschbar — alternative Implementierungen (Automerge Auto-Groups, IPFS, DHT) können das gleiche `DiscoveryAdapter`-Interface implementieren.
+The server checks: body non-empty → valid JWS → `payload.did` matches URL DID → Ed25519 signature valid → `200 OK`.
 
-## Konzept
+### Fetch a profile
 
-Alle Daten sind Ed25519-signiert (JWS). Der Server prüft beim Schreiben die Signatur und stellt sicher, dass die DID im Payload mit der URL übereinstimmt. Clients verifizieren die Signatur beim Lesen selbst.
+```http
+GET /p/did:key:z6Mk... HTTP/1.1
+```
 
-Kein Account-System, keine Authentifizierung — die kryptographische Signatur **ist** die Autorisierung.
+Response `200` with `Content-Type: application/jws` — the raw JWS string, or `404` if not found.
 
-## API
+### Batch summaries
 
-Alle Endpoints unterstützen CORS (`*`).
+```http
+GET /s?dids=did:key:z6MkA...,did:key:z6MkB... HTTP/1.1
+```
 
-### Profile
+Response `200`:
+```json
+[
+  { "did": "did:key:z6MkA...", "name": "Alice", "avatar": "data:image/..." },
+  { "did": "did:key:z6MkB...", "name": "Bob",   "avatar": null             }
+]
+```
 
-| Method | Endpoint | Beschreibung |
-|--------|----------|--------------|
-| `GET` | `/p/{did}` | Profil-JWS abrufen |
-| `PUT` | `/p/{did}` | Profil-JWS speichern |
+### Using HttpDiscoveryAdapter from wot-core
 
-### Verifikationen
+```typescript
+import { HttpDiscoveryAdapter, OfflineFirstDiscoveryAdapter } from '@real-life/wot-core'
 
-| Method | Endpoint | Beschreibung |
-|--------|----------|--------------|
-| `GET` | `/p/{did}/v` | Verifikationen-JWS abrufen |
-| `PUT` | `/p/{did}/v` | Verifikationen-JWS speichern |
+const http = new HttpDiscoveryAdapter({
+  baseUrl: 'https://profiles.utopia-lab.org',
+  identity,      // WotIdentity — used to sign profile JWS on publish
+})
 
-### Attestationen
+// Wrap with offline cache (recommended)
+const discovery = new OfflineFirstDiscoveryAdapter(http, cacheStore)
 
-| Method | Endpoint | Beschreibung |
-|--------|----------|--------------|
-| `GET` | `/p/{did}/a` | Attestationen-JWS abrufen |
-| `PUT` | `/p/{did}/a` | Attestationen-JWS speichern |
+// Publish own profile
+await discovery.publishProfile({ name: 'Alice', bio: '...' })
 
-### PUT-Validierung
+// Look up another DID
+const profile = await discovery.lookupProfile('did:key:z6Mk...')
+```
 
-1. Body darf nicht leer sein → `400`
-2. JWS-Payload muss `did` enthalten → `400`
-3. `payload.did` muss mit URL-DID übereinstimmen → `403`
-4. Ed25519-Signatur muss gültig sein → `400`
-5. Gespeichert → `200`
+### JWS Payload Formats
 
-### GET-Antwort
-
-- `200` mit `Content-Type: application/jws` — JWS-String
-- `404` — Keine Daten für diese DID
-
-### Payload-Formate (im JWS)
-
-**Profil:**
+**Profile:**
 ```json
 {
   "did": "did:key:z6Mk...",
   "name": "Alice",
-  "bio": "...",
-  "avatar": "data:image/...",
-  "updatedAt": "2026-02-11T..."
+  "bio": "Short bio",
+  "avatar": "data:image/png;base64,...",
+  "updatedAt": "2026-03-15T12:00:00Z"
 }
 ```
 
-**Verifikationen:**
-```json
-{
-  "did": "did:key:z6Mk...",
-  "verifications": [
-    { "id": "...", "from": "did:key:...", "to": "did:key:...", "timestamp": "...", "proof": { ... } }
-  ],
-  "updatedAt": "2026-02-11T..."
-}
-```
+**Verifications / Attestations** follow the same wrapper with a `verifications` or `attestations` array.
 
-**Attestationen:**
-```json
-{
-  "did": "did:key:z6Mk...",
-  "attestations": [
-    { "id": "...", "from": "did:key:...", "to": "did:key:...", "claim": "...", "createdAt": "...", "proof": { ... } }
-  ],
-  "updatedAt": "2026-02-11T..."
-}
-```
-
-## Entwicklung
+## How to Run
 
 ```bash
-# Aus dem Monorepo-Root:
-pnpm --filter wot-profiles dev    # Startet auf Port 8788
-pnpm --filter wot-profiles test   # Tests ausführen
+# Development (tsx, auto-restarts on change)
+pnpm dev
+
+# Build
+pnpm build
+
+# Start compiled server
+pnpm start
+
+# Run tests (25 tests)
+pnpm test
 ```
 
-### Umgebungsvariablen
+Environment variables:
 
-| Variable | Standard | Beschreibung |
-|----------|----------|--------------|
-| `PORT` | `8788` | HTTP-Port |
-| `DB_PATH` | `./profiles.db` | Pfad zur SQLite-Datenbank |
+| Variable  | Default        | Description          |
+|-----------|----------------|----------------------|
+| `PORT`    | `8788`         | HTTP listen port     |
+| `DB_PATH` | `profiles.db`  | SQLite database path |
 
 ## Docker
 
@@ -115,15 +130,8 @@ cd packages/wot-profiles
 docker compose up -d
 ```
 
-Persistenz über Docker Volume `profiles-data` unter `/data/profiles.db`.
+Persistence via Docker volume mounted at `/data/profiles.db`.
 
-## Architektur
+## Main Repo
 
-```
-start.ts          Einstiegspunkt (PORT, DB_PATH aus env)
-server.ts         HTTP-Routing, CORS, JWS-Validierung
-profile-store.ts  SQLite-Storage (3 Tabellen: profiles, verifications, attestations)
-jws-verify.ts     Standalone Ed25519/did:key JWS-Verifikation (keine wot-core-Abhängigkeit)
-```
-
-Der Service hat **keine Runtime-Abhängigkeit** auf `wot-core`. Die JWS-Verifikation (`jws-verify.ts`) implementiert Ed25519 + did:key-Auflösung eigenständig über die Web Crypto API.
+[github.com/antontranelis/web-of-trust](https://github.com/antontranelis/web-of-trust)
