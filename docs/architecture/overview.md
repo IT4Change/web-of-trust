@@ -1,362 +1,255 @@
-# Architektur
+# Architecture Overview
 
-> Framework-agnostische Architektur des Web of Trust
+> Framework-agnostic architecture of the Web of Trust
 >
-> Aktualisiert: 2026-02-15 (v2: 7-Adapter-Architektur + Offline-First + Outbox)
+> Updated: 2026-03-16 (v2: 7-Adapter Architecture + Four-Way Persistence + Yjs Default)
 
-## Überblick
+## Core Principle: Framework Agnosticism
 
-Das Web of Trust ist **framework-agnostisch** aufgebaut. Die Kernlogik ist unabhängig von der konkreten Implementierung der Datenhaltung, Kryptografie, Messaging und Synchronisation.
+The Web of Trust is built to be **framework-agnostic**. All domain logic is independent of the concrete storage engine, cryptography library, messaging transport, or CRDT implementation. This is enforced through a strict adapter interface layer.
 
-### Schichtenmodell (v2)
+**Why?**
 
-```
-┌──────────────────────────────────────────────────────────────────┐
-│                      WoT Application                              │
-├──────────────────────────────────────────────────────────────────┤
-│                                                                  │
-│  ┌──────────────────────────────────────────────────────────┐   │
-│  │               WoT Domain Layer                            │   │
-│  │  • Identity, Contact, Verification, Attestation          │   │
-│  │  • Item, Group, AutoGroup                                │   │
-│  │  • Business Logic (Empfänger-Prinzip)                    │   │
-│  └──────────────────────────────────────────────────────────┘   │
-│                            │                                     │
-│                            ▼                                     │
-│  ┌──────────────────────────────────────────────────────────┐   │
-│  │            7 Adapter Interfaces                           │   │
-│  │                                                           │   │
-│  │  Lokal (v1, implementiert):                               │   │
-│  │  • StorageAdapter        (lokale Persistenz)              │   │
-│  │  • ReactiveStorageAdapter (Live Queries)                  │   │
-│  │  • CryptoAdapter         (Signing/Encryption/DID)         │   │
-│  │                                                           │   │
-│  │  Netzwerk (v2, implementiert):                             │   │
-│  │  • DiscoveryAdapter      (Öffentliche Profile/Discovery)  │   │
-│  │  • MessagingAdapter      (Cross-User Delivery)            │   │
-│  │  • ReplicationAdapter    (CRDT Sync + Spaces)             │   │
-│  │                                                           │   │
-│  │  Querschnitt (v2, geplant):                                │   │
-│  │  • AuthorizationAdapter  (UCAN-like Capabilities)         │   │
-│  └──────────────────────────────────────────────────────────┘   │
-│                            │                                     │
-│     ┌────────┬─────────┬───┼────┬─────────┬─────────┐           │
-│     ▼        ▼         ▼   ▼    ▼         ▼         ▼           │
-│  ┌──────┐ ┌──────┐ ┌──────┐ ┌──────┐ ┌──────┐ ┌──────┐        │
-│  │Evolu │ │wot-  │ │wot-  │ │Auto- │ │Matrix│ │Custom│        │
-│  │Store │ │profi.│ │relay │ │merge │ │Client│ │UCAN  │        │
-│  └──────┘ └──────┘ └──────┘ └──────┘ └──────┘ └──────┘        │
-│                                                                  │
-└──────────────────────────────────────────────────────────────────┘
+- No single framework covers all WoT requirements
+- CRDT sync, peer messaging, and capability authorization are orthogonal concerns
+- The technology landscape for decentralized systems is still evolving
+- Adapter boundaries make unit testing trivial (swap any adapter for a NoOp or InMemory variant)
+
+---
+
+## Layer Model
+
+```mermaid
+graph TD
+    A[WoT Application] --> B[WoT Domain Layer]
+    B --> C[7 Adapter Interfaces]
+    C --> D1[StorageAdapter]
+    C --> D2[ReactiveStorageAdapter]
+    C --> D3[CryptoAdapter]
+    C --> D4[DiscoveryAdapter]
+    C --> D5[MessagingAdapter]
+    C --> D6[ReplicationAdapter]
+    C --> D7[AuthorizationAdapter]
+
+    style A stroke:#888,fill:none
+    style B stroke:#888,fill:none
+    style C stroke:#888,fill:none
+    style D1 stroke:#888,fill:none
+    style D2 stroke:#888,fill:none
+    style D3 stroke:#888,fill:none
+    style D4 stroke:#888,fill:none
+    style D5 stroke:#888,fill:none
+    style D6 stroke:#888,fill:none
+    style D7 stroke:#888,fill:none
 ```
 
-### Drei orthogonale Achsen
+The **Domain Layer** contains all business logic: Identity, Contact, Verification, Attestation, Item, Group, Space. It only ever calls adapter interfaces — never concrete implementations.
+
+---
+
+## Three Orthogonal Axes
+
+The network adapters each solve a fundamentally different problem:
 
 ```
-Discovery-Achse                  Messaging-Achse               CRDT/Sync-Achse
-(Öffentliche Sichtbarkeit)       (Zustellung zwischen DIDs)    (Zustandskonvergenz)
+Discovery Axis                  Messaging Axis                 Replication Axis
+(Public visibility)             (Cross-user delivery)          (State convergence)
 
-"Wie finde ich Infos              "Wie erreicht eine Nachricht  "Wie konvergiert der Zustand
- über eine DID?"                   den Empfänger?"               über Geräte und Nutzer?"
+"How do I find information      "How does a message reach      "How does state converge
+ about a DID?"                   a specific recipient?"         across devices and users?"
 
-→ DiscoveryAdapter               → MessagingAdapter            → ReplicationAdapter
-→ wot-profiles (POC)             → Custom WS (POC)             → Evolu (POC)
-→ Automerge/DHT (Ziel)           → Matrix (Ziel)               → Automerge (Ziel)
+→ DiscoveryAdapter              → MessagingAdapter             → ReplicationAdapter
+→ wot-profiles (current)        → Custom WebSocket (current)   → Yjs (default)
+→ DHT / federated (future)      → Matrix (future)              → Automerge (option)
 
-  VOR dem Kontakt                  ZWISCHEN bekannten DIDs        INNERHALB einer Gruppe
-  (öffentlich, anonym)             (privat, E2EE)                 (Group Key, CRDT)
+  BEFORE contact                  BETWEEN known DIDs              WITHIN a group
+  (public, anonymous)             (private, E2EE)                 (group key, CRDT)
 ```
 
-## Adapter-Pattern
+These three axes are independent. You can replace the messaging transport without touching replication, and vice versa.
 
-Die Adapter-Interfaces ermöglichen es, verschiedene Frameworks auszuprobieren, ohne die Kernlogik zu ändern.
+---
 
-### Warum Framework-agnostisch?
+## The Seven Adapters
 
-1. **Kein Framework passt zu 100%** — WoT-spezifische Anforderungen erfordern eigene Implementierung
-2. **Zwei verschiedene Achsen** — CRDT/Sync und Messaging sind orthogonale Probleme
-3. **Technologie-Landschaft bewegt sich** — NextGraph, p2panda, Willow könnten in 12 Monaten reif sein
-4. **Phased Migration** — Custom WS → Matrix, Evolu → Automerge ohne Business-Logik-Änderung
-5. **Testing** — Einfaches Mocking für Unit-Tests (NoOp-Implementierungen)
+Interface definitions live in `packages/wot-core/src/adapters/interfaces/`.
 
-## Kernkonzepte
+### 1. StorageAdapter
 
-### Empfänger-Prinzip
+Local persistence for all domain entities: Identity, Contacts, Verifications, Attestations, Spaces, Group Keys.
 
-Das zentrale Designprinzip: **Daten werden beim Empfänger gespeichert.**
+**Implementations:**
 
-```
-Anna → Verification → Ben
-       └─────────────────┘
-       Gespeichert bei Ben
+- `YjsStorageAdapter` — default, uses `YjsPersonalDocManager` (Y.Doc, pure JavaScript)
+- `AutomergeStorageAdapter` — option, uses `PersonalDocManager` (Automerge, Rust→WASM)
 
-Anna → Attestation → Ben
-       └────────────────┘
-       Gespeichert bei Ben
-```
+### 2. ReactiveStorageAdapter
 
-**Warum?**
-- Jeder kontrolliert seine eigenen Daten
-- Keine Konflikte beim Schreiben (jeder schreibt nur in seinen eigenen Speicher)
-- Einfachere CRDT-Konfliktauflösung
-- Privacy: Ich entscheide, was über mich sichtbar ist
+Live queries that react to data changes. Uses a `Subscribable<T>` pattern (`useState` + `useEffect`). Includes `watchIdentity()` for reactive identity observation.
 
-### Drei Sharing-Patterns
+**Implementations:** Provided by the same class as StorageAdapter in both CRDT variants.
 
-Die Architektur unterstützt drei fundamental verschiedene Sharing-Patterns:
+### 3. CryptoAdapter
 
-```
-1. GROUP SPACES (Kanban, Kalender, Karte)
-   Mechanismus: ReplicationAdapter (CRDT Sync)
-   Verschlüsselung: Group Key
-   → Alle Members sehen alle Daten im Space
+Key generation, signing, verification, encryption, DID conversion.
 
-2. SELECTIVE SHARING (Event für 3 von 10 Kontakten)
-   Mechanismus: MessagingAdapter (Item-Key Delivery)
-   Verschlüsselung: Item-Key pro Item, encrypted per Recipient
-   → Nur ausgewählte Empfänger können entschlüsseln
+- Ed25519 signing and verification
+- X25519 key agreement (ECDH)
+- AES-256-GCM symmetric encryption
+- HKDF key derivation
+- did:key creation and resolution
 
-3. 1:1 DELIVERY (Attestation, Verification)
-   Mechanismus: MessagingAdapter (Fire-and-forget)
-   Verschlüsselung: E2EE mit Empfänger-PublicKey
-   → Empfänger-Prinzip: gespeichert beim Empfänger
-```
+**Implementation:** `WebCryptoAdapter` — WebCrypto API + @noble/ed25519
 
-### Verification = Gegenseitige Bestätigung
+### 4. DiscoveryAdapter
 
-Eine Verification ist eine signierte Aussage: "Ich habe diese Person verifiziert."
+Publish and retrieve public profiles. Everything signed (JWS), nothing encrypted. Readable anonymously; the holder controls what is published.
 
-```
-Anna verifiziert Ben:
-┌────────────────────────────────────┐
-│ Verification                       │
-│ from: did:key:anna                 │
-│ to: did:key:ben    ← Speicherort   │
-│ proof: anna_signature              │
-└────────────────────────────────────┘
-→ Gespeichert bei Ben
+**Implementations:**
 
-Ben verifiziert Anna:
-┌────────────────────────────────────┐
-│ Verification                       │
-│ from: did:key:ben                  │
-│ to: did:key:anna   ← Speicherort   │
-│ proof: ben_signature               │
-└────────────────────────────────────┘
-→ Gespeichert bei Anna
-```
+- `HttpDiscoveryAdapter` — HTTP REST against `wot-profiles` server
+- `OfflineFirstDiscoveryAdapter` — cache wrapper with dirty-flag tracking, delegates to `HttpDiscoveryAdapter`
 
-Jede Richtung ist ein **separates Dokument** mit **einer Signatur**.
+### 5. MessagingAdapter
 
-### Attestation = Geschenk
+Cross-user message delivery between DIDs. Used for attestation delivery, verification exchange, item-key delivery, and CRDT sync bootstrapping.
 
-Eine Attestation ist eine signierte Aussage über jemanden - wie ein Geschenk.
+**Implementations:**
 
-```
-┌────────────────────────────────────┐
-│ Attestation (signiert von Anna)    │
-│ from: did:key:anna                 │
-│ to: did:key:ben    ← Speicherort   │
-│ claim: "Kann gut kochen"           │
-│ proof: anna_signature              │
-└────────────────────────────────────┘
-→ Gespeichert bei Ben
-→ Ben entscheidet: accepted = true/false
+- `WebSocketMessagingAdapter` — WebSocket client, ping/pong heartbeat (15s/5s), early-message buffer (CRDT-agnostic)
+- `OutboxMessagingAdapter` — decorator that queues messages when the relay is unreachable and flushes on reconnect (FIFO)
+- `InMemoryMessagingAdapter` — shared-bus pattern for unit tests
+
+The `OutboxMessagingAdapter` wraps any inner adapter and ensures critical messages (attestations, verifications) are never lost. Fire-and-forget types like `profile-update` can bypass the outbox via `skipTypes`.
+
+### 6. ReplicationAdapter
+
+CRDT-based group spaces with end-to-end encryption. Manages space membership and key rotation. Exposes a `SpaceHandle<T>` interface: `getDoc()`, `transact()`, `onRemoteUpdate()`, `close()`.
+
+**Implementations:**
+
+- `YjsReplicationAdapter` — default; Yjs Y.Doc + `EncryptedSyncService` + `GroupKeyService`
+- `AutomergeReplicationAdapter` — option; same services, Automerge CRDT
+
+### 7. AuthorizationAdapter
+
+UCAN-inspired capability tokens: signed, delegatable, attenuatable, offline-verifiable. Permissions at `read / write / delete / delegate` granularity.
+
+**Implementations:**
+
+- `InMemoryAuthorizationAdapter` — for tests and POC (creator = admin)
+- `crypto/capabilities.ts` — create, verify, delegate, extract; uses a `SignFn` pattern so the private key never leaves `WotIdentity`
+
+---
+
+## Three Sharing Patterns
+
+The architecture supports three fundamentally different ways to share data:
+
+```mermaid
+graph LR
+    A1[Group Spaces] -->|ReplicationAdapter| B1[CRDT Sync\nGroup Key\nAll members see all data]
+    A2[Selective Sharing] -->|MessagingAdapter| B2[Item-Key per item\nEncrypted per recipient\nOnly chosen recipients]
+    A3[1:1 Delivery] -->|MessagingAdapter| B3[E2EE with recipient pubkey\nReceiver Principle\nAttestation / Verification]
+
+    style A1 stroke:#888,fill:none
+    style A2 stroke:#888,fill:none
+    style A3 stroke:#888,fill:none
+    style B1 stroke:#888,fill:none
+    style B2 stroke:#888,fill:none
+    style B3 stroke:#888,fill:none
 ```
 
-**Wichtig:** Das `accepted`-Flag ist **nicht** Teil des signierten Dokuments. Es ist lokale Metadaten, die nur der Empfänger kontrolliert.
+---
 
-### Contact = Lokaler Cache
+## The Receiver Principle
 
-Ein Contact speichert den Public Key einer verifizierten Person für E2E-Verschlüsselung.
+The central design principle: **data is stored at the recipient.**
 
-```
-Contact {
-  did: "did:key:ben"
-  publicKey: "..."        // Für Verschlüsselung
-  status: "active"        // pending | active
-}
-```
+When Anna sends an attestation to Ben, it is stored in Ben's data — not Anna's. When Ben verifies Anna, that verification lives in Anna's document. Consequences:
 
-## Adapter Interfaces
+- Each person controls their own storage
+- No write conflicts (everyone only writes to their own data)
+- CRDT conflict resolution is simpler
+- Privacy: you decide what is visible about you
 
-Die konkreten Interface-Definitionen befinden sich in `packages/wot-core/src/adapters/interfaces/`.
-
-### Bestehend (v1, implementiert)
-
-#### StorageAdapter
-
-Verantwortlich für:
-- Persistierung aller Daten (Identity, Contacts, Verifications, Attestations)
-- Lokale Metadaten (AttestationMetadata mit `accepted`)
-
-**Implementierungen:**
-- `EvoluStorageAdapter` (Demo-App) - aktiv genutzt
-- `LocalStorageAdapter` (IndexedDB) - in wot-core
-
-#### ReactiveStorageAdapter
-
-Verantwortlich für:
-- Live Queries die auf Datenänderungen reagieren
-- `Subscribable<T>` Pattern mit `useState`+`useEffect` (nicht `useSyncExternalStore` — Evolu's `loadQuery().then()` in `subscribe()` verletzt dessen Contract)
-- `watchIdentity()` — Reaktive Identity-Änderungen beobachten
-
-**Implementierungen:**
-- `EvoluStorageAdapter` (implementiert beide Interfaces)
-
-#### CryptoAdapter
-
-Verantwortlich für:
-- Key-Generierung (Ed25519)
-- Mnemonic / Recovery Phrase (BIP39, deutsche Wortliste)
-- Signieren und Verifizieren
-- Verschlüsselung (X25519 + AES-256-GCM)
-- DID-Konvertierung (did:key)
-
-**Implementierungen:**
-- `WebCryptoAdapter` (noble/ed25519 + Web Crypto API)
-
-### Neu (v2)
-
-#### DiscoveryAdapter
-
-Verantwortlich für:
-
-- Öffentliche Profile publizieren und abrufen
-- Verifikationen und Attestationen öffentlich sichtbar machen
-- DID-basierte Suche (wer ist diese DID?)
-
-**Designprinzip:** Alles signiert (JWS), nichts verschlüsselt. Anonym lesbar, Inhaber kontrolliert Sichtbarkeit.
-
-**Implementierungen:**
-
-- `HttpDiscoveryAdapter` (wot-profiles) — HTTP REST + SQLite, aktiv genutzt
-- `OfflineFirstDiscoveryAdapter` (Wrapper) — Offline-Cache + Dirty-Flag-Tracking, delegiert an HttpDiscoveryAdapter
-
-#### MessagingAdapter
-
-Verantwortlich für:
-- Cross-User Delivery zwischen DIDs
-- Attestation/Verification Zustellung (Empfänger-Prinzip)
-- Item-Key Delivery (selektive Sichtbarkeit)
-- DID-Auflösung (wie findet man den Empfänger?)
-
-**Implementierungen:**
-
-- `InMemoryMessagingAdapter` (Tests) — Shared-Bus Pattern für Unit-Tests
-- `WebSocketMessagingAdapter` (POC) — Browser-nativer WebSocket Client + wot-relay Server, Ping/Pong Heartbeat (15s/5s)
-- `OutboxMessagingAdapter` (POC) — Decorator mit persistenter Outbox-Queue für Offline-Zuverlässigkeit
-- Matrix Client (Produktion, geplant)
-
-**Offline-Zuverlässigkeit (Decorator Pattern):**
-
-```text
-OutboxMessagingAdapter (Wrapper)
-  └── WebSocketMessagingAdapter (Inner)
-       └── wot-relay (Server)
-
-send() → connected? → inner.send() mit Timeout
-                    → Fehler/Timeout → outbox.enqueue()
-       → disconnected? → outbox.enqueue() + synthetic receipt
-       → reconnect → flushOutbox() (FIFO)
-```
-
-Der `OutboxMessagingAdapter` stellt sicher, dass kritische Nachrichten (Attestationen, Verifikationen) nie verloren gehen. Konfigurierbare `skipTypes` (z.B. `profile-update`) überspringen die Outbox für Fire-and-Forget-Nachrichten.
-
-#### ReplicationAdapter
-
-Verantwortlich für:
-- Multi-Device Sync (Personal Space)
-- Multi-User Sync (Shared Spaces: Kanban, Kalender, Karte)
-- Membership Management (wer ist in welchem Space?)
-
-**Implementierungen:**
-
-- `AutomergeReplicationAdapter` (POC) — Automerge CRDT + EncryptedSyncService + GroupKeyService + MessagingAdapter
-- Evolu (Personal Space, Multi-Device — geplant)
-- Matrix-backed (Produktion, geplant)
-
-#### AuthorizationAdapter
-
-Verantwortlich für:
-- UCAN-ähnliche Capabilities (signiert, delegierbar)
-- Read/Write/Delete/Delegate Granularität
-- Proof Chains (offline-verifizierbar)
-
-**Geplante Implementierungen:**
-- NoOp (POC: Creator = Admin)
-- Custom UCAN-like (Produktion)
-
-> Vollständige Interface-Spezifikationen: [Adapter-Architektur v2](../architecture/adapters.md)
-
-## Referenz: wot-core
-
-Die TypeScript-Definitionen aller Typen und Interfaces befinden sich im `packages/wot-core` Package:
+A verification is two separate documents, each with one signature, stored at the respective recipient:
 
 ```
-packages/wot-core/src/
-├── types/
-│   ├── identity.ts        # Identity, Profile, PublicProfile, KeyPair
-│   ├── contact.ts         # Contact, ContactStatus
-│   ├── verification.ts    # Verification, GeoLocation
-│   ├── attestation.ts     # Attestation, AttestationMetadata
-│   ├── proof.ts           # Proof (W3C Data Integrity)
-│   ├── messaging.ts       # MessageEnvelope, DeliveryReceipt, MessagingState
-│   ├── resource-ref.ts    # ResourceRef branded type (wot:<type>:<id>)
-│   └── space.ts           # SpaceInfo, SpaceMemberChange, ReplicationState
-├── adapters/
-│   ├── interfaces/
-│   │   ├── StorageAdapter.ts
-│   │   ├── ReactiveStorageAdapter.ts    # + watchIdentity()
-│   │   ├── Subscribable.ts
-│   │   ├── CryptoAdapter.ts            # + Symmetric + EncryptedPayload
-│   │   ├── MessagingAdapter.ts         # Cross-User Messaging
-│   │   ├── DiscoveryAdapter.ts         # Public Profile Discovery
-│   │   ├── DiscoverySyncStore.ts       # Offline-Cache Interface
-│   │   ├── OutboxStore.ts             # Messaging Outbox Interface
-│   │   └── ReplicationAdapter.ts       # CRDT Spaces + SpaceHandle<T>
-│   ├── crypto/
-│   │   └── WebCryptoAdapter.ts         # Ed25519 + X25519 + AES-256-GCM
-│   ├── messaging/
-│   │   ├── InMemoryMessagingAdapter.ts  # Shared-Bus für Tests
-│   │   ├── InMemoryOutboxStore.ts       # In-Memory Outbox für Tests
-│   │   ├── OutboxMessagingAdapter.ts    # Offline-Queue Decorator
-│   │   └── WebSocketMessagingAdapter.ts # Browser WebSocket Client + Heartbeat
-│   ├── discovery/
-│   │   ├── HttpDiscoveryAdapter.ts     # HTTP-based (wot-profiles)
-│   │   ├── OfflineFirstDiscoveryAdapter.ts  # Offline-Cache Wrapper
-│   │   └── InMemoryDiscoverySyncStore.ts    # In-Memory Cache für Tests
-│   ├── replication/
-│   │   └── AutomergeReplicationAdapter.ts   # Automerge + E2EE + GroupKeys
-│   └── storage/
-│       └── LocalStorageAdapter.ts
-├── services/
-│   ├── ProfileService.ts             # signProfile, verifyProfile (JWS)
-│   ├── EncryptedSyncService.ts       # Encrypt/Decrypt CRDT Changes
-│   └── GroupKeyService.ts            # Group Key Management (Generations)
-├── crypto/
-│   ├── did.ts             # did:key Implementierung
-│   ├── jws.ts             # JSON Web Signature
-│   └── encoding.ts        # Base58, Base64Url
-├── identity/
-│   ├── WotIdentity.ts     # Ed25519 + X25519 + JWS + HKDF
-│   └── SeedStorage.ts     # Encrypted Seed in IndexedDB
-├── contact/
-│   └── ContactStorage.ts  # Contact CRUD in IndexedDB
-├── verification/
-│   └── VerificationHelper.ts  # Challenge-Response-Protokoll
-└── wordlists/
-    └── german-positive.ts # 2048 deutsche BIP39-Wörter
+Anna verifies Ben  →  stored at Ben   (signed by Anna)
+Ben verifies Anna  →  stored at Anna  (signed by Ben)
 ```
 
-## Framework-Evaluation
+An attestation is a signed claim delivered to its subject. The `accepted` flag is local metadata controlled only by the recipient — it is not part of the signed payload.
 
-Für eine detaillierte Analyse aller evaluierten CRDT/E2EE/Messaging Frameworks siehe:
-→ [Framework-Evaluation v2](../research/framework-evaluation.md)
+---
 
-## Weiterführend
+## Four-Way Persistence
 
-- [Adapter-Architektur v2](../architecture/adapters.md) - 7-Adapter-Spezifikation
-- [Entitäten](entitaeten.md) - Datenmodell im Detail
-- [Sync-Protokoll](../architecture/sync-protocol.md) - Wie Daten synchronisiert werden
-- [Verschlüsselung](../architecture/encryption.md) - E2E-Verschlüsselung
+Every personal document and group space is persisted through four independent layers:
+
+| Layer | Transport | Purpose | Debounce |
+| --- | --- | --- | --- |
+| **CompactStore** | IndexedDB | Local snapshot — survives page reload | None (immediate) |
+| **Relay** | WebSocket | Real-time sync to other devices | None (immediate) |
+| **Vault** | HTTP | Encrypted cloud backup | 5 seconds |
+| **wot-profiles** | HTTP | Discovery — public profile | On publish |
+
+The Relay and CompactStore receive every change immediately. The Vault receives a debounced full snapshot. This architecture is CRDT-agnostic: each layer stores or forwards raw bytes (encrypted where applicable).
+
+For detailed sync patterns (peer sync, vault snapshot, space invite), see [sync.md](./sync.md).
+
+---
+
+## Identity
+
+Every user is identified by a `did:key` derived deterministically from a BIP39 mnemonic (12 German words, 128 bits of entropy). The same seed on a new device produces the same DID and the same keys — no server, no login token.
+
+- **Ed25519** — signing
+- **X25519** — key agreement (separate HKDF derivation path)
+- **HKDF** — framework key derivation (non-extractable master key)
+- **AES-256-GCM** — symmetric encryption of stored seed (PBKDF2, 600k iterations)
+
+Multi-device: import the same mnemonic. The Relay and Vault handle state merge.
+
+---
+
+## CRDT Choice
+
+**Yjs is the default CRDT since 2026-03-15.** Automerge remains available via `VITE_CRDT=automerge`.
+
+| | Yjs (default) | Automerge (option) |
+| --- | --- | --- |
+| Implementation | Pure JavaScript | Rust → WASM |
+| Mobile init (163 KB doc) | ~85 ms | ~6.4 s |
+| Bundle size | 69 KB | 1.7 MB |
+| Garbage collection | Built-in | Manual compaction |
+
+The switch from Automerge to Yjs was driven by WASM performance on mobile: Automerge caused 30+ second UI freezes on Android. The adapter boundary made the migration possible without touching any domain logic.
+
+Benchmark results are available live at `/benchmark`.
+
+---
+
+## Infrastructure Packages
+
+Three standalone server packages complement the core:
+
+**wot-relay** — WebSocket relay server. DID-based message routing, delivery ACK (messages persisted until client ACKs), multi-device (multiple connections per DID), heartbeat. Live: `wss://relay.utopia-lab.org`
+
+**wot-vault** — Encrypted document store. Append-only change log + snapshots. Auth via signed capability tokens. HTTP REST. Live: used internally by demo app.
+
+**wot-profiles** — Public profile server. HTTP REST (`GET /p/{did}`, `PUT /p/{did}`, `GET /p/batch`). JWS verification built-in, no wot-core dependency. Live: `https://profiles.utopia-lab.org`
+
+---
+
+## Further Reading
+
+- [Adapter Specification](./adapters.md) — full interface definitions for all 7 adapters
+- [Sync Patterns](./sync.md) — peer sync, vault snapshot, space invite
+- [Encryption](./encryption.md) — E2EE, group keys, envelope signing
+- [Entities](./entities.md) — domain data model in detail
+- [DID Key](./did-key.md) — why did:key and how it works
+- [Framework Evaluation](../research/framework-evaluation.md) — 16 evaluated frameworks
+- [Vault Sync Concepts](../concepts/vault-sync.md) — Automerge.save() semantics, history overhead
+- [Current Implementation](../CURRENT_IMPLEMENTATION.md) — what is actually built today

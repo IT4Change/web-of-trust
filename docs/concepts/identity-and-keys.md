@@ -96,9 +96,9 @@ graph TD
 
     B -->|encrypt with passphrase| H[IndexedDB<br/>encrypted seed]
 
-    style A fill:#e1f5fe
-    style E fill:#c8e6c9
-    style H fill:#fff3e0
+    style A stroke:#2196f3,stroke-width:2px
+    style E stroke:#4caf50,stroke-width:2px
+    style H stroke:#ff9800,stroke-width:2px
 ```
 
 ### Wordlist

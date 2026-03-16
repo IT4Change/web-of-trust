@@ -30,10 +30,10 @@ graph TD
     V -->|on new device| App
     P -->|on seed restore| App
 
-    style CS fill:#e8f5e9
-    style R fill:#e3f2fd
-    style V fill:#fff3e0
-    style P fill:#f3e5f5
+    style CS stroke:#4caf50,stroke-width:2px
+    style R stroke:#2196f3,stroke-width:2px
+    style V stroke:#ff9800,stroke-width:2px
+    style P stroke:#9c27b0,stroke-width:2px
 ```
 
 | Path | Transport | Purpose | Latency | Encryption |
@@ -99,10 +99,10 @@ flowchart TD
 
     Connect --> Sync[Receive queued messages<br/>from Relay]
 
-    style Load fill:#e8f5e9
-    style Restore fill:#fff3e0
-    style Bootstrap fill:#f3e5f5
-    style New fill:#fafafa
+    style Load stroke:#4caf50,stroke-width:2px
+    style Restore stroke:#ff9800,stroke-width:2px
+    style Bootstrap stroke:#9c27b0,stroke-width:2px
+    style New stroke:#9e9e9e,stroke-width:2px
 ```
 
 **Fallback chain:** CompactStore → Vault → wot-profiles → empty doc
