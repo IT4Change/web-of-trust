@@ -76,24 +76,24 @@
 
 ## Next Up
 
-### Offline E2E Tests (Priority 1)
+### Offline E2E Tests (Done)
 
 Comprehensive end-to-end tests for offline scenarios:
 
-- [ ] App start without network (load from CompactStore)
-- [ ] Edit profile, create attestation, create space while offline
-- [ ] Reconnect → sync to other devices
-- [ ] Incoming attestations/verifications while offline → appear after reconnect
-- [ ] Tab close without internet → reopen → data persisted
-- [ ] Seed restore offline → online → Vault merge (no data loss)
-- [ ] Cave verification (both peers completely offline, sync later)
-- [ ] Outbox behavior (queue → online → flush → delivered)
+- [x] App start without network (load from CompactStore)
+- [x] Edit profile, create attestation while offline
+- [x] Reconnect → sync to other devices
+- [x] Incoming attestations/verifications while offline → appear after reconnect
+- [x] Tab close without internet → reopen → data persisted
+- [x] Seed restore offline → online → Vault merge (no data loss)
+- [x] Cave verification (both peers completely offline, sync later)
+- [x] Outbox behavior (queue → online → flush → delivered)
 
-### Package Separation (Priority 2)
+### Package Separation (Done)
 
-- [ ] Remove Automerge from wot-core bundle (currently imported even in Yjs mode)
-- [ ] Lazy-load adapter packages
-- [ ] Tree-shaking optimization
+- [x] `@real-life/adapter-automerge` — separate package
+- [x] `@real-life/adapter-yjs` — separate package
+- [x] Automerge not loaded when using Yjs adapter
 
 ### NLNet Application (Deadline: April 1, 2026)
 
