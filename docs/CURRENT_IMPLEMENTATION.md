@@ -5,12 +5,12 @@
 
 ## Last Updated
 
-**Date:** 2026-03-15
-**Phase:** Yjs Migration + CRDT Benchmarks
+**Date:** 2026-03-16
+**Phase:** Offline Hardening + Real Life Stack Connector
 **Demo:** https://web-of-trust.de/demo/
 **Relay:** wss://relay.utopia-lab.org
 **Profiles:** https://profiles.utopia-lab.org
-**Benchmark:** https://web-of-trust.de/demo/benchmark
+**Benchmark:** <https://web-of-trust.de/benchmark>
 
 ---
 
@@ -110,10 +110,17 @@ PersonalDoc {
   verifications:       { [id]: VerificationDoc }
   attestations:        { [id]: AttestationDoc }
   attestationMetadata: { [id]: { accepted, deliveryStatus } }
-  outbox:              { [id]: OutboxEntryDoc }
   spaces:              { [id]: SpaceMetadataDoc }
   groupKeys:           { [spaceId:gen]: GroupKeyDoc }
 }
+
+// Device-local (IndexedDB, NOT in CRDT):
+LocalCacheStore {
+  outbox::{id}:        OutboxEntry          // unsent messages
+  cachedGraph:         { [did]: profile }   // profile cache
+  publishState:        { dirty flags }      // sync state
+}
+
 ```
 
 ### Two Implementations
@@ -327,7 +334,7 @@ Environment variable `VITE_CRDT` controls which StorageAdapter + PersonalDocMana
 
 ### E2E Tests (Playwright)
 
-7 E2E tests, all passing with **both** CRDT adapters:
+14 E2E tests, all passing with **both** CRDT adapters:
 
 1. **Onboarding** — Generate → Verify → Profile → Protect → Complete
 2. **Unlock** — Reload → Passphrase → Logged In
@@ -336,6 +343,13 @@ Environment variable `VITE_CRDT` controls which StorageAdapter + PersonalDocMana
 5. **Attestation Flow** — Alice attests Bob → Bob publishes → visible on public profile
 6. **Multi-Device Sync** — Alice on 2 devices + Bob: personal-doc sync, message routing, space sync
 7. **Spaces** — Create space, invite member, shared notes with CRDT merge, remove member
+8. **Offline Basics** — Edit profile offline, create attestation offline → outbox → reconnect → delivered
+9. **Offline Incoming** — Alice offline, Bob sends attestation → Alice reconnects → appears
+10. **Offline Verification** — Cave scenario: both offline, QR scan → online → mutually connected
+11. **Offline Spaces** — Create space offline, invite while offline → appears on reconnect
+12. **Offline Restore** — Seed restore on new device → relay sync → contacts appear
+13. **Vault Merge** — Seed restore → edit profile → CRDT merge → contacts + new name preserved
+14. **Offline Multi-Device** — Device 2 offline, Device 1 edits → Device 2 reconnects → synced
 
 ---
 
@@ -350,8 +364,9 @@ Environment variable `VITE_CRDT` controls which StorageAdapter + PersonalDocMana
 | wot-vault | 27 | 4.1.0 |
 | wot-profiles | 25 | 4.1.0 |
 | Demo (Unit) | 59 | 4.1.0 |
-| Demo (E2E) | 7 | Playwright |
-| **Total** | **534** | |
+| Demo (E2E) | 14 | Playwright |
+| adapter-yjs | 25 | 4.1.0 |
+| **Total** | **566** | |
 
 ### wot-core Test Files (29)
 
@@ -486,6 +501,7 @@ apps/demo/src/
 │   ├── AutomergePublishStateStore.ts
 │   ├── AutomergeSpaceMetadataStorage.ts
 │   ├── LocalCacheStore.ts
+│   ├── LocalOutboxStore.ts          # Device-local outbox (IndexedDB)
 │   └── PersonalNetworkAdapter.ts
 ├── context/
 │   ├── AdapterContext.tsx           # CRDT Switch + all adapter init
@@ -562,20 +578,27 @@ CRDT updates are encrypted **before** sync. The relay only sees ciphertext. Insp
 
 ## Next Steps
 
-### Priority 1: Offline E2E Tests
+### Priority 1: WoT Connector for Real Life Stack
 
-19 planned scenarios:
-- Offline start, offline actions (profile, attestation, space, verification)
-- Reconnect sync, incoming messages while offline
-- Close tab + return later, vault fallback
-- Verification in a cave (both offline, QR scan)
-- Seed restore offline → vault merge on reconnect
+`real-life-stack/packages/wot-connector/` — Yjs migration, feature-parity with Demo App. In progress:
 
-### Priority 2: WoT Connector for Real Life Stack
+- ✅ ItemGroupCapable interface + type guards + 41 unit tests
+- ✅ App.tsx bypass cleanup (6 `(connector as any)` eliminated)
+- ✅ Profile sync (reactive contact name updates)
+- ✅ Attestation completeness (send, receive, verify, ACK, retry)
+- ✅ OfflineFirstDiscoveryAdapter + dirty flag sync
+- ⬜ Space-name sync (rename propagation to members)
+- ⬜ Full Yjs adapter integration
 
-`real-life-stack/packages/wot-connector/` — Integration with Yjs adapter, CompactStore, new architecture.
+### Priority 2: PWA / Service Worker
 
-### Priority 3: CRDT Adapter Library
+App-asset caching for true offline-first experience. 3 of 19 E2E scenarios blocked by missing Service Worker (tab close offline → tab open offline).
+
+### Priority 3: IPFS Blob Store
+
+Encrypted binary storage (profile pictures, attachments) on IPFS. Concept documented (`docs/concepts/encrypted-blob-store.md`). Three scopes: public, contacts, space.
+
+### Priority 4: CRDT Adapter Library
 
 Swappable CRDT packages for external developers:
 ```
@@ -590,6 +613,7 @@ Swappable CRDT packages for external developers:
 - **Social Recovery (Shamir)** — Seed backup via verified contacts
 - **NextGraph Evaluation** — Call with Nicos (maintainer) pending
 - **Keyhive/BeeKEM** — Earliest production-ready end of 2027
+- **NPM Publishing Pipeline** — adapter-yjs, adapter-automerge, wot-core
 
 ---
 
@@ -622,4 +646,4 @@ Three patterns documented (`docs/concepts/vault-sync.md`):
 ---
 
 *This document is updated on significant changes.*
-*Last change: Yjs Migration (2026-03-15)*
+*Last change: Offline Hardening + RLS Connector (2026-03-16)*
