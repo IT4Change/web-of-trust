@@ -353,7 +353,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
     // Save to CompactStore
     await this._saveToCompactStore(state)
 
-    // Save metadata
+    // Save metadata + group key
     if (this.metadataStorage) {
       await this.metadataStorage.saveSpaceMetadata({
         info,
@@ -361,6 +361,11 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
         documentUrl: `yjs:${spaceId}`,
         memberEncryptionKeys: {},
       })
+      const groupKey = this.groupKeyService.getCurrentKey(spaceId)
+      const generation = this.groupKeyService.getCurrentGeneration(spaceId)
+      if (groupKey) {
+        await this.metadataStorage.saveGroupKey({ spaceId, generation, key: groupKey })
+      }
     }
 
     this.notifySpaceListeners()
@@ -543,6 +548,33 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
     return () => { this.memberChangeListeners.delete(callback) }
   }
 
+  /** Leave a space: clean up local state, metadata, group keys, compact store */
+  async leaveSpace(spaceId: string): Promise<void> {
+    const state = this.spaces.get(spaceId)
+    if (state) {
+      state.unsubUpdate?.()
+      state.doc.destroy()
+      this.spaces.delete(spaceId)
+    }
+
+    // Clean up schedulers
+    this.vaultSchedulers.get(spaceId)?.destroy()
+    this.vaultSchedulers.delete(spaceId)
+    this.compactSchedulers.get(spaceId)?.destroy()
+    this.compactSchedulers.delete(spaceId)
+
+    // Remove from persistent storage
+    if (this.metadataStorage) {
+      await this.metadataStorage.deleteSpaceMetadata(spaceId)
+      await this.metadataStorage.deleteGroupKeys(spaceId)
+    }
+    if (this.compactStore && 'delete' in this.compactStore) {
+      await (this.compactStore as any).delete(spaceId)
+    }
+
+    this.notifySpaceListeners()
+  }
+
   async requestSync(_spaceId: string): Promise<void> {
     // No-op for now — sync happens automatically via update events
   }
@@ -557,13 +589,22 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
     if (!this.metadataStorage) return
 
     const allMeta = await this.metadataStorage.loadAllSpaceMetadata()
+    console.debug(`[YjsReplication] restoreSpacesFromMetadata: ${allMeta.length} spaces found`)
     for (const meta of allMeta) {
-      if (this.spaces.has(meta.info.id)) continue
-      if (this.spaceFilter && !this.spaceFilter(meta.info)) continue
+      if (this.spaces.has(meta.info.id)) {
+        console.debug(`[YjsReplication] skip ${meta.info.id} (already loaded)`)
+        continue
+      }
+      if (this.spaceFilter && !this.spaceFilter(meta.info)) {
+        console.debug(`[YjsReplication] skip ${meta.info.id} (filtered out, appTag=${meta.info.appTag})`)
+        continue
+      }
 
       // Restore group keys
       const keys = await this.metadataStorage.loadGroupKeys(meta.info.id)
+      console.debug(`[YjsReplication] space ${meta.info.id}: ${keys.length} group keys found`)
       for (const k of keys) {
+        console.debug(`[YjsReplication]   key gen=${k.generation} len=${k.key.length}`)
         this.groupKeyService.importKey(k.spaceId, k.key, k.generation)
       }
 
