@@ -27,7 +27,7 @@ import {
   VaultPushScheduler,
   signEnvelope,
 } from '@real-life/wot-core'
-import type { SpaceMetadataStorage } from '@real-life/wot-core'
+import type { SpaceMetadataStorage, AuthorizationAdapter } from '@real-life/wot-core'
 
 /** Duck-typed interface for CompactStorageManager / InMemoryCompactStore */
 export interface YjsCompactStore {
@@ -51,6 +51,7 @@ interface YjsReplicationConfig {
   compactStore?: YjsCompactStore
   vaultUrl?: string
   spaceFilter?: (info: SpaceInfo) => boolean
+  authorizationAdapter?: AuthorizationAdapter
 }
 
 // --- YjsSpaceHandle ---
@@ -245,6 +246,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
   private compactStore?: YjsCompactStore
   private vault?: VaultClient
   private spaceFilter?: (info: SpaceInfo) => boolean
+  private authorizationAdapter?: AuthorizationAdapter
 
   private spaces = new Map<string, YjsSpaceState>()
   private spaceListeners = new Set<(spaces: SpaceInfo[]) => void>()
@@ -263,6 +265,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
     this.metadataStorage = config.metadataStorage
     this.compactStore = config.compactStore
     this.spaceFilter = config.spaceFilter
+    this.authorizationAdapter = config.authorizationAdapter
     if (config.vaultUrl) {
       this.vault = new VaultClient(config.vaultUrl, config.identity)
     }
@@ -383,6 +386,16 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
       }
     }
 
+    // Grant owner all permissions via capability system
+    if (this.authorizationAdapter && type === 'shared') {
+      const resource = `wot:space:${spaceId}` as const
+      const expiration = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString()
+      const ownerCapability = await this.authorizationAdapter.grant(
+        resource, myDid, ['read', 'write', 'delete', 'delegate'], expiration
+      )
+      await this.authorizationAdapter.store(ownerCapability)
+    }
+
     this.notifySpaceListeners()
     return info
   }
@@ -426,6 +439,17 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
 
     const myDid = this.identity.getDid()
 
+    // Capability check: does the caller have delegate permission?
+    if (this.authorizationAdapter) {
+      const canDelegate = await this.authorizationAdapter.canAccess(
+        myDid, `wot:space:${spaceId}`, 'delegate'
+      )
+      if (!canDelegate) throw new Error('Not authorized to add members to this space')
+    } else {
+      // Fallback: only creator (members[0]) can add members
+      if (myDid !== state.info.members[0]) throw new Error('Only creator can add members')
+    }
+
     // Store member key
     state.memberEncryptionKeys.set(memberDid, memberEncryptionPublicKey)
 
@@ -446,8 +470,18 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
     const docBinary = Y.encodeStateAsUpdate(state.doc)
     const encrypted = await EncryptedSyncService.encryptChange(docBinary, groupKey, spaceId, generation, myDid)
 
+    // Grant capability to new member (read+write by default)
+    let memberCapability: string | undefined
+    if (this.authorizationAdapter) {
+      const expiration = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString()
+      memberCapability = await this.authorizationAdapter.grant(
+        `wot:space:${spaceId}`, memberDid,
+        ['read', 'write'], expiration
+      )
+    }
+
     // Send invite
-    const payload = {
+    const payload: Record<string, any> = {
       spaceId,
       spaceInfo: state.info,
       documentUrl: `yjs:${spaceId}`,
@@ -461,6 +495,9 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
         ciphertext: Array.from(encrypted.ciphertext),
         nonce: Array.from(encrypted.nonce),
       },
+    }
+    if (memberCapability) {
+      payload.capability = memberCapability
     }
 
     const envelope: MessageEnvelope = {
@@ -497,6 +534,18 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
     const state = this.spaces.get(spaceId)
     if (!state) return
 
+    const myDid = this.identity.getDid()
+
+    // Capability check: does the caller have delete permission?
+    if (this.authorizationAdapter) {
+      const canDelete = await this.authorizationAdapter.canAccess(
+        myDid, `wot:space:${spaceId}`, 'delete'
+      )
+      if (!canDelete) throw new Error('Not authorized to remove members from this space')
+    } else {
+      if (myDid !== state.info.members[0]) throw new Error('Only creator can remove members')
+    }
+
     state.memberEncryptionKeys.delete(memberDid)
     state.info.members = state.info.members.filter(d => d !== memberDid)
 
@@ -532,7 +581,6 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
 
     // Notify remaining members AND the removed member
     const notifyDids = [...state.info.members, memberDid]
-    const myDid = this.identity.getDid()
     const payload = {
       spaceId,
       memberDid,
@@ -596,6 +644,11 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
 
   getKeyGeneration(spaceId: string): number {
     return this.groupKeyService.getCurrentGeneration(spaceId)
+  }
+
+  /** Expose authorizationAdapter for capability-based access checks */
+  getAuthorizationAdapter(): AuthorizationAdapter | undefined {
+    return this.authorizationAdapter
   }
 
   async updateSpace(spaceId: string, meta: SpaceDocMeta): Promise<void> {
@@ -832,6 +885,11 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
         })
       }
 
+      // Store received capability
+      if (this.authorizationAdapter && payload.capability) {
+        await this.authorizationAdapter.store(payload.capability)
+      }
+
       this.notifySpaceListeners()
     } catch (err) {
       console.debug('[YjsReplication] Failed to handle space invite:', err)
@@ -844,10 +902,22 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
       const state = this.spaces.get(payload.spaceId)
       if (!state) return
 
-      // Sender must be the space creator (first member) to modify membership
-      if (envelope.fromDid !== state.info.members[0]) {
-        console.warn('[YjsReplication] Rejected member-update from non-creator:', envelope.fromDid)
-        return
+      // Authorization check: sender must have permission to modify membership
+      if (this.authorizationAdapter) {
+        const permission = payload.action === 'added' ? 'delegate' : 'delete'
+        const canAct = await this.authorizationAdapter.canAccess(
+          envelope.fromDid, `wot:space:${payload.spaceId}`, permission
+        )
+        if (!canAct) {
+          console.warn('[YjsReplication] Rejected member-update — sender lacks capability:', envelope.fromDid)
+          return
+        }
+      } else {
+        // Fallback: only creator (members[0]) can modify membership
+        if (envelope.fromDid !== state.info.members[0]) {
+          console.warn('[YjsReplication] Rejected member-update from non-creator:', envelope.fromDid)
+          return
+        }
       }
 
       const myDid = this.identity.getDid()
