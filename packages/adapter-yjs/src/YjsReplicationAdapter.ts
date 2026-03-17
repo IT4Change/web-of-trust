@@ -655,8 +655,10 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
       const metaMap = doc.getMap('_meta')
       const metaName = metaMap.get('name') as string | undefined
       const metaDesc = metaMap.get('description') as string | undefined
+      const metaImg = metaMap.get('image') as string | undefined
       if (metaName !== undefined) meta.info.name = metaName
       if (metaDesc !== undefined) meta.info.description = metaDesc
+      if (metaImg !== undefined) meta.info.image = metaImg
 
       const state: YjsSpaceState = {
         info: meta.info,
@@ -688,6 +690,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
     const metaHandler = () => {
       const name = metaMap.get('name') as string | undefined
       const desc = metaMap.get('description') as string | undefined
+      const img = metaMap.get('image') as string | undefined
       let changed = false
       if (name !== undefined && name !== state.info.name) {
         state.info = { ...state.info, name }
@@ -695,6 +698,10 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
       }
       if (desc !== undefined && desc !== state.info.description) {
         state.info = { ...state.info, description: desc }
+        changed = true
+      }
+      if (img !== undefined && img !== state.info.image) {
+        state.info = { ...state.info, image: img }
         changed = true
       }
       if (changed) {
@@ -816,8 +823,10 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
       const metaMap = doc.getMap('_meta')
       const metaName = metaMap.get('name') as string | undefined
       const metaDesc = metaMap.get('description') as string | undefined
+      const metaImg = metaMap.get('image') as string | undefined
       if (metaName) info.name = metaName
       if (metaDesc) info.description = metaDesc
+      if (metaImg) info.image = metaImg
 
       const state: YjsSpaceState = {
         info,
