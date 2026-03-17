@@ -844,6 +844,12 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
       const state = this.spaces.get(payload.spaceId)
       if (!state) return
 
+      // Sender must be the space creator (first member) to modify membership
+      if (envelope.fromDid !== state.info.members[0]) {
+        console.warn('[YjsReplication] Rejected member-update from non-creator:', envelope.fromDid)
+        return
+      }
+
       const myDid = this.identity.getDid()
 
       // Check if I was removed
