@@ -643,7 +643,7 @@ function AppRoutes() {
           <Route path="/verify" element={<Verify />} />
           <Route path="/attestations/*" element={<Attestations />} />
           <Route path="/spaces/*" element={<Spaces />} />
-          <Route path="/network" element={<Network />} />
+          <Route path="/network" element={<Network />} handle={{ fullscreen: true }} />
           <Route path="/p/:did" element={<PublicProfile />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Route>

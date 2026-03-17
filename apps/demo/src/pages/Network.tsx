@@ -60,38 +60,8 @@ export function Network() {
   const simulationRef = useRef<ReturnType<typeof forceSimulation<SimNode>> | null>(null)
   const simNodesRef = useRef<SimNode[]>([])
   const dragState = useRef<{ id: string; offsetX: number; offsetY: number; moved: boolean } | null>(null)
+  const selectedIdRef = useRef<string | null>(null)
 
-  // Break out of AppShell's max-w-2xl constraint
-  const outerRef = useRef<HTMLDivElement>(null)
-  useEffect(() => {
-    const el = outerRef.current
-    if (!el) return
-    // Walk up to the max-w-2xl wrapper and the main element, override their constraints
-    const originals: { el: HTMLElement; maxWidth: string; padding: string; overflow: string }[] = []
-    let parent = el.parentElement
-    while (parent && parent !== document.body) {
-      const style = getComputedStyle(parent)
-      if (style.maxWidth !== 'none' || style.overflow !== 'visible') {
-        originals.push({
-          el: parent,
-          maxWidth: parent.style.maxWidth,
-          padding: parent.style.padding,
-          overflow: parent.style.overflow,
-        })
-        parent.style.maxWidth = 'none'
-        parent.style.padding = '0'
-        parent.style.overflow = 'visible'
-      }
-      parent = parent.parentElement
-    }
-    return () => {
-      originals.forEach(o => {
-        o.el.style.maxWidth = o.maxWidth
-        o.el.style.padding = o.padding
-        o.el.style.overflow = o.overflow
-      })
-    }
-  }, [])
 
   // Responsive sizing
   useEffect(() => {
@@ -110,6 +80,7 @@ export function Network() {
 
   // When a node expands, push neighbors away so they don't overlap
   useEffect(() => {
+    selectedIdRef.current = selectedId
     const sim = simulationRef.current
     if (!sim || dimensions.width === 0) return
     const diagonal = Math.sqrt(dimensions.width ** 2 + dimensions.height ** 2)
@@ -152,8 +123,44 @@ export function Network() {
 
     simNodesRef.current = simNodes
 
-    const padX = EXPANDED_W / 2 + 10
-    const padY = EXPANDED_H / 2 + 10
+    // Measure label widths to compute per-node horizontal padding
+    const labelWidths = new Map<string, number>()
+    const measureCtx = document.createElement('canvas').getContext('2d')
+    if (measureCtx) {
+      simNodes.forEach(d => {
+        measureCtx.font = d.type === 'me' ? '600 13px system-ui' : '400 11px system-ui'
+        labelWidths.set(d.id, measureCtx.measureText(d.label).width)
+      })
+    }
+
+    // FAB exclusion zone (mobile only): bottom-right corner
+    const isMobile = width < 768
+    const fabX = width - 44  // right-4 + w-14/2
+    const fabY = height - 52 // bottom-20 + offset + h-14/2
+    const fabRadius = 50     // FAB radius + padding
+
+    const clampNode = (d: SimNode) => {
+      const isExpanded = d.id === selectedIdRef.current
+      const labelHalf = (labelWidths.get(d.id) || 0) / 2 + 5
+      const basePx = Math.max(d.size + 5, labelHalf)
+      const px = isExpanded ? Math.max(EXPANDED_W / 2 + 10, basePx) : basePx
+      const py = isExpanded ? Math.max(EXPANDED_H / 2 + 10, d.size + 5) : d.size + 5
+      d.x = Math.max(px, Math.min(width - px, d.x))
+      d.y = Math.max(py, Math.min(height - py, d.y))
+
+      // Push nodes away from FAB zone on mobile
+      if (isMobile) {
+        const dx = d.x - fabX
+        const dy = d.y - fabY
+        const dist = Math.sqrt(dx * dx + dy * dy)
+        const minDist = fabRadius + d.size
+        if (dist < minDist && dist > 0) {
+          const push = (minDist - dist) / dist
+          d.x += dx * push
+          d.y += dy * push
+        }
+      }
+    }
 
     const simulation = forceSimulation(simNodes)
       .force('link', forceLink(simEdges).id((d: any) => d.id)
@@ -173,20 +180,14 @@ export function Network() {
       simulation.tick()
     }
     // Clamp after pre-computation
-    simNodes.forEach(d => {
-      d.x = Math.max(d.size + padX, Math.min(width - d.size - padX, d.x))
-      d.y = Math.max(d.size + padY, Math.min(height - d.size - padY, d.y))
-    })
+    simNodes.forEach(clampNode)
 
     simulationRef.current = simulation
 
     // Start at rest — only wakes on drag/interaction
     simulation.alpha(0).restart()
     simulation.on('tick', () => {
-      simNodes.forEach(d => {
-        d.x = Math.max(d.size + padX, Math.min(width - d.size - padX, d.x))
-        d.y = Math.max(d.size + padY, Math.min(height - d.size - padY, d.y))
-      })
+      simNodes.forEach(clampNode)
 
       // Copy positions into render state — single setState to keep nodes + edges in sync
       setGraph({
@@ -285,8 +286,7 @@ export function Network() {
   // Empty state
   if (nodes.length <= 1 && dimensions.width > 0) {
     return (
-      <div ref={outerRef} className="flex flex-col items-center justify-center"
-        style={{ height: 'calc(100vh - 5rem)', minHeight: 400 }}
+      <div className="flex flex-col items-center justify-center h-full"
       >
         <div className="relative mb-8">
           <svg width="120" height="120" viewBox="0 0 120 120">
@@ -319,9 +319,7 @@ export function Network() {
 
   return (
     <div
-      ref={outerRef}
-      className="flex flex-col"
-      style={{ height: '100vh', minHeight: 400 }}
+      className="flex flex-col h-full overflow-hidden"
     >
       <div
         ref={containerRef}
