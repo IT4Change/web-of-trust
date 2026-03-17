@@ -1,267 +1,144 @@
 # Privacy
 
-> Datenschutz-Überlegungen im Web of Trust
+> Data protection considerations in the Web of Trust.
 
-## Grundprinzipien
-
-### Datenminimierung
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                                                             │
-│  Nur erforderliche Daten werden erhoben:                    │
-│                                                             │
-│  ✅ Name (selbst gewählt)                                   │
-│  ✅ Foto (optional)                                         │
-│  ✅ Kontakte (nur verifizierte)                             │
-│  ✅ Selbst erstellte Inhalte                                │
-│                                                             │
-│  ❌ Keine Telefonnummer                                     │
-│  ❌ Keine E-Mail-Adresse                                    │
-│  ❌ Keine Standortdaten (außer explizit in Items)           │
-│  ❌ Kein Adressbuch-Upload                                  │
-│                                                             │
-└─────────────────────────────────────────────────────────────┘
-```
-
-### Lokale Kontrolle
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                                                             │
-│  Daten bleiben unter Nutzer-Kontrolle:                      │
-│                                                             │
-│  • Alle Daten lokal gespeichert                             │
-│  • Export jederzeit möglich                                 │
-│  • Löschung möglich (lokal + Server)                        │
-│  • Kein Account beim Betreiber nötig                        │
-│                                                             │
-└─────────────────────────────────────────────────────────────┘
-```
+*As of March 17, 2026*
 
 ---
 
-## Was der Server sieht
+## Core Principles
 
-### Verschlüsselte Daten (kein Zugriff auf Inhalt)
+### Data Minimization
 
-| Datentyp | Server sieht |
-|----------|--------------|
-| Items | Verschlüsselter Blob |
-| Attestation-Inhalt | Verschlüsselt |
-| Profil-Details | Verschlüsselt |
+Only required data is collected:
 
-### Metadaten (Server sieht)
+- Name (self-chosen)
+- Photo (optional)
+- Contacts (only verified)
+- Self-created content
 
-| Metadatum | Beschreibung | Mitigation |
-|-----------|--------------|------------|
-| **IP-Adresse** | Bei jeder Verbindung | VPN empfehlen |
-| **Timing** | Wann synchronisiert wird | - |
-| **Nachrichtengröße** | Wie viel Daten | Padding möglich |
-| **DID-Paare** | Wer mit wem kommuniziert | Teilweise ableitbar |
+Not collected:
 
-### Kontaktgraph
+- No phone number
+- No email address
+- No location data (unless explicitly in items)
+- No address book upload
+- No operator account required
 
-```mermaid
-flowchart TD
-    subgraph Server["Was der Server ableiten kann"]
-        A[DID A] -->|"tauscht Daten mit"| B[DID B]
-        A -->|"tauscht Daten mit"| C[DID C]
-        B -->|"tauscht Daten mit"| C
-    end
+### Local Control
 
-    Note[Server sieht NICHT wer A, B, C sind - nur DIDs]
-```
-
-**Risiko:** Social Graph ist teilweise ableitbar.
-
-**Mitigation-Optionen:**
-1. Padding (alle Nachrichten gleich groß)
-2. Dummy-Traffic
-3. Onion Routing (komplex)
-
-**Aktuelle Entscheidung:** Akzeptiert als Trade-off für Usability.
+- All data stored locally (IndexedDB)
+- Export possible at any time
+- Deletion possible (local + server request)
+- No operator account needed
 
 ---
 
-## DSGVO-Konformität
+## What the Servers See
 
-### Rechte der Nutzer
+### Relay Server (wss://relay.utopia-lab.org)
 
-| Recht | Umsetzung |
-|-------|-----------|
-| **Auskunft (Art. 15)** | Export-Funktion |
-| **Berichtigung (Art. 16)** | Profil bearbeitbar |
-| **Löschung (Art. 17)** | Lokale Löschung + Server-Request |
-| **Datenübertragbarkeit (Art. 20)** | JSON/CSV Export |
-| **Widerspruch (Art. 21)** | Keine Profilbildung |
+| What the relay sees | What it does NOT see |
+|---------------------|---------------------|
+| DID pairs (who to whom) | Message content (E2E encrypted) |
+| Timing (when sync occurs) | Profile data |
+| Message sizes | Attestations |
+| IP addresses | Space content |
+| Message types (space-invite, content, etc.) | GroupKeys |
 
-### Besondere Kategorien
+### Vault Server (https://vault.utopia-lab.org)
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                                                             │
-│  Keine besonderen Kategorien erhoben:                       │
-│                                                             │
-│  ❌ Keine Gesundheitsdaten                                  │
-│  ❌ Keine politischen Meinungen                             │
-│  ❌ Keine religiösen Überzeugungen                          │
-│  ❌ Keine biometrischen Daten (Profilbild = optional)       │
-│                                                             │
-│  Attestationen könnten sensible Infos enthalten             │
-│  → Nutzer-Verantwortung, E2E-verschlüsselt                  │
-│                                                             │
-└─────────────────────────────────────────────────────────────┘
-```
+| What the vault sees | What it does NOT see |
+|---------------------|---------------------|
+| Encrypted blobs | Plaintext content |
+| DID of the owner | What the docs contain |
+| Document sizes | Who is a member |
+| Access timestamps | GroupKeys |
 
----
+### Profiles Server (https://profiles.utopia-lab.org)
 
-## Löschung
+| What the server sees | Note |
+|---------------------|------|
+| Public profile (name, bio, photo) | Intentionally public, JWS-signed |
+| DID | Pseudonym, not real identity |
 
-### Was gelöscht werden kann
+### Contact Graph
 
-| Datentyp | Löschbar? | Anmerkung |
-|----------|-----------|-----------|
-| Profil | Ja | Lokal + Server |
-| Items | Ja (Soft Delete) | Lokal, Server-Markierung |
-| Kontakte | Ausblenden | Via Auto-Gruppe excludedMembers |
-| Verifizierungen | Nein | Immutable, beim Empfänger gespeichert |
-| Attestationen | Ausblendbar | Empfänger kann `hidden=true` setzen |
+The relay can partially infer who communicates with whom (DID pairs). However, it does not know who is behind the DIDs — only pseudonymous identifiers.
 
-### Empfänger-Prinzip und Datenhoheit
+**Mitigation options (not implemented):**
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                                                             │
-│  Design-Entscheidung: Empfänger-Prinzip                     │
-│                                                             │
-│  Verifizierungen und Attestationen werden beim              │
-│  EMPFÄNGER (to) gespeichert, nicht beim Sender (from).      │
-│                                                             │
-│  Vorteile:                                                  │
-│  • Empfänger kontrolliert, was über ihn veröffentlicht wird │
-│  • Keine Schreibkonflikte (jeder schreibt nur bei sich)     │
-│  • Attestationen können ausgeblendet werden (hidden=true)   │
-│                                                             │
-│  Einschränkungen:                                           │
-│  • Verifizierungen können nicht ausgeblendet werden         │
-│    (steuern Kontakt-Status)                                 │
-│  • Attestationen können nicht gelöscht werden, nur hidden   │
-│                                                             │
-└─────────────────────────────────────────────────────────────┘
-```
+- Padding (all messages same size)
+- Dummy traffic
+- Onion routing
 
-### Warum Verifizierungen/Attestationen nicht löschbar
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                                                             │
-│  Design-Entscheidung:                                       │
-│                                                             │
-│  Verifizierungen und Attestationen sind signierte Aussagen  │
-│  über die Vergangenheit:                                    │
-│                                                             │
-│  "Ich habe Anna am 05.01.2025 getroffen"                    │
-│  "Ben hat mir beim Umzug geholfen"                          │
-│                                                             │
-│  Diese Fakten können nicht "ungeschehen" gemacht werden.    │
-│                                                             │
-│  Aber: Der Empfänger kann Attestationen AUSBLENDEN          │
-│  (hidden=true) - sie sind dann nur für ihn selbst sichtbar. │
-│                                                             │
-└─────────────────────────────────────────────────────────────┘
-```
-
-### Account-Löschung
-
-```mermaid
-flowchart TD
-    Delete[Account löschen] --> Local[Lokal löschen]
-    Delete --> Server[Server-Request]
-
-    Local --> L1[Private Key löschen]
-    Local --> L2[Alle lokalen Daten löschen]
-
-    Server --> S1[Verschlüsselte Blobs löschen]
-    Server --> S2[DID aus Index entfernen]
-
-    Note[Verifizierungen bei Kontakten bleiben - sind deren Daten]
-```
+**Current decision:** Accepted as trade-off for usability.
 
 ---
 
-## Anonymität vs. Pseudonymität
+## Anonymity vs. Pseudonymity
 
-### Aktueller Stand: Pseudonymität
+Users are **pseudonymous**, not anonymous:
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                                                             │
-│  Nutzer sind PSEUDONYM:                                     │
-│                                                             │
-│  • DID = zufälliges Pseudonym                               │
-│  • Name = selbst gewählt (kann falsch sein)                 │
-│  • Aktivitäten = einem DID zuordenbar                       │
-│                                                             │
-│  Nutzer sind NICHT anonym:                                  │
-│  • Verifizierung = jemand kennt die echte Person            │
-│  • Aktivitätsmuster = analysierbar                          │
-│                                                             │
-└─────────────────────────────────────────────────────────────┘
-```
+- DID = random pseudonym (no name, no email)
+- Name = self-chosen (can be a pseudonym)
+- Verification = face-to-face — the verifier knows the real person
 
-### De-Anonymisierung möglich durch
+De-anonymization possible through:
 
-| Methode | Risiko |
-|---------|--------|
-| Verifizierender kennt echte Identität | Hoch |
-| Attestations-Inhalte | Mittel |
-| Metadaten-Korrelation | Mittel |
-| IP-Analyse | Mittel |
+| Method | Risk |
+|--------|------|
+| Verifier knows real identity | High |
+| Attestation content reveals details | Medium |
+| Metadata correlation | Medium |
+| IP analysis | Medium (VPN as mitigation) |
 
 ---
 
-## Privacy by Design
+## GDPR Compliance
 
-### Implementiert
+### User Rights
 
-| Prinzip | Umsetzung |
-|---------|-----------|
-| **Minimierung** | Nur nötige Daten |
-| **Verschlüsselung** | E2E für alle Inhalte |
-| **Lokale Speicherung** | Daten auf Gerät |
-| **Keine Accounts** | Kein Betreiber-Login |
-| **Export** | Volle Datenportabilität |
+| Right | Implementation |
+|-------|---------------|
+| Access (Art. 15) | Export function |
+| Rectification (Art. 16) | Profile editable |
+| Erasure (Art. 17) | Local deletion + server request |
+| Data portability (Art. 20) | JSON export (PersonalDoc) |
+| Objection (Art. 21) | No profiling, no tracking |
 
-### Offen
+### Deletion
 
-| Prinzip | Status |
-|---------|--------|
-| **Metadaten-Schutz** | Teilweise (Trade-off) |
-| **Unlinkability** | Nicht vollständig |
-| **Plausible Deniability** | Nicht implementiert |
+| Data type | Deletable? | Note |
+|-----------|-----------|------|
+| Profile | Yes | Local + profiles server |
+| Space content | Yes | Local deletion, key rotation |
+| Contacts | Hideable | Via excludedMembers |
+| Verifications | No | Immutable, stored at recipient |
+| Attestations | Hideable | Recipient can set `hidden=true` |
 
----
+### Recipient Principle
 
-## Empfehlungen für Nutzer
+Verifications and attestations are stored at the **recipient**, not the sender:
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                                                             │
-│  Für maximale Privacy:                                      │
-│                                                             │
-│  ✅ Pseudonymes Profil verwenden                            │
-│  ✅ Kein echtes Foto hochladen                              │
-│  ✅ VPN verwenden                                           │
-│  ✅ Nur vertrauenswürdige Personen verifizieren             │
-│  ✅ Vorsicht bei Attestations-Inhalten                      │
-│                                                             │
-└─────────────────────────────────────────────────────────────┘
-```
+- Recipient controls what is visible about them
+- No write conflicts (everyone writes only to their own store)
+- Attestations can be hidden (`hidden=true`)
+- Verifications cannot be hidden (they control contact status)
+
+### Why Verifications/Attestations Are Not Deletable
+
+Verifications and attestations are signed statements about the past ("I met Anna on 2025-01-05"). These facts cannot be undone. However, the recipient can hide attestations.
 
 ---
 
-## Weiterführend
+## Recommendations for Users
 
-- [Threat Model](threat-model.md) - Sicherheitsrisiken
-- [Export-Flow](../flows/08-export-nutzer-flow.md) - Daten exportieren
+For maximum privacy:
+
+- Use a pseudonymous profile
+- Don't upload a real photo
+- Use a VPN
+- Only verify trustworthy people
+- Be careful with attestation content
+- Recovery phrase on paper only, never store digitally
