@@ -152,6 +152,9 @@ export function Network() {
 
     simNodesRef.current = simNodes
 
+    const padX = EXPANDED_W / 2 + 10
+    const padY = EXPANDED_H / 2 + 10
+
     const simulation = forceSimulation(simNodes)
       .force('link', forceLink(simEdges).id((d: any) => d.id)
         .distance((d: any) => d.type === 'mutual' ? 160 * scale : 220 * scale)
@@ -163,14 +166,26 @@ export function Network() {
       .alpha(0.4)
       .alphaDecay(0.05)
       .velocityDecay(0.5)
+      .stop() // don't auto-run yet
+
+    // Pre-compute stable layout synchronously (no visual jitter)
+    for (let i = 0; i < 120; i++) {
+      simulation.tick()
+    }
+    // Clamp after pre-computation
+    simNodes.forEach(d => {
+      d.x = Math.max(d.size + padX, Math.min(width - d.size - padX, d.x))
+      d.y = Math.max(d.size + padY, Math.min(height - d.size - padY, d.y))
+    })
 
     simulationRef.current = simulation
 
-    const pad = EXPANDED_W / 2 + 20 // enough room for expanded cards
+    // Start at rest — only wakes on drag/interaction
+    simulation.alpha(0).restart()
     simulation.on('tick', () => {
       simNodes.forEach(d => {
-        d.x = Math.max(d.size + pad, Math.min(width - d.size - pad, d.x))
-        d.y = Math.max(d.size + pad, Math.min(height - d.size - pad, d.y))
+        d.x = Math.max(d.size + padX, Math.min(width - d.size - padX, d.x))
+        d.y = Math.max(d.size + padY, Math.min(height - d.size - padY, d.y))
       })
 
       // Copy positions into render state — single setState to keep nodes + edges in sync
@@ -378,9 +393,9 @@ export function Network() {
               ? (absUx < 0.001 ? bHalfH : absUy < 0.001 ? bHalfW : Math.min(bHalfW / absUx, bHalfH / absUy)) + 2
               : 0
             const strokeProps = {
-              stroke: edgeColor,
-              strokeOpacity: selectedId ? (isConnected ? 0.6 : 0.06) : (edge.type === 'mutual' ? 0.35 : 0.2),
-              strokeWidth: selectedId ? (isConnected ? 2 : 1) : (edge.type === 'mutual' ? 2 : 1.2),
+              stroke: isConnected ? edgeColor : 'currentColor',
+              strokeOpacity: selectedId ? (isConnected ? 0.6 : 0.06) : 0.08,
+              strokeWidth: isConnected ? 2 : 1,
               strokeDasharray: edge.type === 'incoming' ? '4 3' : undefined,
               style: { transition: 'stroke-opacity 0.3s, stroke-width 0.3s, stroke 0.3s' } as React.CSSProperties,
               strokeLinecap: 'round' as const,
@@ -540,13 +555,10 @@ export function Network() {
                       <Avatar name={node.label} avatar={node.avatar} size="sm" />
                     </div>
                     <div className="flex-1 min-w-0 overflow-hidden">
-                      <div className="flex items-center">
-                        <button
-                          className="font-medium text-foreground text-sm truncate hover:text-primary-600 transition-colors text-left"
-                          onClick={e => { e.stopPropagation(); navigate(`/p/${encodeURIComponent(node.id)}`) }}
-                        >
+                      <div className="flex items-center pointer-events-none">
+                        <span className="font-medium text-foreground text-sm truncate">
                           {node.label}
-                        </button>
+                        </span>
                       </div>
                       <div className="flex items-center gap-3 mt-1 text-xs text-muted-foreground/70">
                         {node.type !== 'me' && node.verificationCount > 0 && (
