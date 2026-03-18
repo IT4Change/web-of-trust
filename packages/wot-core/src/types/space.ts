@@ -6,6 +6,7 @@ export interface SpaceInfo {
   name?: string
   description?: string
   image?: string
+  modules?: string[]
   /** App identifier for cross-app space isolation (e.g. 'rls', 'wot-demo') */
   appTag?: string
   members: string[] // DIDs
@@ -16,6 +17,7 @@ export interface SpaceDocMeta {
   name?: string
   description?: string
   image?: string
+  modules?: string[]
 }
 
 export interface SpaceMemberChange {

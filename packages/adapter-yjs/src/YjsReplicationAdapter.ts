@@ -332,7 +332,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
     return this.started ? 'syncing' : 'idle'
   }
 
-  async createSpace<T>(type: SpaceInfo['type'], initialDoc: T, meta?: { name?: string; description?: string; appTag?: string }): Promise<SpaceInfo> {
+  async createSpace<T>(type: SpaceInfo['type'], initialDoc: T, meta?: { name?: string; description?: string; appTag?: string; modules?: string[] }): Promise<SpaceInfo> {
     const spaceId = crypto.randomUUID()
     const now = new Date().toISOString()
     const myDid = this.identity.getDid()
@@ -342,6 +342,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
       type,
       name: meta?.name,
       description: meta?.description,
+      modules: meta?.modules,
       appTag: meta?.appTag,
       members: [myDid],
       createdAt: now,
@@ -352,10 +353,11 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
     doc.transact(() => {
       applyInitialDoc(doc, initialDoc as Record<string, any>)
       // Set shared metadata in _meta map
-      if (meta?.name || meta?.description) {
+      if (meta?.name || meta?.description || meta?.modules) {
         const metaMap = doc.getMap('_meta')
         if (meta.name) metaMap.set('name', meta.name)
         if (meta.description) metaMap.set('description', meta.description)
+        if (meta.modules) metaMap.set('modules', meta.modules)
       }
     }, 'local')
 
@@ -617,6 +619,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
       if (meta.name !== undefined) metaMap.set('name', meta.name)
       if (meta.description !== undefined) metaMap.set('description', meta.description)
       if (meta.image !== undefined) metaMap.set('image', meta.image)
+      if (meta.modules !== undefined) metaMap.set('modules', meta.modules)
     }, 'local')
 
     // Persistence
@@ -656,9 +659,11 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
       const metaName = metaMap.get('name') as string | undefined
       const metaDesc = metaMap.get('description') as string | undefined
       const metaImg = metaMap.get('image') as string | undefined
+      const metaModules = metaMap.get('modules') as string[] | undefined
       if (metaName !== undefined) meta.info.name = metaName
       if (metaDesc !== undefined) meta.info.description = metaDesc
       if (metaImg !== undefined) meta.info.image = metaImg
+      if (metaModules !== undefined) meta.info.modules = metaModules
 
       const state: YjsSpaceState = {
         info: meta.info,
@@ -702,6 +707,11 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
       }
       if (img !== undefined && img !== state.info.image) {
         state.info = { ...state.info, image: img }
+        changed = true
+      }
+      const modules = metaMap.get('modules') as string[] | undefined
+      if (modules !== undefined && JSON.stringify(modules) !== JSON.stringify(state.info.modules)) {
+        state.info = { ...state.info, modules }
         changed = true
       }
       if (changed) {
