@@ -85,27 +85,37 @@ export class InMemoryMessagingAdapter implements MessagingAdapter {
       throw new Error('MessagingAdapter: must call connect() before send()')
     }
 
+    const now = new Date().toISOString()
+
     // Deliver to all currently connected devices of recipient
     const recipients = InMemoryMessagingAdapter.registry.get(envelope.toDid)
-    const deliveredTo = new Set<InMemoryMessagingAdapter>()
     if (recipients && recipients.size > 0) {
       for (const device of recipients) {
         await device.deliverToSelf(envelope)
-        deliveredTo.add(device)
+      }
+
+      // Notify sender of delivered receipt (async callback, like real relay)
+      const deliveredReceipt: DeliveryReceipt = {
+        messageId: envelope.id,
+        status: 'delivered',
+        timestamp: now,
+      }
+      for (const cb of this.receiptCallbacks) {
+        cb(deliveredReceipt)
       }
     }
 
     // Also queue for future devices that may connect later (multi-device).
     // The real relay does store-and-forward: delivered messages are kept until ACK.
-    // On connect(), queued messages are delivered and cleared.
+    // On connect(), queued messages are delivered to newly connected device.
     const queue = InMemoryMessagingAdapter.offlineQueue.get(envelope.toDid) ?? []
     queue.push(envelope)
     InMemoryMessagingAdapter.offlineQueue.set(envelope.toDid, queue)
 
     return {
       messageId: envelope.id,
-      status: deliveredTo.size > 0 ? 'delivered' : 'accepted',
-      timestamp: new Date().toISOString(),
+      status: 'accepted',
+      timestamp: now,
     }
   }
 
