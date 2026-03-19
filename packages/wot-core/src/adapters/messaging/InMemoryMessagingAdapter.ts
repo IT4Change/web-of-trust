@@ -85,8 +85,6 @@ export class InMemoryMessagingAdapter implements MessagingAdapter {
       throw new Error('MessagingAdapter: must call connect() before send()')
     }
 
-    const now = new Date().toISOString()
-
     // Deliver to all currently connected devices of recipient
     const recipients = InMemoryMessagingAdapter.registry.get(envelope.toDid)
     const deliveredTo = new Set<InMemoryMessagingAdapter>()
