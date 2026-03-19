@@ -436,9 +436,9 @@ export function AdapterProvider({ children, identity }: AdapterProviderProps) {
           // so spaces are loaded from IndexedDB before UI renders
           await replicationAdapter!.start()
 
-          // Watch for remote personal doc sync (multi-device) — restore new spaces
+          // Watch for remote personal doc sync (multi-device) — restore new spaces + sync
           unsubRemoteSync = docFns.onPersonalDocChange(() => {
-            replicationAdapter?.restoreSpacesFromMetadata()
+            replicationAdapter?.requestSync('__all__').catch(() => {})
           })
 
           setAdapters({

@@ -260,6 +260,10 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
   private started = false
   private sentMessageIds = new Set<string>()
 
+  // Buffer for content messages that arrive before the space is known (multi-device timing)
+  private pendingMessages = new Map<string, { envelope: MessageEnvelope; receivedAt: number }[]>()
+  private static PENDING_TTL = 60_000 // 60s
+
   constructor(config: YjsReplicationConfig) {
     this.identity = config.identity
     this.messaging = config.messaging
@@ -344,6 +348,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
     this.unsubMessage = null
     this.unsubStateChange?.()
     this.unsubStateChange = null
+    this.pendingMessages.clear()
 
     for (const [, scheduler] of this.vaultSchedulers) scheduler.destroy()
     for (const [, scheduler] of this.compactSchedulers) scheduler.destroy()
@@ -702,10 +707,23 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
   }
 
   async requestSync(spaceId: string): Promise<void> {
-
     if (spaceId === '__all__') {
       // Discover new spaces from PersonalDoc that we don't know yet
       await this.restoreSpacesFromMetadata()
+
+      // Process any pending content messages for known spaces
+      // (messages may have been buffered between previous and current requestSync calls)
+      for (const [spaceId, pending] of this.pendingMessages) {
+        if (this.spaces.has(spaceId) && pending.length > 0) {
+          this.pendingMessages.delete(spaceId)
+          const now = Date.now()
+          for (const { envelope, receivedAt } of pending) {
+            if (now - receivedAt < YjsReplicationAdapter.PENDING_TTL) {
+              await this.handleContentMessage(envelope).catch(() => {})
+            }
+          }
+        }
+      }
 
       // Pull latest Vault snapshots for all existing spaces
       for (const [id, state] of this.spaces) {
@@ -877,11 +895,34 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
       this.spaces.set(meta.info.id, state)
       this.setupSpaceSync(state)
 
+      // Process any buffered content messages that arrived before this space was known
+      const pending = this.pendingMessages.get(meta.info.id)
+      if (pending) {
+        this.pendingMessages.delete(meta.info.id)
+        const now = Date.now()
+        for (const { envelope, receivedAt } of pending) {
+          if (now - receivedAt < YjsReplicationAdapter.PENDING_TTL) {
+            await this.handleContentMessage(envelope).catch(() => {})
+          }
+        }
+      }
+
       // Request full state from other devices (they may have content we don't have yet)
       await this.sendSpaceSyncRequest(meta.info.id).catch(() => {})
 
       // Vault-Pull as safety net (in case no other device is online)
       await this._pullFromVault(state).catch(() => {})
+    }
+
+    // Cleanup expired pending messages
+    const now = Date.now()
+    for (const [spaceId, msgs] of this.pendingMessages) {
+      const valid = msgs.filter(m => now - m.receivedAt < YjsReplicationAdapter.PENDING_TTL)
+      if (valid.length === 0) {
+        this.pendingMessages.delete(spaceId)
+      } else {
+        this.pendingMessages.set(spaceId, valid)
+      }
     }
 
     this.notifySpaceListeners()
@@ -975,11 +1016,21 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
       const spaceId = payload.spaceId
       const state = this.spaces.get(spaceId)
 
-      if (!state) return
+      if (!state) {
+        // Space not known yet — buffer message for when it's discovered
+        // (multi-device: PersonalDoc sync may arrive after content messages)
+        const pending = this.pendingMessages.get(spaceId) ?? []
+        pending.push({ envelope, receivedAt: Date.now() })
+        this.pendingMessages.set(spaceId, pending)
+        return
+      }
 
       const groupKey = this.groupKeyService.getKeyByGeneration(spaceId, payload.generation)
       if (!groupKey) {
-        console.debug(`[YjsReplication] No group key for space ${spaceId} gen ${payload.generation}`)
+        // Key not available yet — buffer message (key-rotation may arrive later)
+        const pending = this.pendingMessages.get(spaceId) ?? []
+        pending.push({ envelope, receivedAt: Date.now() })
+        this.pendingMessages.set(spaceId, pending)
         return
       }
 
@@ -1077,6 +1128,17 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
           generation: payload.generation,
           key: groupKey,
         })
+      }
+
+      // Process any buffered content messages for this space
+      const pending = this.pendingMessages.get(spaceId)
+      if (pending) {
+        this.pendingMessages.delete(spaceId)
+        for (const { envelope: buffered, receivedAt } of pending) {
+          if (Date.now() - receivedAt < YjsReplicationAdapter.PENDING_TTL) {
+            await this.handleContentMessage(buffered).catch(() => {})
+          }
+        }
       }
 
       this.notifySpaceListeners()
@@ -1178,6 +1240,17 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
           generation: payload.generation,
           key: groupKey,
         })
+      }
+
+      // Process buffered content messages that were waiting for this key
+      const pending = this.pendingMessages.get(payload.spaceId)
+      if (pending && pending.length > 0) {
+        this.pendingMessages.delete(payload.spaceId)
+        for (const { envelope: buffered, receivedAt } of pending) {
+          if (Date.now() - receivedAt < YjsReplicationAdapter.PENDING_TTL) {
+            await this.handleContentMessage(buffered).catch(() => {})
+          }
+        }
       }
     } catch (err) {
       console.debug('[YjsReplication] Failed to handle group key rotation:', err)
