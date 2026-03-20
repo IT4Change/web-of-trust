@@ -486,14 +486,30 @@ export async function initYjsPersonalDoc(identity: WotIdentity, messaging?: Mess
   if (legacyOutbox.size > 0) {
     const oldDoc = ydoc
     const oldSize = Y.encodeStateAsUpdate(oldDoc).byteLength
-    const freshDoc = new Y.Doc()
+    // Snapshot all maps as plain JSON (Yjs objects can't be moved between docs)
     const mapsToKeep = ['profile', 'contacts', 'verifications', 'attestations', 'attestationMetadata', 'spaces', 'groupKeys']
+    const snapshots = new Map<string, Record<string, any>>()
+    for (const mapName of mapsToKeep) {
+      const src = oldDoc.getMap(mapName)
+      if (src.size > 0) {
+        snapshots.set(mapName, src.toJSON())
+      }
+    }
+    // Build fresh doc from plain data
+    const freshDoc = new Y.Doc()
     freshDoc.transact(() => {
-      for (const mapName of mapsToKeep) {
-        const src = oldDoc.getMap(mapName)
+      for (const [mapName, data] of snapshots) {
         const dst = freshDoc.getMap(mapName)
-        for (const [k, v] of src.entries()) {
-          dst.set(k, v)
+        if (mapName === 'profile') {
+          // profile is a flat map, not a map-of-maps
+          applyPlainToYmap(dst, data)
+        } else {
+          // contacts, spaces, etc. are maps of maps
+          for (const [k, v] of Object.entries(data)) {
+            const child = new Y.Map()
+            applyPlainToYmap(child, v as Record<string, any>)
+            dst.set(k, child)
+          }
         }
       }
     }, 'local')
