@@ -415,6 +415,34 @@ export async function initYjsPersonalDoc(identity: WotIdentity, messaging?: Mess
   metrics.setImpl('yjs')
   registerDebugApi(metrics)
 
+  // Debug: expose PersonalDoc size breakdown on window
+  if (typeof window !== 'undefined') {
+    ;(window as any).wotDocSizes = () => {
+      if (!ydoc) return console.warn('PersonalDoc not loaded')
+      const maps = ['profile', 'contacts', 'verifications', 'attestations', 'attestationMetadata', 'spaces', 'groupKeys', 'outbox']
+      const results: Record<string, any>[] = []
+      for (const name of maps) {
+        const map = ydoc.getMap(name)
+        let jsonSize = 0
+        const bigEntries: { key: string; sizeKB: string }[] = []
+        for (const [k, v] of map.entries()) {
+          let entrySize = 0
+          try { entrySize = JSON.stringify(v) ?.length ?? 0 } catch { entrySize = 100 }
+          jsonSize += entrySize
+          if (entrySize > 10240) bigEntries.push({ key: k, sizeKB: (entrySize / 1024).toFixed(1) })
+        }
+        results.push({ map: name, entries: map.size, jsonSizeKB: (jsonSize / 1024).toFixed(1) })
+        if (bigEntries.length > 0) {
+          console.log(`  ${name} large entries:`, bigEntries)
+        }
+      }
+      const totalBinary = Y.encodeStateAsUpdate(ydoc).byteLength
+      results.push({ map: 'TOTAL (binary)', entries: '-', jsonSizeKB: (totalBinary / 1024).toFixed(1) })
+      console.table(results)
+      return results
+    }
+  }
+
   ydoc = new Y.Doc()
   let loadedFrom: 'compact-store' | 'vault' | 'new' = 'new'
 
