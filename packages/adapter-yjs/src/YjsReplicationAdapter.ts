@@ -334,6 +334,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
 
     // Restore spaces from metadata (CompactStore → local Y.Doc)
     await this.restoreSpacesFromMetadata()
+    console.debug(`[YjsReplication] after restoreSpacesFromMetadata: ${this.spaces.size} spaces`, Array.from(this.spaces.keys()))
 
     // Initial sync: send full state of all spaces to own DID (multi-device)
     // and pull latest from Vault as safety net
@@ -341,7 +342,9 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
 
     // Pull latest Vault snapshots (without re-running restoreSpacesFromMetadata
     // and _sendFullStateAllSpaces which already ran above)
+    console.debug(`[YjsReplication] before _pullAllFromVault: ${this.spaces.size} spaces`)
     await this._pullAllFromVault()
+    console.debug(`[YjsReplication] after _pullAllFromVault: ${this.spaces.size} spaces`)
 
     // On reconnect: re-send full state + vault pull (without duplicate restoreSpacesFromMetadata)
     if ('onStateChange' in this.messaging && typeof (this.messaging as any).onStateChange === 'function') {
@@ -922,7 +925,10 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
     if (!this.metadataStorage) return
 
     const allMeta = await this.metadataStorage.loadAllSpaceMetadata()
+    console.debug(`[YjsReplication] restoreSpacesFromMetadata: ${allMeta.length} spaces from metadata, ${this.spaces.size} already loaded`)
     for (const meta of allMeta) {
+      console.debug(`[YjsReplication]   space: ${meta.info.id} name=${meta.info.name} type=${meta.info.type}`)
+
       if (this.spaces.has(meta.info.id)) continue
       if (this.spaceFilter && !this.spaceFilter(meta.info)) continue
 

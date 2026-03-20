@@ -417,18 +417,13 @@ export async function initYjsPersonalDoc(identity: WotIdentity, messaging?: Mess
 
   // Debug: expose PersonalDoc size breakdown on window
   if (typeof window !== 'undefined') {
-    ;(window as any).wotDeleteSpace = (spaceId: string) => {
+    ;(window as any).wotDeleteSpace = async (spaceId: string) => {
       if (!ydoc) return console.warn('PersonalDoc not loaded')
       const spacesMap = ydoc.getMap('spaces')
       const groupKeysMap = ydoc.getMap('groupKeys')
+      const before = spacesMap.size
       ydoc.transact(() => {
-        if (spacesMap.has(spaceId)) {
-          spacesMap.delete(spaceId)
-          console.log(`Deleted space ${spaceId} from PersonalDoc`)
-        } else {
-          console.warn(`Space ${spaceId} not found in PersonalDoc`)
-        }
-        // Also delete associated group keys (format: spaceId:generation)
+        spacesMap.delete(spaceId)
         for (const key of Array.from(groupKeysMap.keys())) {
           if (key.startsWith(spaceId + ':')) {
             groupKeysMap.delete(key)
@@ -436,6 +431,12 @@ export async function initYjsPersonalDoc(identity: WotIdentity, messaging?: Mess
           }
         }
       }, 'local')
+      const after = spacesMap.size
+      console.log(`Deleted space ${spaceId} (spaces: ${before} → ${after})`)
+      // Persist immediately
+      await pushToCompactStore()
+      await pushToVault()
+      console.log('Persisted to CompactStore + Vault')
     }
     ;(window as any).wotDocSizes = () => {
       if (!ydoc) return console.warn('PersonalDoc not loaded')
