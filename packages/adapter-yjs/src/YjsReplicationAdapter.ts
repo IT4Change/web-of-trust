@@ -932,15 +932,31 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
         this.groupKeyService.importKey(k.spaceId, k.key, k.generation)
       }
 
+      // Try to restore from CompactStore
+      let binary: Uint8Array | null = null
+      if (this.compactStore) {
+        binary = await this.compactStore.load(meta.info.id)
+      }
+      const isEmpty = !binary || binary.length <= 2
+      const hasGroupKey = this.groupKeyService.getCurrentKey(meta.info.id) !== null
+      const ageMs = meta.info.createdAt ? Date.now() - new Date(meta.info.createdAt).getTime() : 0
+
+      // Ghost-space detection: no group key + empty doc + older than 10 minutes
+      // A freshly joined space may temporarily have no key, so we give it time
+      if (!hasGroupKey && isEmpty && ageMs > 10 * 60_000) {
+        console.debug(`[YjsReplication] Removing ghost space ${meta.info.id} (no key, empty doc, age ${(ageMs / 60_000).toFixed(0)}min)`)
+        await this.metadataStorage.deleteSpaceMetadata(meta.info.id)
+        await this.metadataStorage.deleteGroupKeys(meta.info.id)
+        if (this.compactStore && 'delete' in this.compactStore) {
+          await (this.compactStore as any).delete(meta.info.id)
+        }
+        continue
+      }
+
       // Create Y.Doc
       const doc = new Y.Doc()
-
-      // Try to restore from CompactStore
-      if (this.compactStore) {
-        const binary = await this.compactStore.load(meta.info.id)
-        if (binary) {
-          Y.applyUpdate(doc, binary)
-        }
+      if (binary) {
+        Y.applyUpdate(doc, binary)
       }
 
       // Read _meta from Y.Doc (overrides PersonalDoc values)
