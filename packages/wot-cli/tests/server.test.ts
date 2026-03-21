@@ -95,12 +95,12 @@ describe('WoT CLI HTTP Server', () => {
   // --- Health ---
 
   describe('Health', () => {
-    it('returns DID without auth', async () => {
+    it('returns ok without auth and without leaking DID', async () => {
       const res = await requestNoAuth('/health')
       expect(res.status).toBe(200)
       const data = await res.json()
       expect(data.status).toBe('ok')
-      expect(data.did).toBe('did:key:z6Mkeli123')
+      expect(data.did).toBeUndefined()
     })
   })
 

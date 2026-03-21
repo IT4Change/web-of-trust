@@ -8,7 +8,7 @@
  * File format: { ciphertext, salt, iv } (all base64url)
  */
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync } from 'node:fs'
+import { readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync, chmodSync } from 'node:fs'
 import { dirname } from 'node:path'
 
 interface EncryptedData {
@@ -40,8 +40,10 @@ export class FileBasedSeedStorage {
     }
 
     const dir = dirname(this.filePath)
-    if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
-    writeFileSync(this.filePath, JSON.stringify(encrypted, null, 2), 'utf-8')
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 })
+    writeFileSync(this.filePath, JSON.stringify(encrypted, null, 2), { encoding: 'utf-8', mode: 0o600 })
+    // Ensure permissions even if file existed before (umask might have been different)
+    chmodSync(this.filePath, 0o600)
   }
 
   async loadMnemonic(passphrase: string): Promise<string> {

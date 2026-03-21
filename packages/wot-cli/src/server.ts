@@ -44,9 +44,16 @@ export function createWotServer(options: WotServerOptions) {
     json(res, { error: message }, status)
   }
 
+  const MAX_BODY_SIZE = 1024 * 1024 // 1 MB
+
   async function readBody(req: IncomingMessage): Promise<string> {
     const chunks: Buffer[] = []
-    for await (const chunk of req) chunks.push(chunk as Buffer)
+    let totalSize = 0
+    for await (const chunk of req) {
+      totalSize += (chunk as Buffer).length
+      if (totalSize > MAX_BODY_SIZE) throw new Error('Request body too large')
+      chunks.push(chunk as Buffer)
+    }
     return Buffer.concat(chunks).toString('utf-8')
   }
 
@@ -67,9 +74,9 @@ export function createWotServer(options: WotServerOptions) {
     const method = req.method ?? 'GET'
     const { path } = parseUrl(req.url ?? '/')
 
-    // Health check — no auth required
+    // Health check — no auth required, no identity info
     if (path[0] === 'health') {
-      return json(res, { status: 'ok', did: client.getDid() })
+      return json(res, { status: 'ok' })
     }
 
     // All other endpoints require auth
@@ -120,6 +127,12 @@ export function createWotServer(options: WotServerOptions) {
       if (method === 'PUT' && path[0] === 'spaces' && path[2] === 'items' && path.length === 4) {
         const body = JSON.parse(await readBody(req))
         await client.updateSpaceItem(path[1], path[3], body)
+        return json(res, { ok: true })
+      }
+
+      // DELETE /spaces/:id/items/:itemId
+      if (method === 'DELETE' && path[0] === 'spaces' && path[2] === 'items' && path.length === 4) {
+        await client.updateSpaceItem(path[1], path[3], { _deleted: true })
         return json(res, { ok: true })
       }
 

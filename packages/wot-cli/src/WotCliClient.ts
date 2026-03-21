@@ -18,6 +18,7 @@ import {
   InMemoryPublishStateStore,
   InMemoryGraphCacheStore,
   encodeBase64Url,
+  signEnvelope,
   type StorageAdapter,
   type ReactiveStorageAdapter,
   type SpaceInfo,
@@ -244,6 +245,8 @@ export class WotCliClient {
       payload: JSON.stringify(payload),
       signature: '',
     }
+    // Sign before sending — all messages leaving the device must be signed
+    await signEnvelope(envelope, (data) => this.identity.sign(data))
     await this.outboxAdapter.send(envelope)
   }
 
