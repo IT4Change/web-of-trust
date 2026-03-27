@@ -41,14 +41,14 @@ The architecture is CRDT-agnostic with 7 swappable adapter interfaces. This make
 - Attestation system: signed claims with end-to-end delivery via WebSocket relay (offline queue with ACK)
 - Public profiles: JWS-signed, served via HTTP discovery service
 - Encrypted group spaces: CRDT-based (Yjs default, Automerge option) with AES-256-GCM group key rotation
-- Two blind infrastructure services (Relay, Vault) that see only encrypted bytes, never plaintext — plus one public discovery service (Profiles) where users control what they share
+- Three blind infrastructure services: Relay (WebSocket), Vault (encrypted backup), Profiles (discovery) — servers see only encrypted bytes, never plaintext
 - 534 passing tests across 6 packages, 17 end-to-end tests, 11 offline scenario tests
 - Published npm packages: `@real-life/wot-core`, `@real-life/adapter-yjs`, `@real-life/adapter-automerge`
 - Live demo tested with a small community: https://web-of-trust.de/demo/
 
 **What this funding will enable:**
 
-- Authorization system with space-level and item-level access control (read/write/admin)
+- Authorization system with UCAN-inspired capability delegation and revocation
 - Identity recovery and key rotation using the trust network itself as guardian network — no secrets are shared, no server backup needed
 - Developer documentation: getting-started guides, integration examples, API reference
 - Community pilot with real user groups, using a reference application (Real Life Stack) built on Web of Trust
@@ -66,7 +66,7 @@ I am a full-time open-source developer based in Germany, working with Sebastian 
 
 - **Web of Trust** — Over the past 3 months, I have designed and implemented the complete architecture from scratch: 7 adapter interfaces, two CRDT backends (Yjs + Automerge), 534 tests including 17 end-to-end tests and 11 offline scenario tests, 3 deployed services (Relay, Vault, Profiles), and comprehensive English documentation including a systematic evaluation of 16 frameworks, 6 DID methods, and detailed threat models. All self-funded. https://github.com/antontranelis/web-of-trust
 
-- **Real Life Stack** — A modular toolkit for building community applications focused on real-life encounters: shared calendars, maps, marketplaces, and tasks — all built on Web of Trust as identity and trust layer. Being developed in collaboration with Sebastian Stein as the first application built on Web of Trust. https://github.com/antontranelis/real-life-stack
+- **Real Life Stack** — A modular UI component library for community applications, designed to work with Web of Trust as its identity and trust layer. Being developed in collaboration with Sebastian Stein as the first application built on Web of Trust. https://github.com/antontranelis/real-life-stack
 
 **Why I build this:**
 
@@ -84,17 +84,17 @@ I believe the building blocks for a better alternative exist today: local-first 
 
 ### Amount
 
-€31,000
+€28,000
 
 ### Budget Allocation
 
 The project follows a phased development approach over approximately 9 months. Budget is allocated across 4 work packages:
 
-**WP1: Authorization & Access Control (€8,000 — ~160h @ €50/h)**
+**WP1: Authorization & Capability System (€10,000 — ~200h @ €50/h)**
 
 - Extend existing AuthorizationAdapter (core is implemented: InMemoryAuthorizationAdapter + capabilities.ts)
-- Space-level and item-level access control: read, write, admin permissions
-- Revocation of permissions
+- Capability delegation chains with full verification (read/write/delegate permissions)
+- Space-level and item-level access control with revocation
 - Persistent capability storage (currently in-memory only)
 - Integration with Vault for capability backup
 - Comprehensive test suite (target: 40+ additional tests)
@@ -118,22 +118,21 @@ The project follows a phased development approach over approximately 9 months. B
 - Contribution guidelines and governance model
 - Accessibility considerations documented
 
-**WP4: Community Pilot (€10,000 — ~200h @ €50/h)**
+**WP4: Community Pilot (€5,000 — ~100h @ €50/h)**
 
 - Stabilize reference application (Real Life Stack) for pilot deployment — calendar, marketplace, map modules built on Web of Trust
 - Identify and onboard pilot groups from our network of local community initiatives
 - We have learned from previous deployments (Utopia Map, 860 users) that adoption requires excellent usability and low barriers to entry — Web of Trust and Real Life Stack are designed with these lessons in mind
 - User onboarding materials (multilingual)
 - Gather feedback, iterate, document lessons learned
-- Explore alternative verification methods beyond QR codes to lower adoption barriers
 
-**Total: €31,000**
+**Total: €28,000**
 
 ### Timeline
 
 | Quarter | Work Package | Milestones |
 | --- | --- | --- |
-| Q1 (Month 1-3) | WP1: Authorization | Space/item access control, persistent storage, revocation, 40+ tests |
+| Q1 (Month 1-3) | WP1: Authorization | Capability delegation, persistent storage, revocation, 40+ tests |
 | Q2 (Month 4-6) | WP2: Recovery & Rotation | Guardian recovery flow, key rotation, DID migration, equivalence proofs |
 | Q3 (Month 7-9) | WP3 + WP4 | API reference, getting-started guide, npm docs; reference app stabilized, 2-3 pilot groups onboarded |
 
@@ -182,21 +181,19 @@ These are local-first CRDT frameworks for data synchronization. None include ide
 
 **What makes Web of Trust unique:**
 
-1. **Trust based on real-world encounters** — not online proofs or algorithmic scores
-2. **Open commons infrastructure** — a library, not a platform. `npm install` and go.
-3. **CRDT-agnostic adapter architecture** — swap any of the 7 components independently
-4. **Single BIP39 seed derives all keys** — identity, encryption, storage. One seed, one identity.
-5. **Guardian recovery via the trust network** — your verified contacts are your recovery network. No secrets shared, no server backup.
-6. **Servers are blind** — Relay and Vault see only encrypted bytes, never plaintext. Profiles is public but under user control.
-7. **Designed for local communities** — not planet-scale social networks
+1. Trust based on real-world encounters (not online proofs)
+2. Framework-agnostic adapter architecture (swap any component)
+3. Single BIP39 seed derives all keys (identity, encryption, storage)
+4. No dependency on centralized infrastructure
+5. Designed for community-scale, not planet-scale
 
 ### Technical Challenges
 
 1. **Guardian-Based Identity Recovery:** Using the trust network itself for recovery — verified contacts confirm a new DID via signed attestations. The challenge is ensuring that the recovery threshold is secure against social engineering while remaining accessible when genuinely needed. Key rotation and DID migration must preserve existing attestations and verifications through equivalence proofs.
 
-2. **CRDT Conflict Resolution with E2EE:** Our encrypt-then-sync pattern means CRDT merging happens on the client after decryption. This works across different CRDT backends (adapters are swappable), but creates challenges for concurrent edits when users are offline for extended periods.
+2. **CRDT Conflict Resolution with E2EE:** Our encrypt-then-sync pattern means CRDT merging happens on the client after decryption. This works across different CRDT backends (Yjs default, Automerge option — adapters are swappable), but creates challenges for concurrent edits when users are offline for extended periods — regardless of which CRDT engine is used.
 
-3. **Access Control in Offline-First Systems:** Implementing space-level and item-level permissions (read/write/admin) where revocation must propagate correctly without a central authority — in an offline-first, decentralized system where users may be disconnected when permissions change.
+3. **Capability Delegation Chains:** Implementing UCAN-like delegation where Alice grants Bob write access, and Bob can further delegate to Carol — while ensuring revocation propagates correctly in an offline-first, decentralized system without a central revocation list.
 
 4. **Key Management Across Devices:** Deriving deterministic keys from a single BIP39 seed across different browsers and environments while maintaining security. Our HKDF-based derivation path solves this architecturally, but ensuring consistent behavior and secure seed storage across environments requires careful implementation.
 
@@ -222,23 +219,7 @@ Through applications like Real Life Stack and Utopia Map (860 users, ~60 communi
 
 ## AI Disclosure
 
-This application was drafted with the assistance of Claude (Anthropic, model: claude-opus-4-6) via Claude Code (CLI tool). All technical decisions, architecture choices, budget allocations, and strategic direction are the applicant's. The applicant reviewed, edited, and approved the final submission.
-
-### Prompt Provenance Log
-
-**Interaction 1 — Initial Draft (2026-02-11)**
-
-Prompt: "Write an NLNet NGI Zero Commons Fund application for the Web of Trust project. Read the project documentation (CURRENT_IMPLEMENTATION.md, adapter-architektur-v2.md, architektur.md). Budget: €50,000, 5 Work Packages: WP1 Authorization/UCAN (€10k), WP2 Social Recovery/Shamir (€6k), WP3 Federated Messaging/Matrix or Nostr (€12k), WP4 Security Audit (€15k), WP5 Community Pilot & Docs (€7k). License: AGPL-3.0."
-
-Output: Initial application draft with 5 WPs and €50k budget. Committed as part of repository setup (2026-02-16).
-
-**Interaction 2 — Major Revision (2026-03-16)**
-
-Prompt: "Rewrite the NLNet application based on all changes since February. We now have 534 tests, 17 E2E tests, Yjs migration complete, 3 deployed services. Incorporate team feedback: tighten scope, add timeline, reduce budget. Remove Federation and Security Audit WPs. Replace Shamir recovery with guardian-based recovery using the trust network. Primary audience is developers, not communities. Add sustainability section."
-
-Output: Complete rewrite with 4 WPs, €28k budget, Q1-Q3 timeline, guardian recovery model, developer-focused framing.
-
-Full conversation logs are available on request.
+This application was drafted with the assistance of Claude (Anthropic, model: claude-opus-4-6) via Claude Code (CLI tool). All technical decisions, architecture choices, budget allocations, and strategic direction are the applicant's. The applicant reviewed, edited, and approved the final submission. See `docs/nlnet-prompt-provenance-log.md` for the full prompt provenance log.
 
 ---
 
