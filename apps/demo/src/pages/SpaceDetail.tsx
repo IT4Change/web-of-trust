@@ -6,7 +6,7 @@ import { useAdapters, useIdentity } from '../context'
 import { useLanguage } from '../i18n'
 import { Tooltip } from '../components/ui/Tooltip'
 import { Avatar } from '../components/shared'
-import type { SpaceInfo, SpaceHandle, SpaceDocMeta } from '@web.of.trust/core'
+import type { SpaceInfo, SpaceHandle, SpaceDocMeta } from '@web_of_trust/core'
 
 interface SpaceDoc {
   notes: string

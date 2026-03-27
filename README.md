@@ -1,7 +1,7 @@
 # Web of Trust
 
 [![CI](https://github.com/antontranelis/web-of-trust/actions/workflows/ci.yml/badge.svg)](https://github.com/antontranelis/web-of-trust/actions/workflows/ci.yml)
-[![npm](https://img.shields.io/npm/v/@web.of.trust/core)](https://www.npmjs.com/package/@web.of.trust/core)
+[![npm](https://img.shields.io/npm/v/@web_of_trust/core)](https://www.npmjs.com/package/@web_of_trust/core)
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
 
 A decentralized trust infrastructure for real-life communities. People meet in person, verify each other's identity via QR code, and build reputation through attestations over time.
@@ -151,9 +151,9 @@ pnpm build:core
 ```text
 web-of-trust/
 ├── packages/
-│   ├── wot-core/            # @web.of.trust/core — Core library
-│   ├── adapter-yjs/         # @web.of.trust/adapter-yjs — Yjs CRDT adapter (default)
-│   ├── adapter-automerge/   # @web.of.trust/adapter-automerge — Automerge CRDT adapter
+│   ├── wot-core/            # @web_of_trust/core — Core library
+│   ├── adapter-yjs/         # @web_of_trust/adapter-yjs — Yjs CRDT adapter (default)
+│   ├── adapter-automerge/   # @web_of_trust/adapter-automerge — Automerge CRDT adapter
 │   ├── wot-relay/           # WebSocket Relay Server (Node.js, SQLite)
 │   ├── wot-vault/           # Encrypted Document Store (HTTP, SQLite)
 │   └── wot-profiles/        # Public Profile Service (HTTP, SQLite, JWS)
@@ -168,9 +168,9 @@ web-of-trust/
 
 | Package | Description | Links |
 | ------- | ----------- | ----- |
-| [`@web.of.trust/core`](packages/wot-core/) | Core library — identity, crypto, adapters, services | [npm](https://www.npmjs.com/package/@web.of.trust/core) |
-| [`@web.of.trust/adapter-yjs`](packages/adapter-yjs/) | Yjs CRDT adapter (default) — pure JS, 76x faster on mobile | |
-| [`@web.of.trust/adapter-automerge`](packages/adapter-automerge/) | Automerge CRDT adapter — Rust→WASM | |
+| [`@web_of_trust/core`](packages/wot-core/) | Core library — identity, crypto, adapters, services | [npm](https://www.npmjs.com/package/@web_of_trust/core) |
+| [`@web_of_trust/adapter-yjs`](packages/adapter-yjs/) | Yjs CRDT adapter (default) — pure JS, 76x faster on mobile | |
+| [`@web_of_trust/adapter-automerge`](packages/adapter-automerge/) | Automerge CRDT adapter — Rust→WASM | |
 | [`wot-relay`](packages/wot-relay/) | WebSocket Relay Server — message forwarding, delivery ACK, SQLite | |
 | [`wot-vault`](packages/wot-vault/) | Encrypted Document Store — append-only, capability auth, SQLite | |
 | [`wot-profiles`](packages/wot-profiles/) | Public Profile Service — JWS verification, REST API, SQLite | |
@@ -188,11 +188,11 @@ import {
   ProfileService,
   EncryptedSyncService,
   GroupKeyService,
-} from '@web.of.trust/core'
+} from '@web_of_trust/core'
 
 // CRDT adapter — choose one
-import { YjsReplicationAdapter } from '@web.of.trust/adapter-yjs'
-// or: import { AutomergeReplicationAdapter } from '@web.of.trust/adapter-automerge'
+import { YjsReplicationAdapter } from '@web_of_trust/adapter-yjs'
+// or: import { AutomergeReplicationAdapter } from '@web_of_trust/adapter-automerge'
 
 // Create identity from 12 magic words
 const identity = new WotIdentity()

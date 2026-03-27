@@ -43,7 +43,7 @@ The architecture is CRDT-agnostic with 7 swappable adapter interfaces. This make
 - Encrypted group spaces: CRDT-based (Yjs default, Automerge option) with AES-256-GCM group key rotation
 - Two blind infrastructure services (Relay, Vault) that see only encrypted bytes, never plaintext — plus one public discovery service (Profiles) where users control what they share
 - 534 passing tests across 6 packages, 17 end-to-end tests, 11 offline scenario tests
-- Published npm packages: `@web.of.trust/core`, `@web.of.trust/adapter-yjs`, `@web.of.trust/adapter-automerge`
+- Published npm packages: `@web_of_trust/core`, `@web_of_trust/adapter-yjs`, `@web_of_trust/adapter-automerge`
 - Live demo tested with a small community: https://web-of-trust.de/demo/
 
 **What this funding will enable:**
@@ -202,7 +202,7 @@ These are local-first CRDT frameworks for data synchronization. Some include the
 
 **Primary audience: Developers building decentralized software**
 
-Web of Trust is infrastructure — a JavaScript library that developers integrate into their applications. The npm packages (`@web.of.trust/core`, `@web.of.trust/adapter-yjs`) provide self-sovereign identity, in-person verification, encrypted collaboration, and trust attestations as composable building blocks. Any developer building local-first, decentralized, or community-oriented software can add a trust layer without building their own identity system.
+Web of Trust is infrastructure — a JavaScript library that developers integrate into their applications. The npm packages (`@web_of_trust/core`, `@web_of_trust/adapter-yjs`) provide self-sovereign identity, in-person verification, encrypted collaboration, and trust attestations as composable building blocks. Any developer building local-first, decentralized, or community-oriented software can add a trust layer without building their own identity system.
 
 **Secondary audience: Local communities (via applications built on Web of Trust)**
 

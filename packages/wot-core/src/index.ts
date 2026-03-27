@@ -171,8 +171,8 @@ export type { TraceEntry, TraceStore, TraceOp, TraceFilter } from './storage/Tra
 export { TracedCompactStorageManager } from './storage/TracedCompactStorageManager'
 export { TracedOutboxMessagingAdapter } from './adapters/messaging/TracedOutboxMessagingAdapter'
 
-// Yjs-specific exports have moved to @web.of.trust/adapter-yjs
-// import { initYjsPersonalDoc, YjsReplicationAdapter, ... } from '@web.of.trust/adapter-yjs'
+// Yjs-specific exports have moved to @web_of_trust/adapter-yjs
+// import { initYjsPersonalDoc, YjsReplicationAdapter, ... } from '@web_of_trust/adapter-yjs'
 
-// Automerge-specific exports have moved to @web.of.trust/adapter-automerge
-// import { AutomergeReplicationAdapter, initPersonalDoc, ... } from '@web.of.trust/adapter-automerge'
+// Automerge-specific exports have moved to @web_of_trust/adapter-automerge
+// import { AutomergeReplicationAdapter, initPersonalDoc, ... } from '@web_of_trust/adapter-automerge'

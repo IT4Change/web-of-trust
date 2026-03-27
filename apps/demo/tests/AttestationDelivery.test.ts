@@ -3,13 +3,13 @@ import {
   InMemoryMessagingAdapter,
   InMemoryOutboxStore,
   OutboxMessagingAdapter,
-} from '@web.of.trust/core'
+} from '@web_of_trust/core'
 import type {
   StorageAdapter,
   CryptoAdapter,
   Attestation,
   DeliveryReceipt,
-} from '@web.of.trust/core'
+} from '@web_of_trust/core'
 import { AttestationService } from '../src/services/AttestationService'
 
 const ALICE_DID = 'did:key:z6MkAlice1234567890abcdefghijklmnopqrstuvwxyz'

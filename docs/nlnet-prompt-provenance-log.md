@@ -35,7 +35,7 @@ Key content of the initial draft:
 - WP2 based on Shamir Secret Sharing
 - Referenced Automerge as CRDT (pre-Yjs migration)
 - 182 tests, 2 deployed services
-- Single npm package (`@web.of.trust/core`)
+- Single npm package (`@web_of_trust/core`)
 - AI Disclosure section included
 
 ### Applicant Edits After Interaction 1
@@ -52,7 +52,7 @@ Between Interaction 1 and 2, the project underwent significant technical changes
 
 ### Prompt
 
-> Update the NLNet application to reflect the current state. We now have 534 tests, 7 E2E tests, Yjs as default CRDT, Automerge as option, 3 deployed services, and published npm packages @web.of.trust/core, @web.of.trust/adapter-yjs, @web.of.trust/adapter-automerge. Update test counts, CRDT references, service count, and npm packages. Also update WP1 to reflect that AuthorizationAdapter core is already implemented.
+> Update the NLNet application to reflect the current state. We now have 534 tests, 7 E2E tests, Yjs as default CRDT, Automerge as option, 3 deployed services, and published npm packages @web_of_trust/core, @web_of_trust/adapter-yjs, @web_of_trust/adapter-automerge. Update test counts, CRDT references, service count, and npm packages. Also update WP1 to reflect that AuthorizationAdapter core is already implemented.
 
 ### Unedited Output
 
@@ -121,7 +121,7 @@ Key changes in this rewrite:
 - WP2: Shamir → Guardian-based recovery using the trust network
 - WP4 (Community Pilot) has the largest budget — signaling commitment to adoption
 - "Why I build this": personal motivation, concrete problem (communities depending on corporate infrastructure)
-- Developer-first framing: "npm install @web.of.trust/core"
+- Developer-first framing: "npm install @web_of_trust/core"
 - Added: sustainability, security section, accessibility mention
 - Added: timeline with quarterly milestones
 - AI Disclosure shortened to 3 lines + reference to this log
@@ -146,7 +146,7 @@ Continued review of the application. The applicant directed corrections and impr
 
 ### Applicant Direction (summarized from multi-turn conversation)
 
-> 1. Package names updated: @real-life/* → @web.of.trust/* (npm organization renamed)
+> 1. Package names updated: @real-life/* → @web_of_trust/* (npm organization renamed)
 > 2. Website URL: github.com → web-of-trust.de
 > 3. CRDT comparison corrected: some frameworks (Jazz, DXOS) do include identity — our unique contribution is trust based on real-world encounters, not identity per se
 > 4. Don't position Yjs as "default" — we support both Yjs and Automerge equally

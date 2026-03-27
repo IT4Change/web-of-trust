@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.2.1](https://github.com/antontranelis/web-of-trust/compare/@web.of.trust/core-v0.2.0...@web.of.trust/core-v0.2.1) (2026-03-26)
+## [0.2.1](https://github.com/antontranelis/web-of-trust/compare/@web_of_trust/core-v0.2.0...@web_of_trust/core-v0.2.1) (2026-03-26)
 
 
 ### Features

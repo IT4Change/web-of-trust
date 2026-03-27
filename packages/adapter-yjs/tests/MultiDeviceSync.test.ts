@@ -1,9 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { WotIdentity } from '@web.of.trust/core'
-import { InMemoryMessagingAdapter } from '@web.of.trust/core'
-import { GroupKeyService } from '@web.of.trust/core'
-import { InMemorySpaceMetadataStorage } from '@web.of.trust/core'
-import { InMemoryCompactStore } from '@web.of.trust/core'
+import { WotIdentity } from '@web_of_trust/core'
+import { InMemoryMessagingAdapter } from '@web_of_trust/core'
+import { GroupKeyService } from '@web_of_trust/core'
+import { InMemorySpaceMetadataStorage } from '@web_of_trust/core'
+import { InMemoryCompactStore } from '@web_of_trust/core'
 import { YjsReplicationAdapter } from '../src/YjsReplicationAdapter'
 
 const wait = (ms = 200) => new Promise(r => setTimeout(r, ms))

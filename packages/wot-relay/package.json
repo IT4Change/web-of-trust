@@ -1,5 +1,5 @@
 {
-  "name": "@web.of.trust/relay",
+  "name": "@web_of_trust/relay",
   "version": "0.1.1",
   "type": "module",
   "private": true,
@@ -17,7 +17,7 @@
     "ws": "^8.18.0"
   },
   "devDependencies": {
-    "@web.of.trust/core": "workspace:*",
+    "@web_of_trust/core": "workspace:*",
     "@types/better-sqlite3": "^7.6.12",
     "@types/ws": "^8.5.13",
     "tsx": "^4.19.0",

@@ -1,5 +1,5 @@
 {
-  "name": "@web.of.trust/vault",
+  "name": "@web_of_trust/vault",
   "version": "0.1.1",
   "type": "module",
   "private": true,
@@ -13,7 +13,7 @@
     "start": "node dist/start.js"
   },
   "dependencies": {
-    "@web.of.trust/core": "workspace:*",
+    "@web_of_trust/core": "workspace:*",
     "better-sqlite3": "^11.7.0"
   },
   "devDependencies": {

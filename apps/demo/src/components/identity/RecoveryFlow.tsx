@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { KeyRound, Eye, EyeOff, Shield, AlertCircle } from 'lucide-react'
-import { WotIdentity } from '@web.of.trust/core'
+import { WotIdentity } from '@web_of_trust/core'
 import { ProgressIndicator, InfoTooltip } from '../shared'
 import { useLanguage } from '../../i18n'
 

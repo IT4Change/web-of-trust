@@ -1,4 +1,4 @@
-import type { Verification } from '@web.of.trust/core'
+import type { Verification } from '@web_of_trust/core'
 
 export interface VerificationResponsePayload {
   action: 'response'

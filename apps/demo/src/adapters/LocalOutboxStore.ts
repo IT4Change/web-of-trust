@@ -8,9 +8,9 @@
  * Keys: `outbox::{envelope.id}` in the LocalCacheStore.
  */
 
-import type { OutboxStore, OutboxEntry } from '@web.of.trust/core'
-import type { MessageEnvelope } from '@web.of.trust/core'
-import type { Subscribable } from '@web.of.trust/core'
+import type { OutboxStore, OutboxEntry } from '@web_of_trust/core'
+import type { MessageEnvelope } from '@web_of_trust/core'
+import type { Subscribable } from '@web_of_trust/core'
 import type { LocalCacheStore } from './LocalCacheStore'
 
 const PREFIX = 'outbox::'

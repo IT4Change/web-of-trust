@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { WotIdentity } from '@web.of.trust/core'
+import { WotIdentity } from '@web_of_trust/core'
 import {
   initYjsPersonalDoc,
   getYjsPersonalDoc,

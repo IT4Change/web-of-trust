@@ -1,4 +1,4 @@
-import type { StorageAdapter, Verification, VerificationChallenge, VerificationResponse } from '@web.of.trust/core'
+import type { StorageAdapter, Verification, VerificationChallenge, VerificationResponse } from '@web_of_trust/core'
 
 /**
  * VerificationService - Thin wrapper around wot-core verification

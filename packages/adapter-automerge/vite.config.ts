@@ -21,7 +21,7 @@ export default defineConfig({
         'idb',
         '@automerge/automerge',
         '@automerge/automerge-repo',
-        '@web.of.trust/core',
+        '@web_of_trust/core',
       ],
     },
   },

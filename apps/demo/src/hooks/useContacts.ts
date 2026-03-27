@@ -1,7 +1,7 @@
 import { useCallback, useMemo } from 'react'
 import { useAdapters } from '../context'
 import { useSubscribable } from './useSubscribable'
-import type { ContactStatus } from '@web.of.trust/core'
+import type { ContactStatus } from '@web_of_trust/core'
 
 export function useContacts() {
   const { contactService, reactiveStorage } = useAdapters()

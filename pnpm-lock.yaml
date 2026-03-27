@@ -63,13 +63,13 @@ importers:
       '@types/d3-force':
         specifier: ^3.0.10
         version: 3.0.10
-      '@web.of.trust/adapter-automerge':
+      '@web_of_trust/adapter-automerge':
         specifier: workspace:*
         version: link:../../packages/adapter-automerge
-      '@web.of.trust/adapter-yjs':
+      '@web_of_trust/adapter-yjs':
         specifier: workspace:*
         version: link:../../packages/adapter-yjs
-      '@web.of.trust/core':
+      '@web_of_trust/core':
         specifier: workspace:*
         version: link:../../packages/wot-core
       d3-force:
@@ -271,7 +271,7 @@ importers:
         specifier: ^2.5.3
         version: 2.5.3
     devDependencies:
-      '@web.of.trust/core':
+      '@web_of_trust/core':
         specifier: workspace:*
         version: link:../wot-core
       fake-indexeddb:
@@ -308,7 +308,7 @@ importers:
         specifier: ^13.6.30
         version: 13.6.30
     devDependencies:
-      '@web.of.trust/core':
+      '@web_of_trust/core':
         specifier: workspace:*
         version: link:../wot-core
       fake-indexeddb:
@@ -332,10 +332,10 @@ importers:
 
   packages/wot-cli:
     dependencies:
-      '@web.of.trust/adapter-yjs':
+      '@web_of_trust/adapter-yjs':
         specifier: workspace:*
         version: link:../adapter-yjs
-      '@web.of.trust/core':
+      '@web_of_trust/core':
         specifier: workspace:*
         version: link:../wot-core
       better-sqlite3:
@@ -407,7 +407,7 @@ importers:
       '@types/better-sqlite3':
         specifier: ^7.6.12
         version: 7.6.13
-      '@web.of.trust/core':
+      '@web_of_trust/core':
         specifier: workspace:*
         version: link:../wot-core
       tsx:
@@ -435,7 +435,7 @@ importers:
       '@types/ws':
         specifier: ^8.5.13
         version: 8.18.1
-      '@web.of.trust/core':
+      '@web_of_trust/core':
         specifier: workspace:*
         version: link:../wot-core
       tsx:
@@ -450,7 +450,7 @@ importers:
 
   packages/wot-vault:
     dependencies:
-      '@web.of.trust/core':
+      '@web_of_trust/core':
         specifier: workspace:*
         version: link:../wot-core
       better-sqlite3:

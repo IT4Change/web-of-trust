@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.1.1](https://github.com/antontranelis/web-of-trust/compare/@web.of.trust/vault-v0.1.0...@web.of.trust/vault-v0.1.1) (2026-03-26)
+## [0.1.1](https://github.com/antontranelis/web-of-trust/compare/@web_of_trust/vault-v0.1.0...@web_of_trust/vault-v0.1.1) (2026-03-26)
 
 
 ### Features

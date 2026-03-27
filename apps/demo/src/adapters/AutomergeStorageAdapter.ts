@@ -14,12 +14,12 @@ import type {
   Verification,
   Attestation,
   AttestationMetadata,
-} from '@web.of.trust/core'
+} from '@web_of_trust/core'
 import {
   getPersonalDoc,
   changePersonalDoc,
   onPersonalDocChange,
-} from '@web.of.trust/adapter-automerge'
+} from '@web_of_trust/adapter-automerge'
 import type {
   PersonalDoc,
   ContactDoc,

@@ -25,7 +25,7 @@ jobs:
         run: pnpm install
 
       - name: Build packages
-        run: pnpm --filter @web.of.trust/core --filter @web.of.trust/adapter-yjs --filter @web.of.trust/adapter-automerge build
+        run: pnpm --filter @web_of_trust/core --filter @web_of_trust/adapter-yjs --filter @web_of_trust/adapter-automerge build
 
       - name: Typecheck
         run: pnpm typecheck

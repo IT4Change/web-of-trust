@@ -1,5 +1,5 @@
 {
-  "name": "@web.of.trust/adapter-yjs",
+  "name": "@web_of_trust/adapter-yjs",
   "version": "0.1.1",
   "description": "Yjs CRDT adapter for Web of Trust — pure JavaScript replication and personal document management",
   "repository": {
@@ -36,10 +36,10 @@
     "y-protocols": "^1.0.7"
   },
   "peerDependencies": {
-    "@web.of.trust/core": "workspace:*"
+    "@web_of_trust/core": "workspace:*"
   },
   "devDependencies": {
-    "@web.of.trust/core": "workspace:*",
+    "@web_of_trust/core": "workspace:*",
     "fake-indexeddb": "^6.2.5",
     "happy-dom": "^20.5.0",
     "typescript": "~5.7.2",

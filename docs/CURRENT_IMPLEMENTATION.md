@@ -602,9 +602,9 @@ Encrypted binary storage (profile pictures, attachments) on IPFS. Concept docume
 
 Swappable CRDT packages for external developers:
 ```
-@web.of.trust/core           → Interfaces, Crypto, Identity
-@web.of.trust/adapter-yjs        → YjsReplicationAdapter (Default)
-@web.of.trust/adapter-automerge  → AutomergeReplicationAdapter (Option)
+@web_of_trust/core           → Interfaces, Crypto, Identity
+@web_of_trust/adapter-yjs        → YjsReplicationAdapter (Default)
+@web_of_trust/adapter-automerge  → AutomergeReplicationAdapter (Option)
 ```
 
 ### Deferred
