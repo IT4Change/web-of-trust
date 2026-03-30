@@ -30,9 +30,9 @@ https://web-of-trust.de
 
 Web of Trust is decentralized digital social infrastructure that puts data sovereignty at its center. It provides self-sovereign identity, mutual verification, signed attestations, and end-to-end encrypted collaboration — as an open JavaScript library any developer can integrate.
 
-Today, communities that want to coordinate locally depend on corporate platforms they don't control. Decentralized protocols solve messaging but lack a trust layer based on direct verification between people. Web of Trust fills this gap.
+Today, communities that want to coordinate locally depend on corporate platforms they don't control. Decentralized protocols solve messaging, data sync, and identity — but none provide a trust layer based on mutual verification and reputation. Web of Trust fills this gap.
 
-A working prototype exists: identity (did:key, Ed25519), mutual verification via QR code, encrypted group spaces (Yjs/Automerge), offline support, 534 tests, published npm packages, and a live demo. Funding will enable access control, guardian-based identity recovery using the trust network itself, developer documentation, and a community pilot with real user groups.
+A working prototype exists: identity (did:key, Ed25519), mutual verification via QR code, encrypted group spaces (Yjs/Automerge), offline support, published npm packages, and a live demo. Funding will enable access control, guardian-based identity recovery using the trust network itself, developer documentation, and a community pilot with real user groups.
 
 The outcome is production-ready commons infrastructure for community applications — belonging to the community, not to a company.
 
@@ -58,11 +58,11 @@ The internet was built on open protocols — but identity, trust, and collaborat
 
 ### Amount
 
-€35,000
+€36,000
 
 ### Budget Allocation
 
-The project follows a phased development approach over approximately 9 months. Budget is allocated across 4 work packages:
+The project follows a phased development approach over approximately 9 months (720h total, ~80h/month). Budget is allocated across 4 work packages:
 
 **WP1: Authorization & Access Control (€10,000 — ~200h @ €50/h)**
 
@@ -83,14 +83,12 @@ The project follows a phased development approach over approximately 9 months. B
 - DID migration: attestations and verifications transfer from old to new DID via equivalence proofs
 - This approach is unique to Web of Trust: the guardian network exists naturally from in-person verifications — no artificial setup required
 
-**WP3: Developer Experience & Documentation (€5,000 — ~100h @ €50/h)**
+**WP3: Developer Experience & Documentation (€6,000 — ~120h @ €50/h)**
 
-- Getting-started guide for integrating Web of Trust into existing applications
-- Integration examples and tutorials
+- Optimize the library for ease of integration: simplify API surface, provide sensible defaults, reduce boilerplate required to get started
+- Getting-started guide, integration examples, and tutorials
 - API reference for all 7 adapter interfaces
-- Package documentation for all packages
 - Contribution guidelines and governance model
-- Accessibility considerations documented
 
 **WP4: Community Pilot (€10,000 — ~200h @ €50/h)**
 
@@ -101,7 +99,7 @@ The project follows a phased development approach over approximately 9 months. B
 - Gather feedback, iterate, document lessons learned
 - Explore alternative verification methods beyond QR codes to lower adoption barriers
 
-**Total: €35,000**
+**Total: €36,000**
 
 **Team:** Sebastian Stein (frontend/UX, Real Life Stack) and Tillmann Heigel (infrastructure, native mobile apps) contribute actively but their work is outside this application's scope. We are considering a separate application for the Real Life Stack in the next funding round.
 
@@ -114,7 +112,7 @@ No prior or current external funding. The project has been developed entirely th
 Web of Trust occupies a unique position in the landscape of decentralized identity and trust systems:
 
 **vs. OpenPGP Web of Trust:**
-The classic PGP Web of Trust established the concept of decentralized trust through key signing. However, it remained a tool for technical users, required manual key management, and never achieved mainstream adoption. Our Web of Trust builds on the same philosophical foundation but with a modern approach: BIP39 seed phrases instead of PGP key management, automatic key derivation, QR-code verification flows designed for non-technical users, and encrypted collaboration built in.
+The classic PGP Web of Trust established the concept of decentralized trust through key signing. However, it remained a tool for technical users, required manual key management, and never achieved mainstream adoption. Our Web of Trust builds on the same philosophical foundation but with a modern approach: 12 words to write down instead of PGP key files to manage, automatic key derivation, QR-code verification flows designed for non-technical users, and encrypted collaboration built in.
 
 **vs. CRDT frameworks (Automerge, Yjs, Jazz, DXOS, Loro):**
 These are local-first CRDT frameworks for data synchronization. Some include their own identity systems (Jazz has CoID accounts, DXOS has HALO), but none provide a trust layer with mutual verification between people. We evaluated 16 of them systematically and built a CRDT-agnostic adapter architecture with swappable backends — currently supporting both Yjs and Automerge. Our contribution is the trust layer — mutual verification, signed attestations, guardian recovery — that none of these frameworks provide.
@@ -136,10 +134,9 @@ NextGraph provides a comprehensive local-first framework with Graph CRDT (RDF), 
 1. **Trust through mutual verification** — the protocol uses deliberate friction (mutual QR-code exchange) to encourage real encounters, but does not technically enforce physical presence. Trust is built through direct human interaction, not online proofs or algorithmic scores
 2. **Reputation through signed attestations** — verifiable claims about skills, contributions, and collaboration — building organic reputation over time
 3. **CRDT-agnostic adapter architecture** — swap any of the 7 components independently
-4. **Single BIP39 seed derives all keys** — identity, encryption, storage. One seed, one identity.
-5. **Guardian recovery via the trust network** — your verified contacts are your recovery network. No secrets shared, no server backup.
-6. **Servers are blind** — Relay and Vault see only encrypted bytes, never plaintext. Profiles is public but under user control.
-7. **Designed for local action** — optimized for communities that coordinate and collaborate in the real world
+4. **Guardian recovery via the trust network** — your verified contacts are your recovery network. No secrets shared, no server backup.
+5. **Servers are blind** — Relay and Vault see only encrypted bytes, never plaintext. Profiles is public but under user control.
+6. **Designed for local action** — optimized for communities that coordinate and collaborate in the real world
 
 ### Technical Challenges
 
@@ -151,7 +148,7 @@ NextGraph provides a comprehensive local-first framework with Graph CRDT (RDF), 
 
 4. **Key Management Across Devices:** Deriving deterministic keys from a single BIP39 seed across different browsers and environments while maintaining security. Our HKDF-based derivation path solves this architecturally, but ensuring consistent behavior and secure seed storage across environments requires careful implementation.
 
-5. **Security Review:** We have conducted an internal security review (threat model, crypto inventory, key derivation documentation) and use established cryptographic libraries (WebCrypto API, @noble/ed25519) rather than custom implementations. A formal external security audit is intentionally not part of this application — it would exceed the scope and budget of this funding round. We would welcome the opportunity to discuss a dedicated security audit with NLNet.
+**On security:** We have conducted an internal security review (threat model, crypto inventory, key derivation documentation) and use established cryptographic libraries (WebCrypto API, @noble/ed25519) rather than custom implementations. A formal external security audit is intentionally not part of this application — it would exceed the scope and budget of this funding round. We would welcome the opportunity to discuss a dedicated security audit with NLNet.
 
 ### Ecosystem Engagement
 
@@ -186,9 +183,8 @@ A detailed prompt provenance log documenting all AI interactions is maintained s
 - [x] Contact information filled in
 - [x] License: AGPL-3.0
 - [x] LICENSE file in repository
-- [x] Budget allocation reviewed (€35k, 4 WPs)
+- [x] Budget allocation reviewed (€36k, 4 WPs)
 - [x] Work packages realistic and focused
-- [x] Timeline with milestones
 - [x] AI Disclosure with prompt provenance log
 - [ ] Final review
 - [ ] Transfer to NLNet submission form

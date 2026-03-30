@@ -170,11 +170,21 @@ Fuer die Web-Version gibt es keine Architektur-Entscheidung — der Stack (React
 
 Die Frage ob der WoT Core langfristig nach Rust migriert werden sollte, wird separat behandelt: siehe [wot-rust-migration.md](wot-rust-migration.md).
 
+### Ergebnisse aus dem Gespraech mit Sebastian Galek (30.03.2026)
+
+**Rust ist gesetzt.** Sebastian baut seine App mit Tauri und haelt an Rust fest. Eine Portierung von HMC nach TypeScript ist nicht geplant. Fuer die Integration bedeutet das: WoT laeuft als TypeScript im Tauri-WebView, HMC laeuft als Rust nativ ueber die Tauri Bridge. Das ist der Standard-Tauri-Ansatz, aber Sebastian wuerde langfristig eine Rust-WoT-Library bevorzugen.
+
+**Lizenzfrage:** Sebastian wuenscht sich MIT statt AGPL fuer das WoT, weil er HMC-Features moeglicherweise proprietaer anbieten will. Moeglicher Kompromiss: WoT Core Library unter MIT, Server-Komponenten (Relay, Vault, Profiles) unter AGPL. Oder: Dual Licensing (AGPL + kommerzielle Lizenz). Noch zu klaeren.
+
+**Prioritaeten aus Sebastians Sicht:**
+- Batch-Signaturen (Trust Manifests) — wichtig fuer Performance bei vielen Vertrauensbeweisen
+- Quantitativer Trust Graph — prozentuale Darstellung pro Kontakt, Decay ueber Hops, Multipath-Aggregation
+
 ### Zu klaeren
 
-- **Tauri Mobile Reife:** Wie stabil ist Tauri 2.0 auf iOS/Android fuer Produktions-Apps? Erfahrungen sammeln.
-- **HMC Port:** Waere Sebastian bereit, Kernlogik auch in TS anzubieten? Oder ist Rust gesetzt?
-- **Kopplungsgrad WoT ↔ HMC:** Library-Integration oder lose API-Kopplung?
+- **Lizenz:** AGPL vs. MIT vs. Dual Licensing. Abwaegung zwischen Commons-Schutz und Sebastians Business-Anforderungen.
+- **Tauri Mobile Reife:** Wie stabil ist Tauri 2.0 auf iOS/Android fuer Produktions-Apps?
+- **Multipath-Aggregation:** Wie werden mehrere Trust-Pfade kombiniert? Einfache Addition, probabilistisch, oder gewichtet?
 
 ---
 
@@ -189,9 +199,10 @@ Zwei Modi, je nach Nutzerwunsch:
 
 ### Trust Graph Erweiterungen
 
-- **Decay:** Jeder Hop reduziert Vertrauen prozentual (konfigurierbar)
-- **Multipath:** Mehrere unabhaengige Pfade → hoeheres Gesamtvertrauen
+- **Decay:** Jeder Hop reduziert Vertrauen prozentual (konfigurierbar). Beispiel: Ich vertraue A zu 70%, A vertraut B zu 50% → abgeleitetes Vertrauen zu B = 35%.
+- **Multipath:** Mehrere unabhaengige Pfade erhoehen das Gesamtvertrauen. Wenn B auch ueber C erreichbar ist (60% × 80% = 48%), steigt das aggregierte Vertrauen ueber 35%.
 - **Schwellenwerte:** Pro Anwendung konfigurierbar ("Gutscheine unter 50 Einheiten ab 60% Trust automatisch akzeptieren")
+- **UX:** Nutzer soll fuer jeden Kontakt den aggregierten Trust-Score sehen koennen — auch fuer Personen die er nicht direkt kennt, aber ueber das Netzwerk erreicht.
 
 ### Revocation / Tombstones
 
@@ -204,11 +215,10 @@ Zwei Modi, je nach Nutzerwunsch:
 ## Offene Fragen
 
 1. **Trust Manifests:** Batching von Vertrauensbeweisen spart Resourcen — aber wie bleibt die einzelne Verifizierbarkeit erhalten? Merkle Tree?
-2. **TTL / Ablaufdatum:** Erzwingt aktive Erneuerung, bereinigt tote Beziehungen — aber ist der UX-Aufwand gerechtfertigt?
-3. **Gossip-Kanal:** Fingerprint-Verbreitung ueber den bestehenden WoT Relay (`wss://relay.utopia-lab.org`) oder eigenes Protokoll?
-4. **Tauri Mobile Reife:** Wie stabil ist Tauri 2.0 auf iOS/Android fuer Produktions-Apps?
-5. **Web-Fallback:** Braucht es eine reine Web-Version ohne App-Installation? Wenn ja, mit welchem Feature-Set?
-6. **Rust-Kompetenz:** Anton, Sebastian Galek — wer noch? Braucht es Verstaerkung?
+2. **Multipath-Aggregation:** Wie werden mehrere Trust-Pfade zu einem Score kombiniert? Einfache Multiplikation, probabilistisch, oder gewichtet?
+3. **TTL / Ablaufdatum:** Erzwingt aktive Erneuerung, bereinigt tote Beziehungen — aber ist der UX-Aufwand gerechtfertigt?
+4. **Gossip-Kanal:** Fingerprint-Verbreitung ueber den bestehenden WoT Relay (`wss://relay.utopia-lab.org`) oder eigenes Protokoll?
+5. **Lizenz:** AGPL vs. MIT vs. Dual Licensing — Commons-Schutz vs. Sebastians Business-Anforderungen.
 
 ---
 
