@@ -12,4 +12,7 @@ test-results/
 apps/video/
 .idea/
 .DS_Store
+# F-Droid repo (local build artifacts + secrets)
+packages/wot-fdroid/repo/
+keystore.p12
 docs/nlnet-application-2026.md
