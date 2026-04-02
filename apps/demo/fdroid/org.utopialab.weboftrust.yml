@@ -1,0 +1,60 @@
+# F-Droid metadata for official fdroiddata submission.
+# Copy this file to metadata/org.utopialab.weboftrust.yml in your fdroiddata fork.
+# Docs: https://f-droid.org/docs/Build_Metadata_Reference/
+
+Categories:
+  - Security
+  - Internet
+License: MIT
+AuthorName: Anton Tranelis
+AuthorWebSite: https://web-of-trust.de
+WebSite: https://weboftrust.utopia-lab.org
+SourceCode: https://github.com/antontranelis/web-of-trust
+IssueTracker: https://github.com/antontranelis/web-of-trust/issues
+
+AutoName: Web of Trust
+Description: |
+  Build your decentralized identity through face-to-face verification.
+
+  Web of Trust lets you create a self-sovereign digital identity,
+  verify contacts in person via QR codes, exchange attestations,
+  and share data in encrypted spaces. No central authority needed.
+
+  Features:
+  * Create and manage your cryptographic identity
+  * Verify contacts face-to-face with QR code scanning
+  * Issue and receive attestations
+  * Encrypted data sharing spaces with real-time sync
+  * Offline support with automatic sync on reconnect
+  * Multi-device support
+
+RepoType: git
+Repo: https://github.com/antontranelis/web-of-trust.git
+
+Builds:
+  - versionName: 0.1.0
+    versionCode: 1
+    commit: v0.1.0
+    timeout: 20000
+    sudo:
+      - apt-get update
+      - apt-get install -y nodejs npm
+      - npm install -g pnpm@9
+    subdir: apps/demo/android
+    submodules: false
+    prebuild:
+      - cd ../../..
+      - pnpm install --frozen-lockfile
+      - VITE_BASE_PATH=/ pnpm build --filter=demo
+      - cd apps/demo
+      - npx cap sync android
+    scandelete:
+      - apps/demo/android/gradle/wrapper/gradle-wrapper.jar
+    scanignore:
+      - apps/demo/android/gradle/wrapper/gradle-wrapper.jar
+    build: ./gradlew assembleRelease
+
+AutoUpdateMode: None
+UpdateCheckMode: Tags
+CurrentVersion: 0.1.0
+CurrentVersionCode: 1

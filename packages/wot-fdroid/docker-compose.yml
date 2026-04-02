@@ -1,0 +1,15 @@
+services:
+  wot-fdroid:
+    image: caddy:2-alpine
+    container_name: wot-fdroid
+    hostname: 'wot-fdroid'
+    restart: unless-stopped
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./repo:/srv/fdroid:ro
+    networks:
+      - "net"
+
+networks:
+  net:
+    external: true
