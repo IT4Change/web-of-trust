@@ -1,6 +1,6 @@
 Categories:
-  - Security
   - Internet
+  - Security
 License: MIT
 AuthorName: Anton Tranelis
 AuthorEmail: info@real-life.org
@@ -11,7 +11,6 @@ Changelog: https://github.com/real-life-org/web-of-trust/releases
 
 AutoName: Web of Trust
 Summary: Decentralized identity through face-to-face verification
-
 Description: |
   Web of Trust lets you build a decentralized digital identity — verified
   through real, face-to-face encounters.
@@ -45,12 +44,9 @@ Builds:
       - apt-get install -y nodejs
       - corepack enable
       - corepack prepare pnpm@9.15.4 --activate
-    init: |-
-      cd ../../..
-      pnpm install --frozen-lockfile
-      VITE_BASE_PATH=/ VITE_UPDATE_SERVER_URL=https://web-of-trust.de VITE_UPDATE_CHANNEL=android-foss pnpm build
-      cd apps/demo
-      npx cap sync android
+    init: "cd ../../..\npnpm install --frozen-lockfile\nexport VITE_BASE_PATH=/
+      VITE_UPDATE_SERVER_URL=https://web-of-trust.de VITE_UPDATE_CHANNEL=android-foss\npnpm
+      build\ncd apps/demo\nnpx cap sync android"
     gradle:
       - fdroid
     output: app/build/outputs/apk/fdroid/release/app-fdroid-release-unsigned.apk
