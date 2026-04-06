@@ -15,8 +15,7 @@ const LAST_UPDATE_KEY = "ota_last_updated_at"
 export async function checkForLiveUpdate(): Promise<void> {
   if (!Capacitor.isNativePlatform()) return
 
-  const serverUrl = import.meta.env.VITE_UPDATE_SERVER_URL
-  if (!serverUrl) return
+  const serverUrl = import.meta.env.VITE_UPDATE_SERVER_URL ?? 'https://web-of-trust.de'
 
   const channel =
     import.meta.env.VITE_UPDATE_CHANNEL || Capacitor.getPlatform()
