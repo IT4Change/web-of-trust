@@ -20,18 +20,13 @@ Builds:
     commit: 7b689e85c1089791c86483e58b72059d71d7fc93
     subdir: apps/demo/android
     sudo:
-      - apt-get update
-      - apt-get install -y ca-certificates curl gnupg
-      - mkdir -p /etc/apt/keyrings
-      - curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg
-        --dearmor -o /etc/apt/keyrings/nodesource.gpg
-      - echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x
-        nodistro main" > /etc/apt/sources.list.d/nodesource.list
-      - apt-get update
-      - apt-get install -y nodejs
-      - corepack enable
-      - corepack prepare pnpm@9.15.4 --activate
-    init: "cd ../../..\npnpm install --frozen-lockfile\nexport VITE_BASE_PATH=/ VITE_UPDATE_SERVER_URL=https://web-of-trust.de
+      - sysctl fs.inotify.max_user_watches=524288
+      - curl -Lo node.tar.gz https://nodejs.org/dist/v22.15.0/node-v22.15.0-linux-x64.tar.gz
+      - echo "29d1c60c5b64ccdb0bc4e5495135e68e08a872e0ae91f45d9ec34fc135a17981 node.tar.gz"
+        | sha256sum -c -
+      - tar xzf node.tar.gz --strip-components=1 -C /usr/local/
+    init: "corepack enable\ncorepack prepare pnpm@9.15.4 --activate\ncd ../../..\npnpm
+      install --frozen-lockfile\nexport VITE_BASE_PATH=/ VITE_UPDATE_SERVER_URL=https://web-of-trust.de
       VITE_UPDATE_CHANNEL=android-foss\npnpm build\ncd apps/demo\nnpx cap sync android"
     gradle:
       - fdroid
