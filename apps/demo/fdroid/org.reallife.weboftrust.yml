@@ -17,7 +17,7 @@ Repo: https://github.com/real-life-org/web-of-trust.git
 Builds:
   - versionName: 0.2.1
     versionCode: 3
-    commit: 7b689e85c1089791c86483e58b72059d71d7fc93
+    commit: 280a82b69e5437337defdf504128bcc9a576d7c3
     subdir: apps/demo/android
     sudo:
       - sysctl fs.inotify.max_user_watches=524288
