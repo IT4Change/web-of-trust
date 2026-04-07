@@ -21,8 +21,9 @@ Builds:
     subdir: apps/demo/android/app
     sudo:
       - sysctl fs.inotify.max_user_watches=524288
+      - echo "deb https://deb.debian.org/debian forky main" > /etc/apt/sources.list.d/forky.list
       - apt-get update
-      - apt-get install -t forky -y nodejs
+      - apt-get install -y -t forky nodejs
       - corepack enable
       - corepack prepare pnpm@9.15.4 --activate
     init:
