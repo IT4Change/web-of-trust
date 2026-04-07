@@ -17,21 +17,24 @@ Repo: https://github.com/real-life-org/web-of-trust.git
 Builds:
   - versionName: 0.2.1
     versionCode: 3
-    commit: 97f70fbf0733c8ae73343730866cfe154c4036b8
-    subdir: apps/demo/android
+    commit: de3f6131b27ad3db314a1a3e21b906021c9aad3e
+    subdir: apps/demo/android/app
     sudo:
       - sysctl fs.inotify.max_user_watches=524288
-      - curl -Lo node.tar.gz https://nodejs.org/dist/v22.15.0/node-v22.15.0-linux-x64.tar.gz
-      - echo "29d1c60c5b64ccdb0bc4e5495135e68e08a872e0ae91f45d9ec34fc135a17981 node.tar.gz"
-        | sha256sum -c -
-      - tar xzf node.tar.gz --strip-components=1 -C /usr/local/
+      - apt-get update
+      - apt-get install -t forky -y nodejs
       - corepack enable
       - corepack prepare pnpm@9.15.4 --activate
-    init: "cd ../../..\npnpm install --frozen-lockfile\nexport VITE_BASE_PATH=/ VITE_UPDATE_SERVER_URL=https://web-of-trust.de
-      VITE_UPDATE_CHANNEL=android-foss\npnpm build\ncd apps/demo\nnpx cap sync android"
+    init:
+      - cd ../../../..
+      - pnpm install --frozen-lockfile
+      - export VITE_BASE_PATH=/ VITE_UPDATE_SERVER_URL=https://web-of-trust.de
+        VITE_UPDATE_CHANNEL=android-foss
+      - pnpm build
+      - cd apps/demo
+      - npx cap sync android
     gradle:
       - fdroid
-    output: app/build/outputs/apk/fdroid/release/app-fdroid-release-unsigned.apk
     scanignore:
       - apps/demo/android/app/src/main/assets/public/assets
     scandelete:
