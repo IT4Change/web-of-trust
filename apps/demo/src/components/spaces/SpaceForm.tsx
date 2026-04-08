@@ -77,7 +77,7 @@ export function SpaceForm({ mode }: SpaceFormProps) {
   }, [mode, spaceId, spaces])
 
   // Autosave in edit mode (debounced)
-  const saveTimerRef = useRef<ReturnType<typeof setTimeout>>()
+  const saveTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined)
   const autoSave = useCallback(() => {
     if (mode !== 'edit' || !spaceId || !name.trim()) return
     clearTimeout(saveTimerRef.current)
