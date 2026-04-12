@@ -71,28 +71,53 @@
 
 ### E1: App-Start (Cold Start)
 
-Einmalig beim Öffnen der App.
+Einmalig beim Öffnen der App. Drei Phasen, strikt sequentiell.
 
 ```
 Trigger: App wird geöffnet, User ist eingeloggt
 ```
 
+#### Phase 1: Lokaler State aufbauen (offline-fähig, kein Netzwerk nötig)
+
 | # | Aktion | Ziel |
 |---|--------|------|
-| ✅ 1 | CompactStore öffnen | Lokalen Cache bereitstellen |
-| ✅ 2 | PersonalDoc laden (CompactStore → Vault → Empty) | Spaces, Keys, Contacts verfügbar |
-| ✅ 3 | PersonalSync starten | Multi-Device Sync für PersonalDoc |
-| ✅ 4 | Relay verbinden (WebSocket) | Echtzeitkommunikation |
-| ✅ 5 | Spaces aus PersonalDoc restaurieren (`restoreSpacesFromMetadata`) | Space-Docs aus CompactStore laden |
-| ✅ 6 | Vault Pull für alle Spaces (einmalig) | Neuesten Stand holen |
-| ✅ 7 | Full State Broadcast (einmalig) | Andere Devices informieren |
+| ✅ 1a | CompactStore öffnen | IDB bereit |
+| ✅ 1b | PersonalDoc aus CompactStore laden | Spaces, Keys, Contacts lokal verfügbar |
+| ✅ 1c | Spaces aus PersonalDoc restaurieren (`restoreSpacesFromMetadata`) | Space-Einträge bekannt |
+| ✅ 1d | Space-Docs aus CompactStore laden (`Y.applyUpdate` pro Space) | Lokaler Content verfügbar |
 
-**Reihenfolge:** 1-4 müssen vor 5-7 abgeschlossen sein. 6 und 7 können parallel laufen.
+**Nach Phase 1:** App ist offline benutzbar. Alle lokalen Daten sind geladen.
+UI kann bereits rendern (Spaces, Contacts, Items aus Cache).
+
+#### Phase 2: Netzwerk herstellen
+
+| # | Aktion | Ziel |
+|---|--------|------|
+| ✅ 2a | Vault-Client aufsetzen (HTTP) | Vault-Zugriff möglich |
+| ✅ 2b | Falls PersonalDoc leer (kein CompactStore): aus Vault restaurieren | Neues Device bekommt State |
+| ✅ 2c | Falls PersonalDoc leer (kein Vault): leeres Doc erstellen | Erstbenutzer |
+| ✅ 2d | Relay verbinden (WebSocket) | Echtzeit-Kanal steht |
+
+**Nach Phase 2:** Netzwerk steht, aber es wird noch nichts gesendet.
+Reihenfolge 2a-2c vor 2d: Vault-Restore braucht nur HTTP, kein Relay.
+Aber der State muss vollständig sein bevor wir anfangen zu syncen.
+
+#### Phase 3: Sync starten (erst wenn Phase 1+2 abgeschlossen)
+
+| # | Aktion | Ziel |
+|---|--------|------|
+| ✅ 3a | PersonalSync starten → sendet FullState an eigene DID | Andere Devices bekommen PersonalDoc |
+| ✅ 3b | Vault Pull für alle Spaces (einmalig, Concurrency Limit) | Neueste Snapshots aus Vault holen |
+| ✅ 3c | Full State Broadcast für alle Spaces (einmalig) | Andere Devices/Members bekommen Space-State |
+
+**3b und 3c können parallel laufen.** Beide sind einmalig beim Start.
 
 | ❌ | Darf nicht passieren |
 |----|---------------------|
+| ❌ | PersonalSync starten bevor Relay verbunden ist (erzeugt gescheiterte Messages) |
 | ❌ | Vault Pull oder Broadcast bei nachfolgenden PersonalDoc-Änderungen wiederholen |
 | ❌ | `requestSync("__all__")` als Reaktion auf den eigenen Start-Sync |
+| ❌ | Full State Broadcast bevor lokaler State geladen ist (sendet sonst leere Docs) |
 
 ---
 
