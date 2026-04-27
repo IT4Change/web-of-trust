@@ -94,6 +94,9 @@ export {
   extractJwsPayload,
 } from './crypto/jws'
 
+export * as spec from './spec'
+export * as specAdapters from './spec-adapters'
+
 export {
   createCapability,
   verifyCapability,
