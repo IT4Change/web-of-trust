@@ -21,6 +21,8 @@ This directory is the protocol-level TypeScript implementation of the WoT specif
 - CRDT adapters
 - UI code
 
+DIDComm-compatible plaintext envelopes are transport framing, not spec-core logic. They stay outside `src/spec` and are validated by the `wot-spec` conformance tooling with DIDComm libraries.
+
 Concrete platform integrations live outside the core boundary:
 
 - `src/spec-adapters/web-crypto.ts` implements the crypto port with Web Crypto.

@@ -14,9 +14,9 @@ Legend:
 | Profile | Vector file | Section | TS implementation | Test status | Notes |
 |---|---|---|---|---|---|
 | `wot-identity@0.1` | `phase-1-interop.json` | `identity` | `identity/key-derivation.ts`, `identity/did-key.ts` | Full | Ed25519 seed/public key, X25519 seed/public key, DID, kid, multibase encodings. |
-| `wot-identity@0.1` | `phase-1-interop.json` | `did_resolution` | `identity/did-key.ts`, `identity/did-document.ts` | Partial | Key encodings are covered. Full DID document construction and JCS hash are still validated in `wot-spec`, not TS spec-core. |
+| `wot-identity@0.1` | `phase-1-interop.json` | `did_resolution` | `identity/did-key.ts`, `identity/did-document.ts`, `crypto/jcs.ts` | Full | Resolves the did:key document with bootstrap keyAgreement/service data and checks the DID document JCS hash. |
 | `wot-trust@0.1` | `phase-1-interop.json` | `attestation_vc_jws` | `trust/attestation-vc-jws.ts`, `crypto/jcs.ts`, `crypto/jws.ts` | Full | Payload JCS hash, create, verify, issuer/subject checks. |
-| `wot-sync@0.1` | `phase-1-interop.json` | `didcomm_plaintext_envelope` | none | External | Validated by `wot-spec` with `didcomm-node` and `@veramo/did-comm`; not part of TS spec-core yet. |
+| `wot-sync@0.1` | `phase-1-interop.json` | `didcomm_plaintext_envelope` | none | External by design | Transport-envelope compatibility is validated by `wot-spec` with `didcomm-node` and `@veramo/did-comm`; DIDComm is intentionally not part of TS spec-core. |
 | `wot-sync@0.1` | `phase-1-interop.json` | `ecies` | `sync/encryption.ts`, `spec-adapters/web-crypto.ts` | Full | Ephemeral public key, shared secret, HKDF AES key, encrypt vector, decrypt roundtrip. |
 | `wot-sync@0.1` | `phase-1-interop.json` | `log_payload_encryption` | `sync/encryption.ts` | Full | Deterministic nonce, AES-GCM ciphertext/tag, blob encoding, decrypt roundtrip. |
 | `wot-sync@0.1` | `phase-1-interop.json` | `log_entry_jws` | `sync/log-entry.ts` | Full | Create and verify JWS; authorKid binding and payload checks. |
@@ -40,7 +40,9 @@ The TypeScript spec-core currently validates protocol behavior against vectors, 
 
 ## Current Gaps
 
-- Full DID document generation and JCS hash comparison for `did_resolution` in TS spec-core.
-- DIDComm plaintext envelope validation in TS spec-core; this is currently external library coverage in `wot-spec`.
 - Complete SD-JWT VC implementation beyond the current trust-list vector requirements.
 - JSON Schema validation in TS; currently intentionally centralized in `wot-spec`.
+
+## External Boundaries
+
+- DIDComm plaintext-envelope compatibility is a transport boundary, not a spec-core gap. It remains validated in `wot-spec` against DIDComm libraries.

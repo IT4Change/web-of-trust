@@ -32,6 +32,11 @@ export function didKeyToPublicKeyBytes(didOrKid: string): Uint8Array {
   return ed25519MultibaseToPublicKeyBytes(`z${did.slice('did:key:z'.length)}`)
 }
 
+export interface ResolveDidKeyOptions {
+  keyAgreement?: DidDocument['keyAgreement']
+  service?: NonNullable<DidDocument['service']>
+}
+
 export function ed25519MultibaseToPublicKeyBytes(multibase: string): Uint8Array {
   if (!multibase.startsWith('z')) throw new Error('Expected base58btc multibase key')
   const decoded = decodeBase58(multibase.slice(1))
@@ -41,9 +46,9 @@ export function ed25519MultibaseToPublicKeyBytes(multibase: string): Uint8Array 
   return decoded.slice(ED25519_PREFIX.length)
 }
 
-export function resolveDidKey(did: string): DidDocument {
+export function resolveDidKey(did: string, options: ResolveDidKeyOptions = {}): DidDocument {
   const publicKeyMultibase = ed25519PublicKeyToMultibase(didKeyToPublicKeyBytes(did))
-  return {
+  const document: DidDocument = {
     id: did,
     verificationMethod: [
       {
@@ -55,6 +60,10 @@ export function resolveDidKey(did: string): DidDocument {
     ],
     authentication: ['#sig-0'],
     assertionMethod: ['#sig-0'],
-    keyAgreement: [],
+    keyAgreement: options.keyAgreement ?? [],
   }
+
+  if (options.service) document.service = options.service
+
+  return document
 }

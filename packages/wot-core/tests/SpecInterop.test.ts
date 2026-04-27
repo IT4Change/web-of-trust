@@ -28,6 +28,7 @@ import {
   verifyLogEntryJws,
   verifySdJwtVc,
   verifySpaceCapabilityJws,
+  resolveDidKey,
   x25519PublicKeyToMultibase,
 } from '../src/spec'
 import { WebCryptoSpecCryptoAdapter } from '../src/spec-adapters'
@@ -70,6 +71,14 @@ describe('WoT spec interop vectors', () => {
     expect(bytesToHex(identity.x25519Seed)).toBe(phase1.identity.x25519_seed_hex)
     expect(bytesToHex(identity.x25519PublicKey)).toBe(phase1.identity.x25519_public_hex)
     expect(x25519PublicKeyToMultibase(identity.x25519PublicKey)).toBe(phase1.identity.x25519_public_multibase)
+
+    const didDocument = resolveDidKey(phase1.identity.did, {
+      keyAgreement: phase1.did_resolution.did_document.keyAgreement,
+      service: phase1.did_resolution.did_document.service,
+    })
+    const didDocumentHash = await cryptoAdapter.sha256(canonicalizeToBytes(didDocument as unknown as JsonValue))
+    expect(didDocument).toEqual(phase1.did_resolution.did_document)
+    expect(bytesToHex(didDocumentHash)).toBe(phase1.did_resolution.jcs_sha256)
   })
 
   it('canonicalizes and verifies the attestation VC-JWS vector', async () => {
