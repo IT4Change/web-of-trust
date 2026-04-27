@@ -7,9 +7,16 @@ import {
   createDeviceKeyBindingJws,
   createLogEntryJws,
   createSpaceCapabilityJws,
+  decodeBase64Url,
+  decryptEcies,
+  decryptLogPayload,
+  deriveEciesMaterial,
+  deriveLogPayloadNonce,
   deriveSpecIdentityFromSeedHex,
   ed25519PublicKeyToMultibase,
   ed25519MultibaseToPublicKeyBytes,
+  encryptEcies,
+  encryptLogPayload,
   verifyAttestationVcJws,
   verifyDelegatedAttestationBundle,
   verifyDeviceKeyBindingJws,
@@ -30,6 +37,10 @@ function loadSpecVector(relativePath: string): any {
 
 function bytesToHex(bytes: Uint8Array): string {
   return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('')
+}
+
+function bytesToText(bytes: Uint8Array): string {
+  return new TextDecoder().decode(bytes)
 }
 
 function hexToBytes(hex: string): Uint8Array {
@@ -113,6 +124,59 @@ describe('WoT spec interop vectors', () => {
       now: new Date('2026-04-23T10:00:00Z'),
     })
     expect(capabilityPayload).toEqual(phase1.space_capability_jws.payload)
+  })
+
+  it('recreates ECIES and log payload encryption vectors', async () => {
+    const eciesMaterial = await deriveEciesMaterial({
+      crypto: cryptoAdapter,
+      ephemeralPrivateSeed: hexToBytes(phase1.ecies.ephemeral_private_hex),
+      recipientPublicKey: decodeBase64Url(phase1.ecies.recipient_x25519_public_b64),
+    })
+    expect(bytesToHex(eciesMaterial.sharedSecret)).toBe(phase1.ecies.shared_secret_hex)
+    expect(bytesToHex(eciesMaterial.aesKey)).toBe(phase1.ecies.aes_key_hex)
+
+    const eciesMessage = await encryptEcies({
+      crypto: cryptoAdapter,
+      ephemeralPrivateSeed: hexToBytes(phase1.ecies.ephemeral_private_hex),
+      recipientPublicKey: decodeBase64Url(phase1.ecies.recipient_x25519_public_b64),
+      nonce: hexToBytes(phase1.ecies.nonce_hex),
+      plaintext: new TextEncoder().encode(phase1.ecies.plaintext),
+    })
+    expect(eciesMessage).toEqual({
+      epk: phase1.ecies.ephemeral_public_b64,
+      nonce: 'GhscHR4fICEiIyQl',
+      ciphertext: phase1.ecies.ciphertext_b64,
+    })
+    const eciesPlaintext = await decryptEcies({
+      crypto: cryptoAdapter,
+      recipientPrivateSeed: hexToBytes(phase1.identity.x25519_seed_hex),
+      message: eciesMessage,
+    })
+    expect(bytesToText(eciesPlaintext)).toBe(phase1.ecies.plaintext)
+
+    const logNonce = await deriveLogPayloadNonce(
+      cryptoAdapter,
+      phase1.log_payload_encryption.device_id,
+      phase1.log_payload_encryption.seq,
+    )
+    expect(bytesToHex(logNonce)).toBe(phase1.log_payload_encryption.nonce_hex)
+
+    const encryptedLogPayload = await encryptLogPayload({
+      crypto: cryptoAdapter,
+      spaceContentKey: hexToBytes(phase1.log_payload_encryption.space_content_key_hex),
+      deviceId: phase1.log_payload_encryption.device_id,
+      seq: phase1.log_payload_encryption.seq,
+      plaintext: new TextEncoder().encode(phase1.log_payload_encryption.plaintext),
+    })
+    expect(bytesToHex(encryptedLogPayload.ciphertextTag)).toBe(phase1.log_payload_encryption.ciphertext_tag_hex)
+    expect(encryptedLogPayload.blobBase64Url).toBe(phase1.log_payload_encryption.blob_b64)
+
+    const decryptedLogPayload = await decryptLogPayload({
+      crypto: cryptoAdapter,
+      spaceContentKey: hexToBytes(phase1.log_payload_encryption.space_content_key_hex),
+      blob: decodeBase64Url(phase1.log_payload_encryption.blob_b64),
+    })
+    expect(bytesToText(decryptedLogPayload)).toBe(phase1.log_payload_encryption.plaintext)
   })
 
   it('verifies the DeviceKeyBinding-JWS vector', async () => {

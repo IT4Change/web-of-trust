@@ -46,4 +46,29 @@ export class WebCryptoSpecCryptoAdapter implements SpecCryptoAdapter {
     const binary = atob(jwk.x.replace(/-/g, '+').replace(/_/g, '/'))
     return Uint8Array.from(binary, (char) => char.charCodeAt(0))
   }
+
+  async x25519SharedSecret(privateSeed: Uint8Array, publicKey: Uint8Array): Promise<Uint8Array> {
+    const privateKey = await crypto.subtle.importKey(
+      'pkcs8',
+      toBuffer(wrapX25519PrivateKey(privateSeed)),
+      { name: 'X25519' },
+      false,
+      ['deriveBits'],
+    )
+    const peerPublicKey = await crypto.subtle.importKey('raw', toBuffer(publicKey), { name: 'X25519' }, false, [])
+    const sharedSecret = await crypto.subtle.deriveBits({ name: 'X25519', public: peerPublicKey }, privateKey, 256)
+    return new Uint8Array(sharedSecret)
+  }
+
+  async aes256GcmEncrypt(key: Uint8Array, nonce: Uint8Array, plaintext: Uint8Array): Promise<Uint8Array> {
+    const cryptoKey = await crypto.subtle.importKey('raw', toBuffer(key), { name: 'AES-GCM' }, false, ['encrypt'])
+    const ciphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv: toBuffer(nonce), tagLength: 128 }, cryptoKey, toBuffer(plaintext))
+    return new Uint8Array(ciphertext)
+  }
+
+  async aes256GcmDecrypt(key: Uint8Array, nonce: Uint8Array, ciphertext: Uint8Array): Promise<Uint8Array> {
+    const cryptoKey = await crypto.subtle.importKey('raw', toBuffer(key), { name: 'AES-GCM' }, false, ['decrypt'])
+    const plaintext = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: toBuffer(nonce), tagLength: 128 }, cryptoKey, toBuffer(ciphertext))
+    return new Uint8Array(plaintext)
+  }
 }
