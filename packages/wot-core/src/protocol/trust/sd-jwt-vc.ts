@@ -69,6 +69,7 @@ export async function verifyHmcTrustListSdJwtVc(
   sdJwtCompact: string,
   options: VerifyHmcTrustListSdJwtVcOptions,
 ): Promise<VerifiedSdJwtVc> {
+  // HMC H01 `#sd-jwt-vc-validation-muss`: apply Trust List claim checks after generic SD-JWT VC verification.
   const verified = await verifySdJwtVc(sdJwtCompact, options)
   const { issuerKid, issuerPayload } = verified
 
@@ -99,7 +100,8 @@ function decodeDisclosure(encodedDisclosure: string): JsonValue {
 }
 
 function readIssuerKid(kid: unknown): string {
-  if (typeof kid !== 'string' || kid.length === 0) throw new Error('Missing SD-JWT issuer kid')
+  if (kid === undefined || kid === '') throw new Error('Missing SD-JWT issuer kid')
+  if (typeof kid !== 'string') throw new Error('Invalid SD-JWT issuer kid')
   return kid
 }
 

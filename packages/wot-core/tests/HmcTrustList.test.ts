@@ -98,40 +98,45 @@ describe('HMC H01 SD-JWT VC Trust List verifier', () => {
     ).rejects.toThrow('Invalid HMC Trust List vct')
   })
 
-  it('rejects a Trust List whose iss is missing, invalid, or does not match the signing kid DID', async () => {
-    const missingIss = await signedTrustListWithPayload((payload) => {
-      delete payload.iss
-    })
-    const invalidIss = await signedTrustListWithPayload((payload) => {
-      payload.iss = 42
-    })
-    const issuerMismatch = await signedTrustListWithPayload((payload) => {
-      payload.iss = 'did:key:z6MkpTHR8VNsBxYAAWHut2Geadd9jSwuBV8xRoAnwWsdvktH'
-    })
+  it.each([
+    {
+      name: 'missing',
+      mutate: (payload: Record<string, JsonValue>) => {
+        delete payload.iss
+      },
+      error: 'Missing HMC Trust List iss',
+    },
+    {
+      name: 'invalid',
+      mutate: (payload: Record<string, JsonValue>) => {
+        payload.iss = 42
+      },
+      error: 'Invalid HMC Trust List iss',
+    },
+    {
+      name: 'mismatched',
+      mutate: (payload: Record<string, JsonValue>) => {
+        payload.iss = 'did:key:z6MkpTHR8VNsBxYAAWHut2Geadd9jSwuBV8xRoAnwWsdvktH'
+      },
+      error: 'Invalid HMC Trust List issuer',
+    },
+    {
+      name: 'a DID URL fragment',
+      mutate: (payload: Record<string, JsonValue>) => {
+        payload.iss = `${phase1.identity.did}#sig-0`
+      },
+      error: 'Invalid HMC Trust List issuer',
+    },
+  ])('rejects a Trust List whose iss is $name', async ({ mutate, error }) => {
+    const trustList = await signedTrustListWithPayload(mutate)
 
     await expect(
-      verifyHmcTrustListSdJwtVc(missingIss, {
+      verifyHmcTrustListSdJwtVc(trustList, {
         crypto: cryptoAdapter,
         expectedVct,
         now: verificationTime,
       }),
-      'missing iss',
-    ).rejects.toThrow('Missing HMC Trust List iss')
-    await expect(
-      verifyHmcTrustListSdJwtVc(invalidIss, {
-        crypto: cryptoAdapter,
-        expectedVct,
-        now: verificationTime,
-      }),
-      'invalid iss',
-    ).rejects.toThrow('Invalid HMC Trust List iss')
-    await expect(
-      verifyHmcTrustListSdJwtVc(issuerMismatch, {
-        crypto: cryptoAdapter,
-        expectedVct,
-        now: verificationTime,
-      }),
-    ).rejects.toThrow('Invalid HMC Trust List issuer')
+    ).rejects.toThrow(error)
   })
 
   it('rejects missing or unsupported _sd_alg after generic SD-JWT VC verification', async () => {
@@ -183,7 +188,7 @@ describe('HMC H01 SD-JWT VC Trust List verifier', () => {
         now: verificationTime,
       }),
       'invalid kid',
-    ).rejects.toThrow('Missing SD-JWT issuer kid')
+    ).rejects.toThrow('Invalid SD-JWT issuer kid')
   })
   it('rejects missing or expired exp at the injectable verification time', async () => {
     const missingExp = await signedTrustListWithPayload((payload) => {
