@@ -1,3 +1,10 @@
+// Sync 004 profile-service recovery fallback scope.
+// Encodes the closed recovery-boundary decision from real-life-org/wot-spec#19
+// as a pure protocol classification helper. This is living conformance
+// documentation until an application recovery workflow consumes it; it does not
+// fetch, verify JWS, merge profiles, persist data, or restore private state.
+// Artifact vocabulary last reviewed against wot-spec#19 on 2026-05-10.
+
 export type ProfileRecoveryArtifactDisposition = 'allowed' | 'forbidden' | 'unknown'
 
 export type ProfileRecoveryArtifactDataBoundary =
@@ -64,6 +71,8 @@ const PROFILE_RECOVERY_VERIFICATION_GATES: readonly ProfileRecoveryVerificationG
 ]
 
 export function classifyProfileRecoveryArtifact(artifact: string): ProfileRecoveryArtifactClassification {
+  // Accept string for runtime caller-provided artifact names. Static callers
+  // should prefer ProfileRecoveryArtifact when they only pass known values.
   if ((ALLOWED_PROFILE_RECOVERY_ARTIFACTS as readonly string[]).includes(artifact)) {
     return {
       artifact,

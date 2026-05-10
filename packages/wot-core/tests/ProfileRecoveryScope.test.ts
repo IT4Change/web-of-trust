@@ -59,6 +59,20 @@ describe('Sync 004 profile-service recovery fallback scope', () => {
     })
   })
 
+  it.each(['', 'DID-Document', 'did_document'])(
+    'keeps profile recovery artifact names strict for near-miss value %j',
+    (artifact) => {
+      expect(classifyProfileRecoveryArtifact(artifact)).toEqual({
+        artifact,
+        disposition: 'unknown',
+        recoverySource: 'profile-service-fallback',
+        dataBoundary: 'out-of-scope',
+        canonicalReplacementFor: [],
+        normativeDecision: 'real-life-org/wot-spec#19',
+      })
+    },
+  )
+
   it('lists the mandatory verification gates for profile-service recovery fallback', () => {
     expect(listProfileRecoveryVerificationGates()).toEqual([
       'jws-signature-verification',
