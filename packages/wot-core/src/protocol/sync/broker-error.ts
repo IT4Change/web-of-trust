@@ -24,6 +24,7 @@ export interface BrokerErrorBody {
   [key: string]: unknown
 }
 
+// Keys are TypeScript-friendly; values are kebab-case for logs and telemetry.
 export const BROKER_ERROR_CLIENT_ACTIONS = {
   restoreCloneRecovery: 'restore-clone-recovery',
   requestFreshCapabilityViaPeerContact: 'request-fresh-capability-via-peer-contact',
@@ -49,7 +50,7 @@ export function parseBrokerErrorBody(value: unknown): BrokerErrorBody {
   const body = assertRecord(value, 'broker error body')
   assertKnownBrokerErrorCode(body.code)
   assertHumanReadableMessage(body.message)
-  return body as BrokerErrorBody
+  return { ...body } as BrokerErrorBody
 }
 
 export function classifyBrokerErrorClientAction(code: unknown): BrokerErrorClientAction {

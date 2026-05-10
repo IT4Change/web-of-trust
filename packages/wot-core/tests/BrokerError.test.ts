@@ -8,6 +8,7 @@ import {
   parseBrokerErrorBody,
 } from '../src/protocol'
 
+// Intentionally duplicated from Sync 003 so source drift makes this test fail.
 const SYNC_003_BROKER_ERROR_CODES = [
   'DOC_NOT_FOUND',
   'CAPABILITY_INVALID',
@@ -27,6 +28,7 @@ const SYNC_003_BROKER_ERROR_CODES = [
 describe('Sync 003 broker error catalog', () => {
   it('exposes exactly the known wot-sync@0.1 broker error codes from Sync 003', () => {
     expect(KNOWN_BROKER_ERROR_CODES).toEqual(SYNC_003_BROKER_ERROR_CODES)
+    expect(new Set(KNOWN_BROKER_ERROR_CODES).size).toBe(KNOWN_BROKER_ERROR_CODES.length)
 
     for (const code of SYNC_003_BROKER_ERROR_CODES) {
       expect(isKnownBrokerErrorCode(code), code).toBe(true)
@@ -74,14 +76,21 @@ describe('Sync 003 broker error catalog', () => {
   })
 
   it('tolerates unknown extra body fields as non-authoritative metadata', () => {
-    expect(parseBrokerErrorBody({
+    const body = {
       code: 'RATE_LIMITED',
       message: 'Rate-Limit ueberschritten',
       retryAfterSeconds: 30,
       brokerTraceId: 'trace-123',
-    })).toMatchObject({
+    }
+
+    const parsed = parseBrokerErrorBody(body)
+
+    expect(parsed).not.toBe(body)
+    expect(parsed).toEqual({
       code: 'RATE_LIMITED',
       message: 'Rate-Limit ueberschritten',
+      retryAfterSeconds: 30,
+      brokerTraceId: 'trace-123',
     })
   })
 
