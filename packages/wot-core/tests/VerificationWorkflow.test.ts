@@ -238,6 +238,42 @@ describe('VerificationWorkflow', () => {
     })
   })
 
+  it('preserves primary protocol decisions when a jti also contains a consumed nonce', async () => {
+    const anna = await createTestIdentity('anna')
+    const ben = await createTestIdentity('ben')
+    const consumedNonce = '123e4567-e89b-42d3-a456-426614174000'
+    const activeNonce = '550e8400-e29b-41d4-a716-446655440000'
+    let nextNonce = consumedNonce
+    let now = new Date('2026-04-28T08:00:00Z')
+    const workflow = new VerificationWorkflow({
+      crypto: cryptoAdapter,
+      randomId: () => nextNonce,
+      now: () => now,
+    })
+
+    await workflow.createOnlineQrChallenge(anna, 'Anna')
+    now = new Date('2026-04-28T08:04:59Z')
+    expect(workflow.acceptVerifiedVerificationAttestation(anna, verificationAttestationPayload(anna.getDid(), consumedNonce))).toEqual({
+      decision: 'accept-in-person',
+      nonce: consumedNonce,
+    })
+
+    nextNonce = activeNonce
+    await workflow.createOnlineQrChallenge(anna, 'Anna')
+    expect(workflow.acceptVerifiedVerificationAttestation(anna, {
+      ...verificationAttestationPayload(anna.getDid(), activeNonce),
+      jti: `urn:uuid:verification-${consumedNonce}-${activeNonce}-ben`,
+    })).toEqual({
+      decision: 'accept-in-person',
+      nonce: activeNonce,
+    })
+
+    expect(workflow.acceptVerifiedVerificationAttestation(anna, verificationAttestationPayload(ben.getDid(), consumedNonce))).toEqual({
+      decision: 'reject',
+      reason: 'wrong-subject',
+    })
+  })
+
   it('rejects expired active challenges and classifies reset challenges as remote/unbound', async () => {
     const anna = await createTestIdentity('anna')
     const nonce = '550e8400-e29b-41d4-a716-446655440000'
@@ -284,6 +320,13 @@ describe('VerificationWorkflow', () => {
     })
 
     now = new Date('2026-04-29T08:04:58Z')
+    await workflow.createOnlineQrChallenge(anna, 'Anna')
+    expect(workflow.acceptVerifiedVerificationAttestation(anna, payload)).toEqual({
+      decision: 'reject',
+      reason: 'nonce-consumed',
+    })
+
+    now = new Date('2026-04-29T08:04:59Z')
     await workflow.createOnlineQrChallenge(anna, 'Anna')
     expect(workflow.acceptVerifiedVerificationAttestation(anna, payload)).toEqual({
       decision: 'reject',

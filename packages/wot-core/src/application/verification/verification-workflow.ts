@@ -81,6 +81,7 @@ export class VerificationWorkflow {
     if (options.broker !== undefined) challenge.broker = options.broker
 
     const parsedChallenge = parseQrChallenge(JSON.stringify(challenge))
+    // Store and return the normalized Trust 002 JSON form that passed protocol validation.
     const rawJson = JSON.stringify(parsedChallenge)
     this.activeQrChallenge = { ...parsedChallenge }
     return { challenge: { ...parsedChallenge }, rawJson }
@@ -109,6 +110,8 @@ export class VerificationWorkflow {
       consumedNonces: new Set(this.consumedNonces.keys()),
     })
     const consumedNonce = this.findConsumedNonce(payload.jti)
+    // Preserve primary protocol rejections to avoid leaking nonce-history membership.
+    // Only a remote/unbound result can be upgraded into the local replay classification.
     if (decision.decision === 'remote-unbound' && consumedNonce) {
       return { decision: 'reject', reason: 'nonce-consumed' }
     }
