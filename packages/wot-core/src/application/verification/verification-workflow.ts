@@ -16,6 +16,8 @@ import {
 } from '../../protocol'
 
 const CONSUMED_NONCE_RETENTION_MS = 24 * 60 * 60 * 1000
+const PENDING_COUNTER_VERIFICATION_MAX_AGE_MS = 24 * 60 * 60 * 1000
+const VERIFICATION_ATTESTATION_CLAIM = 'in-person verifiziert'
 
 export interface VerificationWorkflowOptions {
   crypto: ProtocolCryptoAdapter
@@ -42,12 +44,30 @@ export interface CreateOnlineQrChallengeResult {
   rawJson: string
 }
 
+export interface PendingCounterVerification {
+  counterpartyDid: string
+  originalVerificationId: string
+  createdAt: string
+  expiresAt: string
+}
+
+export interface RecordPendingCounterVerificationOptions {
+  counterpartyDid: string
+  originalVerificationId: string
+}
+
+export type CounterVerificationAcceptanceDecision =
+  | { decision: 'accept-mutual-in-person'; originalVerificationId: string }
+  | { decision: 'remote-unbound'; reason: 'missing-in-response-to' | 'no-pending-counter-verification' | 'pending-counter-expired' }
+  | { decision: 'reject'; reason: 'wrong-subject' | 'wrong-issuer' | 'not-verification-attestation' }
+
 export class VerificationWorkflow {
   private readonly crypto: ProtocolCryptoAdapter
   private readonly randomId: () => string
   private readonly now: () => Date
   private activeQrChallenge: QrChallenge | null = null
   private readonly consumedNonces = new Map<string, number>()
+  private readonly pendingCounterVerifications = new Map<string, PendingCounterVerification>()
 
   constructor(options: VerificationWorkflowOptions) {
     this.crypto = options.crypto
@@ -118,8 +138,66 @@ export class VerificationWorkflow {
     if (decision.decision === 'accept-in-person') {
       this.consumedNonces.set(decision.nonce.toLowerCase(), now.getTime())
       this.activeQrChallenge = null
+      this.recordPendingCounterVerification({
+        counterpartyDid: payload.iss,
+        originalVerificationId: payload.jti!,
+      })
     }
     return decision
+  }
+
+  recordPendingCounterVerification(options: RecordPendingCounterVerificationOptions): PendingCounterVerification {
+    const now = this.now()
+    const pending: PendingCounterVerification = {
+      counterpartyDid: options.counterpartyDid,
+      originalVerificationId: options.originalVerificationId,
+      createdAt: now.toISOString(),
+      expiresAt: new Date(now.getTime() + PENDING_COUNTER_VERIFICATION_MAX_AGE_MS).toISOString(),
+    }
+    this.pendingCounterVerifications.set(pending.originalVerificationId, pending)
+    return { ...pending }
+  }
+
+  getPendingCounterVerification(originalVerificationId: string): PendingCounterVerification | null {
+    this.prunePendingCounterVerifications(this.now())
+    const pending = this.pendingCounterVerifications.get(originalVerificationId)
+    return pending === undefined ? null : { ...pending }
+  }
+
+  getPendingCounterVerifications(): PendingCounterVerification[] {
+    this.prunePendingCounterVerifications(this.now())
+    return Array.from(this.pendingCounterVerifications.values(), (pending) => ({ ...pending }))
+  }
+
+  acceptVerifiedCounterVerification(
+    identity: IdentitySession,
+    payload: AttestationVcPayload,
+  ): CounterVerificationAcceptanceDecision {
+    const now = this.now()
+    const localDid = identity.getDid()
+    if (payload.sub !== localDid || payload.credentialSubject?.id !== localDid) {
+      return { decision: 'reject', reason: 'wrong-subject' }
+    }
+    if (!isVerificationAttestationPayload(payload)) {
+      return { decision: 'reject', reason: 'not-verification-attestation' }
+    }
+    const inResponseTo = typeof payload.inResponseTo === 'string' && payload.inResponseTo.length > 0
+      ? payload.inResponseTo
+      : null
+    if (!inResponseTo) return { decision: 'remote-unbound', reason: 'missing-in-response-to' }
+
+    const pending = this.pendingCounterVerifications.get(inResponseTo)
+    if (!pending) return { decision: 'remote-unbound', reason: 'no-pending-counter-verification' }
+    if (Date.parse(pending.expiresAt) <= now.getTime()) {
+      this.pendingCounterVerifications.delete(inResponseTo)
+      return { decision: 'remote-unbound', reason: 'pending-counter-expired' }
+    }
+    if (payload.iss !== pending.counterpartyDid || payload.issuer !== pending.counterpartyDid) {
+      return { decision: 'reject', reason: 'wrong-issuer' }
+    }
+
+    this.pendingCounterVerifications.delete(inResponseTo)
+    return { decision: 'accept-mutual-in-person', originalVerificationId: inResponseTo }
   }
 
   decodeChallenge(code: string): VerificationChallenge {
@@ -239,6 +317,13 @@ export class VerificationWorkflow {
     }
   }
 
+  private prunePendingCounterVerifications(now: Date): void {
+    const nowMs = now.getTime()
+    for (const [originalVerificationId, pending] of this.pendingCounterVerifications) {
+      if (Date.parse(pending.expiresAt) <= nowMs) this.pendingCounterVerifications.delete(originalVerificationId)
+    }
+  }
+
   private findConsumedNonce(jti: string | undefined): string | null {
     if (!jti) return null
     for (const nonce of parseVerificationJtiNonces(jti)) {
@@ -246,6 +331,14 @@ export class VerificationWorkflow {
     }
     return null
   }
+}
+
+function isVerificationAttestationPayload(payload: AttestationVcPayload): boolean {
+  return (
+    payload.type.includes('VerifiableCredential') &&
+    payload.type.includes('WotAttestation') &&
+    payload.credentialSubject.claim === VERIFICATION_ATTESTATION_CLAIM
+  )
 }
 
 function parseVerificationJtiNonces(jti: string): string[] {

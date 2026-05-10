@@ -238,6 +238,112 @@ describe('VerificationWorkflow', () => {
     })
   })
 
+  it('records pending counter-verification state for nonce-bound incoming verifications', async () => {
+    const anna = await createTestIdentity('anna')
+    const ben = await createTestIdentity('ben')
+    const nonce = '550e8400-e29b-41d4-a716-446655440000'
+    let now = new Date('2026-04-28T08:00:00Z')
+    const workflow = new VerificationWorkflow({
+      crypto: cryptoAdapter,
+      randomId: () => nonce,
+      now: () => now,
+    })
+    await workflow.createOnlineQrChallenge(anna, 'Anna')
+    now = new Date('2026-04-28T08:04:59Z')
+
+    const payload = verificationAttestationPayload(anna.getDid(), nonce, {
+      issuer: ben.getDid(),
+      iss: ben.getDid(),
+    })
+
+    expect(workflow.acceptVerifiedVerificationAttestation(anna, payload)).toEqual({
+      decision: 'accept-in-person',
+      nonce,
+    })
+    expect(workflow.getPendingCounterVerification(payload.jti!)).toEqual({
+      counterpartyDid: ben.getDid(),
+      originalVerificationId: payload.jti,
+      createdAt: '2026-04-28T08:04:59.000Z',
+      expiresAt: '2026-04-29T08:04:59.000Z',
+    })
+  })
+
+  it('accepts verified counter-verifications only with matching pending counter state', async () => {
+    const anna = await createTestIdentity('anna')
+    const ben = await createTestIdentity('ben')
+    const originalVerificationId = 'urn:uuid:verification-550e8400-e29b-41d4-a716-446655440000-ben'
+    const workflow = new VerificationWorkflow({
+      crypto: cryptoAdapter,
+      now: () => new Date('2026-04-28T08:10:00Z'),
+    })
+    workflow.recordPendingCounterVerification({
+      counterpartyDid: anna.getDid(),
+      originalVerificationId,
+    })
+
+    const counterPayload = verificationAttestationPayload(ben.getDid(), '123e4567-e89b-42d3-a456-426614174000', {
+      issuer: anna.getDid(),
+      iss: anna.getDid(),
+      inResponseTo: originalVerificationId,
+    })
+
+    expect(workflow.acceptVerifiedCounterVerification(ben, counterPayload)).toEqual({
+      decision: 'accept-mutual-in-person',
+      originalVerificationId,
+    })
+    expect(workflow.acceptVerifiedCounterVerification(ben, counterPayload)).toEqual({
+      decision: 'remote-unbound',
+      reason: 'no-pending-counter-verification',
+    })
+  })
+
+  it('does not classify unbound or expired counter-verifications as mutual in-person', async () => {
+    const anna = await createTestIdentity('anna')
+    const ben = await createTestIdentity('ben')
+    const originalVerificationId = 'urn:uuid:verification-550e8400-e29b-41d4-a716-446655440000-ben'
+    let now = new Date('2026-04-28T08:10:00Z')
+    const workflow = new VerificationWorkflow({
+      crypto: cryptoAdapter,
+      now: () => now,
+    })
+    workflow.recordPendingCounterVerification({
+      counterpartyDid: anna.getDid(),
+      originalVerificationId,
+    })
+
+    const validCounterPayload = verificationAttestationPayload(
+      ben.getDid(),
+      '123e4567-e89b-42d3-a456-426614174000',
+      {
+        issuer: anna.getDid(),
+        iss: anna.getDid(),
+        inResponseTo: originalVerificationId,
+      },
+    )
+
+    expect(workflow.acceptVerifiedCounterVerification(ben, {
+      ...validCounterPayload,
+      inResponseTo: undefined,
+    })).toEqual({
+      decision: 'remote-unbound',
+      reason: 'missing-in-response-to',
+    })
+    expect(workflow.acceptVerifiedCounterVerification(ben, {
+      ...validCounterPayload,
+      issuer: 'did:key:z6Mkeve',
+      iss: 'did:key:z6Mkeve',
+    })).toEqual({
+      decision: 'reject',
+      reason: 'wrong-issuer',
+    })
+
+    now = new Date('2026-04-29T08:10:00Z')
+    expect(workflow.acceptVerifiedCounterVerification(ben, validCounterPayload)).toEqual({
+      decision: 'remote-unbound',
+      reason: 'pending-counter-expired',
+    })
+  })
+
   it('preserves primary protocol decisions when a jti also contains a consumed nonce', async () => {
     const anna = await createTestIdentity('anna')
     const ben = await createTestIdentity('ben')
