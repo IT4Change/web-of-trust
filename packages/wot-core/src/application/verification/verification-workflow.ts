@@ -46,6 +46,7 @@ export interface CreateOnlineQrChallengeResult {
 
 export interface PendingCounterVerification {
   counterpartyDid: string
+  /** The `jti` of the original in-person Verification-Attestation this counter-verification answers. */
   originalVerificationId: string
   createdAt: string
   expiresAt: string
@@ -53,6 +54,7 @@ export interface PendingCounterVerification {
 
 export interface RecordPendingCounterVerificationOptions {
   counterpartyDid: string
+  /** The `jti` of the original in-person Verification-Attestation this counter-verification answers. */
   originalVerificationId: string
 }
 
@@ -138,6 +140,7 @@ export class VerificationWorkflow {
     if (decision.decision === 'accept-in-person') {
       this.consumedNonces.set(decision.nonce.toLowerCase(), now.getTime())
       this.activeQrChallenge = null
+      // accept-in-person guarantees jti exists; missing jti would have produced missing-jti-nonce.
       this.recordPendingCounterVerification({
         counterpartyDid: payload.iss,
         originalVerificationId: payload.jti!,
@@ -146,6 +149,9 @@ export class VerificationWorkflow {
     return decision
   }
 
+  /**
+   * Public for composition code that imports an already accepted in-person Verification-Attestation.
+   */
   recordPendingCounterVerification(options: RecordPendingCounterVerificationOptions): PendingCounterVerification {
     const now = this.now()
     const pending: PendingCounterVerification = {

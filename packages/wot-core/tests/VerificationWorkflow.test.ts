@@ -238,6 +238,41 @@ describe('VerificationWorkflow', () => {
     })
   })
 
+  it('keeps replay classification after active QR challenge state is gone', async () => {
+    const anna = await createTestIdentity('anna')
+    const consumedNonce = '550e8400-e29b-41d4-a716-446655440000'
+    const replacementNonce = '123e4567-e89b-42d3-a456-426614174000'
+    let nextNonce = consumedNonce
+    let now = new Date('2026-04-28T08:00:00Z')
+    const workflow = new VerificationWorkflow({
+      crypto: cryptoAdapter,
+      randomId: () => nextNonce,
+      now: () => now,
+    })
+
+    await workflow.createOnlineQrChallenge(anna, 'Anna')
+    now = new Date('2026-04-28T08:04:59Z')
+    expect(workflow.acceptVerifiedVerificationAttestation(
+      anna,
+      verificationAttestationPayload(anna.getDid(), consumedNonce),
+    )).toEqual({
+      decision: 'accept-in-person',
+      nonce: consumedNonce,
+    })
+
+    nextNonce = replacementNonce
+    await workflow.createOnlineQrChallenge(anna, 'Anna')
+    workflow.resetActiveQrChallenge()
+
+    expect(workflow.acceptVerifiedVerificationAttestation(anna, {
+      ...verificationAttestationPayload(anna.getDid(), replacementNonce),
+      jti: `urn:uuid:verification-${consumedNonce}-ben`,
+    })).toEqual({
+      decision: 'reject',
+      reason: 'nonce-consumed',
+    })
+  })
+
   it('records pending counter-verification state for nonce-bound incoming verifications', async () => {
     const anna = await createTestIdentity('anna')
     const ben = await createTestIdentity('ben')
