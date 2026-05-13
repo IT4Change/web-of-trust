@@ -309,6 +309,16 @@ describe('Sync 003 broker challenge-response control frames', () => {
       })
     }
 
+    await expect(verifyBrokerChallengeResponseControlFrame({
+      frame: brokerVectors.frames.challenge_response,
+      pendingChallenge: vectorPendingChallenge(),
+      publicKey: hexToBytes(phase1.identity.ed25519_public_hex),
+      crypto: {} as ProtocolCryptoAdapter,
+    })).resolves.toEqual({
+      disposition: 'rejected',
+      errorCode: 'MALFORMED_MESSAGE',
+    })
+
     expect(verifyCalls).toBe(0)
   })
 

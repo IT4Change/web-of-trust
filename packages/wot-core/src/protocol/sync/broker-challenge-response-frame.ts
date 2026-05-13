@@ -127,6 +127,9 @@ export function assertBrokerChallengeResponseControlFrame(
 /**
  * Verifies a Sync 003 `challenge-response` Broker Control-Frame against a
  * caller-owned pending challenge and caller-supplied Ed25519 public key bytes.
+ * See Sync 003 `03-wot-sync/003-transport-und-broker.md`
+ * "Broker-Auth-Transcript (MUSS)", "Wire-Encoding der `signature` (MUSS)",
+ * and the pending-challenge binding rule.
  *
  * This protocol helper is deterministic and storage-free: it does not resolve
  * DIDs, bind WebSocket connections, consume nonce history, emit runtime broker
