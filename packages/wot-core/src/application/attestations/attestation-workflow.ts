@@ -5,6 +5,7 @@ import {
   createAttestationVcJwsWithSigner,
   decodeBase64Url,
   verifyAttestationVcJws,
+  wholeSecondRfc3339,
 } from '../../protocol'
 
 export interface AttestationWorkflowOptions {
@@ -34,7 +35,7 @@ export class AttestationWorkflow {
 
   async createAttestation(input: CreateAttestationInput): Promise<Attestation> {
     const id = `urn:uuid:${this.randomId()}`
-    const createdAt = new Date(Math.floor(this.now().getTime() / 1000) * 1000).toISOString()
+    const createdAt = wholeSecondRfc3339(this.now())
     const from = input.issuer.getDid()
     const to = input.subjectDid
     const vcJws = await createAttestationVcJwsWithSigner({

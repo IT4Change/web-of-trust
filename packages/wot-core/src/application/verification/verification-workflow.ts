@@ -15,6 +15,7 @@ import {
   ed25519MultibaseToPublicKeyBytes,
   encodeBase64Url,
   parseQrChallenge,
+  wholeSecondRfc3339,
 } from '../../protocol'
 
 const CONSUMED_NONCE_RETENTION_MS = 24 * 60 * 60 * 1000
@@ -202,8 +203,8 @@ export class VerificationWorkflow {
     const pending: PendingCounterVerification = {
       counterpartyDid: options.counterpartyDid,
       originalVerificationId: options.originalVerificationId,
-      createdAt: now.toISOString(),
-      expiresAt: new Date(now.getTime() + PENDING_COUNTER_VERIFICATION_MAX_AGE_MS).toISOString(),
+      createdAt: wholeSecondRfc3339(now),
+      expiresAt: wholeSecondRfc3339(new Date(now.getTime() + PENDING_COUNTER_VERIFICATION_MAX_AGE_MS)),
     }
     this.pendingCounterVerifications.set(pending.originalVerificationId, pending)
     return { ...pending }
@@ -367,7 +368,7 @@ export class VerificationWorkflow {
     id: string
     inResponseTo?: string
   }): Promise<Attestation> {
-    const createdAt = new Date(Math.floor(this.now().getTime() / 1000) * 1000).toISOString()
+    const createdAt = wholeSecondRfc3339(this.now())
     const from = input.issuer.getDid()
     const payload = createVerificationAttestationVcPayload({
       id: input.id,
