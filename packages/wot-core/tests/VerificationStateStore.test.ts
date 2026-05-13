@@ -42,6 +42,7 @@ describe('InMemoryVerificationStateStore', () => {
       'did:key:z6Mkwrong',
       '2026-04-28T08:05:00Z',
     )).toBe('wrong-counterparty')
+    expect(await store.getPendingCounterVerification(pending.originalVerificationId)).toEqual(pending)
     await store.deletePendingCounterVerification(pending.originalVerificationId)
     expect(await store.getPendingCounterVerifications()).toEqual([])
 
