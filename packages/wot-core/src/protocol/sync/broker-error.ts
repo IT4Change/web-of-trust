@@ -1,5 +1,5 @@
 // Spec: Sync 003 `Fehler-Responses` defines this catalog and the two explicit client actions below.
-// [NEEDS CLARIFICATION: Sync 003 error response envelope shape; real-life-org/wot-spec#36] Full `error/1.0` envelope parsing is out of scope here.
+// The `error/1.0` control-frame shape lives in broker-control-frame.ts; wot-spec#36 tracks the prior envelope-shape ambiguity.
 export const KNOWN_BROKER_ERROR_CODES = Object.freeze([
   'DOC_NOT_FOUND',
   'CAPABILITY_INVALID',
@@ -48,6 +48,8 @@ export function assertKnownBrokerErrorCode(value: unknown): asserts value is Bro
 
 export function parseBrokerErrorBody(value: unknown): BrokerErrorBody {
   const body = assertRecord(value, 'broker error body')
+  assertOwnProperty(body, 'code', 'broker error code')
+  assertOwnProperty(body, 'message', 'broker error message')
   assertKnownBrokerErrorCode(body.code)
   assertHumanReadableMessage(body.message)
   return { ...body } as BrokerErrorBody
@@ -64,6 +66,10 @@ export function classifyBrokerErrorClientAction(code: unknown): BrokerErrorClien
 function assertRecord(value: unknown, name: string): Record<string, unknown> {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new Error(`Invalid ${name}`)
   return value as Record<string, unknown>
+}
+
+function assertOwnProperty(record: Record<string, unknown>, key: string, name: string): void {
+  if (!Object.prototype.hasOwnProperty.call(record, key)) throw new Error(`Invalid ${name}`)
 }
 
 function assertHumanReadableMessage(value: unknown): asserts value is string {
