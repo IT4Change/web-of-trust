@@ -128,13 +128,31 @@ describe('Sync 003 ack/1.0 plaintext messages', () => {
     }
   })
 
-  it('rejects extra ACK body fields', () => {
-    expect(() => parseAckMessage(validAck({
+  it('ignores unknown extra ACK body fields for forward-compatibility per Sync 003', () => {
+    const messageWithExtras = validAck({
       body: {
         messageId: ORIGINAL_MESSAGE_ID,
         status: 'received',
+        future: { nested: true },
       },
-    }))).toThrow('Invalid ack body property: status')
+    })
+
+    expect(() => parseAckMessage(messageWithExtras)).not.toThrow()
+    expect(() => assertAckMessage(messageWithExtras)).not.toThrow()
+    expect(parseAckMessage(messageWithExtras)).toEqual(messageWithExtras)
+  })
+
+  it('still requires body.messageId and still binds it to thid even when extra body fields are present', () => {
+    expect(() => parseAckMessage(validAck({ body: { status: 'received' } }))).toThrow(
+      'Invalid ack body messageId',
+    )
+
+    expect(() => parseAckMessage(validAck({
+      body: {
+        messageId: '550e8400-e29b-41d4-a716-446655440099',
+        status: 'received',
+      },
+    }))).toThrow('Invalid ack thid')
   })
 
   it('rejects malformed common plaintext envelope fields', () => {
