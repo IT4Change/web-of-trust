@@ -106,9 +106,34 @@ function readIssuerKid(kid: unknown): string {
 }
 
 function assertDisclosureDigestsPresent(payload: Record<string, unknown>, disclosureDigests: string[]): void {
-  const serializedPayload = JSON.stringify(payload)
+  const sdDigests = collectSdDigests(payload)
   for (const disclosureDigest of disclosureDigests) {
-    if (!serializedPayload.includes(`"${disclosureDigest}"`)) throw new Error('SD-JWT disclosure digest not present')
+    if (!sdDigests.has(disclosureDigest)) throw new Error('SD-JWT disclosure digest not present')
+  }
+}
+
+function collectSdDigests(payload: Record<string, unknown>): Set<string> {
+  const sdDigests = new Set<string>()
+  visitForSdDigests(payload, sdDigests)
+  return sdDigests
+}
+
+function visitForSdDigests(value: unknown, sdDigests: Set<string>): void {
+  if (Array.isArray(value)) {
+    for (const item of value) visitForSdDigests(item, sdDigests)
+    return
+  }
+  if (value === null || typeof value !== 'object') return
+  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+    if (key === '_sd') {
+      if (!Array.isArray(child)) throw new Error('Invalid SD-JWT _sd claim')
+      for (const digest of child) {
+        if (typeof digest !== 'string') throw new Error('Invalid SD-JWT _sd claim')
+        sdDigests.add(digest)
+      }
+      continue
+    }
+    visitForSdDigests(child, sdDigests)
   }
 }
 
