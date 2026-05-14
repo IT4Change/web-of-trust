@@ -54,6 +54,10 @@ export type BrokerDeviceRevokeVerificationResult =
 
 /**
  * Creates the Sync 003 signed `device-revoke` Broker Control-Frame wire shape.
+ * Spec refs:
+ * - wot-spec Sync 003 `03-wot-sync/003-transport-und-broker.md#device-deaktivierung`
+ * - wot-spec Sync 003 `03-wot-sync/003-transport-und-broker.md#broker-control-frames-normativ`
+ * - wot-spec Sync 003 `03-wot-sync/003-transport-und-broker.md#authentizitaet-pro-message-typ-normativ`
  *
  * This helper is intentionally protocol-only: it parses the closed outer
  * frame, decodes the inner JWS payload, and exposes bytes for verification.
@@ -131,11 +135,19 @@ export async function verifyBrokerDeviceRevokeControlFrame(
     }
   }
 
-  const signatureValid = await options.crypto.verifyEd25519(
-    parsed.signingBytes,
-    parsed.signatureBytes,
-    options.publicKey,
-  )
+  let signatureValid: boolean
+  try {
+    signatureValid = await options.crypto.verifyEd25519(
+      parsed.signingBytes,
+      parsed.signatureBytes,
+      options.publicKey,
+    )
+  } catch {
+    return {
+      disposition: 'rejected',
+      errorCode: 'AUTH_INVALID',
+    }
+  }
 
   if (!signatureValid) {
     return {

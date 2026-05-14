@@ -184,6 +184,21 @@ describe('Sync 003 broker device-revoke control frame', () => {
     })
   })
 
+  it('maps verifier adapter exceptions to AUTH_INVALID protocol rejection', async () => {
+    await expect(verifyBrokerDeviceRevokeControlFrame({
+      frame: vector.frame,
+      publicKey: didKeyToPublicKeyBytes(vector.payload.did),
+      crypto: {
+        async verifyEd25519() {
+          throw new Error('verifier backend unavailable')
+        },
+      },
+    })).resolves.toEqual({
+      disposition: 'rejected',
+      errorCode: 'AUTH_INVALID',
+    })
+  })
+
   it('rejects invalid signatures, unsupported alg, missing kid, foreign kid, and did/signer mismatch as AUTH_INVALID', async () => {
     const invalidSignatureBytes = new Uint8Array(decodeBase64Url(vector.signature_b64))
     invalidSignatureBytes[0] ^= 0xff
