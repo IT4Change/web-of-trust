@@ -50,8 +50,8 @@ export function assertAckMessage(value: unknown): asserts value is AckMessage {
   // spec-anchor: protocol/ack-type-exact
   if (value.type !== ACK_MESSAGE_TYPE) throw new Error('Invalid ack message type')
   if (value.thid === undefined) throw new Error('Invalid ack thid')
-  // spec-anchor: protocol/ack-channel-scope-deferred
-  // NEEDS CLARIFICATION: wot-spec#52. Channel, routing, addressing, and deletion semantics stay outside this shape helper.
+  // Original-message existence, authenticated device scoping, and referenced
+  // message type are runtime checks outside this shape helper.
   assertAckMessageBody(value.body)
   // spec-anchor: protocol/ack-thid-message-id-binding
   if (value.thid !== value.body.messageId) throw new Error('Invalid ack thid')
@@ -59,22 +59,14 @@ export function assertAckMessage(value: unknown): asserts value is AckMessage {
 
 export function assertAckMessageBody(value: unknown): asserts value is AckMessageBody {
   const body = assertRecord(value, 'ack body')
-  // spec-anchor: protocol/ack-body-invariants
-  assertNoExtraKeys(body, ['messageId'], 'ack body')
   // spec-anchor: protocol/ack-message-id-uuid-v4
+  // Unknown extra body fields are accepted for forward-compatibility per Sync 003.
   assertCanonicalUuidV4(body.messageId, 'ack body messageId')
 }
 
 function assertRecord(value: unknown, name: string): Record<string, unknown> {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new Error(`Invalid ${name}`)
   return value as Record<string, unknown>
-}
-
-function assertNoExtraKeys(value: Record<string, unknown>, allowed: string[], name: string): void {
-  const allowedSet = new Set(allowed)
-  for (const key of Object.keys(value)) {
-    if (!allowedSet.has(key)) throw new Error(`Invalid ${name} property: ${key}`)
-  }
 }
 
 function assertCanonicalUuidV4(value: unknown, name: string): void {
