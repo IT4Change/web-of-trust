@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
-import { resolve } from 'node:path'
+import { dirname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { IdentityWorkflow, type IdentitySeedVault } from '../src/application/identity'
 import { createIdentityVaultUnlockHandle } from '../src/application/identity/identity-vault-handle'
 import { decodeBase64Url } from '../src/protocol'
@@ -9,7 +10,9 @@ import * as coreRoot from '../src'
 import * as coreApplication from '../src/application'
 
 const cryptoAdapter = new WebCryptoProtocolCryptoAdapter()
-const demoAppRuntimePath = resolve(process.cwd(), '../../apps/demo/src/runtime/appRuntime.ts')
+const __filename = fileURLToPath(import.meta.url)
+const __dirname = dirname(__filename)
+const demoAppRuntimePath = resolve(__dirname, '../../../apps/demo/src/runtime/appRuntime.ts')
 
 class MemoryIdentitySeedVault implements IdentitySeedVault {
   private seed: Uint8Array | null = null
