@@ -1,20 +1,36 @@
+import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import {
   compareSyncHeads,
   deriveSyncStartSeq,
   evaluateSyncResponseDisposition,
 } from '../src/protocol'
+import type { SyncHeads, SyncResponseDisposition, SyncHeadsComparison } from '../src/protocol'
+
+const phase1 = loadSpecVector('./fixtures/wot-spec/phase-1-interop.json')
+const vectors = phase1.sync_heads_disposition
+
+function loadSpecVector(relativePath: string): any {
+  return JSON.parse(readFileSync(new URL(relativePath, import.meta.url), 'utf8'))
+}
+
+function expectVectorError(expectedError: string, run: () => unknown): void {
+  if (expectedError === 'invalid-head-seq') {
+    expect(run).toThrow('Invalid sync head seq')
+    return
+  }
+  if (expectedError === 'sync-head-seq-overflow') {
+    expect(run).toThrow('Sync head seq overflow')
+    return
+  }
+  throw new Error(`Unknown sync heads vector error: ${expectedError}`)
+}
 
 describe('WoT sync heads disposition', () => {
-  it('derives seq 0 for a missing device head and seq N+1 for a known head', () => {
-    const heads = {
-      'device-alpha': 0,
-      'device-beta': 41,
-    }
-
-    expect(deriveSyncStartSeq(heads, 'device-missing')).toBe(0)
-    expect(deriveSyncStartSeq(heads, 'device-alpha')).toBe(1)
-    expect(deriveSyncStartSeq(heads, 'device-beta')).toBe(42)
+  it.each(vectors.derive_start_seq_cases)('derives start seq vector case $name', (testCase) => {
+    expect(deriveSyncStartSeq(testCase.heads as SyncHeads, testCase.deviceId)).toBe(
+      testCase.expected_start_seq,
+    )
   })
 
   it('treats empty heads as missing every opaque deviceId key', () => {
@@ -22,63 +38,44 @@ describe('WoT sync heads disposition', () => {
     expect(deriveSyncStartSeq({}, '../opaque/device/id')).toBe(0)
   })
 
+  it.each(vectors.invalid_head_seq_cases)('rejects invalid head seq vector case $name', (testCase) => {
+    expectVectorError(testCase.expected_error, () =>
+      deriveSyncStartSeq(testCase.heads as SyncHeads, testCase.deviceId),
+    )
+  })
+
+  it.each(vectors.derive_start_seq_overflow_cases)(
+    'rejects start seq overflow vector case $name',
+    (testCase) => {
+      expectVectorError(testCase.expected_error, () =>
+        deriveSyncStartSeq(testCase.heads as SyncHeads, testCase.deviceId),
+      )
+    },
+  )
+
   it.each([
-    ['negative integer', -1],
-    ['fractional number', 1.5],
     ['NaN', Number.NaN],
     ['positive infinity', Number.POSITIVE_INFINITY],
     ['unsafe integer', Number.MAX_SAFE_INTEGER + 1],
-  ])('rejects invalid known head values: %s', (_name, value) => {
+  ])('rejects non-JSON invalid known head values: %s', (_name, value) => {
     expect(() => deriveSyncStartSeq({ 'device-alpha': value }, 'device-alpha')).toThrow(
       'Invalid sync head seq',
     )
   })
 
-  it('rejects deriving a next seq beyond Number.MAX_SAFE_INTEGER', () => {
-    expect(() => deriveSyncStartSeq({ 'device-alpha': Number.MAX_SAFE_INTEGER }, 'device-alpha')).toThrow(
-      'Sync head seq overflow',
+  it.each(vectors.response_truncation_cases)(
+    'classifies response truncation vector case $name',
+    (testCase) => {
+      expect(evaluateSyncResponseDisposition(testCase.response)).toBe(
+        testCase.expected_disposition as SyncResponseDisposition,
+      )
+    },
+  )
+
+  it.each(vectors.heads_comparison_cases)('compares heads vector case $name', (testCase) => {
+    expect(compareSyncHeads(testCase.left as SyncHeads, testCase.right as SyncHeads)).toBe(
+      testCase.expected_disposition as SyncHeadsComparison,
     )
-  })
-
-  it('classifies truncated sync responses as requiring another request', () => {
-    expect(evaluateSyncResponseDisposition({ truncated: true })).toBe('request-next-page')
-    expect(evaluateSyncResponseDisposition({ truncated: false })).toBe('complete')
-  })
-
-  it('compares identical heads as consistent', () => {
-    expect(compareSyncHeads({
-      'device-alpha': 0,
-      'device-beta': 9,
-    }, {
-      'device-beta': 9,
-      'device-alpha': 0,
-    })).toBe('consistent')
-  })
-
-  it('compares different head values as divergent', () => {
-    expect(compareSyncHeads({
-      'device-alpha': 4,
-      'device-beta': 9,
-    }, {
-      'device-alpha': 5,
-      'device-beta': 9,
-    })).toBe('divergent')
-  })
-
-  it('compares missing or extra device keys as divergent', () => {
-    expect(compareSyncHeads({
-      'device-alpha': 4,
-    }, {
-      'device-alpha': 4,
-      'device-beta': 0,
-    })).toBe('divergent')
-
-    expect(compareSyncHeads({
-      'device-alpha': 4,
-      'device-beta': 0,
-    }, {
-      'device-alpha': 4,
-    })).toBe('divergent')
   })
 
   it.each([
