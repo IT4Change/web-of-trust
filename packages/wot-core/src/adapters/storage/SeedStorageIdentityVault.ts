@@ -4,6 +4,10 @@ import {
 } from './IndexedDbIdentitySeedVault'
 import type { SeedStorageAdapter } from '../../ports/SeedStorageAdapter'
 
+/**
+ * @deprecated Use IndexedDbIdentitySeedVaultOptions for the browser reference
+ * identity seed vault. This compatibility alias remains only for older imports.
+ */
 export type SeedStorageIdentityVaultOptions = IndexedDbIdentitySeedVaultOptions
 
 /**

@@ -96,7 +96,9 @@ export class IndexedDbIdentitySeedVault implements IdentitySeedVault {
     if (!isStoredIdentitySeed(parsed)) throw new Error(UNSUPPORTED_STORED_IDENTITY_SEED_ERROR)
 
     try {
-      return decodeBase64Url(parsed.seed)
+      const seed = decodeBase64Url(parsed.seed)
+      if (seed.byteLength !== 64) throw new Error('Unsupported stored identity seed length')
+      return seed
     } catch {
       throw new Error(UNSUPPORTED_STORED_IDENTITY_SEED_ERROR)
     }

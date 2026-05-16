@@ -94,6 +94,25 @@ describe('IndexedDbIdentitySeedVault', () => {
     await expect(vault.unlockWithPassphrase('local passphrase')).rejects.toThrow(unsupportedLocalIdentityMessage)
   })
 
+  it('rejects stored identity seeds with unsupported byte lengths', async () => {
+    const unsupportedLengths = [63, 65]
+
+    for (const byteLength of unsupportedLengths) {
+      const storage = new MemorySeedStorage()
+      const vault = new IndexedDbIdentitySeedVault(storage)
+      const unsupportedPayload = new TextEncoder().encode(JSON.stringify({
+        type: 'wot.identity.seed',
+        version: 1,
+        seedFormat: 'bip39-64-byte',
+        seed: encodeBase64Url(new Uint8Array(byteLength)),
+      }))
+
+      await storage.storeSeed(unsupportedPayload, 'local passphrase')
+
+      await expect(vault.unlockWithPassphrase('local passphrase')).rejects.toThrow(unsupportedLocalIdentityMessage)
+    }
+  })
+
   it('does not expose any raw-seed-returning method on the app-facing reference IdentitySeedVault contract', () => {
     const storage = new MemorySeedStorage()
     const vault = new IndexedDbIdentitySeedVault(storage)
