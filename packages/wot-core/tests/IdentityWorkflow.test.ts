@@ -207,15 +207,34 @@ describe('IdentitySession.signJws uses the protocol JCS/EdDSA compact JWS path',
     const jwsA = await identity.signJws(orderedA)
     const jwsB = await identity.signJws(orderedB)
 
-    const [encodedHeaderA, encodedPayloadA] = jwsA.split('.')
-    const [encodedHeaderB, encodedPayloadB] = jwsB.split('.')
+    const partsA = jwsA.split('.')
+    const partsB = jwsB.split('.')
+    expect(partsA).toHaveLength(3)
+    expect(partsB).toHaveLength(3)
+    const [encodedHeaderA, encodedPayloadA] = partsA
+    const [encodedHeaderB, encodedPayloadB] = partsB
 
     // JCS produces sorted-key canonical bytes, so payload encoding must match
     // regardless of caller key order — and must equal the JCS bytes directly.
     expect(encodedPayloadA).toBe(encodedPayloadB)
     expect(new TextDecoder().decode(decodeBase64Url(encodedPayloadA))).toBe(canonicalize(orderedA))
+    expect(new TextDecoder().decode(decodeBase64Url(encodedPayloadB))).toBe(canonicalize(orderedA))
     expect(new TextDecoder().decode(decodeBase64Url(encodedHeaderA))).toBe(canonicalize({ alg: 'EdDSA', kid: identity.kid }))
+    expect(new TextDecoder().decode(decodeBase64Url(encodedHeaderB))).toBe(canonicalize({ alg: 'EdDSA', kid: identity.kid }))
     expect(encodedHeaderA).toBe(encodedHeaderB)
+
+    await expect(
+      verifyJwsWithPublicKey(jwsA, {
+        publicKey: identity.ed25519PublicKey,
+        crypto: cryptoAdapter,
+      }),
+    ).resolves.toBeTruthy()
+    await expect(
+      verifyJwsWithPublicKey(jwsB, {
+        publicKey: identity.ed25519PublicKey,
+        crypto: cryptoAdapter,
+      }),
+    ).resolves.toBeTruthy()
   })
 })
 
