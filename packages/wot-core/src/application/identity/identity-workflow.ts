@@ -1,7 +1,7 @@
 import { generateMnemonic, mnemonicToSeedSync, validateMnemonic } from '@scure/bip39'
 import { germanPositiveWordlist } from '../../wordlists/german-positive'
-import { encodeBase64Url } from '../../protocol'
-import type { ProtocolCryptoAdapter } from '../../protocol'
+import { createJcsEd25519JwsWithSigner, encodeBase64Url } from '../../protocol'
+import type { JsonValue, ProtocolCryptoAdapter } from '../../protocol'
 import type { IdentitySeedVault } from '../../ports'
 import type { IdentityEncryptedPayload, IdentityVaultUnlockHandle, PublicIdentitySession } from '../../types/identity-session'
 import { createIdentityVaultUnlockHandle, encryptForRecipientUsingX25519 } from './identity-vault-handle'
@@ -69,12 +69,11 @@ class ProtocolIdentitySession implements PublicIdentitySession {
   }
 
   async signJws(payload: unknown): Promise<string> {
-    const header = { alg: 'EdDSA', typ: 'JWT' }
-    const encodedHeader = encodeBase64Url(new TextEncoder().encode(JSON.stringify(header)))
-    const encodedPayload = encodeBase64Url(new TextEncoder().encode(JSON.stringify(payload)))
-    const signingInput = `${encodedHeader}.${encodedPayload}`
-    const signature = await this.#handle.signEd25519(new TextEncoder().encode(signingInput))
-    return `${signingInput}.${encodeBase64Url(signature)}`
+    return createJcsEd25519JwsWithSigner(
+      { alg: 'EdDSA', kid: this.kid },
+      payload as JsonValue,
+      (signingInput) => this.#handle.signEd25519(signingInput),
+    )
   }
 
   async deriveFrameworkKey(info: string): Promise<Uint8Array> {

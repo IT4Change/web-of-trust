@@ -4,7 +4,7 @@ import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { IdentityWorkflow, type IdentitySeedVault } from '../src/application/identity'
 import { createIdentityVaultUnlockHandle } from '../src/application/identity/identity-vault-handle'
-import { decodeBase64Url } from '../src/protocol'
+import { canonicalize, decodeBase64Url, decodeJws, verifyJwsWithPublicKey } from '../src/protocol'
 import { WebCryptoProtocolCryptoAdapter } from '../src/protocol-adapters'
 import * as coreRoot from '../src'
 import * as coreApplication from '../src/application'
@@ -170,6 +170,71 @@ describe('IdentityWorkflow', () => {
     await expect(
       workflow.recoverIdentity({ mnemonic: 'not a valid recovery phrase', passphrase: 'local passphrase' }),
     ).rejects.toThrow('Invalid mnemonic')
+  })
+})
+
+describe('IdentitySession.signJws uses the protocol JCS/EdDSA compact JWS path', () => {
+  // Identity 002: identity-session JWS must follow the protocol JCS/EdDSA shape
+  // (header carries alg=EdDSA + identity kid, header/payload are JCS-canonical,
+  // signature verifies through the shared verifyJwsWithPublicKey helper).
+  it('emits a protocol-decodable compact JWS that verifies with the identity public key', async () => {
+    const workflow = new IdentityWorkflow({ crypto: cryptoAdapter, vault: new MemoryIdentitySeedVault() })
+    const { identity } = await workflow.createIdentity({ passphrase: 'protocol-jws', storeSeed: false })
+
+    const payload = { did: identity.did, nonce: 'abc-123', issuedAt: '2026-05-18T09:14:46.781Z' }
+    const jws = await identity.signJws(payload)
+
+    const decoded = decodeJws<Record<string, unknown>, Record<string, unknown>>(jws)
+    expect(decoded.header.alg).toBe('EdDSA')
+    expect(decoded.header.kid).toBe(identity.kid)
+    expect(decoded.header.typ).toBeUndefined()
+    expect(decoded.payload).toEqual(payload)
+
+    const verified = await verifyJwsWithPublicKey(jws, {
+      publicKey: identity.ed25519PublicKey,
+      crypto: cryptoAdapter,
+    })
+    expect(verified.payload).toEqual(payload)
+  })
+
+  it('canonicalizes header and payload bytes independently of caller object key order', async () => {
+    const workflow = new IdentityWorkflow({ crypto: cryptoAdapter, vault: new MemoryIdentitySeedVault() })
+    const { identity } = await workflow.createIdentity({ passphrase: 'protocol-jws-jcs', storeSeed: false })
+
+    const orderedA = { a: 1, b: 'two', c: [true, false] }
+    const orderedB = { c: [true, false], b: 'two', a: 1 }
+
+    const jwsA = await identity.signJws(orderedA)
+    const jwsB = await identity.signJws(orderedB)
+
+    const partsA = jwsA.split('.')
+    const partsB = jwsB.split('.')
+    expect(partsA).toHaveLength(3)
+    expect(partsB).toHaveLength(3)
+    const [encodedHeaderA, encodedPayloadA] = partsA
+    const [encodedHeaderB, encodedPayloadB] = partsB
+
+    // JCS produces sorted-key canonical bytes, so payload encoding must match
+    // regardless of caller key order — and must equal the JCS bytes directly.
+    expect(encodedPayloadA).toBe(encodedPayloadB)
+    expect(new TextDecoder().decode(decodeBase64Url(encodedPayloadA))).toBe(canonicalize(orderedA))
+    expect(new TextDecoder().decode(decodeBase64Url(encodedPayloadB))).toBe(canonicalize(orderedA))
+    expect(new TextDecoder().decode(decodeBase64Url(encodedHeaderA))).toBe(canonicalize({ alg: 'EdDSA', kid: identity.kid }))
+    expect(new TextDecoder().decode(decodeBase64Url(encodedHeaderB))).toBe(canonicalize({ alg: 'EdDSA', kid: identity.kid }))
+    expect(encodedHeaderA).toBe(encodedHeaderB)
+
+    await expect(
+      verifyJwsWithPublicKey(jwsA, {
+        publicKey: identity.ed25519PublicKey,
+        crypto: cryptoAdapter,
+      }),
+    ).resolves.toBeTruthy()
+    await expect(
+      verifyJwsWithPublicKey(jwsB, {
+        publicKey: identity.ed25519PublicKey,
+        crypto: cryptoAdapter,
+      }),
+    ).resolves.toBeTruthy()
   })
 })
 
