@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { afterEach, describe, it, expect, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { resolve, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -14,6 +14,11 @@ import type { PublicIdentitySession } from '../../wot-core/src/application/ident
 
 const here = dirname(fileURLToPath(import.meta.url))
 const authSourcePath = resolve(here, '../src/auth.ts')
+const boundaryNowSeconds = 1_800_000_000
+
+afterEach(() => {
+  vi.restoreAllMocks()
+})
 
 function mockRequest(headers: Record<string, string> = {}): IncomingMessage {
   return { headers } as unknown as IncomingMessage
@@ -165,6 +170,19 @@ describe('Vault auth — protocol JWS verification', () => {
       expect(result.error ?? '').toMatch(/expired|skew/i)
     })
 
+    it('accepts iat exactly at the future clock-skew boundary', async () => {
+      const { identity } = await createTestIdentity('alice-boundary-future')
+      vi.spyOn(Date, 'now').mockReturnValue(boundaryNowSeconds * 1000)
+      const token = await makeAuthToken(identity, {
+        iat: boundaryNowSeconds + 60,
+      })
+      const result = await verifyIdentity(
+        mockRequest({ authorization: `Bearer ${token}` }),
+      )
+      expect(result.authenticated).toBe(true)
+      expect(result.error).toBeUndefined()
+    })
+
     it('rejects iat too far in the past (token expiry)', async () => {
       const { identity } = await createTestIdentity('alice-pass')
       const token = await makeAuthToken(identity, {
@@ -175,6 +193,19 @@ describe('Vault auth — protocol JWS verification', () => {
       )
       expect(result.authenticated).toBe(false)
       expect(result.error ?? '').toMatch(/expired|skew/i)
+    })
+
+    it('accepts iat exactly at the expiry boundary', async () => {
+      const { identity } = await createTestIdentity('alice-boundary-past')
+      vi.spyOn(Date, 'now').mockReturnValue(boundaryNowSeconds * 1000)
+      const token = await makeAuthToken(identity, {
+        iat: boundaryNowSeconds - 300,
+      })
+      const result = await verifyIdentity(
+        mockRequest({ authorization: `Bearer ${token}` }),
+      )
+      expect(result.authenticated).toBe(true)
+      expect(result.error).toBeUndefined()
     })
   })
 })
