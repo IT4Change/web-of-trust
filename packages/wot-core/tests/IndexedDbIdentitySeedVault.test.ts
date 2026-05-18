@@ -162,8 +162,8 @@ describe('IndexedDbIdentitySeedVault', () => {
 describe('deprecated identity seed vault compatibility alias removal', () => {
   it('removes the deprecated alias file and public exports', () => {
     expect(existsSync(legacyAliasPath)).toBe(false)
-    expect((storageAdapters as Record<string, unknown>)[legacyAliasExport]).toBeUndefined()
-    expect((coreAdapters as Record<string, unknown>)[legacyAliasExport]).toBeUndefined()
-    expect((coreRoot as Record<string, unknown>)[legacyAliasExport]).toBeUndefined()
+    expect(Object.prototype.hasOwnProperty.call(storageAdapters, legacyAliasExport)).toBe(false)
+    expect(Object.prototype.hasOwnProperty.call(coreAdapters, legacyAliasExport)).toBe(false)
+    expect(Object.prototype.hasOwnProperty.call(coreRoot, legacyAliasExport)).toBe(false)
   })
 })
