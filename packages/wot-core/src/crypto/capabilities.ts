@@ -149,9 +149,11 @@ export async function verifyCapability(
   try {
     await verifyJwsWithPublicKey(capabilityJws, { publicKey, crypto: protocolCrypto })
   } catch (error) {
+    const message = error instanceof Error ? error.message : 'verification failed'
+    const prefix = message.toLowerCase().includes('kid') ? 'Invalid JWS header' : 'Invalid signature'
     return {
       valid: false,
-      error: `Invalid signature: ${error instanceof Error ? error.message : 'verification failed'}`,
+      error: `${prefix}: ${message}`,
     }
   }
 

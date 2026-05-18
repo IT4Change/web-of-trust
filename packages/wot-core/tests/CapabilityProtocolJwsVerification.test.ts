@@ -19,6 +19,10 @@ function futureDate(hours: number): string {
   return new Date(Date.now() + hours * 60 * 60 * 1000).toISOString()
 }
 
+function encodeJson(value: unknown): string {
+  return Buffer.from(JSON.stringify(value)).toString('base64url')
+}
+
 describe('Capability protocol-backed JWS verification (issue #94)', () => {
   // Issue #94 / Identity 002 / Sync 003: capability JWS extraction and
   // verification must delegate to the protocol JWS helpers (decodeJws /
@@ -95,6 +99,44 @@ describe('Capability protocol-backed JWS verification (issue #94)', () => {
       const result = await verifyCapability('not.a-real-jws')
       expect(result.valid).toBe(false)
       if (!result.valid) expect(result.error).toBeDefined()
+    })
+
+    it('rejects a JWS with a JSON-primitive payload before signature verification', async () => {
+      const primitiveJws = [
+        encodeJson({ alg: 'EdDSA', kid: 'did:key:zFake#sig-0' }),
+        encodeJson(42),
+        'AAAA',
+      ].join('.')
+
+      const result = await verifyCapability(primitiveJws)
+      expect(result.valid).toBe(false)
+      if (!result.valid) expect(result.error).toContain('cannot extract payload')
+      expect(extractCapability(primitiveJws)).toBeNull()
+    })
+
+    it('reports a missing kid as a header error rather than a signature error', async () => {
+      const { identity: alice } = await createTestIdentity('cap-protocol-missing-kid-alice')
+      const { identity: bob } = await createTestIdentity('cap-protocol-missing-kid-bob')
+      const payload = {
+        id: crypto.randomUUID(),
+        issuer: alice.getDid(),
+        audience: bob.getDid(),
+        resource,
+        permissions: ['read'],
+        expiration: futureDate(12),
+      }
+      const jwsWithoutKid = [
+        encodeJson({ alg: 'EdDSA' }),
+        encodeJson(payload),
+        'AAAA',
+      ].join('.')
+
+      const result = await verifyCapability(jwsWithoutKid)
+      expect(result.valid).toBe(false)
+      if (!result.valid) {
+        expect(result.error).toContain('Invalid JWS header')
+        expect(result.error).not.toContain('Invalid signature')
+      }
     })
 
     it('rejects a tampered signature segment', async () => {
