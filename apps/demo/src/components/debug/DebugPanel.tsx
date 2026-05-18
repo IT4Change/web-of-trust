@@ -233,26 +233,6 @@ export function DebugPanel() {
             </Section>
           )}
 
-          {/* Legacy */}
-          {snapshot.impl === 'legacy' && snapshot.legacy.idbChunkCount !== null && (
-            <Section title="Legacy (IDB)">
-              <Row
-                label="Chunks"
-                value={String(snapshot.legacy.idbChunkCount)}
-                status={snapshot.legacy.idbChunkCount > 20 ? 'red' : snapshot.legacy.idbChunkCount > 10 ? 'yellow' : 'green'}
-              />
-              {snapshot.legacy.healthCheckResult !== null && (
-                <Row label="Health" value={snapshot.legacy.healthCheckResult ? 'OK' : 'Unhealthy'} status={snapshot.legacy.healthCheckResult ? 'green' : 'red'} />
-              )}
-              {snapshot.legacy.findDurationMs !== null && (
-                <Row label="find()" value={formatMs(snapshot.legacy.findDurationMs)} />
-              )}
-              {snapshot.legacy.flushDurationMs !== null && (
-                <Row label="flush()" value={formatMs(snapshot.legacy.flushDurationMs)} />
-              )}
-            </Section>
-          )}
-
           {/* Migration */}
           {snapshot.persistence.migration && (
             <Section title="Migration">
