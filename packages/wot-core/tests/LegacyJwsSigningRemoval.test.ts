@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import * as coreRoot from '../src'
 import * as coreCrypto from '../src/crypto'
+import * as cryptoJwsModule from '../src/crypto/jws'
 import { canonicalize, decodeBase64Url, decodeJws, verifyJwsWithPublicKey } from '../src/protocol'
 import { createTestIdentity, testCryptoAdapter } from './helpers/identity-session'
 
@@ -11,6 +12,8 @@ const __dirname = dirname(fileURLToPath(import.meta.url))
 const cryptoJwsPath = resolve(__dirname, '../src/crypto/jws.ts')
 const coreIndexPath = resolve(__dirname, '../src/index.ts')
 const coreCryptoIndexPath = resolve(__dirname, '../src/crypto/index.ts')
+const exportedSignJwsDeclaration = /export\s+(?:async\s+function|function|const|let|var)\s+signJws\b/
+const reExportedSignJws = /export\s*\{[^}]*\bsignJws\b[^}]*\}/
 
 describe('legacy crypto signJws helper removal', () => {
   // Issue #94 / Identity 002: the legacy JWT-style signJws helper in
@@ -23,21 +26,21 @@ describe('legacy crypto signJws helper removal', () => {
 
   it('does not define an exported signJws helper in packages/wot-core/src/crypto/jws.ts', () => {
     const source = readFileSync(cryptoJwsPath, 'utf8')
-    expect(source).not.toMatch(/export\s+async\s+function\s+signJws\b/)
-    expect(source).not.toMatch(/export\s+function\s+signJws\b/)
-    expect(source).not.toMatch(/export\s*\{[^}]*\bsignJws\b[^}]*\}/)
+    expect(source).not.toMatch(exportedSignJwsDeclaration)
+    expect(source).not.toMatch(reExportedSignJws)
+    expect(Object.prototype.hasOwnProperty.call(cryptoJwsModule, 'signJws')).toBe(false)
   })
 
   it('does not re-export signJws from @web_of_trust/core/crypto', () => {
     const source = readFileSync(coreCryptoIndexPath, 'utf8')
-    expect(source).not.toMatch(/\bsignJws\b/)
-    expect((coreCrypto as Record<string, unknown>).signJws).toBeUndefined()
+    expect(source).not.toMatch(reExportedSignJws)
+    expect(Object.prototype.hasOwnProperty.call(coreCrypto, 'signJws')).toBe(false)
   })
 
   it('does not re-export signJws from @web_of_trust/core', () => {
     const source = readFileSync(coreIndexPath, 'utf8')
-    expect(source).not.toMatch(/\bsignJws\b/)
-    expect((coreRoot as Record<string, unknown>).signJws).toBeUndefined()
+    expect(source).not.toMatch(reExportedSignJws)
+    expect(Object.prototype.hasOwnProperty.call(coreRoot, 'signJws')).toBe(false)
   })
 
   it('keeps verifyJws and extractJwsPayload as compatibility verification helpers', () => {
