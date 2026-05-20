@@ -1,9 +1,13 @@
 import { createServer, type Server as HttpServer } from 'http'
 import { randomBytes } from 'crypto'
 import { WebSocketServer, type WebSocket } from 'ws'
+import { protocol, WebCryptoProtocolCryptoAdapter } from '@web_of_trust/core'
 import type { ClientMessage, RelayMessage } from './types.js'
 import { OfflineQueue } from './queue.js'
 import { getDashboardHtml } from './dashboard-html.js'
+
+const { didKeyToPublicKeyBytes, decodeBase64Url } = protocol
+const protocolCrypto = new WebCryptoProtocolCryptoAdapter()
 
 export interface RelayServerOptions {
   port: number
@@ -18,60 +22,6 @@ interface PendingChallenge {
 }
 
 const CHALLENGE_TIMEOUT_MS = 30_000 // 30 seconds to respond
-const BASE58_ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
-
-function decodeBase58(input: string): Uint8Array {
-  let num = BigInt(0)
-  for (const char of input) {
-    const index = BASE58_ALPHABET.indexOf(char)
-    if (index === -1) throw new Error(`Invalid Base58 character: ${char}`)
-    num = num * BigInt(58) + BigInt(index)
-  }
-  const hex = num.toString(16)
-  const hexPadded = hex.length % 2 ? '0' + hex : hex
-  const bytes: number[] = []
-  for (let i = 0; i < hexPadded.length; i += 2) {
-    bytes.push(parseInt(hexPadded.slice(i, i + 2), 16))
-  }
-  let leadingZeros = 0
-  for (const char of input) {
-    if (char === '1') leadingZeros++
-    else break
-  }
-  return new Uint8Array([...new Array(leadingZeros).fill(0), ...bytes])
-}
-
-function decodeBase64Url(input: string): Uint8Array {
-  const base64 = input.replace(/-/g, '+').replace(/_/g, '/')
-  const padded = base64 + '='.repeat((4 - (base64.length % 4)) % 4)
-  const binary = Buffer.from(padded, 'base64')
-  return new Uint8Array(binary)
-}
-
-/** Extract Ed25519 public key bytes from did:key */
-function didToPublicKeyBytes(did: string): Uint8Array {
-  if (!did.startsWith('did:key:z')) {
-    throw new Error('Invalid did:key format')
-  }
-  const multibase = did.slice('did:key:z'.length)
-  const prefixedKey = decodeBase58(multibase)
-  if (prefixedKey[0] !== 0xed || prefixedKey[1] !== 0x01) {
-    throw new Error('Invalid multicodec prefix for Ed25519')
-  }
-  return prefixedKey.slice(2)
-}
-
-/** Verify an Ed25519 signature over a message */
-async function verifySignature(publicKeyBytes: Uint8Array, signature: Uint8Array, message: Uint8Array): Promise<boolean> {
-  const publicKey = await crypto.subtle.importKey(
-    'raw',
-    publicKeyBytes as any,
-    { name: 'Ed25519' },
-    false,
-    ['verify'],
-  )
-  return crypto.subtle.verify('Ed25519', publicKey, signature as any, message as any)
-}
 
 export class RelayServer {
   private wss: WebSocketServer | null = null
@@ -274,10 +224,10 @@ export class RelayServer {
 
     // Verify signature
     try {
-      const publicKeyBytes = didToPublicKeyBytes(did)
+      const publicKeyBytes = didKeyToPublicKeyBytes(did)
       const signatureBytes = decodeBase64Url(signature)
       const nonceBytes = new TextEncoder().encode(nonce)
-      const valid = await verifySignature(publicKeyBytes, signatureBytes, nonceBytes)
+      const valid = await protocolCrypto.verifyEd25519(nonceBytes, signatureBytes, publicKeyBytes)
 
       if (!valid) {
         this.pendingChallenges.delete(ws)
