@@ -2,11 +2,18 @@ import { createServer, type Server as HttpServer } from 'http'
 import { randomBytes } from 'crypto'
 import { WebSocketServer, type WebSocket } from 'ws'
 import { protocol, WebCryptoProtocolCryptoAdapter } from '@web_of_trust/core'
-import type { ClientMessage, RelayMessage } from './types.js'
+import type { RelayMessage } from './types.js'
 import { OfflineQueue } from './queue.js'
 import { getDashboardHtml } from './dashboard-html.js'
 
-const { didKeyToPublicKeyBytes, decodeBase64Url } = protocol
+const {
+  didKeyToPublicKeyBytes,
+  createBrokerChallengeControlFrame,
+  createBrokerRegisteredControlFrame,
+  parseBrokerRegisterControlFrame,
+  verifyBrokerChallengeResponseControlFrame,
+} = protocol
+
 const protocolCrypto = new WebCryptoProtocolCryptoAdapter()
 
 export interface RelayServerOptions {
@@ -14,20 +21,24 @@ export interface RelayServerOptions {
   dbPath?: string // SQLite path, defaults to ':memory:' for tests
 }
 
-/** Pending challenge awaiting response from client */
+/** Pending challenge awaiting response from client, bound to the connection. */
 interface PendingChallenge {
   did: string
+  deviceId: string
   nonce: string
   createdAt: number
 }
 
 const CHALLENGE_TIMEOUT_MS = 30_000 // 30 seconds to respond
+const NONCE_BYTE_LENGTH = 32
 
 export class RelayServer {
   private wss: WebSocketServer | null = null
   private httpServer: HttpServer | null = null
   private connections = new Map<string, Set<WebSocket>>() // DID → Set of WebSockets (multi-device)
   private socketToDid = new Map<WebSocket, string>() // WebSocket → DID (reverse lookup)
+  private socketToDeviceId = new Map<WebSocket, string>() // WebSocket → deviceId
+  private knownDevices = new Map<string, Set<string>>() // DID → Set of known deviceIds
   private pendingChallenges = new Map<WebSocket, PendingChallenge>()
   private queue: OfflineQueue
   private startedAt = Date.now()
@@ -78,6 +89,7 @@ export class RelayServer {
     }
     this.connections.clear()
     this.socketToDid.clear()
+    this.socketToDeviceId.clear()
     this.pendingChallenges.clear()
 
     if (this.wss) {
@@ -129,16 +141,18 @@ export class RelayServer {
 
   private handleConnection(ws: WebSocket): void {
     ws.on('message', (data) => {
+      let parsed: unknown
       try {
-        const msg = JSON.parse(data.toString()) as ClientMessage
-        this.handleMessage(ws, msg)
+        parsed = JSON.parse(data.toString())
       } catch {
         this.sendTo(ws, {
           type: 'error',
-          code: 'INVALID_MESSAGE',
+          code: 'MALFORMED_MESSAGE',
           message: 'Invalid JSON',
         })
+        return
       }
+      this.handleMessage(ws, parsed)
     })
 
     ws.on('close', () => {
@@ -151,105 +165,162 @@ export class RelayServer {
           if (sockets.size === 0) this.connections.delete(did)
         }
         this.socketToDid.delete(ws)
+        this.socketToDeviceId.delete(ws)
       }
     })
   }
 
-  private handleMessage(ws: WebSocket, msg: ClientMessage): void {
-    switch (msg.type) {
+  private handleMessage(ws: WebSocket, msg: unknown): void {
+    if (msg === null || typeof msg !== 'object') {
+      this.sendTo(ws, { type: 'error', code: 'MALFORMED_MESSAGE', message: 'Invalid message' })
+      return
+    }
+    const record = msg as Record<string, unknown>
+    switch (record.type) {
       case 'register':
-        this.handleRegister(ws, msg.did)
+        this.handleRegister(ws, record)
         break
       case 'challenge-response':
-        this.handleChallengeResponse(ws, msg.did, msg.nonce, msg.signature)
+        void this.handleChallengeResponse(ws, record)
         break
       case 'send':
-        this.handleSend(ws, msg.envelope)
+        this.handleSend(ws, (record.envelope ?? {}) as Record<string, unknown>)
         break
       case 'ack':
-        this.handleAck(ws, msg.messageId)
+        this.handleAck(ws, String(record.messageId ?? ''))
         break
       case 'ping':
         this.sendTo(ws, { type: 'pong' })
         break
+      default:
+        this.sendTo(ws, { type: 'error', code: 'MALFORMED_MESSAGE', message: 'Unknown message type' })
     }
   }
 
   /**
    * Step 1: Client sends register → Relay responds with challenge nonce.
-   * The client must sign the nonce with their Ed25519 private key.
+   * Sync 003 Broker-Auth-Transcript: register MUST carry `did` and a canonical
+   * lowercase UUID-v4 `deviceId`. Validation is delegated to the protocol
+   * register-frame helper.
    */
-  private handleRegister(ws: WebSocket, did: string): void {
-    // Validate DID format
-    if (!did.startsWith('did:key:z')) {
-      this.sendTo(ws, { type: 'error', code: 'INVALID_DID', message: 'DID must be did:key format' })
+  private handleRegister(ws: WebSocket, raw: Record<string, unknown>): void {
+    let frame
+    try {
+      frame = parseBrokerRegisterControlFrame(raw)
+      didKeyToPublicKeyBytes(frame.did)
+    } catch (err) {
+      this.sendTo(ws, {
+        type: 'error',
+        code: 'MALFORMED_MESSAGE',
+        message: err instanceof Error ? err.message : 'Invalid register frame',
+      })
       return
     }
 
-    // Generate random nonce
-    const nonce = randomBytes(32).toString('hex')
+    // Generate 32 random bytes and build the challenge frame via protocol helper
+    // — this produces a canonical unpadded Base64URL nonce, not hex.
+    const nonceBytes = new Uint8Array(randomBytes(NONCE_BYTE_LENGTH))
+    const challengeFrame = createBrokerChallengeControlFrame({ nonce: nonceBytes })
 
-    // Store pending challenge
-    this.pendingChallenges.set(ws, { did, nonce, createdAt: Date.now() })
+    // Bind the pending challenge to this exact connection plus did/deviceId/nonce.
+    this.pendingChallenges.set(ws, {
+      did: frame.did,
+      deviceId: frame.deviceId,
+      nonce: challengeFrame.nonce,
+      createdAt: Date.now(),
+    })
 
-    // Send challenge to client
-    this.sendTo(ws, { type: 'challenge', nonce })
+    this.sendTo(ws, challengeFrame)
   }
 
   /**
-   * Step 2: Client signs the nonce and sends it back.
-   * Relay verifies the signature against the DID's public key.
+   * Step 2: Client signs the Broker-Auth-Transcript and sends it back.
+   * Verification is delegated to the protocol challenge-response helper, which
+   * parses the frame, applies the pending-challenge binding rule, and verifies
+   * the Ed25519 signature over the JCS-canonicalized transcript bytes.
    */
-  private async handleChallengeResponse(ws: WebSocket, did: string, nonce: string, signature: string): Promise<void> {
+  private async handleChallengeResponse(ws: WebSocket, raw: Record<string, unknown>): Promise<void> {
     const pending = this.pendingChallenges.get(ws)
 
     if (!pending) {
-      this.sendTo(ws, { type: 'error', code: 'NO_CHALLENGE', message: 'No pending challenge. Send register first.' })
+      this.sendTo(ws, {
+        type: 'error',
+        code: 'AUTH_INVALID',
+        message: 'No pending challenge. Send register first.',
+      })
       return
     }
 
-    // Check timeout
     if (Date.now() - pending.createdAt > CHALLENGE_TIMEOUT_MS) {
       this.pendingChallenges.delete(ws)
-      this.sendTo(ws, { type: 'error', code: 'CHALLENGE_EXPIRED', message: 'Challenge expired. Send register again.' })
+      this.sendTo(ws, {
+        type: 'error',
+        code: 'AUTH_INVALID',
+        message: 'Challenge expired. Send register again.',
+      })
       return
     }
 
-    // Check DID and nonce match
-    if (did !== pending.did || nonce !== pending.nonce) {
-      this.pendingChallenges.delete(ws)
-      this.sendTo(ws, { type: 'error', code: 'CHALLENGE_MISMATCH', message: 'DID or nonce does not match the pending challenge.' })
-      return
-    }
-
-    // Verify signature
+    // Caller-supplied public key bytes from the shared DID helper — no local
+    // DID-to-public-key decoding in this file.
+    let publicKey: Uint8Array
     try {
-      const publicKeyBytes = didKeyToPublicKeyBytes(did)
-      const signatureBytes = decodeBase64Url(signature)
-      const nonceBytes = new TextEncoder().encode(nonce)
-      const valid = await protocolCrypto.verifyEd25519(nonceBytes, signatureBytes, publicKeyBytes)
+      publicKey = didKeyToPublicKeyBytes(pending.did)
+    } catch {
+      this.pendingChallenges.delete(ws)
+      this.sendTo(ws, {
+        type: 'error',
+        code: 'MALFORMED_MESSAGE',
+        message: 'Pending did is not a resolvable did:key',
+      })
+      return
+    }
 
-      if (!valid) {
-        this.pendingChallenges.delete(ws)
-        this.sendTo(ws, { type: 'error', code: 'AUTH_FAILED', message: 'Signature verification failed. You do not own this DID.' })
-        return
-      }
+    let result
+    try {
+      result = await verifyBrokerChallengeResponseControlFrame({
+        frame: raw,
+        pendingChallenge: {
+          did: pending.did,
+          deviceId: pending.deviceId,
+          nonce: pending.nonce,
+        },
+        publicKey,
+        crypto: protocolCrypto,
+      })
     } catch (err) {
       this.pendingChallenges.delete(ws)
-      this.sendTo(ws, { type: 'error', code: 'AUTH_ERROR', message: `Verification error: ${err instanceof Error ? err.message : String(err)}` })
+      this.sendTo(ws, {
+        type: 'error',
+        code: 'INTERNAL_ERROR',
+        message: err instanceof Error ? err.message : 'Verifier failure',
+      })
       return
     }
 
-    // Auth successful — complete registration
+    if (result.disposition === 'rejected') {
+      this.pendingChallenges.delete(ws)
+      this.sendTo(ws, {
+        type: 'error',
+        code: result.errorCode,
+        message:
+          result.errorCode === 'AUTH_INVALID'
+            ? 'Signature verification failed or challenge binding mismatched.'
+            : 'Malformed challenge-response frame.',
+      })
+      return
+    }
+
+    // Auth successful — complete registration.
     this.pendingChallenges.delete(ws)
-    this.completeRegistration(ws, did)
+    this.completeRegistration(ws, result.frame.did, result.frame.deviceId)
   }
 
   /**
    * Complete the registration after successful auth.
    * Delivers queued messages to the newly authenticated client.
    */
-  private completeRegistration(ws: WebSocket, did: string): void {
+  private completeRegistration(ws: WebSocket, did: string, deviceId: string): void {
     // Support multiple devices per DID
     let sockets = this.connections.get(did)
     if (!sockets) {
@@ -258,8 +329,18 @@ export class RelayServer {
     }
     sockets.add(ws)
     this.socketToDid.set(ws, did)
+    this.socketToDeviceId.set(ws, deviceId)
 
-    this.sendTo(ws, { type: 'registered', did, peers: sockets.size - 1 })
+    let knownForDid = this.knownDevices.get(did)
+    if (!knownForDid) {
+      knownForDid = new Set()
+      this.knownDevices.set(did, knownForDid)
+    }
+    const isNewDevice = !knownForDid.has(deviceId)
+    knownForDid.add(deviceId)
+
+    const registeredFrame = createBrokerRegisteredControlFrame({ did, deviceId, isNewDevice })
+    this.sendTo(ws, { ...registeredFrame, peers: sockets.size - 1 })
 
     // First: get previously delivered but unACKed messages (redelivery)
     const unacked = this.queue.getUnacked(did)

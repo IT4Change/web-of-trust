@@ -15,6 +15,11 @@ export interface IdentitySession {
   getDid(): string
   sign(data: string): Promise<string>
   signJws(payload: unknown): Promise<string>
+  // Sync 003 Broker-Auth-Transcript signing: accepts arbitrary bytes (e.g. the
+  // JCS-canonicalized broker-auth transcript) and returns the raw 64-byte
+  // Ed25519 signature. Operation-shaped; the vault never returns raw seed
+  // material through this surface.
+  signEd25519(data: Uint8Array): Promise<Uint8Array>
   deriveFrameworkKey(info: string): Promise<Uint8Array>
   getPublicKeyMultibase(): Promise<string>
   getEncryptionPublicKeyBytes(): Promise<Uint8Array>
