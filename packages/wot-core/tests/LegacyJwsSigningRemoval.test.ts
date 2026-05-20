@@ -11,7 +11,11 @@ const __dirname = dirname(fileURLToPath(import.meta.url))
 const cryptoJwsPath = resolve(__dirname, '../src/crypto/jws.ts')
 const coreIndexPath = resolve(__dirname, '../src/index.ts')
 const coreCryptoIndexPath = resolve(__dirname, '../src/crypto/index.ts')
-const legacyHelperPattern = /\b(signJws|verifyJws|extractJwsPayload)\b/
+const legacyHelperNames = '(signJws|verifyJws|extractJwsPayload)'
+const legacyHelperReExportPattern = new RegExp(`export\\s*\\{[^}]*\\b${legacyHelperNames}\\b[^}]*\\}`)
+const legacyHelperDeclarationPattern = new RegExp(
+  `export\\s+(?:async\\s+)?(?:function\\s+${legacyHelperNames}\\b|(?:const|let|var)\\s+${legacyHelperNames}\\b)`,
+)
 
 describe('legacy crypto JWS public-surface removal', () => {
   // Issue #94 / Identity 002: the legacy public JWS helpers
@@ -30,7 +34,8 @@ describe('legacy crypto JWS public-surface removal', () => {
 
   it('does not re-export legacy JWS helpers from @web_of_trust/core/crypto', () => {
     const source = readFileSync(coreCryptoIndexPath, 'utf8')
-    expect(source).not.toMatch(legacyHelperPattern)
+    expect(source).not.toMatch(legacyHelperReExportPattern)
+    expect(source).not.toMatch(legacyHelperDeclarationPattern)
     expect(source).not.toMatch(/from\s+['"]\.\/jws['"]/)
     expect(Object.prototype.hasOwnProperty.call(coreCrypto, 'signJws')).toBe(false)
     expect(Object.prototype.hasOwnProperty.call(coreCrypto, 'verifyJws')).toBe(false)
@@ -39,7 +44,8 @@ describe('legacy crypto JWS public-surface removal', () => {
 
   it('does not re-export legacy JWS helpers from @web_of_trust/core', () => {
     const source = readFileSync(coreIndexPath, 'utf8')
-    expect(source).not.toMatch(legacyHelperPattern)
+    expect(source).not.toMatch(legacyHelperReExportPattern)
+    expect(source).not.toMatch(legacyHelperDeclarationPattern)
     expect(source).not.toMatch(/from\s+['"]\.\/crypto\/jws['"]/)
     expect(Object.prototype.hasOwnProperty.call(coreRoot, 'signJws')).toBe(false)
     expect(Object.prototype.hasOwnProperty.call(coreRoot, 'verifyJws')).toBe(false)
