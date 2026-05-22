@@ -22,6 +22,7 @@ import type {
   Attestation,
   AttestationMetadata,
   Contact,
+  ContactStatus,
   Identity,
   MessagingState,
   IdentitySession,
@@ -31,7 +32,6 @@ import type {
 import type { AutomergeReplicationAdapter } from '@web_of_trust/adapter-automerge'
 import type { YjsReplicationAdapter } from '@web_of_trust/adapter-yjs'
 import {
-  ContactService,
   AttestationService,
 } from '../services'
 import { AutomergePublishStateStore } from '../adapters/AutomergePublishStateStore'
@@ -80,6 +80,68 @@ type DemoRuntimeStore = DemoStoragePort & DemoReactivePort & {
   getAllDeliveryStatuses(): Promise<Map<string, string>>
 }
 
+type DemoContactStoragePort = Pick<DemoStoragePort, 'addContact' | 'getContacts' | 'getContact' | 'updateContact' | 'removeContact'>
+
+interface DemoContactServicePort {
+  addContact(did: string, publicKey: string, name?: string, status?: ContactStatus): Promise<Contact>
+  getContacts(): Promise<Contact[]>
+  getActiveContacts(): Promise<Contact[]>
+  getContact(did: string): Promise<Contact | null>
+  activateContact(did: string): Promise<void>
+  updateContactName(did: string, name: string): Promise<void>
+  removeContact(did: string): Promise<void>
+}
+
+function createDemoContactService(storage: DemoContactStoragePort): DemoContactServicePort {
+  return {
+    async addContact(did, publicKey, name, status = 'pending') {
+      const now = new Date().toISOString()
+      const contact: Contact = {
+        did,
+        publicKey,
+        ...(name != null ? { name } : {}),
+        status,
+        createdAt: now,
+        updatedAt: now,
+      }
+      await storage.addContact(contact)
+      return contact
+    },
+    async getContacts() {
+      return storage.getContacts()
+    },
+    async getActiveContacts() {
+      const contacts = await storage.getContacts()
+      return contacts.filter(c => c.status === 'active')
+    },
+    async getContact(did) {
+      return storage.getContact(did)
+    },
+    async activateContact(did) {
+      const existing = await storage.getContact(did)
+      if (!existing) throw new Error('Contact not found')
+      await storage.updateContact({
+        ...existing,
+        status: 'active',
+        verifiedAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      })
+    },
+    async updateContactName(did, name) {
+      const existing = await storage.getContact(did)
+      if (!existing) throw new Error('Contact not found')
+      await storage.updateContact({
+        ...existing,
+        name,
+        updatedAt: new Date().toISOString(),
+      })
+    },
+    async removeContact(did) {
+      await storage.removeContact(did)
+    },
+  }
+}
+
 interface AdapterContextValue {
   storage: DemoStoragePort
   reactiveStorage: DemoReactivePort
@@ -91,7 +153,7 @@ interface AdapterContextValue {
   graphCacheStore: AutomergeGraphCacheStore
   outboxStore: LocalOutboxStore
   messagingState: MessagingState
-  contactService: ContactService
+  contactService: DemoContactServicePort
   attestationService: AttestationService
   syncDiscovery: () => Promise<void>
   flushOutbox: () => Promise<void>
@@ -487,7 +549,7 @@ export function AdapterProvider({ children, identity }: AdapterProviderProps) {
             publishStateStore,
             graphCacheStore,
             outboxStore,
-            contactService: new ContactService(storage as unknown as ConstructorParameters<typeof ContactService>[0]),
+            contactService: createDemoContactService(storage),
             attestationService,
             syncDiscovery,
             flushOutbox,

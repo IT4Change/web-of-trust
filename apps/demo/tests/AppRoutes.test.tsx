@@ -264,6 +264,9 @@ describe('Trust 002 verification status source guard', () => {
     if (/\bReactiveStorageAdapter\b/.test(text)) {
       hits.push('AdapterContext.tsx still references broad ReactiveStorageAdapter')
     }
+    if (text.includes('ConstructorParameters<typeof ContactService>')) {
+      hits.push('AdapterContext.tsx still derives contact storage from ContactService constructor')
+    }
 
     for (const needle of [
       'saveVerification',
