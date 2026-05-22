@@ -1,5 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import {
   encodeBase64Url,
 } from '@web_of_trust/core/crypto'
@@ -16,11 +18,13 @@ import { AttestationService, type AttestationStoragePort } from '../src/services
 
 const ALICE_DID = 'did:key:z6MkAlice1234567890abcdefghijklmnopqrstuvwxyz'
 const BOB_DID = 'did:key:z6MkBob1234567890abcdefghijklmnopqrstuvwxyzab'
+const testDir = path.dirname(fileURLToPath(import.meta.url))
+const demoRoot = path.resolve(testDir, '..')
 
 describe('AttestationService storage port source guard', () => {
   it('keeps the service on an attestation-only storage port', () => {
-    const serviceSource = readFileSync('src/services/AttestationService.ts', 'utf8')
-    const testSource = readFileSync('tests/AttestationDelivery.test.ts', 'utf8')
+    const serviceSource = readFileSync(path.resolve(demoRoot, 'src/services/AttestationService.ts'), 'utf8')
+    const testSource = readFileSync(path.resolve(testDir, 'AttestationDelivery.test.ts'), 'utf8')
 
     const legacyMockMethods = [
       ['save', 'Verification'],
