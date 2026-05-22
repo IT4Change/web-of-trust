@@ -256,6 +256,11 @@ describe('Trust 002 verification status source guard', () => {
     const file = 'apps/demo/src/context/AdapterContext.tsx'
     const actualPath = fs.existsSync(file) ? file : path.join('..', '..', file)
     const text = fs.readFileSync(actualPath, 'utf8')
+    const contactServiceFile = 'apps/demo/src/services/ContactService.ts'
+    const contactServicePath = fs.existsSync(contactServiceFile)
+      ? contactServiceFile
+      : path.join('..', '..', contactServiceFile)
+    const contactServiceText = fs.readFileSync(contactServicePath, 'utf8')
     const hits: string[] = []
 
     if (/\bStorageAdapter\b/.test(text)) {
@@ -266,6 +271,9 @@ describe('Trust 002 verification status source guard', () => {
     }
     if (text.includes('ConstructorParameters<typeof ContactService>')) {
       hits.push('AdapterContext.tsx still derives contact storage from ContactService constructor')
+    }
+    if (/\bStorageAdapter\b/.test(contactServiceText)) {
+      hits.push('ContactService.ts still references broad StorageAdapter')
     }
 
     for (const needle of [
