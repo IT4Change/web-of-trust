@@ -15,10 +15,21 @@ import { createAttestationWorkflow } from '../runtime/appRuntime'
 
 export type DeliveryStatus = 'sending' | 'queued' | 'delivered' | 'acknowledged' | 'failed'
 
+/**
+ * Demo-local storage port for attestation persistence.
+ * Keeps AttestationService independent from the broad core storage surface.
+ */
 export interface AttestationStoragePort {
+  /** Persist or replace an attestation. */
   saveAttestation(attestation: Attestation): Promise<void>
+
+  /** Return attestations received by the current identity. */
   getReceivedAttestations(): Promise<Attestation[]>
+
+  /** Return a stored attestation by id, or null when it is unknown. */
   getAttestation(id: string): Promise<Attestation | null>
+
+  /** Update the accepted flag for a stored attestation. */
   setAttestationAccepted(attestationId: string, accepted: boolean): Promise<void>
 }
 
