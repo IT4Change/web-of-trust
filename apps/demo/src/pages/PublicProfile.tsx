@@ -68,6 +68,9 @@ export function PublicProfile() {
   const tryLocalFallback = useCallback((): boolean => {
     // Try own profile
     if (decodedDid === myDid && localIdentity) {
+      setPublicAttestations([])
+      setResolvedProfiles(new Map())
+      setMutualContacts([])
       setProfile({
         did: decodedDid,
         name: localIdentity.profile.name,
@@ -84,6 +87,9 @@ export function PublicProfile() {
     // Try contact data
     const contact = contacts.find(c => c.did === decodedDid)
     if (contact?.name) {
+      setPublicAttestations([])
+      setResolvedProfiles(new Map())
+      setMutualContacts([])
       setProfile({
         did: decodedDid,
         name: contact.name,
@@ -112,6 +118,10 @@ export function PublicProfile() {
 
     async function fetchAll() {
       setState('loading')
+      setProfile(null)
+      setPublicAttestations([])
+      setResolvedProfiles(new Map())
+      setMutualContacts([])
 
       try {
         const [profileResult, aData] = await Promise.all([

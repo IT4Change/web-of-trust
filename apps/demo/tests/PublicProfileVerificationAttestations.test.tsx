@@ -1,6 +1,104 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, beforeEach, vi } from 'vitest'
+import { render, screen, waitFor } from '@testing-library/react'
+import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom'
+import * as React from 'react'
 import fs from 'node:fs'
 import path from 'node:path'
+import type { Attestation, Contact } from '@web_of_trust/core/types'
+
+const mocks = vi.hoisted(() => {
+  const emptySubscribable = <T,>(value: T) => ({
+    getValue: () => value,
+    subscribe: () => () => {},
+  })
+
+  return {
+    identityState: {
+      identity: { getDid: () => 'did:key:viewer' },
+      did: 'did:key:viewer',
+    },
+    contacts: [] as Contact[],
+    localIdentity: null as null,
+    localAttestations: [] as Attestation[],
+    discovery: {
+      resolveProfile: vi.fn(),
+      resolveAttestations: vi.fn(),
+    },
+    emptySubscribable,
+  }
+})
+
+vi.mock('../src/runtime/appRuntime', () => ({
+  createHttpDiscoveryAdapter: () => mocks.discovery,
+}))
+
+vi.mock('../src/context', () => ({
+  useIdentity: () => mocks.identityState,
+  useOptionalAdapters: () => ({
+    discovery: mocks.discovery,
+    reactiveStorage: {
+      watchContacts: () => mocks.emptySubscribable(mocks.contacts),
+      watchIdentity: () => mocks.emptySubscribable(mocks.localIdentity),
+      watchAllAttestations: () => mocks.emptySubscribable(mocks.localAttestations),
+    },
+  }),
+}))
+
+vi.mock('../src/i18n', () => ({
+  plural: (count: number, one: string, many: string) => count === 1 ? one : many,
+  useLanguage: () => ({
+    t: {
+      common: {
+        attestationOne: 'Bestätigung',
+        attestationMany: 'Bestätigungen',
+        from: 'von',
+        personOne: 'Person',
+        personMany: 'Personen',
+      },
+      contacts: {
+        statusIncoming: 'incoming',
+        statusMutual: 'mutual',
+        statusOutgoing: 'outgoing',
+      },
+      publicProfile: {
+        attestPerson: 'Bestätigung erstellen',
+        attestPersonDesc: 'Bestätige etwas über {name}',
+        attestationCount: '{count} {attestationLabel}',
+        contactBadge: '(Kontakt)',
+        errorDescription: 'Das Profil konnte nicht geladen oder verifiziert werden.',
+        errorTitle: 'Fehler beim Laden',
+        joinButton: 'Jetzt starten',
+        joinCta: 'Dem Web of Trust beitreten',
+        loading: 'Profil wird geladen...',
+        mutualContactPlural: '{count} deiner Kontakte kennen diese Person: {names}.',
+        mutualContactSingular: '{name} kennt diese Person auch.',
+        notFoundDescription: 'Für diese DID wurde kein öffentliches Profil hinterlegt.',
+        notFoundTitle: 'Kein Profil gefunden',
+        offlineBanner: 'Du bist offline. Die angezeigten Daten stammen aus dem lokalen Speicher und sind möglicherweise nicht aktuell.',
+        offlineDescription: 'Das Profil kann nicht geladen werden, da keine Internetverbindung besteht.',
+        offlineTitle: 'Du bist offline',
+        publicTitle: 'Öffentliches Profil',
+        title: 'Profil',
+        unknown: 'Unbekannt',
+        verifiedBanner: 'Signiert',
+        verifiedByCount: 'Verbunden mit {count} {personLabel}',
+        verifyButton: 'Verbinden',
+        verifyPerson: 'Person verbinden',
+        youSuffix: ' (Du)',
+        yourContactBadge: '(dein Kontakt)',
+      },
+      aria: {
+        copyDid: 'DID kopieren',
+        shareProfile: 'Profil teilen',
+      },
+    },
+    fmt: (template: string, vars: Record<string, string | number>) =>
+      Object.entries(vars).reduce((text, [key, value]) => text.replace(`{${key}}`, String(value)), template),
+    formatDate: () => '2026-05-22',
+  }),
+}))
+
+import { PublicProfile } from '../src/pages/PublicProfile'
 
 function readRepoFile(file: string): string {
   const actualPath = fs.existsSync(file) ? file : path.join('..', '..', file)
@@ -20,5 +118,100 @@ describe('PublicProfile Trust 002 verification-attestation source guard', () => 
     expect(text).toContain('resolveAttestations')
     expect(text).toContain('isVerificationAttestation')
     expect(text).toContain('getVerificationStatus')
+  })
+})
+
+function makeVerificationAttestation(from: string, to: string): Attestation {
+  return {
+    id: `att-${from}-${to}`,
+    from,
+    to,
+    claim: 'in-person verifiziert',
+    createdAt: '2026-05-22T12:00:00.000Z',
+    vcJws: 'header.payload.signature',
+  }
+}
+
+function NavigateTo({ did }: { did: string }) {
+  const navigate = useNavigate()
+
+  React.useEffect(() => {
+    navigate(`/p/${encodeURIComponent(did)}`)
+  }, [did, navigate])
+
+  return null
+}
+
+function renderPublicProfile(did: string) {
+  return render(
+    <MemoryRouter initialEntries={[`/p/${encodeURIComponent(did)}`]}>
+      <NavigateTo did={did} />
+      <Routes>
+        <Route path="/p/:did" element={<PublicProfile />} />
+      </Routes>
+    </MemoryRouter>,
+  )
+}
+
+describe('PublicProfile fallback display state', () => {
+  beforeEach(() => {
+    mocks.contacts = []
+    mocks.localAttestations = []
+    mocks.discovery.resolveProfile.mockReset()
+    mocks.discovery.resolveAttestations.mockReset()
+  })
+
+  it('clears public verification-attestations when navigation falls back to local contact data', async () => {
+    const firstDid = 'did:key:first'
+    const secondDid = 'did:key:second'
+    const verifierDid = 'did:key:verifier'
+
+    mocks.contacts = [{
+      did: secondDid,
+      name: 'Second Contact',
+      publicKey: '',
+      status: 'active',
+      createdAt: '2026-05-22T10:00:00.000Z',
+      updatedAt: '2026-05-22T10:00:00.000Z',
+    }]
+
+    mocks.discovery.resolveProfile.mockImplementation(async (targetDid: string) => {
+      if (targetDid === firstDid) {
+        return {
+          profile: {
+            did: firstDid,
+            name: 'First Profile',
+            updatedAt: '2026-05-22T11:00:00.000Z',
+          },
+          fromCache: false,
+        }
+      }
+
+      return { profile: null, fromCache: true }
+    })
+    mocks.discovery.resolveAttestations.mockImplementation(async (targetDid: string) =>
+      targetDid === firstDid ? [makeVerificationAttestation(verifierDid, firstDid)] : [],
+    )
+
+    const view = renderPublicProfile(firstDid)
+
+    expect(await screen.findByText('First Profile')).toBeInTheDocument()
+    expect(screen.getByText('Verbunden mit 1 Person')).toBeInTheDocument()
+    expect(screen.getByText(verifierDid)).toBeInTheDocument()
+
+    view.rerender(
+      <MemoryRouter initialEntries={[`/p/${encodeURIComponent(firstDid)}`]}>
+        <NavigateTo did={secondDid} />
+        <Routes>
+          <Route path="/p/:did" element={<PublicProfile />} />
+        </Routes>
+      </MemoryRouter>,
+    )
+
+    expect(await screen.findByText('Second Contact')).toBeInTheDocument()
+    await waitFor(() => {
+      expect(screen.queryByText('Verbunden mit 1 Person')).not.toBeInTheDocument()
+      expect(screen.queryByText(verifierDid)).not.toBeInTheDocument()
+    })
   })
 })
