@@ -68,6 +68,10 @@ class ProtocolIdentitySession implements PublicIdentitySession {
     return encodeBase64Url(signature)
   }
 
+  async signEd25519(data: Uint8Array): Promise<Uint8Array> {
+    return this.#handle.signEd25519(data)
+  }
+
   async signJws(payload: unknown): Promise<string> {
     return createJcsEd25519JwsWithSigner(
       { alg: 'EdDSA', kid: this.kid },

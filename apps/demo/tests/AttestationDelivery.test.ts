@@ -55,6 +55,7 @@ function createMockIdentity(did: string): IdentitySession {
     getDid: () => did,
     sign: vi.fn(async () => encodeBase64Url(new Uint8Array(64))),
     signJws: vi.fn(async () => 'mock.header.signature'),
+    signEd25519: vi.fn(async () => new Uint8Array(64)),
     deriveFrameworkKey: vi.fn(async () => new Uint8Array(32)),
     getPublicKeyMultibase: vi.fn(async () => did.replace('did:key:', '')),
     getEncryptionPublicKeyBytes: vi.fn(async () => new Uint8Array(32)),

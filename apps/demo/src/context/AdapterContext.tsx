@@ -36,7 +36,7 @@ import { AutomergePublishStateStore } from '../adapters/AutomergePublishStateSto
 import { AutomergeGraphCacheStore } from '../adapters/AutomergeGraphCacheStore'
 import { LocalCacheStore } from '../adapters/LocalCacheStore'
 import { LocalOutboxStore } from '../adapters/LocalOutboxStore'
-import { appRuntimeConfig, createHttpDiscoveryAdapter } from '../runtime/appRuntime'
+import { appRuntimeConfig, createHttpDiscoveryAdapter, getOrCreateBrowserDeviceId } from '../runtime/appRuntime'
 // Yjs and Automerge adapters are dynamically imported to keep WASM out of the default bundle
 
 const USE_YJS = import.meta.env.VITE_CRDT !== 'automerge'
@@ -118,7 +118,8 @@ export function AdapterProvider({ children, identity }: AdapterProviderProps) {
 
         // Create WebSocket adapter — try to connect quickly, but don't block init
         const wsAdapter = new WebSocketMessagingAdapter(appRuntimeConfig.relayUrl, {
-          signChallenge: (nonce: string) => identity.sign(nonce),
+          deviceId: getOrCreateBrowserDeviceId(did),
+          signBrokerAuthTranscript: (bytes: Uint8Array) => identity.signEd25519(bytes),
         })
         try {
           await Promise.race([
