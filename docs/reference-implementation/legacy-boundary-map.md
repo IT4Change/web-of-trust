@@ -63,7 +63,7 @@ Current area | Classification | Target boundary | Notes
 - `packages/wot-core/src/application/identity/identity-workflow.ts` creates identity sessions and signs JWS directly while also managing seed-vault lifecycle. Signing/JWS rules should remain in `protocol`; workflow should orchestrate seed recovery, storage, and session lifecycle through ports.
 - `packages/wot-core/src/services/ProfileService.ts` verifies profile JWS, constructs public DID documents, and builds profile-service behavior in one module. DID/JWS verification and DID-document construction should be protocol/application functions; profile service transport and cache behavior should be adapters/server-infra.
 - `packages/wot-core/src/services/GroupKeyService.ts` implements key generation, generation disposition, and in-memory state. The stale/future/application disposition is useful, but Sync 005 validation and key-rotation message semantics should be protocol/application-owned.
-- `apps/demo/src/services/AttestationService.ts` and `VerificationService.ts` are app services that participate in trust workflows using storage and messaging directly. Preserve workflow intent only after mapping it to `application` use cases over ports.
+- `apps/demo/src/services/AttestationService.ts` is an app service that participates in trust workflows using storage and messaging directly. The legacy demo verification-service provider has been removed; preserve remaining workflow intent only after mapping it to `application` use cases over ports.
 
 ### Application Workflow Mixed With Adapter Logic
 
