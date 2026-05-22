@@ -226,7 +226,6 @@ export function AdapterProvider({ children, identity }: AdapterProviderProps) {
             const doc = getPersonalDoc() as any
             if (doc.cachedGraph?.entries && Object.keys(doc.cachedGraph.entries).length > 0) {
               await localCacheStore.set('graph:entries', JSON.parse(JSON.stringify(doc.cachedGraph.entries)))
-              await localCacheStore.set('graph:verifications', JSON.parse(JSON.stringify(doc.cachedGraph.verifications ?? {})))
               await localCacheStore.set('graph:attestations', JSON.parse(JSON.stringify(doc.cachedGraph.attestations ?? {})))
               console.debug('[migration] Copied cachedGraph from PersonalDoc to LocalCacheStore')
             }
