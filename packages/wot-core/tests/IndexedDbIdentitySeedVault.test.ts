@@ -6,6 +6,7 @@ import { IndexedDbIdentitySeedVault } from '../src/adapters/storage/IndexedDbIde
 import * as coreRoot from '../src'
 import * as coreAdapters from '../src/adapters'
 import * as storageAdapters from '../src/adapters/storage'
+import { encodeBase64Url } from '../src/protocol'
 import { WebCryptoProtocolCryptoAdapter } from '../src/protocol-adapters'
 
 const cryptoAdapter = new WebCryptoProtocolCryptoAdapter()
@@ -144,6 +145,78 @@ describe('IndexedDbIdentitySeedVault', () => {
     for (const name of forbidden) {
       expect((vault as unknown as Record<string, unknown>)[name]).toBeUndefined()
     }
+  })
+
+  it('opens the legacy SeedStorage IndexedDB database and unlocks a pre-existing encrypted seed (no-arg vault)', async () => {
+    // Wire-compat fixture: write directly to the IndexedDB location that the
+    // pre-inline SeedStorage class used — same database name, schema version,
+    // store name, record key, PBKDF2 iteration count, and AES-GCM parameters.
+    // A no-argument IndexedDbIdentitySeedVault must be able to unlock it.
+    const LEGACY_DB_NAME = 'wot-identity'
+    const LEGACY_DB_VERSION = 2
+    const LEGACY_SEED_STORE = 'seeds'
+    const LEGACY_SESSION_STORE = 'session'
+    const LEGACY_SEED_RECORD_KEY = 'master-seed'
+    const LEGACY_PBKDF2_ITERATIONS = 100000
+
+    const passphrase = 'legacy passphrase'
+    const seed = crypto.getRandomValues(new Uint8Array(64))
+    const payload = new TextEncoder().encode(JSON.stringify({
+      type: 'wot.identity.seed',
+      version: 1,
+      seedFormat: 'bip39-64-byte',
+      seed: encodeBase64Url(seed),
+    }))
+
+    const salt = crypto.getRandomValues(new Uint8Array(16))
+    const iv = crypto.getRandomValues(new Uint8Array(12))
+    const passphraseKey = await crypto.subtle.importKey(
+      'raw',
+      new TextEncoder().encode(passphrase),
+      'PBKDF2',
+      false,
+      ['deriveKey'],
+    )
+    const encryptionKey = await crypto.subtle.deriveKey(
+      { name: 'PBKDF2', salt, iterations: LEGACY_PBKDF2_ITERATIONS, hash: 'SHA-256' },
+      passphraseKey,
+      { name: 'AES-GCM', length: 256 },
+      false,
+      ['encrypt', 'decrypt'],
+    )
+    const ciphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, encryptionKey, payload)
+
+    const legacyRecord = {
+      ciphertext: encodeBase64Url(new Uint8Array(ciphertext)),
+      salt: encodeBase64Url(salt),
+      iv: encodeBase64Url(iv),
+    }
+
+    const db = await new Promise<IDBDatabase>((resolveDb, rejectDb) => {
+      const request = indexedDB.open(LEGACY_DB_NAME, LEGACY_DB_VERSION)
+      request.onerror = () => rejectDb(request.error)
+      request.onsuccess = () => resolveDb(request.result)
+      request.onupgradeneeded = (event) => {
+        const opened = (event.target as IDBOpenDBRequest).result
+        if (!opened.objectStoreNames.contains(LEGACY_SEED_STORE)) opened.createObjectStore(LEGACY_SEED_STORE)
+        if (!opened.objectStoreNames.contains(LEGACY_SESSION_STORE)) opened.createObjectStore(LEGACY_SESSION_STORE)
+      }
+    })
+    await new Promise<void>((resolveTx, rejectTx) => {
+      const tx = db.transaction([LEGACY_SEED_STORE], 'readwrite')
+      const req = tx.objectStore(LEGACY_SEED_STORE).put(legacyRecord, LEGACY_SEED_RECORD_KEY)
+      req.onerror = () => rejectTx(req.error)
+      req.onsuccess = () => resolveTx()
+    })
+    db.close()
+
+    const vault = new IndexedDbIdentitySeedVault()
+    expect(await vault.hasSeed()).toBe(true)
+    const handle = await vault.unlockWithPassphrase(passphrase)
+    expect(handle).not.toBeNull()
+    await expect(handle!.deriveFrameworkKey('wot/test/v1')).resolves.toEqual(
+      await cryptoAdapter.hkdfSha256(seed, 'wot/test/v1', 32),
+    )
   })
 
   it('publishes the browser reference IdentitySeedVault from the public adapter boundaries', () => {
