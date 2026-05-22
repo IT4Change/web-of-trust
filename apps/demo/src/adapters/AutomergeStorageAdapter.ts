@@ -1,19 +1,15 @@
 /**
- * AutomergeStorageAdapter - StorageAdapter + ReactiveStorageAdapter backed by Personal Automerge Doc
+ * AutomergeStorageAdapter - demo runtime store backed by Personal Automerge Doc.
  *
- * Replaces EvoluStorageAdapter. All data lives in a single Automerge document
- * managed by personalDocManager.
+ * Implements the demo-local DemoRuntimeStore shape from AdapterContext.tsx.
+ * Legacy Verification document APIs have been removed; Trust 001/002 attestations
+ * are the normative verification surface.
  */
-import type {
-  StorageAdapter,
-  ReactiveStorageAdapter,
-  Subscribable,
-} from '@web_of_trust/core/ports'
+import type { Subscribable } from '@web_of_trust/core/ports'
 import type {
   Identity,
   Profile,
   Contact,
-  Verification,
   Attestation,
   AttestationMetadata,
 } from '@web_of_trust/core/types'
@@ -25,7 +21,6 @@ import {
 import type {
   PersonalDoc,
   ContactDoc,
-  VerificationDoc,
   AttestationDoc,
 } from '../personalDocManager'
 
@@ -45,17 +40,6 @@ function contactFromDoc(doc: ContactDoc): Contact {
   }
 }
 
-function verificationFromDoc(doc: VerificationDoc): Verification {
-  return {
-    id: doc.id,
-    from: doc.fromDid,
-    to: doc.toDid,
-    timestamp: doc.timestamp,
-    proof: JSON.parse(doc.proofJson),
-    ...(doc.locationJson != null ? { location: JSON.parse(doc.locationJson) } : {}),
-  }
-}
-
 function attestationFromDoc(doc: AttestationDoc): Attestation {
   return {
     id: doc.attestationId ?? doc.id,
@@ -69,7 +53,7 @@ function attestationFromDoc(doc: AttestationDoc): Attestation {
   }
 }
 
-export class AutomergeStorageAdapter implements StorageAdapter, ReactiveStorageAdapter {
+export class AutomergeStorageAdapter {
   private cachedIdentity: Identity | null = null
 
   constructor(private did: string) {}
@@ -196,48 +180,6 @@ export class AutomergeStorageAdapter implements StorageAdapter, ReactiveStorageA
     })
   }
 
-  // --- Verifications ---
-
-  async saveVerification(verification: Verification): Promise<void> {
-    changePersonalDoc(doc => {
-      // Remove existing verification from same from→to pair (renewal)
-      for (const [key, v] of Object.entries(doc.verifications)) {
-        if (v.fromDid === verification.from && v.toDid === verification.to && key !== verification.id) {
-          delete doc.verifications[key]
-        }
-      }
-
-      doc.verifications[verification.id] = {
-        id: verification.id,
-        fromDid: verification.from,
-        toDid: verification.to,
-        timestamp: verification.timestamp,
-        proofJson: JSON.stringify(verification.proof),
-        locationJson: verification.location ? JSON.stringify(verification.location) : null,
-      }
-    })
-  }
-
-  async getReceivedVerifications(): Promise<Verification[]> {
-    const doc = getPersonalDoc()
-    return Object.values(doc.verifications)
-      .filter(v => v.toDid === this.did)
-      .map(verificationFromDoc)
-  }
-
-  async getAllVerifications(): Promise<Verification[]> {
-    const doc = getPersonalDoc()
-    return Object.values(doc.verifications)
-      .filter(v => v.fromDid === this.did || v.toDid === this.did)
-      .map(verificationFromDoc)
-  }
-
-  async getVerification(id: string): Promise<Verification | null> {
-    const doc = getPersonalDoc()
-    const v = doc.verifications[id]
-    return v ? verificationFromDoc(v) : null
-  }
-
   // --- Attestations ---
 
   async saveAttestation(attestation: Attestation): Promise<void> {
@@ -342,7 +284,7 @@ export class AutomergeStorageAdapter implements StorageAdapter, ReactiveStorageA
     this.cachedIdentity = null
   }
 
-  // --- Reactive (ReactiveStorageAdapter) ---
+  // --- Reactive ---
 
   watchIdentity(): Subscribable<Identity | null> {
     const did = this.did
@@ -385,64 +327,6 @@ export class AutomergeStorageAdapter implements StorageAdapter, ReactiveStorageA
     const getSnapshot = (): Contact[] => {
       const doc = getPersonalDoc()
       return Object.values(doc.contacts).map(contactFromDoc)
-    }
-
-    let snapshot = getSnapshot()
-    let snapshotKey = JSON.stringify(snapshot)
-
-    return {
-      subscribe: (callback) => {
-        return onPersonalDocChange(() => {
-          const next = getSnapshot()
-          const nextKey = JSON.stringify(next)
-          if (nextKey !== snapshotKey) {
-            snapshot = next
-            snapshotKey = nextKey
-            callback(snapshot)
-          }
-        })
-      },
-      getValue: () => snapshot,
-    }
-  }
-
-  watchAllVerifications(): Subscribable<Verification[]> {
-    const myDid = this.did
-
-    const getSnapshot = (): Verification[] => {
-      const doc = getPersonalDoc()
-      return Object.values(doc.verifications)
-        .filter(v => v.fromDid === myDid || v.toDid === myDid)
-        .map(verificationFromDoc)
-    }
-
-    let snapshot = getSnapshot()
-    let snapshotKey = JSON.stringify(snapshot)
-
-    return {
-      subscribe: (callback) => {
-        return onPersonalDocChange(() => {
-          const next = getSnapshot()
-          const nextKey = JSON.stringify(next)
-          if (nextKey !== snapshotKey) {
-            snapshot = next
-            snapshotKey = nextKey
-            callback(snapshot)
-          }
-        })
-      },
-      getValue: () => snapshot,
-    }
-  }
-
-  watchReceivedVerifications(): Subscribable<Verification[]> {
-    const myDid = this.did
-
-    const getSnapshot = (): Verification[] => {
-      const doc = getPersonalDoc()
-      return Object.values(doc.verifications)
-        .filter(v => v.toDid === myDid)
-        .map(verificationFromDoc)
     }
 
     let snapshot = getSnapshot()
