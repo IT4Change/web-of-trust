@@ -73,29 +73,15 @@ export function useProfileSync() {
   }, [discovery])
 
   /**
-   * Upload verifications and accepted attestations via DiscoveryAdapter.
+   * Upload accepted attestations via DiscoveryAdapter.
+   *
+   * Trust 002 verification-attestations are ordinary attestations: the
+   * holder controls public visibility through the same accepted metadata.
    */
   const uploadVerificationsAndAttestations = useCallback(async () => {
     if (!identity) return
 
     const did = identity.getDid()
-
-    // Upload verifications (deduplicated by sender — keep newest per from-DID)
-    const allVerifications = await storage.getReceivedVerifications()
-    const byFrom = new Map<string, typeof allVerifications[0]>()
-    for (const v of allVerifications) {
-      const existing = byFrom.get(v.from)
-      if (!existing || v.timestamp > existing.timestamp) {
-        byFrom.set(v.from, v)
-      }
-    }
-    const verifications = [...byFrom.values()]
-    if (verifications.length > 0) {
-      await discovery.publishVerifications(
-        { did, verifications, updatedAt: new Date().toISOString() },
-        identity,
-      )
-    }
 
     // Upload accepted attestations only
     const allAttestations = await storage.getReceivedAttestations()
@@ -213,7 +199,7 @@ export function useProfileSync() {
   }, [messaging, storage, fetchContactProfile])
 
   /**
-   * Upload verifications + attestations on mount.
+   * Upload accepted attestations on mount.
    */
   useEffect(() => {
     if (!identity) return
@@ -221,7 +207,7 @@ export function useProfileSync() {
   }, [identity, uploadVerificationsAndAttestations])
 
   /**
-   * Re-upload when verifications or attestations change (debounced).
+   * Re-upload when received attestations change (debounced).
    */
   useEffect(() => {
     const debouncedUpload = () => {
@@ -231,23 +217,16 @@ export function useProfileSync() {
       }, 2000)
     }
 
-    const vSub = reactiveStorage.watchReceivedVerifications()
     const aSub = reactiveStorage.watchReceivedAttestations()
 
-    let vSkipFirst = true
     let aSkipFirst = true
 
-    const unsubV = vSub.subscribe(() => {
-      if (vSkipFirst) { vSkipFirst = false; return }
-      debouncedUpload()
-    })
     const unsubA = aSub.subscribe(() => {
       if (aSkipFirst) { aSkipFirst = false; return }
       debouncedUpload()
     })
 
     return () => {
-      unsubV()
       unsubA()
       if (vaUploadTimerRef.current) clearTimeout(vaUploadTimerRef.current)
     }
