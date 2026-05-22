@@ -1,5 +1,5 @@
 import { useEffect, useCallback, useRef } from 'react'
-import type { PublicProfile, MessageEnvelope } from '@web_of_trust/core/types'
+import type { Attestation, PublicProfile, MessageEnvelope } from '@web_of_trust/core/types'
 import { useAdapters } from '../context'
 import { useIdentity } from '../context'
 
@@ -85,7 +85,7 @@ export function useProfileSync() {
 
     // Upload accepted attestations only
     const allAttestations = await storage.getReceivedAttestations()
-    const accepted = []
+    const accepted: Attestation[] = []
     for (const att of allAttestations) {
       const meta = await storage.getAttestationMetadata(att.id)
       if (meta?.accepted) accepted.push(att)
