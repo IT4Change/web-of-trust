@@ -21,5 +21,6 @@ describe('PersistenceMetrics LegacyIdentityRemoval', () => {
     const snapshot = new PersistenceMetrics('compact-store').getSnapshot()
 
     expect(snapshot).not.toHaveProperty('legacy')
+    expect(snapshot.persistence).not.toHaveProperty('legacy')
   })
 })
