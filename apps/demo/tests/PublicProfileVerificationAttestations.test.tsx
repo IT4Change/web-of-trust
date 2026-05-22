@@ -4,6 +4,7 @@ import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom'
 import * as React from 'react'
 import fs from 'node:fs'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import type { Attestation, Contact } from '@web_of_trust/core/types'
 
 const mocks = vi.hoisted(() => {
@@ -24,6 +25,11 @@ const mocks = vi.hoisted(() => {
       resolveProfile: vi.fn(),
       resolveAttestations: vi.fn(),
     },
+    graphCacheStore: {
+      getCachedVerifications: vi.fn(),
+      cacheEntry: vi.fn(),
+      resolveNames: vi.fn(),
+    },
     emptySubscribable,
   }
 })
@@ -36,6 +42,7 @@ vi.mock('../src/context', () => ({
   useIdentity: () => mocks.identityState,
   useOptionalAdapters: () => ({
     discovery: mocks.discovery,
+    graphCacheStore: mocks.graphCacheStore,
     reactiveStorage: {
       watchContacts: () => mocks.emptySubscribable(mocks.contacts),
       watchIdentity: () => mocks.emptySubscribable(mocks.localIdentity),
@@ -100,9 +107,11 @@ vi.mock('../src/i18n', () => ({
 
 import { PublicProfile } from '../src/pages/PublicProfile'
 
+const testDir = path.dirname(fileURLToPath(import.meta.url))
+const repoRoot = path.resolve(testDir, '..', '..', '..')
+
 function readRepoFile(file: string): string {
-  const actualPath = fs.existsSync(file) ? file : path.join('..', '..', file)
-  return fs.readFileSync(actualPath, 'utf8')
+  return fs.readFileSync(path.resolve(repoRoot, file), 'utf8')
 }
 
 describe('PublicProfile Trust 002 verification-attestation source guard', () => {
@@ -127,6 +136,17 @@ function makeVerificationAttestation(from: string, to: string): Attestation {
     from,
     to,
     claim: 'in-person verifiziert',
+    createdAt: '2026-05-22T12:00:00.000Z',
+    vcJws: 'header.payload.signature',
+  }
+}
+
+function makeGenericAttestation(from: string, to: string, claim = 'helped with setup'): Attestation {
+  return {
+    id: `att-generic-${from}-${to}`,
+    from,
+    to,
+    claim,
     createdAt: '2026-05-22T12:00:00.000Z',
     vcJws: 'header.payload.signature',
   }
@@ -159,6 +179,12 @@ describe('PublicProfile fallback display state', () => {
     mocks.localAttestations = []
     mocks.discovery.resolveProfile.mockReset()
     mocks.discovery.resolveAttestations.mockReset()
+    mocks.graphCacheStore.getCachedVerifications.mockReset()
+    mocks.graphCacheStore.cacheEntry.mockReset()
+    mocks.graphCacheStore.resolveNames.mockReset()
+    mocks.graphCacheStore.getCachedVerifications.mockResolvedValue([])
+    mocks.graphCacheStore.cacheEntry.mockResolvedValue(undefined)
+    mocks.graphCacheStore.resolveNames.mockResolvedValue(new Map())
   })
 
   it('clears public verification-attestations when navigation falls back to local contact data', async () => {
@@ -247,6 +273,68 @@ describe('PublicProfile fallback display state', () => {
     await waitFor(() => {
       expect(screen.queryByText('Verbunden mit 1 Person')).not.toBeInTheDocument()
       expect(screen.queryByText('Known Verifier kennt diese Person auch.')).not.toBeInTheDocument()
+    })
+  })
+
+  it('ignores generic public attestations that are not addressed to the viewed DID', async () => {
+    const profileDid = 'did:key:profile'
+    const otherDid = 'did:key:other'
+    const attesterDid = 'did:key:attester'
+
+    mocks.discovery.resolveProfile.mockResolvedValue({
+      profile: {
+        did: profileDid,
+        name: 'Target Profile',
+        updatedAt: '2026-05-22T11:00:00.000Z',
+      },
+      fromCache: false,
+    })
+    mocks.discovery.resolveAttestations.mockResolvedValue([
+      makeGenericAttestation(attesterDid, otherDid, 'foreign claim'),
+    ])
+
+    renderPublicProfile(profileDid)
+
+    expect(await screen.findByText('Target Profile')).toBeInTheDocument()
+    await waitFor(() => {
+      expect(screen.queryByText('1 Bestätigung')).not.toBeInTheDocument()
+      expect(screen.queryByText('foreign claim')).not.toBeInTheDocument()
+    })
+  })
+
+  it('preserves cached legacy verifications when caching fresh public attestations', async () => {
+    const profileDid = 'did:key:profile'
+    const attesterDid = 'did:key:attester'
+    const existingVerifications = [{
+      id: 'legacy-verification',
+      from: 'did:key:legacy-verifier',
+      to: profileDid,
+      timestamp: '2026-05-22T09:00:00.000Z',
+    }]
+    const publicAttestations = [makeGenericAttestation(attesterDid, profileDid, 'fresh claim')]
+
+    mocks.graphCacheStore.getCachedVerifications.mockResolvedValue(existingVerifications)
+    mocks.discovery.resolveProfile.mockResolvedValue({
+      profile: {
+        did: profileDid,
+        name: 'Target Profile',
+        updatedAt: '2026-05-22T11:00:00.000Z',
+      },
+      fromCache: false,
+    })
+    mocks.discovery.resolveAttestations.mockResolvedValue(publicAttestations)
+
+    renderPublicProfile(profileDid)
+
+    expect(await screen.findByText('Target Profile')).toBeInTheDocument()
+    await waitFor(() => {
+      expect(mocks.graphCacheStore.getCachedVerifications).toHaveBeenCalledWith(profileDid)
+      expect(mocks.graphCacheStore.cacheEntry).toHaveBeenCalledWith(
+        profileDid,
+        expect.objectContaining({ did: profileDid }),
+        existingVerifications,
+        publicAttestations,
+      )
     })
   })
 })

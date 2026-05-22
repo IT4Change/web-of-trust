@@ -56,13 +56,17 @@ export function PublicProfile() {
 
   const isContact = useMemo(() => contacts.some(c => c.did === decodedDid), [contacts, decodedDid])
 
-  const verificationAttestations = useMemo(
-    () => publicAttestations.filter(a => isVerificationAttestation(a) && a.to === decodedDid),
+  const profileAttestations = useMemo(
+    () => publicAttestations.filter(a => a.to === decodedDid),
     [publicAttestations, decodedDid],
   )
+  const verificationAttestations = useMemo(
+    () => profileAttestations.filter(isVerificationAttestation),
+    [profileAttestations],
+  )
   const genericAttestations = useMemo(
-    () => publicAttestations.filter(a => !isVerificationAttestation(a)),
-    [publicAttestations],
+    () => profileAttestations.filter(a => !isVerificationAttestation(a)),
+    [profileAttestations],
   )
 
   const tryLocalFallback = useCallback((): boolean => {
@@ -146,7 +150,8 @@ export function PublicProfile() {
 
         // Cache fresh data for offline use
         if (!profileResult.fromCache && adapters?.graphCacheStore) {
-          adapters.graphCacheStore.cacheEntry(decodedDid, profileResult.profile, [], aData).catch(() => {})
+          const existingVerifications = await adapters.graphCacheStore.getCachedVerifications(decodedDid).catch(() => [])
+          adapters.graphCacheStore.cacheEntry(decodedDid, profileResult.profile, existingVerifications, aData).catch(() => {})
         }
       } catch {
         if (tryLocalFallbackRef.current()) return
