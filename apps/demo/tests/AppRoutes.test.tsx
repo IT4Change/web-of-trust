@@ -321,4 +321,47 @@ describe('Trust 002 verification status source guard', () => {
 
     expect(hits).toEqual([])
   })
+
+  it('removes legacy verification APIs from AutomergeStorageAdapter while keeping attestation APIs', () => {
+    const file = 'apps/demo/src/adapters/AutomergeStorageAdapter.ts'
+    const actualPath = fs.existsSync(file) ? file : path.join('..', '..', file)
+    const text = fs.readFileSync(actualPath, 'utf8')
+    const hits: string[] = []
+
+    for (const needle of [
+      'saveVerification',
+      'getReceivedVerifications',
+      'getAllVerifications',
+      'getVerification',
+      'watchReceivedVerifications',
+      'watchAllVerifications',
+      'verificationFromDoc',
+      'VerificationDoc',
+    ]) {
+      if (text.includes(needle)) {
+        hits.push(`AutomergeStorageAdapter.ts still contains ${needle}`)
+      }
+    }
+
+    if (/\bimplements\s+StorageAdapter\b/.test(text) || /\bStorageAdapter\b/.test(text)) {
+      hits.push('AutomergeStorageAdapter.ts still references broad StorageAdapter')
+    }
+    if (/\bReactiveStorageAdapter\b/.test(text)) {
+      hits.push('AutomergeStorageAdapter.ts still references broad ReactiveStorageAdapter')
+    }
+
+    for (const needle of [
+      'saveAttestation',
+      'getReceivedAttestations',
+      'getAttestationMetadata',
+      'watchAllAttestations',
+      'watchReceivedAttestations',
+    ]) {
+      if (!text.includes(needle)) {
+        hits.push(`AutomergeStorageAdapter.ts lost ${needle}`)
+      }
+    }
+
+    expect(hits).toEqual([])
+  })
 })
