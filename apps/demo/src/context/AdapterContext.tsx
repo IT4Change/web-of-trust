@@ -17,10 +17,10 @@ import type {
   ReactiveStorageAdapter,
   CryptoAdapter,
   MessagingAdapter,
-  PublicVerificationsData,
   PublicAttestationsData,
 } from '@web_of_trust/core/ports'
 import type {
+  Attestation,
   MessagingState,
   IdentitySession,
   PublicProfile,
@@ -37,10 +37,15 @@ import { AutomergeGraphCacheStore } from '../adapters/AutomergeGraphCacheStore'
 import { LocalCacheStore } from '../adapters/LocalCacheStore'
 import { LocalOutboxStore } from '../adapters/LocalOutboxStore'
 import { appRuntimeConfig, createHttpDiscoveryAdapter, getOrCreateBrowserDeviceId } from '../runtime/appRuntime'
+import { useIdentity } from './IdentityContext'
 // Yjs and Automerge adapters are dynamically imported to keep WASM out of the default bundle
 
 const USE_YJS = import.meta.env.VITE_CRDT !== 'automerge'
-import { useIdentity } from './IdentityContext'
+const VERIFICATION_ATTESTATION_CLAIM = 'in-person verifiziert'
+
+function isVerificationAttestation(attestation: Attestation): boolean {
+  return attestation.claim === VERIFICATION_ATTESTATION_CLAIM && Boolean(attestation.vcJws)
+}
 
 interface AdapterContextValue {
   storage: StorageAdapter
@@ -300,56 +305,43 @@ export function AdapterProvider({ children, identity }: AdapterProviderProps) {
                 await storage.createIdentity(did, restoredProfile)
               }
 
-              // Restore verifications + attestations from server (parallel)
-              const [verifications, attestations] = await Promise.all([
-                httpDiscovery.resolveVerifications(did),
-                httpDiscovery.resolveAttestations(did),
-              ])
-              console.log('[restore] Verifications:', verifications.length, 'Attestations:', attestations.length)
+              const attestations = await httpDiscovery.resolveAttestations(did)
+              console.log('[restore] Attestations:', attestations.length)
 
-              // Save verifications and collect contact DIDs
-              const contactDids = new Set<string>()
-              for (const v of verifications) {
-                await storage.saveVerification(v)
-                const contactDid = v.from === did ? v.to : v.from
-                contactDids.add(contactDid)
-              }
+              const contactTimestamps = new Map<string, string>()
+              const recordVerificationPartner = (attestation: Attestation) => {
+                if (!isVerificationAttestation(attestation)) return
+                if (attestation.from !== did && attestation.to !== did) return
 
-              // Save attestations
-              for (const a of attestations) {
-                await storage.saveAttestation(a)
-                await storage.setAttestationAccepted(a.id, true)
-              }
-
-              // Load outgoing verifications + attestations from each contact (parallel)
-              await Promise.all(Array.from(contactDids).map(async (contactDid) => {
-                const [contactVerifications, contactAttestations] = await Promise.all([
-                  httpDiscovery.resolveVerifications(contactDid).catch(() => []),
-                  httpDiscovery.resolveAttestations(contactDid).catch(() => []),
-                ])
-                for (const v of contactVerifications) {
-                  if (v.from === did && v.to === contactDid) {
-                    await storage.saveVerification(v)
-                  }
+                const contactDid = attestation.from === did ? attestation.to : attestation.from
+                const current = contactTimestamps.get(contactDid)
+                if (!current || attestation.createdAt < current) {
+                  contactTimestamps.set(contactDid, attestation.createdAt)
                 }
-                for (const a of contactAttestations) {
-                  if (a.from === did && a.to === contactDid) {
-                    const existingAtt = await storage.getAttestation(a.id)
+              }
+
+              for (const attestation of attestations) {
+                await storage.saveAttestation(attestation)
+                await storage.setAttestationAccepted(attestation.id, true)
+                recordVerificationPartner(attestation)
+              }
+
+              await Promise.all(Array.from(contactTimestamps.keys()).map(async (contactDid) => {
+                const contactAttestations = await httpDiscovery.resolveAttestations(contactDid).catch(() => [])
+                for (const attestation of contactAttestations) {
+                  if (attestation.from === did && attestation.to === contactDid && isVerificationAttestation(attestation)) {
+                    const existingAtt = await storage.getAttestation(attestation.id)
                     if (!existingAtt) {
-                      await storage.saveAttestation(a)
+                      await storage.saveAttestation(attestation)
                     }
+                    recordVerificationPartner(attestation)
                   }
                 }
               }))
 
-              // Create contacts from verification partners
-              for (const contactDid of contactDids) {
+              for (const [contactDid, earliest] of contactTimestamps) {
                 const existingContact = await storage.getContact(contactDid)
                 if (!existingContact) {
-                  const earliest = verifications
-                    .filter(v => v.from === contactDid || v.to === contactDid)
-                    .map(v => v.timestamp)
-                    .sort()[0] || new Date().toISOString()
                   await storage.addContact({
                     did: contactDid,
                     publicKey: '',
@@ -378,16 +370,14 @@ export function AdapterProvider({ children, identity }: AdapterProviderProps) {
           try {
             await discovery.syncPending(did, identity, async () => {
               const localIdentity = await storage.getIdentity()
-              const verifications = await storage.getReceivedVerifications()
               const allAttestations = await storage.getReceivedAttestations()
-              const accepted = []
+              const accepted: Attestation[] = []
               for (const att of allAttestations) {
                 const meta = await storage.getAttestationMetadata(att.id)
                 if (meta?.accepted) accepted.push(att)
               }
               const result: {
                 profile?: PublicProfile
-                verifications?: PublicVerificationsData
                 attestations?: PublicAttestationsData
               } = {}
               if (localIdentity) {
@@ -398,9 +388,6 @@ export function AdapterProvider({ children, identity }: AdapterProviderProps) {
                   ...(localIdentity.profile.avatar ? { avatar: localIdentity.profile.avatar } : {}),
                   updatedAt: new Date().toISOString(),
                 }
-              }
-              if (verifications.length > 0) {
-                result.verifications = { did, verifications, updatedAt: new Date().toISOString() }
               }
               if (accepted.length > 0) {
                 result.attestations = { did, attestations: accepted, updatedAt: new Date().toISOString() }
