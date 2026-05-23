@@ -217,35 +217,6 @@ export function AdapterProvider({ children, identity }: AdapterProviderProps) {
           sendTimeoutMs: 15_000,
         })
 
-        // One-time migration: copy cachedGraph + publishState from PersonalDoc to LocalCacheStore
-        // (Automerge-only — Yjs docs don't have these legacy fields)
-        if (!USE_YJS) try {
-          const existingEntries = await localCacheStore.get('graph:entries')
-          if (!existingEntries) {
-            const { getPersonalDoc, changePersonalDoc } = await import('@web_of_trust/adapter-automerge')
-            const doc = getPersonalDoc() as any
-            if (doc.cachedGraph?.entries && Object.keys(doc.cachedGraph.entries).length > 0) {
-              await localCacheStore.set('graph:entries', JSON.parse(JSON.stringify(doc.cachedGraph.entries)))
-              await localCacheStore.set('graph:attestations', JSON.parse(JSON.stringify(doc.cachedGraph.attestations ?? {})))
-              console.debug('[migration] Copied cachedGraph from PersonalDoc to LocalCacheStore')
-            }
-            if (doc.publishState && Object.keys(doc.publishState).length > 0) {
-              await localCacheStore.set('publish-state', JSON.parse(JSON.stringify(doc.publishState)))
-              console.debug('[migration] Copied publishState from PersonalDoc to LocalCacheStore')
-            }
-            // Clean up PersonalDoc — remove migrated fields to shrink the doc
-            if (doc.cachedGraph || doc.publishState) {
-              changePersonalDoc((d: any) => {
-                delete d.cachedGraph
-                delete d.publishState
-              })
-              console.debug('[migration] Removed cachedGraph + publishState from PersonalDoc')
-            }
-          }
-        } catch (err) {
-          console.warn('[migration] LocalCacheStore migration failed (non-fatal):', err)
-        }
-
         lap('outbox-setup')
         const publishStateStore = new AutomergePublishStateStore(localCacheStore)
         const graphCacheStore = new AutomergeGraphCacheStore(localCacheStore)
