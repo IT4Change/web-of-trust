@@ -41,20 +41,6 @@ export function useGraphCache() {
       if (!cancelled) {
         const afterSummary = await graphCacheStore.getEntries(contactDids)
         if (!cancelled) setEntries(afterSummary)
-
-        // Full refresh for entries missing verifierDids (needed for inter-contact edges)
-        // Use service.refresh() directly to bypass the stale-check in refreshContacts()
-        const needsFull = contactDids.filter(did => {
-          const entry = afterSummary.get(did)
-          return !entry?.verifierDids?.length
-        })
-        if (needsFull.length > 0 && !cancelled) {
-          await Promise.allSettled(needsFull.map(did => service.refresh(did)))
-          if (!cancelled) {
-            const afterFull = await graphCacheStore.getEntries(contactDids)
-            if (!cancelled) setEntries(afterFull)
-          }
-        }
       }
     }
 
