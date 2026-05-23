@@ -1,4 +1,6 @@
 import { describe, it, expect } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import * as Automerge from '@automerge/automerge'
 import { Repo } from '@automerge/automerge-repo'
 import { sanitizeLegacyPersonalDoc, sanitizePersonalDocHandle } from '../src/PersonalDocManager'
@@ -11,6 +13,20 @@ import type { PersonalDoc } from '../src/PersonalDocManager'
  * re-introduce that schema on load/migration.
  */
 describe('sanitizeLegacyPersonalDoc', () => {
+  it('keeps legacy publish-state types out of the Automerge adapter source surface', () => {
+    const sourceFiles = [
+      resolve(process.cwd(), 'src/PersonalDocManager.ts'),
+      resolve(process.cwd(), 'src/index.ts'),
+    ]
+
+    for (const file of sourceFiles) {
+      const source = readFileSync(file, 'utf8')
+
+      expect(source).not.toContain('PublishStateDoc')
+      expect(source).not.toContain('verificationsDirty')
+    }
+  })
+
   it('strips top-level publishState from legacy data', () => {
     const legacy = {
       profile: null,
