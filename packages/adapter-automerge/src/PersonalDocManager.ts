@@ -42,7 +42,6 @@ export interface CachedGraphEntryDoc {
   avatar: string | null
   verificationCount: number
   attestationCount: number
-  verifierDidsJson: string | null  // JSON string[]
   fetchedAt: string
 }
 

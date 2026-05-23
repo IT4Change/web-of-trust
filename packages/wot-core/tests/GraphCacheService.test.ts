@@ -632,6 +632,7 @@ describe('Trust 002 graph cache port source guard', () => {
       service: 'packages/wot-core/src/services/GraphCacheService.ts',
       inMemory: 'packages/wot-core/src/adapters/discovery/InMemoryGraphCacheStore.ts',
       automerge: 'apps/demo/src/adapters/AutomergeGraphCacheStore.ts',
+      personalDoc: 'packages/adapter-automerge/src/PersonalDocManager.ts',
     } as const
 
     const read = (file: string): string => {
@@ -652,6 +653,9 @@ describe('Trust 002 graph cache port source guard', () => {
       const text = read(file)
       if (/\bverifierDids\b/.test(text)) {
         hits.push(`${file} still references verifierDids`)
+      }
+      if (/\bverifierDidsJson\b/.test(text)) {
+        hits.push(`${file} still references verifierDidsJson`)
       }
       if (/\bfindMutualContacts\b/.test(text)) {
         hits.push(`${file} still references findMutualContacts`)
