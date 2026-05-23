@@ -28,38 +28,6 @@ export interface OutboxEntryDoc {
   retryCount: number
 }
 
-export interface CachedGraphEntryDoc {
-  did: string
-  name: string | null
-  bio: string | null
-  avatar: string | null
-  verificationCount: number
-  attestationCount: number
-  fetchedAt: string
-}
-
-export interface CachedGraphVerificationDoc {
-  subjectDid: string
-  verificationId: string
-  fromDid: string
-  toDid: string
-  timestamp: string
-  proofJson: string
-  locationJson: string | null
-}
-
-export interface CachedGraphAttestationDoc {
-  subjectDid: string
-  attestationId: string
-  fromDid: string
-  toDid: string
-  claim: string
-  tagsJson: string | null
-  context: string | null
-  attestationCreatedAt: string
-  vcJws: string
-}
-
 export interface SpaceMetadataDoc {
   info: {
     id: string
@@ -292,13 +260,10 @@ const COMPACT_STORE_DB = 'wot-compact-store'
 const SYNC_STATE_DB = 'wot-personal-sync-states'
 
 /**
- * Strip the legacy top-level `publishState` field from a loaded PersonalDoc
- * snapshot. Other legacy fields are left intact so demo-level migrations can
- * still copy them into LocalCacheStore before their own cleanup slices remove
- * them.
+ * Strip legacy top-level cache fields from a loaded PersonalDoc snapshot.
  */
 export function sanitizeLegacyPersonalDoc(raw: Partial<PersonalDoc> & Record<string, unknown>): Partial<PersonalDoc> & Record<string, unknown> {
-  const { publishState: _publishState, ...rest } = raw
+  const { publishState: _publishState, cachedGraph: _cachedGraph, ...rest } = raw
   return {
     ...rest,
     profile: raw.profile ?? null,
@@ -324,20 +289,22 @@ const PERSONAL_DOC_FIELD_NAMES = [
 ] as const
 
 /**
- * Normalize loaded Automerge PersonalDoc handles by removing only the legacy
- * `publishState` field and filling current schema defaults. Returns true when
- * the snapshot changed so callers can persist the cleaned document.
+ * Normalize loaded Automerge PersonalDoc handles by removing legacy cache
+ * fields and filling current schema defaults. Returns true when the snapshot
+ * changed so callers can persist the cleaned document.
  */
 export function sanitizePersonalDocHandle(handle: DocHandle<PersonalDoc>): boolean {
   const doc = handle.doc() as Record<string, unknown> | undefined
   if (!doc) return false
   const hasPublishState = 'publishState' in doc
+  const hasCachedGraph = 'cachedGraph' in doc
   const hasMissingFields = PERSONAL_DOC_FIELD_NAMES.some(field => !(field in doc))
-  if (!hasPublishState && !hasMissingFields) return false
+  if (!hasPublishState && !hasCachedGraph && !hasMissingFields) return false
   const sanitized = sanitizeLegacyPersonalDoc(doc)
   handle.change(d => {
     const target = d as unknown as Record<string, unknown>
     delete target.publishState
+    delete target.cachedGraph
     Object.assign(target, sanitized)
   })
   return true

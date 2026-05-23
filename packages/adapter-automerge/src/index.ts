@@ -23,9 +23,6 @@ export type {
   AttestationDoc,
   AttestationMetadataDoc,
   OutboxEntryDoc,
-  CachedGraphEntryDoc,
-  CachedGraphVerificationDoc,
-  CachedGraphAttestationDoc,
   SpaceMetadataDoc,
   GroupKeyDoc,
 } from './PersonalDocManager'
