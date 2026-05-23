@@ -322,6 +322,50 @@ describe('Trust 002 verification status source guard', () => {
     expect(hits).toEqual([])
   })
 
+  it('drops legacy Verification detail storage and migration from the demo graph cache while keeping attestations', () => {
+    const graphFile = 'apps/demo/src/adapters/AutomergeGraphCacheStore.ts'
+    const graphPath = fs.existsSync(graphFile) ? graphFile : path.join('..', '..', graphFile)
+    const graphText = fs.readFileSync(graphPath, 'utf8')
+
+    const contextFile = 'apps/demo/src/context/AdapterContext.tsx'
+    const contextPath = fs.existsSync(contextFile) ? contextFile : path.join('..', '..', contextFile)
+    const contextText = fs.readFileSync(contextPath, 'utf8')
+
+    const hits: string[] = []
+
+    for (const needle of [
+      'VERIFICATIONS_KEY',
+      'graph:verifications',
+      'VerificationDoc',
+      'private verifications',
+      'this.verifications',
+      'proofJson',
+      'locationJson',
+      'verificationId',
+    ]) {
+      if (graphText.includes(needle)) {
+        hits.push(`AutomergeGraphCacheStore.ts still contains ${needle}`)
+      }
+    }
+
+    if (contextText.includes('graph:verifications') || contextText.includes('cachedGraph.verifications')) {
+      hits.push('AdapterContext.tsx still migrates cachedGraph verifications')
+    }
+
+    if (!graphText.includes('getCachedAttestations')) {
+      hits.push('AutomergeGraphCacheStore.ts lost cached attestations')
+    }
+    if (!graphText.includes('ATTESTATIONS_KEY')) {
+      hits.push('AutomergeGraphCacheStore.ts lost attestation persistence')
+    }
+
+    if (!/getCachedVerifications\([^)]*\)\s*:\s*Promise<Verification\[\]>\s*\{\s*return \[\]/s.test(graphText)) {
+      hits.push('getCachedVerifications should be a temporary empty compatibility method')
+    }
+
+    expect(hits).toEqual([])
+  })
+
   it('removes legacy verification APIs from AutomergeStorageAdapter while keeping attestation APIs', () => {
     const file = 'apps/demo/src/adapters/AutomergeStorageAdapter.ts'
     const actualPath = fs.existsSync(file) ? file : path.join('..', '..', file)
