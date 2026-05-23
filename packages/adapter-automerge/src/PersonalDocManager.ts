@@ -292,13 +292,15 @@ const COMPACT_STORE_DB = 'wot-compact-store'
 const SYNC_STATE_DB = 'wot-personal-sync-states'
 
 /**
- * Strip legacy/unknown top-level fields (e.g. `publishState`) from a loaded
- * PersonalDoc snapshot so they are not re-introduced when assigned into a
- * current PersonalDoc. Demo publish-state persistence is owned by
- * LocalCacheStore — PersonalDoc must not carry that schema.
+ * Strip the legacy top-level `publishState` field from a loaded PersonalDoc
+ * snapshot. Other legacy fields are left intact so demo-level migrations can
+ * still copy them into LocalCacheStore before their own cleanup slices remove
+ * them.
  */
-export function sanitizeLegacyPersonalDoc(raw: Partial<PersonalDoc> & Record<string, unknown>): PersonalDoc {
+export function sanitizeLegacyPersonalDoc(raw: Partial<PersonalDoc> & Record<string, unknown>): Partial<PersonalDoc> & Record<string, unknown> {
+  const { publishState: _publishState, ...rest } = raw
   return {
+    ...rest,
     profile: raw.profile ?? null,
     contacts: raw.contacts ?? {},
     verifications: raw.verifications ?? {},
@@ -320,24 +322,22 @@ const PERSONAL_DOC_FIELD_NAMES = [
   'spaces',
   'groupKeys',
 ] as const
-const PERSONAL_DOC_FIELD_SET = new Set<string>(PERSONAL_DOC_FIELD_NAMES)
 
 /**
- * Normalize loaded Automerge PersonalDoc handles to the current schema. Returns
- * true when the snapshot changed so callers can persist the cleaned document.
+ * Normalize loaded Automerge PersonalDoc handles by removing only the legacy
+ * `publishState` field and filling current schema defaults. Returns true when
+ * the snapshot changed so callers can persist the cleaned document.
  */
 export function sanitizePersonalDocHandle(handle: DocHandle<PersonalDoc>): boolean {
   const doc = handle.doc() as Record<string, unknown> | undefined
   if (!doc) return false
-  const hasUnexpectedFields = Object.keys(doc).some(field => !PERSONAL_DOC_FIELD_SET.has(field))
+  const hasPublishState = 'publishState' in doc
   const hasMissingFields = PERSONAL_DOC_FIELD_NAMES.some(field => !(field in doc))
-  if (!hasUnexpectedFields && !hasMissingFields) return false
+  if (!hasPublishState && !hasMissingFields) return false
   const sanitized = sanitizeLegacyPersonalDoc(doc)
   handle.change(d => {
     const target = d as unknown as Record<string, unknown>
-    for (const field of Object.keys(target)) {
-      if (!PERSONAL_DOC_FIELD_SET.has(field)) delete target[field]
-    }
+    delete target.publishState
     Object.assign(target, sanitized)
   })
   return true
