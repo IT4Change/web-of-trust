@@ -1,18 +1,7 @@
 import type { PublicProfile } from '../types/identity'
-import type { Verification } from '../types/verification'
 import type { Attestation } from '../types/attestation'
 import type { IdentitySession } from '../types/identity-session'
 import type { DidDocument } from '../protocol'
-
-/**
- * Published verifications data — wraps an array of verifications
- * about a DID, signed by the DID owner as JWS.
- */
-export interface PublicVerificationsData {
-  did: string
-  verifications: Verification[]
-  updatedAt: string
-}
 
 /**
  * Published attestations data — wraps an array of accepted attestations
@@ -70,12 +59,10 @@ export interface ProfileResolveResult {
 export interface DiscoveryAdapter {
   // Publish own public data (signed as JWS)
   publishProfile(data: PublicProfile, identity: IdentitySession): Promise<void>
-  publishVerifications(data: PublicVerificationsData, identity: IdentitySession): Promise<void>
   publishAttestations(data: PublicAttestationsData, identity: IdentitySession): Promise<void>
 
   // Resolve public data for a DID (verifies JWS signature)
   resolveProfile(did: string): Promise<ProfileResolveResult>
-  resolveVerifications(did: string): Promise<Verification[]>
   resolveAttestations(did: string): Promise<Attestation[]>
 
   // Optional: batch summary for multiple DIDs (unsigned, server-derived counts)

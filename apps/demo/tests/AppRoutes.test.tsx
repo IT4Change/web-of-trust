@@ -430,3 +430,54 @@ describe('Trust 002 verification status source guard', () => {
     expect(hits).toEqual([])
   })
 })
+
+describe('Discovery 094 demo publish-state source guard', () => {
+  // The broad DiscoveryAdapter publication of legacy `Verification[]` goes away.
+  // The demo publish-state store and sync-status hook must drop `verificationsDirty`
+  // and `dirtyState.verifications`, but must still track profile and attestations.
+  it('removes verificationsDirty from AutomergePublishStateStore and useSyncStatus while keeping profile/attestations', () => {
+    const files = {
+      store: 'apps/demo/src/adapters/AutomergePublishStateStore.ts',
+      hook: 'apps/demo/src/hooks/useSyncStatus.ts',
+    } as const
+
+    const read = (file: string): string => {
+      const candidates = [file, path.join('..', '..', file), path.join('..', file)]
+      for (const candidate of candidates) {
+        if (fs.existsSync(candidate)) return fs.readFileSync(candidate, 'utf8')
+      }
+      throw new Error(`source guard cannot locate ${file}`)
+    }
+
+    const storeText = read(files.store)
+    const hookText = read(files.hook)
+    const hits: string[] = []
+
+    for (const text of [storeText, hookText]) {
+      if (text.includes('verificationsDirty')) {
+        hits.push(`source still contains verificationsDirty`)
+      }
+    }
+
+    if (/\bdirtyState\.verifications\b/.test(hookText) || /\bdirtyState\.verifications\b/.test(storeText)) {
+      hits.push('useSyncStatus / publish-state store still references dirtyState.verifications')
+    }
+    if (/verifications\s*:\s*boolean/.test(storeText)) {
+      hits.push('DirtyState in AutomergePublishStateStore still has a verifications boolean')
+    }
+    if (/case\s+'verifications'/.test(storeText) || /===\s*'verifications'/.test(storeText) || /field\s*===\s*'verifications'/.test(storeText)) {
+      hits.push('AutomergePublishStateStore still branches on the verifications publish field')
+    }
+
+    for (const needle of ['profileDirty', 'attestationsDirty', 'profile:', 'attestations:']) {
+      if (!storeText.includes(needle)) {
+        hits.push(`AutomergePublishStateStore lost required token ${needle}`)
+      }
+    }
+    if (!/dirtyState\.profile\b/.test(hookText) || !/dirtyState\.attestations\b/.test(hookText)) {
+      hits.push('useSyncStatus must still consume dirtyState.profile and dirtyState.attestations')
+    }
+
+    expect(hits).toEqual([])
+  })
+})

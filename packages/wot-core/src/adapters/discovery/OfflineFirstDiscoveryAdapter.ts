@@ -1,11 +1,9 @@
 import type { PublicProfile } from '../../types/identity'
-import type { Verification } from '../../types/verification'
 import type { Attestation } from '../../types/attestation'
 import type { IdentitySession } from '../../types/identity-session'
 import type {
   DiscoveryAdapter,
   ProfileResolveResult,
-  PublicVerificationsData,
   PublicAttestationsData,
   ProfileSummary,
 } from '../../ports/DiscoveryAdapter'
@@ -17,7 +15,7 @@ import type { GraphCacheStore } from '../../ports/GraphCacheStore'
  *
  * Decorator pattern: wraps an inner DiscoveryAdapter and adds:
  * - Dirty-flag tracking for publish operations (via PublishStateStore)
- * - Profile/verification/attestation caching for resolve operations (via GraphCacheStore)
+ * - Profile/attestation caching for resolve operations (via GraphCacheStore)
  * - syncPending() method for retry on reconnect
  *
  * The wrapper is optional — adapters that are natively offline-capable
@@ -72,17 +70,6 @@ export class OfflineFirstDiscoveryAdapter implements DiscoveryAdapter {
     }
   }
 
-  async publishVerifications(data: PublicVerificationsData, identity: IdentitySession): Promise<void> {
-    await this.publishState.markDirty(data.did, 'verifications')
-    try {
-      await this.inner.publishVerifications(data, identity)
-      await this.publishState.clearDirty(data.did, 'verifications')
-      this.clearError()
-    } catch (e) {
-      this.setError(e)
-    }
-  }
-
   async publishAttestations(data: PublicAttestationsData, identity: IdentitySession): Promise<void> {
     await this.publishState.markDirty(data.did, 'attestations')
     try {
@@ -117,14 +104,6 @@ export class OfflineFirstDiscoveryAdapter implements DiscoveryAdapter {
     }
   }
 
-  async resolveVerifications(did: string): Promise<Verification[]> {
-    try {
-      return await this.inner.resolveVerifications(did)
-    } catch {
-      return []
-    }
-  }
-
   async resolveAttestations(did: string): Promise<Attestation[]> {
     try {
       return await this.inner.resolveAttestations(did)
@@ -156,7 +135,6 @@ export class OfflineFirstDiscoveryAdapter implements DiscoveryAdapter {
     identity: IdentitySession,
     getPublishData: () => Promise<{
       profile?: PublicProfile
-      verifications?: PublicVerificationsData
       attestations?: PublicAttestationsData
     }>,
   ): Promise<void> {
@@ -169,16 +147,6 @@ export class OfflineFirstDiscoveryAdapter implements DiscoveryAdapter {
       try {
         await this.inner.publishProfile(data.profile, identity)
         await this.publishState.clearDirty(did, 'profile')
-        this.clearError()
-      } catch (e) {
-        this.setError(e)
-      }
-    }
-
-    if (dirty.has('verifications') && data.verifications) {
-      try {
-        await this.inner.publishVerifications(data.verifications, identity)
-        await this.publishState.clearDirty(did, 'verifications')
         this.clearError()
       } catch (e) {
         this.setError(e)

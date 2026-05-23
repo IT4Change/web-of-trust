@@ -39,10 +39,8 @@ function makeAttestation(from: string, to: string, claim: string): Attestation {
 function createMockDiscovery(overrides: Partial<DiscoveryAdapter> = {}): DiscoveryAdapter {
   return {
     publishProfile: vi.fn().mockResolvedValue(undefined),
-    publishVerifications: vi.fn().mockResolvedValue(undefined),
     publishAttestations: vi.fn().mockResolvedValue(undefined),
     resolveProfile: vi.fn().mockResolvedValue({ profile: null, fromCache: false }),
-    resolveVerifications: vi.fn().mockResolvedValue([]),
     resolveAttestations: vi.fn().mockResolvedValue([]),
     ...overrides,
   }
@@ -74,18 +72,6 @@ describe('GraphCacheService', () => {
       expect(entry).not.toBeNull()
       expect(entry!.name).toBe('Alice')
       expect(entry!.attestationCount).toBe(1)
-    })
-
-    it('should not call resolveVerifications during refresh', async () => {
-      discovery = createMockDiscovery({
-        resolveProfile: vi.fn().mockResolvedValue({ profile: ALICE_PROFILE, fromCache: false }),
-        resolveAttestations: vi.fn().mockResolvedValue([]),
-      })
-      service = new GraphCacheService(discovery, store)
-
-      await service.refresh(ALICE_DID)
-
-      expect(discovery.resolveVerifications).not.toHaveBeenCalled()
     })
 
     it('should return cached data on network failure', async () => {
@@ -619,8 +605,8 @@ describe('Trust 002 graph cache port source guard', () => {
       hits.push('OfflineFirstDiscoveryAdapter still falls back to graph-cache legacy verifications')
     }
 
-    if (!/resolveVerifications\([^)]*\)\s*:\s*Promise<Verification\[\]>\s*\{[\s\S]*?return \[\]/.test(text.offline)) {
-      hits.push('OfflineFirstDiscoveryAdapter should keep resolveVerifications but fall back to []')
+    if (/resolveVerifications/.test(text.offline)) {
+      hits.push('OfflineFirstDiscoveryAdapter should no longer expose resolveVerifications')
     }
 
     expect(hits).toEqual([])
