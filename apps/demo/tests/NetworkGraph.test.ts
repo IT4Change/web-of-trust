@@ -199,6 +199,25 @@ describe('Network graph contact-to-contact edges from Trust 002 attestations', (
     expect(findEdge(result.current.edges, ALICE_DID, BOB_DID)).toBeUndefined()
   })
 
+  it('preserves attestation from→to direction on non-mutual edges even when from sorts after to', () => {
+    contactsForTest = [
+      { did: ALICE_DID, name: 'Alice' },
+      { did: BOB_DID, name: 'Bob' },
+    ]
+    // BOB_DID > ALICE_DID lexicographically; from=BOB, to=ALICE must yield source=BOB, target=ALICE
+    attestationsForTest = [makeTrustVerificationAttestation(BOB_DID, ALICE_DID)]
+
+    const { result } = renderHook(() => useNetworkGraph())
+    const edge = result.current.edges.find(
+      (e) => e.source !== MY_DID && e.target !== MY_DID,
+    )
+
+    expect(edge).toBeDefined()
+    expect(edge?.source).toBe(BOB_DID)
+    expect(edge?.target).toBe(ALICE_DID)
+    expect(edge?.type).toBe('outgoing')
+  })
+
   it('builds edges across more than two contacts independently', () => {
     contactsForTest = [
       { did: ALICE_DID, name: 'Alice' },

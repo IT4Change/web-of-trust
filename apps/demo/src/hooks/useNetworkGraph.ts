@@ -142,7 +142,7 @@ export function useNetworkGraph() {
     // Each verification-attestation (from → to) is a directional edge; opposite-direction
     // attestations between the same two contacts collapse into one `mutual` edge.
     const contactDids = new Set(allContacts.map(c => c.did))
-    const pairDirections = new Map<string, { forward: boolean; reverse: boolean }>()
+    const pairs = new Map<string, { from: string; to: string; mutual: boolean }>()
     const pairKey = (a: string, b: string) => (a < b ? `${a}|${b}` : `${b}|${a}`)
 
     for (const attestation of attestations) {
@@ -153,19 +153,19 @@ export function useNetworkGraph() {
       if (!contactDids.has(from) || !contactDids.has(to)) continue
 
       const key = pairKey(from, to)
-      const entry = pairDirections.get(key) ?? { forward: false, reverse: false }
-      if (from < to) entry.forward = true
-      else entry.reverse = true
-      pairDirections.set(key, entry)
+      const existing = pairs.get(key)
+      if (!existing) {
+        pairs.set(key, { from, to, mutual: false })
+      } else if (existing.from !== from) {
+        existing.mutual = true
+      }
     }
 
-    for (const [key, dirs] of pairDirections) {
-      const [a, b] = key.split('|') as [string, string]
-      const isMutual = dirs.forward && dirs.reverse
+    for (const { from, to, mutual } of pairs.values()) {
       edges.push({
-        source: a,
-        target: b,
-        type: isMutual ? 'mutual' : 'outgoing',
+        source: from,
+        target: to,
+        type: mutual ? 'mutual' : 'outgoing',
       })
     }
 
