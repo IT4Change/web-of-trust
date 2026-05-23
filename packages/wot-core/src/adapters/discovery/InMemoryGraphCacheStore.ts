@@ -18,12 +18,16 @@ export class InMemoryGraphCacheStore implements GraphCacheStore {
     profile: PublicProfile | null,
     attestations: Attestation[],
   ): Promise<void> {
+    const existingSummary = this.summaryCounts.get(did)
     if (profile) {
       this.profiles.set(did, profile)
     }
     this.attestationsBySubject.set(did, attestations)
     this.fetchedAt.set(did, new Date().toISOString())
-    this.summaryCounts.delete(did) // Full refresh is authoritative
+    this.summaryCounts.set(did, {
+      verificationCount: existingSummary?.verificationCount ?? 0,
+      attestationCount: attestations.length,
+    })
   }
 
   async getEntry(did: string): Promise<CachedGraphEntry | null> {

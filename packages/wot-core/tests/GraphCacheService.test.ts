@@ -124,16 +124,30 @@ describe('GraphCacheService', () => {
     })
 
     it('should fetch profile and attestations in parallel', async () => {
+      let resolveProfile!: (value: { profile: typeof ALICE_PROFILE; fromCache: false }) => void
+      let resolveAttestations!: (value: Attestation[]) => void
+      const profilePromise = new Promise<{ profile: typeof ALICE_PROFILE; fromCache: false }>((resolve) => {
+        resolveProfile = resolve
+      })
+      const attestationsPromise = new Promise<Attestation[]>((resolve) => {
+        resolveAttestations = resolve
+      })
+
       discovery = createMockDiscovery({
-        resolveProfile: vi.fn().mockResolvedValue({ profile: ALICE_PROFILE, fromCache: false }),
-        resolveAttestations: vi.fn().mockResolvedValue([]),
+        resolveProfile: vi.fn().mockReturnValue(profilePromise),
+        resolveAttestations: vi.fn().mockReturnValue(attestationsPromise),
       })
       service = new GraphCacheService(discovery, store)
 
-      await service.refresh(ALICE_DID)
+      const refresh = service.refresh(ALICE_DID)
+      await Promise.resolve()
 
       expect(discovery.resolveProfile).toHaveBeenCalledWith(ALICE_DID)
       expect(discovery.resolveAttestations).toHaveBeenCalledWith(ALICE_DID)
+
+      resolveProfile({ profile: ALICE_PROFILE, fromCache: false })
+      resolveAttestations([])
+      await refresh
     })
   })
 
@@ -539,14 +553,14 @@ describe('InMemoryGraphCacheStore', () => {
       expect(entry!.verificationCount).toBe(0)
     })
 
-    it('should be cleared by cacheEntry (full refresh overwrites summary)', async () => {
+    it('should preserve verification summary count when cacheEntry refreshes details', async () => {
       await store.updateSummary(ALICE_DID, 'Alice', 10, 5)
 
       const attestations = [makeAttestation(BOB_DID, ALICE_DID, 'Zuverlässig')]
       await store.cacheEntry(ALICE_DID, ALICE_PROFILE, attestations)
 
       const entry = await store.getEntry(ALICE_DID)
-      expect(entry!.verificationCount).toBe(0)
+      expect(entry!.verificationCount).toBe(10)
       expect(entry!.attestationCount).toBe(1)
     })
   })

@@ -246,7 +246,8 @@ export function useProfileSync() {
     if (!profile?.name) return
 
     // Cache profile in GraphCacheStore (enables offline Space invites)
-    graphCacheStore.cacheEntry(contactDid, profile, []).catch(() => {})
+    const cachedAttestations = await graphCacheStore.getCachedAttestations(contactDid).catch(() => [])
+    graphCacheStore.cacheEntry(contactDid, profile, cachedAttestations).catch(() => {})
 
     const contact = (await storage.getContacts()).find(c => c.did === contactDid)
     if (!contact) return
