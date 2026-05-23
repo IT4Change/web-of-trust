@@ -1,11 +1,9 @@
 import type { PublicProfile } from '../../types/identity'
-import type { Verification } from '../../types/verification'
 import type { Attestation } from '../../types/attestation'
 import type { IdentitySession } from '../../types/identity-session'
 import type {
   DiscoveryAdapter,
   ProfileResolveResult,
-  PublicVerificationsData,
   PublicAttestationsData,
   ProfileSummary,
 } from '../../ports/DiscoveryAdapter'
@@ -46,23 +44,6 @@ export class HttpDiscoveryAdapter implements DiscoveryAdapter {
     }
   }
 
-  async publishVerifications(data: PublicVerificationsData, identity: IdentitySession): Promise<void> {
-    const trace = getTraceLog()
-    const start = performance.now()
-    try {
-      const jws = await identity.signJws(data)
-      const res = await this.fetchWithTimeout(
-        `${this.baseUrl}/p/${encodeURIComponent(data.did)}/v`,
-        { method: 'PUT', body: jws, headers: { 'Content-Type': 'text/plain' } },
-      )
-      if (!res.ok) throw new Error(`Verifications upload failed: ${res.status}`)
-      trace.log({ store: 'profiles', operation: 'write', label: `publishVerifications ${data.did.slice(0, 24)}…`, durationMs: Math.round(performance.now() - start), success: true, meta: { did: data.did, count: data.verifications?.length ?? 0 } })
-    } catch (err) {
-      trace.log({ store: 'profiles', operation: 'write', label: `publishVerifications ${data.did.slice(0, 24)}…`, durationMs: Math.round(performance.now() - start), success: false, error: err instanceof Error ? err.message : String(err), meta: { did: data.did } })
-      throw err
-    }
-  }
-
   async publishAttestations(data: PublicAttestationsData, identity: IdentitySession): Promise<void> {
     const trace = getTraceLog()
     const start = performance.now()
@@ -97,29 +78,6 @@ export class HttpDiscoveryAdapter implements DiscoveryAdapter {
       return { profile, didDocument: result.didDocument ?? null, version: result.version, fromCache: false }
     } catch (err) {
       trace.log({ store: 'profiles', operation: 'read', label: `resolveProfile ${did.slice(0, 24)}…`, durationMs: Math.round(performance.now() - start), success: false, error: err instanceof Error ? err.message : String(err), meta: { did } })
-      throw err
-    }
-  }
-
-  async resolveVerifications(did: string): Promise<Verification[]> {
-    const trace = getTraceLog()
-    const start = performance.now()
-    try {
-      const res = await this.fetchWithTimeout(`${this.baseUrl}/p/${encodeURIComponent(did)}/v`)
-      if (res.status === 404) {
-        trace.log({ store: 'profiles', operation: 'read', label: `resolveVerifications ${did.slice(0, 24)}… (not found)`, durationMs: Math.round(performance.now() - start), success: true, meta: { did, count: 0 } })
-        return []
-      }
-      if (!res.ok) throw new Error(`Verifications fetch failed: ${res.status}`)
-      const jws = await res.text()
-      const result = await ProfileService.verifySignedPayload(jws)
-      if (!result.valid || !result.payload) return []
-      const data = result.payload as unknown as PublicVerificationsData
-      const verifications = data.verifications ?? []
-      trace.log({ store: 'profiles', operation: 'read', label: `resolveVerifications ${did.slice(0, 24)}…`, durationMs: Math.round(performance.now() - start), success: true, meta: { did, count: verifications.length } })
-      return verifications
-    } catch (err) {
-      trace.log({ store: 'profiles', operation: 'read', label: `resolveVerifications ${did.slice(0, 24)}…`, durationMs: Math.round(performance.now() - start), success: false, error: err instanceof Error ? err.message : String(err), meta: { did } })
       throw err
     }
   }

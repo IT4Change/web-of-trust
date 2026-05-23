@@ -1,7 +1,7 @@
 /**
  * Field types for discovery publish operations.
  */
-export type PublishStateField = 'profile' | 'verifications' | 'attestations'
+export type PublishStateField = 'profile' | 'attestations'
 
 /**
  * Persistent store for publish state tracking.

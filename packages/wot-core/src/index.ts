@@ -62,7 +62,6 @@ export type { MessagingAdapter } from './ports/MessagingAdapter'
 export type {
   DiscoveryAdapter,
   ProfileResolveResult,
-  PublicVerificationsData,
   PublicAttestationsData,
   ProfileSummary,
 } from './ports/DiscoveryAdapter'
