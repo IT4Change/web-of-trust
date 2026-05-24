@@ -40,12 +40,42 @@ describe('sanitizeLegacyPersonalDoc', () => {
     }
   })
 
-  it('strips top-level publishState and cachedGraph from legacy data', () => {
+  it('keeps legacy verification PersonalDoc schema out of the source surface', () => {
+    const sourceFiles = [
+      resolve(process.cwd(), 'src/PersonalDocManager.ts'),
+      resolve(process.cwd(), 'src/index.ts'),
+      resolve(process.cwd(), '../../apps/demo/src/personalDocManager.ts'),
+    ]
+
+    const forbiddenNeedles = [
+      'VerificationDoc',
+      'verifications:',
+    ]
+
+    for (const file of sourceFiles) {
+      const source = readFileSync(file, 'utf8')
+
+      for (const needle of forbiddenNeedles) {
+        expect(source).not.toContain(needle)
+      }
+    }
+  })
+
+  it('strips top-level publishState, cachedGraph, and verifications from legacy data', () => {
     const cachedGraph = { entries: { 'did:key:bob': { name: 'Bob' } } }
     const legacy = {
       profile: null,
       contacts: {},
-      verifications: {},
+      verifications: {
+        v1: {
+          id: 'v1',
+          fromDid: 'did:key:alice',
+          toDid: 'did:key:bob',
+          timestamp: '2026-01-01T00:00:00Z',
+          proofJson: '{}',
+          locationJson: null,
+        },
+      },
       attestations: {},
       attestationMetadata: {},
       outbox: {},
@@ -65,10 +95,12 @@ describe('sanitizeLegacyPersonalDoc', () => {
     expect((sanitized as Record<string, unknown>).publishState).toBeUndefined()
     expect('cachedGraph' in sanitized).toBe(false)
     expect((sanitized as Record<string, unknown>).cachedGraph).toBeUndefined()
+    expect('verifications' in sanitized).toBe(false)
+    expect((sanitized as Record<string, unknown>).verifications).toBeUndefined()
   })
 
   it('preserves current PersonalDoc fields', () => {
-    const input: PersonalDoc & { publishState?: unknown } = {
+    const input: Omit<PersonalDoc, 'verifications'> & { publishState?: unknown; verifications?: unknown } = {
       profile: {
         did: 'did:key:alice',
         name: 'Alice',
@@ -92,16 +124,6 @@ describe('sanitizeLegacyPersonalDoc', () => {
           updatedAt: '2026-01-01T00:00:00Z',
         },
       },
-      verifications: {
-        v1: {
-          id: 'v1',
-          fromDid: 'did:key:alice',
-          toDid: 'did:key:bob',
-          timestamp: '2026-01-01T00:00:00Z',
-          proofJson: '{}',
-          locationJson: null,
-        },
-      },
       attestations: {},
       attestationMetadata: {},
       outbox: {},
@@ -114,13 +136,13 @@ describe('sanitizeLegacyPersonalDoc', () => {
 
     expect(sanitized.profile?.name).toBe('Alice')
     expect(sanitized.contacts['did:key:bob']?.name).toBe('Bob')
-    expect(sanitized.verifications.v1?.id).toBe('v1')
     expect(sanitized.attestations).toEqual({})
     expect(sanitized.attestationMetadata).toEqual({})
     expect(sanitized.outbox).toEqual({})
     expect(sanitized.spaces).toEqual({})
     expect(sanitized.groupKeys).toEqual({})
     expect('publishState' in sanitized).toBe(false)
+    expect('verifications' in sanitized).toBe(false)
   })
 
   it('returns a doc safe to Object.assign into a current PersonalDoc', () => {
@@ -138,27 +160,36 @@ describe('sanitizeLegacyPersonalDoc', () => {
 
     const sanitized = sanitizeLegacyPersonalDoc(legacy)
 
-    const target: PersonalDoc = {
+    const target = {
       profile: null,
       contacts: {},
-      verifications: {},
       attestations: {},
       attestationMetadata: {},
       outbox: {},
       spaces: {},
       groupKeys: {},
-    }
+    } as PersonalDoc
     Object.assign(target, sanitized)
 
     expect('publishState' in target).toBe(false)
+    expect('verifications' in target).toBe(false)
   })
 
-  it('sanitizes a saved Automerge snapshot that has top-level publishState and cachedGraph', () => {
+  it('sanitizes a saved Automerge snapshot that has top-level publishState, cachedGraph, and verifications', () => {
     const cachedGraph = { entries: { 'did:key:bob': { name: 'Bob' } } }
     const legacyDoc = Automerge.from<Record<string, unknown>>({
       profile: null,
       contacts: {},
-      verifications: {},
+      verifications: {
+        v1: {
+          id: 'v1',
+          fromDid: 'did:key:alice',
+          toDid: 'did:key:bob',
+          timestamp: '2026-01-01T00:00:00Z',
+          proofJson: '{}',
+          locationJson: null,
+        },
+      },
       attestations: {},
       attestationMetadata: {},
       outbox: {},
@@ -176,21 +207,32 @@ describe('sanitizeLegacyPersonalDoc', () => {
     const reloaded = Automerge.load<Record<string, unknown>>(snapshot)
     expect('publishState' in reloaded).toBe(true)
     expect('cachedGraph' in reloaded).toBe(true)
+    expect('verifications' in reloaded).toBe(true)
 
     const sanitized = sanitizeLegacyPersonalDoc(reloaded as Partial<PersonalDoc> & Record<string, unknown>)
     expect('publishState' in sanitized).toBe(false)
     expect('cachedGraph' in sanitized).toBe(false)
+    expect('verifications' in sanitized).toBe(false)
     expect(sanitized.profile).toBeNull()
     expect(sanitized.contacts).toEqual({})
     expect(sanitized.spaces).toEqual({})
   })
 
-  it('strips top-level publishState and cachedGraph before re-saving a loaded Automerge handle', () => {
+  it('strips top-level publishState, cachedGraph, and verifications before re-saving a loaded Automerge handle', () => {
     const cachedGraph = { entries: { 'did:key:bob': { name: 'Bob' } } }
     const legacyDoc = Automerge.from<Record<string, unknown>>({
       profile: null,
       contacts: {},
-      verifications: {},
+      verifications: {
+        v1: {
+          id: 'v1',
+          fromDid: 'did:key:alice',
+          toDid: 'did:key:bob',
+          timestamp: '2026-01-01T00:00:00Z',
+          proofJson: '{}',
+          locationJson: null,
+        },
+      },
       attestations: {},
       attestationMetadata: {},
       outbox: {},
@@ -211,6 +253,7 @@ describe('sanitizeLegacyPersonalDoc', () => {
       if (!handle.isReady()) handle.doneLoading()
       expect('publishState' in (handle.doc() as unknown as Record<string, unknown>)).toBe(true)
       expect('cachedGraph' in (handle.doc() as unknown as Record<string, unknown>)).toBe(true)
+      expect('verifications' in (handle.doc() as unknown as Record<string, unknown>)).toBe(true)
 
       expect(sanitizePersonalDocHandle(handle)).toBe(true)
 
@@ -218,6 +261,7 @@ describe('sanitizeLegacyPersonalDoc', () => {
       const reloaded = Automerge.load<Record<string, unknown>>(cleanedSnapshot)
       expect('publishState' in reloaded).toBe(false)
       expect('cachedGraph' in reloaded).toBe(false)
+      expect('verifications' in reloaded).toBe(false)
       expect(reloaded.profile).toBeNull()
       expect(reloaded.contacts).toEqual({})
       expect(reloaded.spaces).toEqual({})

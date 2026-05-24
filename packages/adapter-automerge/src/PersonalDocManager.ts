@@ -7,7 +7,7 @@
  * - Synced to other devices via PersonalNetworkAdapter -> wot-relay (E2E encrypted)
  * - Doc-ID derived deterministically from mnemonic (same on all devices)
  *
- * The Personal-Doc contains: profile, contacts, verifications, attestations,
+ * The Personal-Doc contains: profile, contacts, attestations,
  * attestation metadata, outbox, spaces, and group keys.
  */
 import { Repo, stringifyAutomergeUrl, parseAutomergeUrl } from '@automerge/automerge-repo'
@@ -62,15 +62,6 @@ export interface ContactDoc {
   updatedAt: string
 }
 
-export interface VerificationDoc {
-  id: string
-  fromDid: string
-  toDid: string
-  timestamp: string
-  proofJson: string
-  locationJson: string | null
-}
-
 export interface AttestationDoc {
   id: string
   attestationId: string | null
@@ -104,7 +95,6 @@ export interface ProfileDoc {
 export interface PersonalDoc {
   profile: ProfileDoc | null
   contacts: Record<string, ContactDoc>
-  verifications: Record<string, VerificationDoc>
   attestations: Record<string, AttestationDoc>
   attestationMetadata: Record<string, AttestationMetadataDoc>
   outbox: Record<string, OutboxEntryDoc>
@@ -260,15 +250,17 @@ const COMPACT_STORE_DB = 'wot-compact-store'
 const SYNC_STATE_DB = 'wot-personal-sync-states'
 
 /**
- * Strip legacy top-level cache fields from a loaded PersonalDoc snapshot.
+ * Strip legacy top-level fields from a loaded PersonalDoc snapshot.
  */
 export function sanitizeLegacyPersonalDoc(raw: Partial<PersonalDoc> & Record<string, unknown>): Partial<PersonalDoc> & Record<string, unknown> {
-  const { publishState: _publishState, cachedGraph: _cachedGraph, ...rest } = raw
+  const rest = { ...raw }
+  delete rest.publishState
+  delete rest.cachedGraph
+  delete rest.verifications
   return {
     ...rest,
     profile: raw.profile ?? null,
     contacts: raw.contacts ?? {},
-    verifications: raw.verifications ?? {},
     attestations: raw.attestations ?? {},
     attestationMetadata: raw.attestationMetadata ?? {},
     outbox: raw.outbox ?? {},
@@ -280,7 +272,6 @@ export function sanitizeLegacyPersonalDoc(raw: Partial<PersonalDoc> & Record<str
 const PERSONAL_DOC_FIELD_NAMES = [
   'profile',
   'contacts',
-  'verifications',
   'attestations',
   'attestationMetadata',
   'outbox',
@@ -289,7 +280,7 @@ const PERSONAL_DOC_FIELD_NAMES = [
 ] as const
 
 /**
- * Normalize loaded Automerge PersonalDoc handles by removing legacy cache
+ * Normalize loaded Automerge PersonalDoc handles by removing legacy
  * fields and filling current schema defaults. Returns true when the snapshot
  * changed so callers can persist the cleaned document.
  */
@@ -298,13 +289,15 @@ export function sanitizePersonalDocHandle(handle: DocHandle<PersonalDoc>): boole
   if (!doc) return false
   const hasPublishState = 'publishState' in doc
   const hasCachedGraph = 'cachedGraph' in doc
+  const hasLegacyVerificationRecords = 'verifications' in doc
   const hasMissingFields = PERSONAL_DOC_FIELD_NAMES.some(field => !(field in doc))
-  if (!hasPublishState && !hasCachedGraph && !hasMissingFields) return false
+  if (!hasPublishState && !hasCachedGraph && !hasLegacyVerificationRecords && !hasMissingFields) return false
   const sanitized = sanitizeLegacyPersonalDoc(doc)
   handle.change(d => {
     const target = d as unknown as Record<string, unknown>
     delete target.publishState
     delete target.cachedGraph
+    delete target.verifications
     Object.assign(target, sanitized)
   })
   return true
@@ -314,7 +307,6 @@ function emptyPersonalDoc(): PersonalDoc {
   return {
     profile: null,
     contacts: {},
-    verifications: {},
     attestations: {},
     attestationMetadata: {},
     outbox: {},
