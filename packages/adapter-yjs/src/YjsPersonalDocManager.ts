@@ -591,12 +591,16 @@ export async function initYjsPersonalDoc(identity: IdentitySession, messaging?: 
   // Listen for remote changes (from multi-device sync)
   ydoc.on('update', (_update: Uint8Array, origin: any) => {
     if (origin !== 'local') {
-      // Prevent legacy outbox from being re-synced from remote devices
+      // Prevent legacy top-level maps from being re-synced from remote devices
       const outboxMap = ydoc!.getMap('outbox')
-      if (outboxMap.size > 0) {
+      const verificationsMap = ydoc!.getMap('verifications')
+      if (outboxMap.size > 0 || verificationsMap.size > 0) {
         ydoc!.transact(() => {
           for (const key of Array.from(outboxMap.keys())) {
             outboxMap.delete(key)
+          }
+          for (const key of Array.from(verificationsMap.keys())) {
+            verificationsMap.delete(key)
           }
         }, 'local')
       }
