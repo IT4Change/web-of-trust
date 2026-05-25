@@ -63,9 +63,6 @@ function getProfileMap(): Y.Map<any> {
 function getContactsMap(): Y.Map<any> {
   return ydoc!.getMap('contacts')
 }
-function getVerificationsMap(): Y.Map<any> {
-  return ydoc!.getMap('verifications')
-}
 function getAttestationsMap(): Y.Map<any> {
   return ydoc!.getMap('attestations')
 }
@@ -93,7 +90,6 @@ function snapshotDoc(): PersonalDoc {
   return {
     profile,
     contacts: ymapOfMapsToRecord(getContactsMap()),
-    verifications: ymapOfMapsToRecord(getVerificationsMap()),
     attestations: ymapOfMapsToRecord(getAttestationsMap()),
     attestationMetadata: ymapOfMapsToRecord(getAttestationMetadataMap()),
     outbox: ymapOfMapsToRecord(getOutboxMap()),
@@ -159,8 +155,6 @@ function createDocProxy(): PersonalDoc {
     },
     get contacts() { return createRecordProxy(getContactsMap()) },
     set contacts(_v) { /* handled by proxy */ },
-    get verifications() { return createRecordProxy(getVerificationsMap()) },
-    set verifications(_v) { /* handled by proxy */ },
     get attestations() { return createRecordProxy(getAttestationsMap()) },
     set attestations(_v) { /* handled by proxy */ },
     get attestationMetadata() { return createRecordProxy(getAttestationMetadataMap()) },
@@ -443,7 +437,7 @@ export async function initYjsPersonalDoc(identity: IdentitySession, messaging?: 
     }
     ;(window as any).wotDocSizes = () => {
       if (!ydoc) return console.warn('PersonalDoc not loaded')
-      const maps = ['profile', 'contacts', 'verifications', 'attestations', 'attestationMetadata', 'spaces', 'groupKeys', 'outbox']
+      const maps = ['profile', 'contacts', 'attestations', 'attestationMetadata', 'spaces', 'groupKeys', 'outbox']
       const results: Record<string, any>[] = []
       for (const name of maps) {
         const map = ydoc.getMap(name)
@@ -516,7 +510,7 @@ export async function initYjsPersonalDoc(identity: IdentitySession, messaging?: 
     const oldDoc = ydoc
     const oldSize = Y.encodeStateAsUpdate(oldDoc).byteLength
     // Snapshot all maps as plain JSON (Yjs objects can't be moved between docs)
-    const mapsToKeep = ['profile', 'contacts', 'verifications', 'attestations', 'attestationMetadata', 'spaces', 'groupKeys']
+    const mapsToKeep = ['profile', 'contacts', 'attestations', 'attestationMetadata', 'spaces', 'groupKeys']
     const snapshots = new Map<string, Record<string, any>>()
     for (const mapName of mapsToKeep) {
       const src = oldDoc.getMap(mapName)

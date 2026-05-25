@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import {
   initYjsPersonalDoc,
@@ -14,6 +16,33 @@ import { createTestIdentity } from '../../wot-core/tests/helpers/identity-sessio
 describe('YjsPersonalDocManager', () => {
   let identity: PublicIdentitySession
   let dbCounter = 0
+
+  describe('PersonalDoc schema source guard', () => {
+    it('does not expose legacy top-level verification storage in adapter-yjs sources', () => {
+      const adapterRoot = process.cwd()
+      const files = [
+        ['packages/adapter-yjs/src/types.ts', 'src/types.ts'],
+        ['packages/adapter-yjs/src/index.ts', 'src/index.ts'],
+        ['packages/adapter-yjs/src/YjsPersonalDocManager.ts', 'src/YjsPersonalDocManager.ts'],
+        ['packages/adapter-yjs/src/YjsStorageAdapter.ts', 'src/YjsStorageAdapter.ts'],
+      ]
+      const needles = [
+        'VerificationDoc',
+        'getVerificationsMap',
+        'doc.verifications',
+        'verifications:',
+      ]
+
+      const hits = files.flatMap(([label, file]) => {
+        const text = readFileSync(resolve(adapterRoot, file), 'utf8')
+        return needles
+          .filter(needle => text.includes(needle))
+          .map(needle => `${label}: still contains ${needle}`)
+      })
+
+      expect(hits).toEqual([])
+    })
+  })
 
   beforeEach(async () => {
     identity = (await createTestIdentity('personal-doc-test')).identity
@@ -38,7 +67,7 @@ describe('YjsPersonalDocManager', () => {
       expect(doc).toBeDefined()
       expect(doc.profile).toBeNull()
       expect(doc.contacts).toEqual({})
-      expect(doc.verifications).toEqual({})
+      expect(doc).not.toHaveProperty('verifications')
       expect(doc.attestations).toEqual({})
       expect(doc.attestationMetadata).toEqual({})
       expect(doc.outbox).toEqual({})
@@ -160,28 +189,6 @@ describe('YjsPersonalDocManager', () => {
       })
       const doc = getYjsPersonalDoc()
       expect(Object.keys(doc.contacts)).toHaveLength(3)
-    })
-  })
-
-  describe('Verifications', () => {
-    beforeEach(async () => {
-      await initYjsPersonalDoc(identity)
-    })
-
-    it('should save a verification', () => {
-      const verification = {
-        id: 'v-1',
-        fromDid: 'did:key:alice',
-        toDid: 'did:key:bob',
-        timestamp: new Date().toISOString(),
-        proofJson: '{"type":"test"}',
-        locationJson: '{"lat":0,"lng":0}',
-      }
-      changeYjsPersonalDoc(doc => {
-        doc.verifications[verification.id] = verification
-      })
-      const doc = getYjsPersonalDoc()
-      expect(doc.verifications['v-1'].fromDid).toBe('did:key:alice')
     })
   })
 
