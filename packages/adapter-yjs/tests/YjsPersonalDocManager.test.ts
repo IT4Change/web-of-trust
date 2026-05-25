@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
+import * as Y from 'yjs'
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import {
   initYjsPersonalDoc,
@@ -371,6 +372,34 @@ describe('YjsPersonalDocManager', () => {
   })
 
   describe('Persistence (CompactStore)', () => {
+    class MemoryCompactStore {
+      saved: Uint8Array | null
+
+      constructor(initial: Uint8Array | null = null) {
+        this.saved = initial
+      }
+
+      async open(): Promise<void> {}
+
+      async save(_id: string, data: Uint8Array): Promise<void> {
+        this.saved = data
+      }
+
+      async load(_id: string): Promise<Uint8Array | null> {
+        return this.saved
+      }
+
+      async delete(_id: string): Promise<void> {
+        this.saved = null
+      }
+
+      async list(): Promise<string[]> {
+        return this.saved ? ['personal-doc'] : []
+      }
+
+      close(): void {}
+    }
+
     it('should persist and restore via CompactStore', async () => {
       // Init and add data
       await initYjsPersonalDoc(identity)
@@ -415,6 +444,31 @@ describe('YjsPersonalDocManager', () => {
       const doc = await initYjsPersonalDoc(identity)
       expect(doc.profile).toBeNull()
       expect(Object.keys(doc.contacts)).toHaveLength(0)
+    })
+
+    it('rebuilds persisted updates that contain only legacy verification records', async () => {
+      const oldDoc = new Y.Doc()
+      oldDoc.transact(() => {
+        const verifications = oldDoc.getMap('verifications')
+        const verification = new Y.Map()
+        verifications.set('v-1', verification)
+        verification.set('id', 'v-1')
+        verification.set('fromDid', 'did:key:alice')
+        verification.set('toDid', identity.getDid())
+        verification.set('timestamp', new Date().toISOString())
+        verification.set('proofJson', '{}')
+        verification.set('locationJson', null)
+      })
+
+      const compactStore = new MemoryCompactStore(Y.encodeStateAsUpdate(oldDoc))
+      const restored = await initYjsPersonalDoc(identity, undefined, undefined, compactStore)
+
+      expect(restored).not.toHaveProperty('verifications')
+      expect(compactStore.saved).not.toBeNull()
+
+      const sanitizedDoc = new Y.Doc()
+      Y.applyUpdate(sanitizedDoc, compactStore.saved!)
+      expect(sanitizedDoc.getMap('verifications').size).toBe(0)
     })
   })
 

@@ -501,12 +501,14 @@ export async function initYjsPersonalDoc(identity: IdentitySession, messaging?: 
     }
   }
 
-  // Migration: rebuild doc without legacy outbox entries
-  // (outbox moved to LocalOutboxStore / IndexedDB)
+  // Migration: rebuild doc without legacy top-level maps
+  // (outbox moved to LocalOutboxStore / IndexedDB; verification records moved
+  // to Trust 002 attestation storage)
   // Yjs keeps tombstones for deleted entries, so simply deleting keys
   // doesn't reduce binary size. We must rebuild the doc from scratch.
   const legacyOutbox = ydoc.getMap('outbox')
-  if (legacyOutbox.size > 0) {
+  const legacyVerifications = ydoc.getMap('verifications')
+  if (legacyOutbox.size > 0 || legacyVerifications.size > 0) {
     const oldDoc = ydoc
     const oldSize = Y.encodeStateAsUpdate(oldDoc).byteLength
     // Snapshot all maps as plain JSON (Yjs objects can't be moved between docs)
@@ -540,7 +542,7 @@ export async function initYjsPersonalDoc(identity: IdentitySession, messaging?: 
     oldDoc.destroy()
     ydoc = freshDoc
     const newSize = Y.encodeStateAsUpdate(ydoc).byteLength
-    console.debug(`[yjs-personal-doc] Migration: rebuilt doc without outbox (${(oldSize/1024).toFixed(0)}KB → ${(newSize/1024).toFixed(0)}KB)`)
+    console.debug(`[yjs-personal-doc] Migration: rebuilt doc without legacy maps (${(oldSize/1024).toFixed(0)}KB -> ${(newSize/1024).toFixed(0)}KB)`)
     // Persist immediately so the smaller doc replaces the bloated one
     const migratedUpdate = Y.encodeStateAsUpdate(ydoc)
     await compactStore!.save(PERSONAL_DOC_ID, migratedUpdate)
