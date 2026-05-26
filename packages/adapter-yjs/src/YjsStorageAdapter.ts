@@ -371,20 +371,20 @@ export class YjsStorageAdapter implements StorageAdapter, ReactiveStorageAdapter
   }
 
   watchAllVerifications(): Subscribable<Verification[]> {
-    const snapshot: Verification[] = []
+    const snapshot = Object.freeze([]) as readonly Verification[]
 
     return {
       subscribe: () => () => {},
-      getValue: () => snapshot,
+      getValue: () => [...snapshot],
     }
   }
 
   watchReceivedVerifications(): Subscribable<Verification[]> {
-    const snapshot: Verification[] = []
+    const snapshot = Object.freeze([]) as readonly Verification[]
 
     return {
       subscribe: () => () => {},
-      getValue: () => snapshot,
+      getValue: () => [...snapshot],
     }
   }
 

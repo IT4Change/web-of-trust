@@ -79,6 +79,10 @@ function getGroupKeysMap(): Y.Map<any> {
   return ydoc!.getMap('groupKeys')
 }
 
+function getExistingRootMap(doc: Y.Doc, name: string): Y.Map<any> | null {
+  return doc.share.has(name) ? doc.getMap(name) : null
+}
+
 // --- Snapshot: Y.Doc → PersonalDoc ---
 
 function snapshotDoc(): PersonalDoc {
@@ -507,8 +511,8 @@ export async function initYjsPersonalDoc(identity: IdentitySession, messaging?: 
   // Yjs keeps tombstones for deleted entries, so simply deleting keys
   // doesn't reduce binary size. We must rebuild the doc from scratch.
   const legacyOutbox = ydoc.getMap('outbox')
-  const legacyVerifications = ydoc.getMap('verifications')
-  if (legacyOutbox.size > 0 || legacyVerifications.size > 0) {
+  const legacyVerifications = getExistingRootMap(ydoc, 'verifications')
+  if (legacyOutbox.size > 0 || legacyVerifications !== null) {
     const oldDoc = ydoc
     const oldSize = Y.encodeStateAsUpdate(oldDoc).byteLength
     // Snapshot all maps as plain JSON (Yjs objects can't be moved between docs)
@@ -593,14 +597,16 @@ export async function initYjsPersonalDoc(identity: IdentitySession, messaging?: 
     if (origin !== 'local') {
       // Prevent legacy top-level maps from being re-synced from remote devices
       const outboxMap = ydoc!.getMap('outbox')
-      const verificationsMap = ydoc!.getMap('verifications')
-      if (outboxMap.size > 0 || verificationsMap.size > 0) {
+      const verificationsMap = getExistingRootMap(ydoc!, 'verifications')
+      if (outboxMap.size > 0 || verificationsMap !== null) {
         ydoc!.transact(() => {
           for (const key of Array.from(outboxMap.keys())) {
             outboxMap.delete(key)
           }
-          for (const key of Array.from(verificationsMap.keys())) {
-            verificationsMap.delete(key)
+          if (verificationsMap) {
+            for (const key of Array.from(verificationsMap.keys())) {
+              verificationsMap.delete(key)
+            }
           }
         }, 'local')
       }

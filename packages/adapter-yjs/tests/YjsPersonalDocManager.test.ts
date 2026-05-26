@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import * as Y from 'yjs'
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
@@ -20,22 +20,30 @@ describe('YjsPersonalDocManager', () => {
 
   describe('PersonalDoc schema source guard', () => {
     it('does not expose legacy top-level verification storage in adapter-yjs sources', () => {
-      const adapterRoot = process.cwd()
+      const adapterRoot = [
+        process.cwd(),
+        resolve(process.cwd(), 'packages/adapter-yjs'),
+        resolve(process.cwd(), '..', 'adapter-yjs'),
+      ].find(candidate => existsSync(resolve(candidate, 'src/types.ts')))
+
+      expect(adapterRoot).toBeDefined()
+
       const files = [
         ['packages/adapter-yjs/src/types.ts', 'src/types.ts'],
         ['packages/adapter-yjs/src/index.ts', 'src/index.ts'],
         ['packages/adapter-yjs/src/YjsPersonalDocManager.ts', 'src/YjsPersonalDocManager.ts'],
         ['packages/adapter-yjs/src/YjsStorageAdapter.ts', 'src/YjsStorageAdapter.ts'],
-      ]
+      ] as const
       const needles = [
         'VerificationDoc',
         'getVerificationsMap',
         'doc.verifications',
         'verifications:',
+        "getMap('verifications')",
       ]
 
       const hits = files.flatMap(([label, file]) => {
-        const text = readFileSync(resolve(adapterRoot, file), 'utf8')
+        const text = readFileSync(resolve(adapterRoot!, file), 'utf8')
         return needles
           .filter(needle => text.includes(needle))
           .map(needle => `${label}: still contains ${needle}`)
@@ -468,7 +476,7 @@ describe('YjsPersonalDocManager', () => {
 
       const sanitizedDoc = new Y.Doc()
       Y.applyUpdate(sanitizedDoc, compactStore.saved!)
-      expect(sanitizedDoc.getMap('verifications').size).toBe(0)
+      expect(sanitizedDoc.share.has('verifications')).toBe(false)
     })
   })
 
