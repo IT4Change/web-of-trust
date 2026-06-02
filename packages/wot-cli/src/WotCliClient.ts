@@ -25,6 +25,7 @@ import {
 import { GroupKeyService } from '@web_of_trust/core/services'
 import { WebCryptoProtocolCryptoAdapter } from '@web_of_trust/core/protocol-adapters'
 import { signEnvelope } from '@web_of_trust/core/crypto'
+import { parseQrChallenge } from '@web_of_trust/core/protocol'
 import type { StorageAdapter, ReactiveStorageAdapter } from '@web_of_trust/core/ports'
 import type { SpaceInfo, Contact, Attestation, MessageEnvelope, MessageType } from '@web_of_trust/core/types'
 import {
@@ -276,7 +277,7 @@ export class WotCliClient {
   async createChallenge(): Promise<{ code: string; nonce: string }> {
     const ident = await this.storage!.getIdentity()
     const name = ident?.profile.name ?? 'Eli'
-    const { code, challenge } = await this.verificationWorkflow.createChallenge(this.requireIdentity(), name)
+    const { rawJson: code, challenge } = await this.verificationWorkflow.createOnlineQrChallenge(this.requireIdentity(), name)
     console.log(`[wot-cli] Challenge created (nonce: ${challenge.nonce.slice(0, 8)}...)`)
     return { code, nonce: challenge.nonce }
   }
@@ -288,10 +289,10 @@ export class WotCliClient {
   async respondToChallenge(challengeCode: string): Promise<{ peerDid: string; peerName: string }> {
     if (!this.storage || !this.outboxAdapter) throw new Error('Not initialized')
 
-    const decoded = this.verificationWorkflow.decodeChallenge(challengeCode)
-    const peerDid = decoded.fromDid
-    const peerName = decoded.fromName || 'Unknown'
-    const peerPublicKey = decoded.fromPublicKey
+    const decoded = parseQrChallenge(challengeCode)
+    const peerDid = decoded.did
+    const peerName = decoded.name || 'Unknown'
+    const peerPublicKey = this.verificationWorkflow.publicKeyFromDid(peerDid)
 
     // Add as contact
     const now = new Date().toISOString()
