@@ -179,7 +179,16 @@ describe('Device delegation protocol verification', () => {
           issuerKid: deviceDelegation.device_key_binding_jws.header.kid,
           signingSeed: hexToBytes(phase1.identity.ed25519_seed_hex),
         }),
-        name,
+        `${name} create`,
+      ).rejects.toThrow(expectedError)
+
+      // Standalone verifyDeviceKeyBindingJws coverage: synthesize a signed JWS
+      // (bypassing create's format check) so the verify path is asserted directly,
+      // not only via verifyDelegatedAttestationBundle's redundant second parse.
+      const jws = await signedDeviceBinding(payload)
+      await expect(
+        verifyDeviceKeyBindingJws(jws, { crypto: cryptoAdapter }),
+        `${name} verify`,
       ).rejects.toThrow(expectedError)
     }
   })
