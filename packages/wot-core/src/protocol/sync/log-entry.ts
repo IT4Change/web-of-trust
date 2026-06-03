@@ -1,5 +1,6 @@
 import type { ProtocolCryptoAdapter } from '../crypto/ports'
 import type { JsonValue } from '../crypto/jcs'
+import { decodeBase64Url } from '../crypto/encoding'
 import { createJcsEd25519Jws, decodeJws, verifyJwsWithPublicKey } from '../crypto/jws'
 import { didKeyToPublicKeyBytes } from '../identity/did-key'
 import {
@@ -30,6 +31,8 @@ export interface VerifyLogEntryJwsOptions {
 // Sync 002 defines the LogEntryPayload JWS; Sync 003 defines the plaintext log-entry wrapper.
 export const LOG_ENTRY_MESSAGE_TYPE = 'https://web-of-trust.de/protocols/log-entry/1.0' as const
 const BASE64URL_SEGMENT_PATTERN = /^[A-Za-z0-9_-]+$/
+const LOG_ENTRY_DATA_NONCE_LENGTH = 12
+const LOG_ENTRY_DATA_TAG_LENGTH = 16
 
 export interface LogEntryMessageBody {
   entry: string
@@ -63,13 +66,13 @@ export async function verifyLogEntryJws(jws: string, options: VerifyLogEntryJwsO
   const { header, payload } = decodeJws<{ alg?: string; kid?: string }, LogEntryPayload>(jws)
   if (header.alg !== 'EdDSA') throw new Error('Invalid log entry alg')
   if (!header.kid) throw new Error('Missing log entry kid')
+  assertLogEntryPayload(payload)
   if (payload.authorKid !== header.kid) throw new Error('Log entry authorKid mismatch')
 
   await verifyJwsWithPublicKey(jws, {
     publicKey: didKeyToPublicKeyBytes(payload.authorKid),
     crypto: options.crypto,
   })
-  assertLogEntryPayload(payload)
   return payload
 }
 
@@ -116,7 +119,7 @@ export function assertLogEntryPayload(payload: unknown): asserts payload is LogE
   if (!Number.isInteger(record.keyGeneration) || (record.keyGeneration as number) < 0) {
     throw new Error('Invalid log entry keyGeneration')
   }
-  assertBase64Url(record.data, 'log entry data')
+  assertEncryptedLogEntryData(record.data, 'log entry data')
   assertDateTime(record.timestamp, 'log entry timestamp')
 }
 
@@ -158,6 +161,13 @@ function assertNonNegativeInteger(value: unknown, name: string): void {
 
 function assertBase64Url(value: unknown, name: string): void {
   if (typeof value !== 'string' || !isValidBase64UrlSegment(value)) throw new Error(`Invalid ${name}`)
+}
+
+function assertEncryptedLogEntryData(value: unknown, name: string): void {
+  assertBase64Url(value, name)
+  const encoded = value as string
+  const bytes = decodeBase64Url(encoded)
+  if (bytes.length <= LOG_ENTRY_DATA_NONCE_LENGTH + LOG_ENTRY_DATA_TAG_LENGTH) throw new Error(`Invalid ${name}`)
 }
 
 function assertDateTime(value: unknown, name: string): void {
