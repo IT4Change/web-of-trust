@@ -1,7 +1,9 @@
 import type { ProtocolCryptoAdapter } from '../crypto/ports'
 import type { JsonValue } from '../crypto/jcs'
+import { decodeBase64Url } from '../crypto/encoding'
 import { createJcsEd25519Jws, decodeJws, verifyJwsWithPublicKey } from '../crypto/jws'
 import { didKeyToPublicKeyBytes } from '../identity/did-key'
+import { AES_GCM_TAG_LENGTH, NONCE_LENGTH } from './aes-gcm-frame'
 import {
   assertPlaintextMessage,
   createPlaintextMessage,
@@ -63,13 +65,13 @@ export async function verifyLogEntryJws(jws: string, options: VerifyLogEntryJwsO
   const { header, payload } = decodeJws<{ alg?: string; kid?: string }, LogEntryPayload>(jws)
   if (header.alg !== 'EdDSA') throw new Error('Invalid log entry alg')
   if (!header.kid) throw new Error('Missing log entry kid')
-  if (payload.authorKid !== header.kid) throw new Error('Log entry authorKid mismatch')
 
   await verifyJwsWithPublicKey(jws, {
-    publicKey: didKeyToPublicKeyBytes(payload.authorKid),
+    publicKey: didKeyToPublicKeyBytes(header.kid),
     crypto: options.crypto,
   })
   assertLogEntryPayload(payload)
+  if (payload.authorKid !== header.kid) throw new Error('Log entry authorKid mismatch')
   return payload
 }
 
@@ -116,7 +118,7 @@ export function assertLogEntryPayload(payload: unknown): asserts payload is LogE
   if (!Number.isInteger(record.keyGeneration) || (record.keyGeneration as number) < 0) {
     throw new Error('Invalid log entry keyGeneration')
   }
-  assertBase64Url(record.data, 'log entry data')
+  assertEncryptedLogEntryData(record.data, 'log entry data')
   assertDateTime(record.timestamp, 'log entry timestamp')
 }
 
@@ -158,6 +160,14 @@ function assertNonNegativeInteger(value: unknown, name: string): void {
 
 function assertBase64Url(value: unknown, name: string): void {
   if (typeof value !== 'string' || !isValidBase64UrlSegment(value)) throw new Error(`Invalid ${name}`)
+}
+
+function assertEncryptedLogEntryData(value: unknown, name: string): void {
+  // Sync 002 framing (003-wot-sync/002-sync-protokoll.md, "Verschlüsselter Payload `data`"):
+  // nonce(12) || ciphertext || tag(16) — reject blobs without any ciphertext byte.
+  assertBase64Url(value, name)
+  const bytes = decodeBase64Url(value as string)
+  if (bytes.length <= NONCE_LENGTH + AES_GCM_TAG_LENGTH) throw new Error(`Invalid ${name}`)
 }
 
 function assertDateTime(value: unknown, name: string): void {
