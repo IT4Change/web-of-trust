@@ -5,15 +5,13 @@ import {
   createAdminRemoveMessage,
   createBrokerAdminMessageSignature,
   createSpaceRotateMessage,
+  deriveSpaceAdminKeyFromSeedHex,
+  encodeBase64Url,
   parseAdminAddMessage,
   parseAdminRemoveMessage,
   parseSpaceRotateMessage,
-  verifyBrokerAdminMessageSignature,
-} from '../src/protocol/sync/broker-admin-messages'
-import {
-  deriveSpaceAdminKeyFromSeedHex,
-  encodeBase64Url,
   type ProtocolCryptoAdapter,
+  verifyBrokerAdminMessageSignature,
 } from '../src/protocol'
 import { WebCryptoProtocolCryptoAdapter } from '../src/protocol-adapters'
 
