@@ -14,6 +14,13 @@ This document tracks reference-implementation coverage for `wot-trust@0.1`. It i
 - **Persistence caveat:** `activeQrChallenge` remains intentionally in-memory and is not part of `VerificationStateStore`; a restart clears active QR challenge state and should generate a fresh challenge. Consumed nonce history and pending counter-verification state now have an injected durable port boundary, while the bundled in-memory implementation remains volatile.
 - **Open questions:** Spec PR #62 resolved the Trust 002 full-match `jti` grammar previously tracked under `wot-spec#47`; PR #65 resolved `wot-spec#38` by requiring Trust QR challenge nonces to be canonical lowercase UUID v4 values. `wot-spec#63` now tracks only whether the literal `urn:uuid:` prefix is case-sensitive. Until that is resolved, non-canonical prefixes are treated as unbound remote verifications rather than nonce-bound in-person proof.
 
+## Trust 001 No attestation-ack semantics
+
+- **Spec refs:** `../wot-spec/02-wot-trust/001-attestations.md` (Z.147, Z.149) and `../wot-spec/CONFORMANCE.md` (Z.69).
+- **Normative rule:** `wot-trust@0.1` defines no `attestation-ack` and no semantic acceptance confirmation. Attestations are gifts: after delivery they belong to the holder (001 Z.147). Transport ACKs from the sync layer only confirm processing or durable buffering of an inbox message for a specific device; they MUST NOT be interpreted as an acceptance or trust signal for an attestation (001 Z.149, CONFORMANCE Z.69). A later publication in the recipient's profile is the recipient's deliberate public feedback.
+- **Implementation:** The reference implementation carries no `attestation-ack` message type and no `acknowledged` delivery/receipt status. Delivery tracking in the demo (`apps/demo/src/services/AttestationService.ts`) maps only transport states (`sending`/`queued`/`delivered`/`failed`) from relay `onReceipt` (Sync 003 `ack/1.0`). Publish-consent is tracked separately via the `accepted` flag (`setAttestationAccepted`), which gates profile publication and is not a wire-trust acknowledgement.
+- **Boundaries:** This document does not normatively define delivery/ACK behavior; see `../wot-spec/02-wot-trust/` for the authority and `packages/wot-core/src/protocol/COVERAGE.md` for the protocol-core scope note (delivery and `attestation-ack` deferred to wot-spec#21).
+
 ## Trust 001 Timestamp Precision
 
 - **Spec refs:** `../wot-spec/02-wot-trust/001-attestations.md` and `../wot-spec/schemas/attestation-vc-payload.schema.json`.
