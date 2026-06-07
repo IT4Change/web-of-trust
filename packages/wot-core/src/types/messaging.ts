@@ -8,7 +8,6 @@ export type MessageType =
   | 'space-invite'
   | 'group-key-rotation'
   | 'profile-update'
-  | 'attestation-ack'
   | 'ack'
   | 'content'
   | 'member-update'
@@ -43,12 +42,11 @@ export interface MessageEnvelope {
  * Multi-stage delivery receipts:
  * - accepted: Relay has accepted the message
  * - delivered: Recipient device has received it
- * - acknowledged: Recipient app has processed it (e.g. attestation saved)
  * - failed: Delivery failed (reason in reason field)
  */
 export interface DeliveryReceipt {
   messageId: string
-  status: 'accepted' | 'delivered' | 'acknowledged' | 'failed'
+  status: 'accepted' | 'delivered' | 'failed'
   timestamp: string
   reason?: string
 }
