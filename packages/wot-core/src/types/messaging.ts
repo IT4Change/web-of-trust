@@ -16,6 +16,13 @@ export type MessageType =
   | 'space-sync-request'
 
 /**
+ * @deprecated Legacy / not DIDComm-compatible (v:1, fromDid, toDid, signature
+ * top-level). Sync 003 (Z.343/410) specifies the DIDComm-v2-plaintext envelope;
+ * the spec-compliant pendant is `DidcommPlaintextMessage` in
+ * protocol/sync/membership-messages.ts (envelope carries no crypto, authenticity
+ * lives in the body via Inner-JWS/ECIES). This type dies with the
+ * Automerge-adapter-stack refactor in Phase 2+. See real-life-org/wot-spec#96.
+ *
  * Standardized envelope format for all cross-user messages.
  * Signature is separate from payload — independently verifiable.
  */

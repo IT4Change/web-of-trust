@@ -337,7 +337,7 @@ Resolved by [`wot-spec` issue #17](https://github.com/real-life-org/wot-spec/iss
 
 ### Q-9: Legacy JWS callers
 
-`packages/wot-core/src/crypto/jws.ts` produces non-JCS, `typ: 'JWT'` JWS values incompatible with the protocol-core JWS shape. It is still consumed by `services/ProfileService.ts` and `crypto/capabilities.ts`; `packages/wot-core/src/application/identity/identity-workflow.ts` (`ProtocolIdentitySession.signJws`) also builds non-JCS `typ: 'JWT'` JWS values directly. (The former `WotIdentity.signJws` caller was removed with `src/identity/`.) None of those artifacts are in scope for `wot-identity@0.1` proper, but they share the JWS surface. This is an implementation question (migration path), not a spec question — listed so the follow-up identity slice does not silently re-introduce the legacy framing.
+`packages/wot-core/src/crypto/jws.ts` produces non-JCS, `typ: 'JWT'` JWS values incompatible with the protocol-core JWS shape. It is still consumed by `services/ProfileService.ts` and `application/authorization/capabilities.ts` (moved from `crypto/` in slice 1.A.2); `packages/wot-core/src/application/identity/identity-workflow.ts` (`ProtocolIdentitySession.signJws`) also builds non-JCS `typ: 'JWT'` JWS values directly. (The former `WotIdentity.signJws` caller was removed with `src/identity/`.) None of those artifacts are in scope for `wot-identity@0.1` proper, but they share the JWS surface. This is an implementation question (migration path), not a spec question — listed so the follow-up identity slice does not silently re-introduce the legacy framing.
 
 ### Q-10: DID Document schema validation
 

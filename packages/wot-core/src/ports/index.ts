@@ -1,4 +1,3 @@
-export * from './AuthorizationAdapter'
 export * from './CryptoAdapter'
 export * from './DiscoveryAdapter'
 export * from './GraphCacheStore'

@@ -238,7 +238,7 @@ semantics now available for future adapter work.
 UCAN-inspired capabilities.
 
 - `InMemoryAuthorizationAdapter` — for tests/POC
-- `crypto/capabilities.ts` — create, verify, delegate, extract. SignFn pattern (private key stays encapsulated).
+- `application/authorization/capabilities.ts` — create, verify, delegate, extract. SignFn pattern (private key stays encapsulated). (Moved from `crypto/` in slice 1.A.2 because the capabilities are non-normative app-level building blocks, not spec-protocol.)
 
 ### 7. SpaceMetadataStorage
 
@@ -276,21 +276,24 @@ HTTP client for wot-vault server (snapshots, changes, info, delete).
 
 ## Crypto
 
-### Envelope Auth (`crypto/envelope-auth.ts`)
-Ed25519-signed message envelopes. Sender authentication for all relay messages.
+> **Status after Phase-1 slices 1.A.1.1 + 1.A.2:** `src/crypto/` is reduced to legacy envelope-auth only. Capabilities, encoding, and DID encoding have moved to their proper layers. The remaining `crypto/` files are scheduled to die with the Automerge-adapter-stack refactor in Phase 2+.
 
-### Capabilities (`crypto/capabilities.ts`)
-UCAN-inspired capability tokens:
+### Envelope Auth (`crypto/envelope-auth.ts`) — **deprecated, legacy**
+Ed25519-signed message envelopes. Pipe-separated top-level signing contradicts Sync 003 (which mandates DIDComm-plaintext envelope + inner-JWS authenticity). Marked `@deprecated` in slice 1.A.2 ([wot-spec#96](https://github.com/real-life-org/wot-spec/issues/96)). Survives in the Automerge-adapter stack until Phase 2+.
+
+### Capabilities (canonical: `application/authorization/capabilities.ts`)
+UCAN-inspired capability tokens (non-normative application-level building blocks, not spec-protocol):
 - `createCapability(issuer, audience, permissions, signFn)`
 - `verifyCapability(token, issuerPublicKey)`
 - `delegateCapability(parent, audience, permissions, signFn)`
 - Offline-verifiable, delegatable, attenuatable
+(Moved from `crypto/` in slice 1.A.2, [wot-spec#95](https://github.com/real-life-org/wot-spec/issues/95). Re-exported via `@web_of_trust/core` root for backwards compat.)
 
-### Encoding (`crypto/encoding.ts`)
-Base58, Base64Url, Multibase, `toBuffer()` utility.
+### Encoding (canonical: `protocol/crypto/encoding.ts`)
+Base58, Base64URL, Base64 (std + padding), Multibase, `toBuffer()` utility. (Consolidated from `crypto/encoding.ts` in slice 1.A.2.)
 
 ### DID encoding (canonical: `protocol/identity/did-key.ts`)
-`publicKeyToDidKey()`, `didKeyToPublicKeyBytes()`. (The former `crypto/did.ts` was removed in slice 1.A.1.1; `getDefaultDisplayName()` moved to `application/identity/display-name.ts`.)
+`publicKeyToDidKey()`, `didKeyToPublicKeyBytes()`. (Former `crypto/did.ts` removed in slice 1.A.1.1; `getDefaultDisplayName()` moved to `application/identity/display-name.ts`.)
 
 ---
 

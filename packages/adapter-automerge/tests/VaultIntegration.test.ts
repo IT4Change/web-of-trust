@@ -4,7 +4,7 @@ import { createTestIdentity } from '../../wot-core/tests/helpers/identity-sessio
 import { InMemoryMessagingAdapter, InMemorySpaceMetadataStorage } from '@web_of_trust/core/adapters'
 import { EncryptedSyncService, GroupKeyService } from '@web_of_trust/core/services'
 import { VaultClient, base64ToUint8 } from '@web_of_trust/core/adapters'
-import { createCapability } from '@web_of_trust/core/crypto'
+import { createCapability } from '@web_of_trust/core/application'
 import { createResourceRef } from '@web_of_trust/core/types'
 import { AutomergeReplicationAdapter } from '../src/AutomergeReplicationAdapter'
 

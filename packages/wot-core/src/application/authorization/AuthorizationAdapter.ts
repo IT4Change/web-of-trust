@@ -1,9 +1,9 @@
-import type { ResourceRef } from '../types/resource-ref'
+import type { ResourceRef } from '../../types/resource-ref'
 import type {
   CapabilityJws,
   CapabilityVerificationResult,
   Permission,
-} from '../crypto/capabilities'
+} from './capabilities'
 
 /**
  * AuthorizationAdapter — Stateful layer for capability management.
@@ -16,8 +16,8 @@ import type {
  * - Revoking capabilities
  *
  * The cryptographic primitives (create, verify, delegate) live in
- * crypto/capabilities.ts. This adapter adds state: storage, queries,
- * and revocation lists.
+ * application/authorization/capabilities.ts. This adapter adds state:
+ * storage, queries, and revocation lists.
  *
  * Implementations:
  * - InMemoryAuthorizationAdapter (tests)

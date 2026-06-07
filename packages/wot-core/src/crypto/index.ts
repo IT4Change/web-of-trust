@@ -1,27 +1,6 @@
-export {
-  encodeBase58,
-  decodeBase58,
-  encodeBase64Url,
-  decodeBase64Url,
-  encodeBase64,
-  decodeBase64,
-  toBuffer,
-} from './encoding'
-export {
-  createCapability,
-  verifyCapability,
-  delegateCapability,
-  extractCapability,
-} from './capabilities'
-export type {
-  Capability,
-  CapabilityJws,
-  Permission,
-  SignFn,
-  VerifiedCapability,
-  CapabilityError,
-  CapabilityVerificationResult,
-} from './capabilities'
+// Legacy crypto barrel — dies in Phase 2 with the Automerge-adapter-stack refactor.
+// Only the (deprecated) envelope-auth operations remain. Capability primitives moved
+// to application/authorization; encoding consolidated into protocol/crypto/encoding.
 export {
   canonicalSigningInput,
   signEnvelope,

@@ -4,7 +4,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   encodeBase64Url,
-} from '@web_of_trust/core/crypto'
+} from '@web_of_trust/core/protocol'
 import {
   InMemoryMessagingAdapter,
   InMemoryOutboxStore,
