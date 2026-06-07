@@ -117,9 +117,9 @@ Trust 001 Z.147 + `CONFORMANCE.md` Z.69 sagen explizit: `wot-trust@0.1` definier
 **Was bewusst BLEIBT** (Stop-Bedingung aus Implementation gegriffen, Anton-bestätigt):
 
 - **Sync 003 `ack/1.0` als Transport-Inbox-ACK** (Sync-Layer, normativ, getrennt vom Trust-Layer) — `DeliveryStatus: 'queued'/'sending'/'delivered'/'failed'` in Demo `AttestationService` plus Outbox/Retry/Receipt-Plumbing.
-- **`accepted`-Flag als Publish-Consent** (nicht Trust-Akzeptanz): `setAttestationAccepted(id, accepted)`, AttestationList-Toggle, AdapterContext-Upload-Gating, Automerge-Schema-Feld. Steuert ausschließlich, ob eine empfangene Attestation in das öffentliche Profil des Holders aufgenommen wird. Das ist die **"Profil-Veröffentlichung als Trust-konforme Rückmeldung des Holders"** aus wot-spec#96-Kommentar — Application-Workflow, keine Trust-Wire-Semantik.
+- **`accepted`-Flag als Publish-Consent** (nicht Trust-Akzeptanz): `setAttestationAccepted(id, accepted)`, AttestationList-Toggle, AdapterContext-Upload-Gating, Automerge-Schema-Feld. Steuert ausschließlich, ob eine empfangene Attestation in das öffentliche Profil des Holders aufgenommen wird. Das ist die **"Profil-Veröffentlichung als sichtbares Holder-Feedback"** als Application-Workflow, keine Trust-Wire-Semantik. Spec-Anker: Trust 001 Z.147/Z.149 + `CONFORMANCE.md` Z.69 (kein `attestation-ack`), und [wot-spec#21](https://github.com/real-life-org/wot-spec/issues/21) (closed: Klassifikation delivery receipts vs. attestation-ack).
 
-> **Wichtige Klarstellung gegenüber älteren Plan-Versionen**: frühere Formulierungen wie "jede `accepted`-Modellierung wird entfernt" waren zu pauschal. `accepted` als Trust-Akzeptanzbestätigung (gibt es nicht) ≠ `accepted` als Publish-Consent (legitimes Produktfeature). Spec-Anker für die Trennung: wot-spec#96-Resolution.
+> **Wichtige Klarstellung gegenüber älteren Plan-Versionen**: frühere Formulierungen wie "jede `accepted`-Modellierung wird entfernt" waren zu pauschal. `accepted` als Trust-Akzeptanzbestätigung (gibt es nicht) ≠ `accepted` als Publish-Consent (legitimes Produktfeature). Spec-Anker für die Trennung: Trust 001 Z.147/Z.149 + `CONFORMANCE.md` Z.69 + [wot-spec#21](https://github.com/real-life-org/wot-spec/issues/21)-Resolution.
 
 ##### 1.B.2-verification — Verification-Delivery-Workflow (Candidate #3) — deferred
 
