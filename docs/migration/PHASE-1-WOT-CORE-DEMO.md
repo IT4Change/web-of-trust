@@ -52,28 +52,48 @@ Adressiert die **horizontalen** Punkte aus `IMPLEMENTATION-ARCHITECTURE.md#bekan
 - **Services klassifizieren + verschieben**: `GraphCacheService`, `VaultClient`, `VaultPushScheduler` nach `adapters/` verschieben (rein adapter-only). Die 4 verbleibenden Services (`AttestationDeliveryService`, `EncryptedSyncService`, `GroupKeyService`, `ProfileService`) bleiben mit `// PHASE-1.B.x: REMOVE` / `// CLASSIFY:`-Markern bis zu ihren jeweiligen 1.B-Slices.
 - Bezug: Candidate **#8** (Adapter entry-point cleanup) aus `runtime-port-contract-map.md`.
 
-### 1.A.2 — Crypto-Entkopplung + `src/crypto/`-Entfernung (Sessions ~1, **gated**)
+### 1.A.1.1 — `did.ts` Auflösung (Mini-Slice, Sessions ~0.5)
 
-> **Gate**: setzt die Beantwortung der Spec-Issues [#95](https://github.com/real-life-org/wot-spec/issues/95), [#96](https://github.com/real-life-org/wot-spec/issues/96), [#97](https://github.com/real-life-org/wot-spec/issues/97) voraus. Diese Sub-Phase startet **nicht** vor den Antworten.
+Resolution-Plan aus [wot-spec#97](https://github.com/real-life-org/wot-spec/issues/97#issuecomment-4642708927):
 
-Befund aus 1.A.1 (PR #153 § Deferred): `src/crypto/` ist kein reiner Import-Move. Konkret blockierend:
+- `createDid`, `didToPublicKeyBytes` → ersatzlos löschen (existieren byte-identisch in `protocol/identity/did-key.ts`).
+- `isValidDid` → ersatzlos löschen (tot in wot-core).
+- `getDefaultDisplayName` → nach `application/identity/display-name.ts` verschieben (UX-Convention, kein normatives Protokoll).
+- Konsumenten umbiegen, `src/crypto/did.ts` löschen.
+- Demo-Inline-Fallback-Vereinheitlichung als separates Issue [#156](https://github.com/real-life-org/web-of-trust/issues/156) für 1.D.
 
-- `src/crypto/capabilities.ts` instanziiert `WebCryptoProtocolCryptoAdapter` auf Modulebene — verletzt `protocol -/-> protocol-adapters`.
-- `src/crypto/envelope-auth.ts` ruft `crypto.subtle.importKey/verify` direkt auf — Browser-Global im protocol-Layer verboten — und koppelt an `types/messaging.MessageEnvelope`.
+Voraussetzung: 1.B.1 PR muss gemerged sein (vermeidet File-Konflikte in `application/identity/`).
 
-Saubere Auflösung verlangt:
+### 1.A.2 — Crypto-Cleanup + Legacy-Marker (Sessions ~1, entsperrt)
 
-- **Port-Injektion** in `createCapability`/`verifyCapability` statt Modul-Level-`new`.
-- **`envelope-auth`-Entkopplung** von `MessageEnvelope`: entweder als Transport-Auth-Schicht (Adapter-Layer) oder durch protocol-natives JCS+JWS ersetzen — abhängig von #96.
-- **Capabilities-Zielschicht** (`protocol/sync` vs eigenes `protocol/trust`) — abhängig von #95.
-- **`did.ts#isValidDid` + `getDefaultDisplayName`** ersatzlos streichen (#97 trivial).
+> **Status 2026-06-07**: Alle drei Spec-Issues [#95](https://github.com/real-life-org/wot-spec/issues/95) (capabilities), [#96](https://github.com/real-life-org/wot-spec/issues/96) (envelope-auth), [#97](https://github.com/real-life-org/wot-spec/issues/97) (did.ts) sind beantwortet. **Kein Spec-Gate mehr.**
 
-Endzustand nach 1.A.2:
+Die ursprüngliche Annahme (Port-Injection-Refactor + komplette `src/crypto/`-Entfernung) entfällt nach Spec-Klärung:
 
-- `packages/wot-core/src/crypto/` ist gelöscht. Keine Aliase, Re-Export-Shims, Bridge-Module, `@deprecated`-Marker.
-- `./crypto`-Subpath aus `package.json` `exports`-Map entfernt.
-- `index.ts` re-exportiert nur Layer-Barrels (verbliebener A.5-Endzustand aus 1.A.1).
-- Alle Konsumenten im Monorepo (Demo, CRDT-Adapter, CLI, Server-Pakete) sind auf `protocol/`-Pfade umgestellt.
+- **#95 capabilities.ts**: Nicht normativ. Move nach `application/authorization/capabilities.ts`. `AuthorizationAdapter`-Port wandert mit, weil er rein an Capability-Typen hängt. `protocol -/-> protocol-adapters`-Verstoß löst sich automatisch (in `application/` ist Adapter-Nutzung erlaubt).
+- **#96 envelope-auth.ts**: Pipe-separiertes Top-Level-Signing widerspricht Sync 003 (Envelope = DIDComm-Plaintext, Authentizität via Inner-JWS im `body`). Legacy-Status. **Bleibt** in `src/crypto/` mit Legacy-Marker + Spec-Divergenz-Doku. Stirbt mit Automerge-Adapter-Stack-Refactor in Phase 2+.
+- **#97 did.ts**: in 1.A.1.1 verortet.
+
+**Konkrete Sub-Tasks für 1.A.2**:
+
+1. `crypto/capabilities.ts` + Typen → `application/authorization/capabilities.ts` (Move + Konsumenten umbiegen).
+2. `ports/AuthorizationAdapter.ts` → `application/authorization/AuthorizationService.ts` (Move; oder Name beibehalten als `AuthorizationAdapter` falls Refactor-Scope minimal halten gewünscht).
+3. `crypto/encoding.ts` klassifizieren — vermutlich `protocol/crypto/` falls Funktionalität dort fehlt, sonst Demo-internal.
+4. Legacy-Marker auf `crypto/envelope-auth.ts` + `types/messaging.MessageEnvelope` mit Spec-Divergenz-Doku + Phase-2-Verweis.
+5. `crypto/index.ts` auf das Minimum reduzieren (nur envelope-auth-Re-Exports).
+6. `types/messaging.MessageEnvelope` Legacy-Marker.
+
+**Endzustand `src/crypto/` nach 1.A.1 + 1.A.1.1 + 1.A.2**:
+
+```
+src/crypto/
+├── envelope-auth.ts    (Legacy-Marker + Spec-Divergenz-Doku, Phase-2-Sterben)
+├── index.ts            (nur envelope-auth-Re-Export)
+```
+
+`./crypto`-Subpath in `exports`-Map bleibt zunächst (exportiert Legacy-MessageEnvelope-Operationen) mit `@deprecated`-Marker. Phase-2-Refactor des Automerge-Stacks entfernt finale Files.
+
+**Keine TDD-Verbindlichkeit** in 1.A.2 — reine Moves + Klassifikation + Marker.
 
 ### 1.B — Per-Workflow-Slices (Sessions ~3, nach Spec-Profil)
 
@@ -160,6 +180,7 @@ Verboten: Spec-Lücke mit lokalem Workaround dauerhaft auflösen.
 14. **Demo zu 100% via Hooks**: ESLint-Regel verhindert direkte `@web_of_trust/core`-Imports in Demo-UI außer in `hooks/wot/` und `runtime/`.
 15. **COVERAGE.md neu generieren oder weglassen**: mechanischer Generator aus `wot-spec/conformance/manifest.json` + Code-Lokationen, ODER entfernt mit Hinweis auf `IMPLEMENTATION-ARCHITECTURE.md` als Lage-Karte.
 16. **TDD-Spur pro Workflow nachweisbar**: für jeden neu geschriebenen oder verschobenen Workflow in 1.B existiert mindestens ein Application-Use-Case-Test, der commit-weise vor der Implementation liegt (Commit-History oder PR-Body weist die Reihenfolge aus). Adapter-Contract-Tests und Hook-Tests sind pro Workflow vorhanden. Reine Datei-Verschiebungen sind ausgenommen.
+17. **`src/crypto/` minimal mit Legacy-Doku**: nach 1.A.1+1.A.1.1+1.A.2 enthält das Verzeichnis ausschließlich `envelope-auth.ts` + `index.ts` mit dokumentierter Spec-Divergenz (Verweis auf [wot-spec#96](https://github.com/real-life-org/wot-spec/issues/96) und Sync 003 Z.343/410) und Phase-2-Sterbe-Marker. Vollständige Löschung erbt Phase 2 (Automerge-Stack-Refactor).
 
 Plus Test/Build-Garantien:
 - `pnpm --filter @web_of_trust/core test/typecheck/build` grün
@@ -170,13 +191,14 @@ Plus Test/Build-Garantien:
 
 Strikte Reihenfolge wegen Abhängigkeiten:
 
-1. **1.A.1 Querschnitt-Konsolidierung ohne Crypto** zuerst — schafft die Schichten-Sauberkeit auf der 1.B aufbaut. ✅ in PR #153.
-2. **1.B.1 Identity** kann parallel zu 1.A.2 starten (kein Crypto-Konflikt) — klein, schnell, gibt Vertrauen in den Flow.
-3. **1.A.2 Crypto-Entkopplung** sobald Spec-Issues #95/#96/#97 beantwortet sind. Parallel zu 1.B.1 möglich.
-4. **1.B.2 Trust** und **1.B.3 Sync** in der Reihenfolge (Trust hat weniger Querverbindungen). 1.B.3 hängt an 1.A.2 (`EncryptedSyncService`, `GroupKeyService` migrieren in 1.B.3 sauber, brauchen aber das aufgelöste crypto-Erbe).
-5. **1.D Demo-Hooks** kann erst sauber laufen wenn 1.A.1+1.A.2 done und mind. 1.B.1+1.B.2 abgeschlossen sind.
-6. **1.E Test-Migration** parallel zu 1.D.
-7. **1.C Standalone-Publikation** ganz am Ende — finalisiert die öffentliche API.
+1. **1.A.1 Querschnitt-Konsolidierung ohne Crypto** ✅ in PR #153.
+2. **1.B.1 Identity** läuft parallel — keine Crypto-Kopplung. ✅ in Bearbeitung.
+3. **1.A.1.1 `did.ts` Auflösung** direkt nach 1.B.1-Merge (vermeidet `application/identity/`-Konflikt).
+4. **1.A.2 Crypto-Cleanup + Legacy-Marker** parallel zu 1.A.1.1 oder direkt danach möglich — alle Spec-Issues beantwortet, kleiner Move-Slice ohne Refactor.
+5. **1.B.2 Trust** und **1.B.3 Sync** in der Reihenfolge (Trust hat weniger Querverbindungen). 1.B.3 migriert `EncryptedSyncService`/`GroupKeyService` und braucht den 1.A.2-Endzustand.
+6. **1.D Demo-Hooks** wenn 1.A.* + mindestens 1.B.1+1.B.2 abgeschlossen sind. Verarbeitet auch Issues [#154](https://github.com/real-life-org/web-of-trust/issues/154) (Boundary-Test) und [#156](https://github.com/real-life-org/web-of-trust/issues/156) (Demo-Inline-Fallbacks).
+7. **1.E Test-Migration** parallel zu 1.D.
+8. **1.C Standalone-Publikation** ganz am Ende — finalisiert die öffentliche API + integriert [#154](https://github.com/real-life-org/web-of-trust/issues/154) als Smoke-Stub-Erweiterung.
 
 ## Nicht-Ziele
 
