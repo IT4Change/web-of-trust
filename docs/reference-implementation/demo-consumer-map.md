@@ -117,9 +117,9 @@ Non-goals for this document:
 
 ## Open Questions
 
-These need human/spec decisions or a separate spec PR before runtime behavior is invented locally:
+> **Status 2026-06-07**: Alle 4 Items sind spec-aufgelöst. Liste bleibt als historischer Audit-Trail; siehe `migration/PHASE-1-WOT-CORE-DEMO.md#status-quo` für Konsolidierung.
 
-- [LEGACY MIGRATION: normalize space key-rotation message naming before protocol parsing] Sync 005 now names `key-rotation` as the only normative known Inbox message type for Space-Key-Rotation, and the protocol membership parser rejects `group-key-rotation`. Demo or adapter-local migration aliases must normalize legacy `group-key-rotation` before handing messages to protocol code.
-- [NEEDS CLARIFICATION: split invite/member-update validation authority] The current invite/member-update handling sometimes uses local envelope payload shapes and adapter-local authorization checks. The split between protocol validation, application signer policy, and adapter delivery mechanics should be made explicit before moving logic out of CRDT adapters.
-- [NEEDS CLARIFICATION: define discovery recovery guarantees] Recovery currently restores profile, verifications, attestations, and contacts from the profile service. The minimum normative discovery recovery guarantees versus demo convenience restore behavior should be clarified.
-- [NEEDS CLARIFICATION: classify delivery receipts and attestation ack] Delivery receipts and `attestation-ack` are app behavior today. Confirm whether any part belongs to a future conformance profile or remains a demo/reference application feature.
+- ~~[LEGACY MIGRATION: normalize space key-rotation message naming before protocol parsing]~~ **Resolved**: Sync 005 Z.243-252 normiert `key-rotation` als alleinigen Message-Type. Legacy `group-key-rotation` wird in Phase 1.B.3 nicht mehr aliased — Adapter senden direkt `key-rotation`, Inbox-Migration ist Teil des Workflow-Slices.
+- ~~[NEEDS CLARIFICATION: split invite/member-update validation authority]~~ **Resolved**: Sync 005 §Verantwortlichkeitsgrenzen normiert die Protocol/Application/Adapter-Tripartition. Validation-Authority liegt in `protocol/sync/`, Signer-Policy in `application/`, Delivery in `adapters/`. Slicing in 1.B.3.
+- ~~[NEEDS CLARIFICATION: define discovery recovery guarantees]~~ **Resolved**: Sync 004 Z.115-120 + Recovery-Sektion normiert Discovery-Recovery. Profile, Verifications, akzeptierte Attestations sind Recovery-Pflicht; Contacts bleiben Application-Konvenienz.
+- ~~[NEEDS CLARIFICATION: classify delivery receipts and attestation ack]~~ **Resolved**: Trust 001 Z.147 + CONFORMANCE Z.69 — `wot-trust@0.1` definiert **keine** `attestation-ack` und keine semantische Annahmebestätigung. Demo-`attestation-ack`/`received`/`accepted`-Modellierung wird in 1.B.2 entfernt (nicht in einen Workflow-Bucket geschoben). Sync 003 `ack/1.0` bleibt als Transport-Inbox-ACK normativ separat.
