@@ -197,7 +197,7 @@ packages/wot-core/README.md   # ab Slice 1.C
 
 **Output-Kontrakt-Erweiterung**: PR-Body listet die durchgeführten Doku-Sync-Updates als eigenen Block (analog zur 5-Punkte-Traceability). Leerer Block bedeutet: nichts gefunden bei systematischer Grep-Suche, nicht: nicht gesucht.
 
-**Loop-Review-Should-Fix wegen Doku-Drift gilt als vermeidbarer Fehler.** Aktuell aufgelaufene Folge-Commits (z.B. `b8acb2f`, `20300ac`, `d7adc14`) dokumentieren den Workflow; sollten in zukünftigen Slices nicht mehr nötig sein.
+**Loop-Review-Should-Fix wegen Doku-Drift gilt als vermeidbarer Fehler.** Aktuell aufgelaufene Folge-Commits (`32a9f62` nach PR #160, `20300ac` nach PR #163, `d7adc14` + `ebe8a95` nach PR #166) dokumentieren den Workflow; sollten in zukünftigen Slices nicht mehr nötig sein.
 
 ## Spec-Härtung-Loop
 
