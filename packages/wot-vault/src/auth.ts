@@ -2,7 +2,7 @@ import {
   verifyCapability,
   extractCapability,
   type Permission,
-} from '@web_of_trust/core/crypto'
+} from '@web_of_trust/core'
 import {
   protocol,
   WebCryptoProtocolCryptoAdapter,

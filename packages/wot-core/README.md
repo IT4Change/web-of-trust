@@ -228,7 +228,7 @@ interface AuthorizationAdapter {
 }
 ```
 
-**Implementations:** `InMemoryAuthorizationAdapter` + `crypto/capabilities.ts`
+**Implementations:** `InMemoryAuthorizationAdapter` + `application/authorization/capabilities.ts`
 
 ---
 

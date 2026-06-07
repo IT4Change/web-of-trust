@@ -69,7 +69,7 @@ export type { ReplicationAdapter, SpaceHandle, TransactOptions } from './ports/R
 export type { PublishStateStore, PublishStateField } from './ports/PublishStateStore'
 export type { GraphCacheStore, CachedGraphEntry } from './ports/GraphCacheStore'
 export type { OutboxStore, OutboxEntry } from './ports/OutboxStore'
-export type { AuthorizationAdapter } from './ports/AuthorizationAdapter'
+export type { AuthorizationAdapter } from './application/authorization/AuthorizationAdapter'
 
 // Crypto Utilities
 export {
@@ -99,7 +99,7 @@ export {
   verifyCapability,
   delegateCapability,
   extractCapability,
-} from './crypto/capabilities'
+} from './application/authorization'
 
 export {
   signEnvelope,
@@ -114,7 +114,7 @@ export type {
   VerifiedCapability,
   CapabilityError,
   CapabilityVerificationResult,
-} from './crypto/capabilities'
+} from './application/authorization'
 
 // Services
 export { ProfileService } from './services/ProfileService'

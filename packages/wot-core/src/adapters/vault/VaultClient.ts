@@ -6,7 +6,7 @@
  *
  * Auth: JWS identity token + signed capability per request.
  */
-import { createCapability } from '../../crypto/capabilities'
+import { createCapability } from '../../application/authorization/capabilities'
 import { createResourceRef } from '../../types/resource-ref'
 import type { IdentitySession } from '../../types/identity-session'
 import { getTraceLog } from '../../storage/TraceLog'

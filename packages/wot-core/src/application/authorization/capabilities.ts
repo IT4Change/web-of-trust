@@ -8,21 +8,21 @@
  * - Chainable (proof chains: Alice → Bob → Carl)
  * - Expiring (mandatory expiration, no eternal tokens)
  *
- * These are pure protocol functions (like signJws, createDid) — not an adapter.
+ * These are application-level capability primitives (non-normative) — not an adapter.
  * The AuthorizationAdapter uses these for stateful operations (storage, queries).
  *
  * Inspired by UCAN and Willow/Meadowcap.
  */
 
-import { decodeJws, didKeyToPublicKeyBytes, verifyJwsWithPublicKey } from '../protocol'
-import { WebCryptoProtocolCryptoAdapter } from '../protocol-adapters'
-import type { ResourceRef } from '../types/resource-ref'
+import { decodeJws, didKeyToPublicKeyBytes, verifyJwsWithPublicKey } from '../../protocol'
+import { WebCryptoProtocolCryptoAdapter } from '../../protocol-adapters'
+import type { ResourceRef } from '../../types/resource-ref'
 
-// SPEC-UNKLAR: real-life-org/wot-spec#95 — Zielschicht für dieses delegierbare
-// Capability-Modell (protocol/sync vs eigenes protocol/trust). NICHT mit
-// protocol/sync/space-capability.ts mergen (andere Semantik). Der Move nach
-// protocol ist in 1.A blockiert, weil die Modul-Level-Instanz unten
-// protocol -> protocol-adapters verletzt; saubere Lösung = Port-Injektion (1.B).
+// real-life-org/wot-spec#95 — RESOLVED: dieses delegierbare Capability-Modell ist
+// NICHT normativ (UCAN-style App-Level-Delegation, primär für Vault-Resource-Access).
+// Es lebt deshalb in application/authorization, nicht in protocol/. NICHT mit
+// protocol/sync/space-capability.ts mergen (andere Semantik). In application/ ist
+// Adapter-Nutzung erlaubt, daher ist die Modul-Level-Instanz unten unproblematisch.
 const protocolCrypto = new WebCryptoProtocolCryptoAdapter()
 
 // --- Types ---

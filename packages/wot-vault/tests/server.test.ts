@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { VaultServer } from '../src/server'
 import type { PublicIdentitySession } from '../../wot-core/src/application/identity'
 import { createTestIdentity } from '../../wot-core/tests/helpers/identity-session'
-import { createCapability } from '@web_of_trust/core/crypto'
+import { createCapability } from '@web_of_trust/core'
 import { createResourceRef } from '@web_of_trust/core/types'
 
 const PORT = 18789 // Test port

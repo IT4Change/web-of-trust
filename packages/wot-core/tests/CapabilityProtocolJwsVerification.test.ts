@@ -7,13 +7,13 @@ import {
   delegateCapability,
   extractCapability,
   verifyCapability,
-} from '../src/crypto/capabilities'
+} from '../src/application/authorization/capabilities'
 import { createResourceRef } from '../src/types/resource-ref'
 import { decodeJws } from '../src/protocol'
 import { createTestIdentity } from './helpers/identity-session'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
-const capabilitiesPath = resolve(__dirname, '../src/crypto/capabilities.ts')
+const capabilitiesPath = resolve(__dirname, '../src/application/authorization/capabilities.ts')
 
 function futureDate(hours: number): string {
   return new Date(Date.now() + hours * 60 * 60 * 1000).toISOString()

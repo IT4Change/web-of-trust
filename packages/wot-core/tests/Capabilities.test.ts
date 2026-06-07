@@ -4,7 +4,7 @@ import {
   verifyCapability,
   delegateCapability,
   extractCapability,
-} from '../src/crypto/capabilities'
+} from '../src/application/authorization/capabilities'
 import { createResourceRef } from '../src/types/resource-ref'
 import type { PublicIdentitySession } from '../src/application/identity'
 import { createTestIdentity } from './helpers/identity-session'
