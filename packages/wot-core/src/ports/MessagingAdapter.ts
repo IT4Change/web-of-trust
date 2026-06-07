@@ -29,7 +29,7 @@ export interface MessagingAdapter {
   // Receiving — callback may be async (ACK is deferred until callback resolves)
   onMessage(callback: (envelope: MessageEnvelope) => void | Promise<void>): () => void
 
-  // Receipt Updates (async: delivered/acknowledged come later)
+  // Receipt Updates (async: delivered comes later)
   onReceipt(callback: (receipt: DeliveryReceipt) => void): () => void
 
   // Transport Resolution (how to find the recipient?)

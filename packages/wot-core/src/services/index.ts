@@ -1,5 +1,3 @@
-export { AttestationDeliveryService } from './AttestationDeliveryService'
-export type { DeliveryStatus } from './AttestationDeliveryService'
 export { EncryptedSyncService } from './EncryptedSyncService'
 export { GroupKeyService } from './GroupKeyService'
 export { ProfileService } from './ProfileService'
