@@ -29,7 +29,7 @@ See also: [Verification](#verification), [Receiver Principle](#receiver-principl
 
 One of the 7 core adapters. Manages UCAN-inspired capability tokens for access control.
 
-**Implementation:** `InMemoryAuthorizationAdapter` (POC/tests). `crypto/capabilities.ts` provides the core primitives: create, verify, delegate, extract.
+**Implementation:** `InMemoryAuthorizationAdapter` (POC/tests). `application/authorization/capabilities.ts` provides the core primitives: create, verify, delegate, extract.
 
 See also: [Capability](#capability), [UCAN](#ucan-user-controlled-authorization-networks)
 
@@ -462,7 +462,7 @@ A keyword attached to an attestation to make it categorizable and filterable.
 
 ### UCAN (User Controlled Authorization Networks)
 
-A standard for capability tokens that are self-certifying and delegatable without a central authority. The Web of Trust's `AuthorizationAdapter` and `crypto/capabilities.ts` are inspired by UCAN.
+A standard for capability tokens that are self-certifying and delegatable without a central authority. The Web of Trust's `AuthorizationAdapter` and `application/authorization/capabilities.ts` are inspired by UCAN.
 
 See also: [Capability](#capability), [AuthorizationAdapter](#authorizationadapter)
 
