@@ -78,7 +78,7 @@ export {
   encodeBase64Url,
   decodeBase64Url,
   toBuffer,
-} from './crypto/encoding'
+} from './protocol/crypto/encoding'
 
 export { getDefaultDisplayName } from './application/identity'
 

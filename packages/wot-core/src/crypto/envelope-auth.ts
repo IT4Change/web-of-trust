@@ -10,7 +10,7 @@
 
 import type { MessageEnvelope } from '../types/messaging'
 import { didKeyToPublicKeyBytes } from '../protocol/identity/did-key'
-import { decodeBase64Url, toBuffer } from './encoding'
+import { decodeBase64Url, toBuffer } from '../protocol/crypto/encoding'
 
 // SPEC-UNKLAR: real-life-org/wot-spec#96 — pipe-separiertes Envelope-Signing
 // (v|id|type|fromDid|toDid|createdAt|payload) vs protocol JCS+JWS; plus direkter

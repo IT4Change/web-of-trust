@@ -10,7 +10,7 @@ import { createCapability } from '../../application/authorization/capabilities'
 import { createResourceRef } from '../../types/resource-ref'
 import type { IdentitySession } from '../../types/identity-session'
 import { getTraceLog } from '../../storage/TraceLog'
-import { encodeBase64 } from '../../crypto/encoding'
+import { encodeBase64 } from '../../protocol/crypto/encoding'
 
 export interface VaultChange {
   seq: number
@@ -246,4 +246,4 @@ export class VaultClient {
 }
 
 // Re-export for backward compatibility
-export { decodeBase64 as base64ToUint8 } from '../../crypto/encoding'
+export { decodeBase64 as base64ToUint8 } from '../../protocol/crypto/encoding'

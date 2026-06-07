@@ -1,6 +1,6 @@
 import type { CryptoAdapter, MasterKeyHandle, EncryptionKeyPair, EncryptedPayload } from '../../ports/CryptoAdapter'
 import type { KeyPair } from '../../types'
-import { encodeBase64Url, decodeBase64Url, toBuffer } from '../../crypto/encoding'
+import { encodeBase64Url, decodeBase64Url, toBuffer } from '../../protocol/crypto/encoding'
 import { publicKeyToDidKey, didKeyToPublicKeyBytes } from '../../protocol/identity/did-key'
 import * as ed25519 from '@noble/ed25519'
 
