@@ -141,15 +141,21 @@ Total: 6 produktive `createResourceRef`-Stellen. 5 davon in Demo-Attestation-/Ve
 |---|---|---:|---:|
 | **Automerge** | `packages/adapter-automerge/src/PersonalDocManager.ts` | 1 (Z.446) | 1 (Z.355) |
 | **Automerge** | `packages/adapter-automerge/src/EncryptedMessagingNetworkAdapter.ts` | 1 (Z.166) | 1 (Z.111) |
-| **Automerge** | `packages/adapter-automerge/src/AutomergeReplicationAdapter.ts` | 2 (Z.484, 731) | 4 (Z.334, 351, 379, 396, 1016) |
+| **Automerge** | `packages/adapter-automerge/src/AutomergeReplicationAdapter.ts` | 2 (Z.484, 731) | 5 (Z.334, 351, 379, 396, 1016) |
 | **Automerge** | `packages/adapter-automerge/src/PersonalNetworkAdapter.ts` | 1 (Z.215) | 1 (Z.101) |
+| **Automerge Σ** | | **5** | **8** |
 | **Yjs** | `packages/adapter-yjs/src/YjsPersonalDocManager.ts` | 2 (Z.354, 560) | 2 (Z.385, 401) |
 | **Yjs** | `packages/adapter-yjs/src/YjsPersonalSyncAdapter.ts` | 1 (Z.145) | 1 (Z.97) |
-| **Yjs** | `packages/adapter-yjs/src/YjsReplicationAdapter.ts` | 6 (Z.522, 607, 664, 770, 1489, 1677, 1768) | 4 (Z.942, 997, 1183, 1244, 1283, 1365) |
-| **wot-core (Benchmark)** | `packages/wot-core/src/...` Benchmark-Datei | 4 | 4 |
-| **Total produktiv** | **7 Files** | **14** | **15** |
+| **Yjs** | `packages/adapter-yjs/src/YjsReplicationAdapter.ts` | 9 (Z.522, 607, 664, 770, 997, 1183, 1489, 1677, 1768) | 4 (Z.942, 1244, 1283, 1365) |
+| **Yjs Σ** | | **12** | **7** |
+| **wot-core (Benchmark, non-prod)** | Benchmark-Datei | 4 | 4 |
+| **Produktiv Σ (7 Files)** | | **17** | **15** |
 
-**Korrektur gegenüber Audit-Erstausgabe**: Die Erstausgabe behauptete "alle ~14 Call-Sites im Automerge-Stack, Yjs-Stack nutzt EncryptedSyncService nicht direkt". Das war **falsch** — Yjs nutzt ihn massiv (3 Files, ~14 Calls). Korrigiert via [web-of-trust#177](https://github.com/real-life-org/web-of-trust/issues/177). Insgesamt **~29 produktive Call-Sites über 7 Files** in beiden Adapter-Stacks; zusätzlich Benchmark-Aufrufe in wot-core (kein Produktiv-Code).
+**Insgesamt 32 produktive Call-Sites über 7 Files** in beiden Adapter-Stacks (Automerge: 13, Yjs: 19). Zusätzlich Benchmark-Aufrufe in wot-core (kein Produktiv-Code).
+
+**Korrekturen gegenüber den vorherigen Audit-Ausgaben**:
+1. *Erstausgabe (b9975ea)*: behauptete fälschlich "alle Call-Sites im Automerge-Stack, Yjs nutzt EncryptedSyncService nicht direkt". Yjs nutzt den Service tatsächlich am häufigsten (19 Calls vs 13 Automerge). Korrigiert via [web-of-trust#177](https://github.com/real-life-org/web-of-trust/issues/177).
+2. *Rebuild-Ausgabe (58ec1e9)*: Tabellen-Summen waren falsch (14/15 statt 17/15), `YjsReplicationAdapter.ts` Z.997 und Z.1183 standen im falschen Feld (`decryptChange` statt `encryptChange`), `AutomergeReplicationAdapter.ts` listete 5 decrypt-Zeilen aber zählte 4. Verifiziert via `grep -rn "EncryptedSyncService\.\(encrypt\|decrypt\)Change" packages/adapter-*/src/`.
 
 **Re-Exports** (Konsumenten-Pfade):
 

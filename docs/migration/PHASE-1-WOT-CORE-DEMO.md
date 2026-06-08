@@ -29,7 +29,7 @@ Am Ende dieser drei Wochen ist `@web_of_trust/core` eine stand-alone publizierba
 
 | Woche | Schwerpunkt | Spec-Anker |
 |---|---|---|
-| **W1** | `1.B.3-encrypted-sync` (~29 Call-Sites in Automerge + Yjs; ggf. zwei Sub-Slices parallel) | Sync 001 Z.87 + Z.103-105, Sync 002 |
+| **W1** | `1.B.3-encrypted-sync` (32 produktive Call-Sites in Automerge + Yjs; ggf. zwei Sub-Slices parallel) | Sync 001 Z.87 + Z.103-105, Sync 002 |
 | **W2** | `1.B.3-group-key` → `1.B.3-profile-service` → `1.B.2-verification-v2` (5 Demo-Stellen, B2ack-3 vorgeklärt) → `1.B.3-member-key-directory` (inkl. A2-2-Re-Aktivierung) | Sync 003/004/005 + Trust 002 |
 | **W3** | `1.B.3-sync-recovery` + `1.B.3-discovery-recovery` + `1.B.3-device-keys` + Adapter-Audit → `1.D Demo-Hooks` (inkl. B2ack-2 + A2-1-Cross-Repo-Check) → `1.E Test-Migration` → `1.C Standalone-Publikation` | Sync 004 §Recovery + Identity 004 |
 
