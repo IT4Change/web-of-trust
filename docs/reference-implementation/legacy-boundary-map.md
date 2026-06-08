@@ -113,9 +113,11 @@ Demo React hooks and contexts | Demo-only, possible future React package | Extra
 - ~~The reference boundary for `ProfileService` is unclear: profile JWS creation/verification may belong to application, while HTTP publication and discovery are adapters/server-infra.~~ **Resolved**: Sync 004 Z.20 + Z.153 — Profile Service ist optionaler externer Dienst, `didDocument` ist die kanonische Quelle. JWS-Verify gehört in `protocol/`, HTTP in `adapters/discovery/`.
 - ~~CRDT adapter responsibilities around key rotation, catch-up, vault refresh, and sync-request triggering need a precise port contract before replacing current Yjs/Automerge behavior.~~ **Resolved**: Sync 005 Z.173-175 normiert die Protocol/Application/Adapter-Tripartition; Sync 005 Z.243-252 normiert key-rotation als Application-Workflow. Port-Contract folgt direkt aus der Spec — Detail-Slicing in 1.B.3.
 - **Open (Produkt-Entscheidung, kein Spec-Thema)**: The demo identity-change cleanup deletes multiple IndexedDB databases. Bleibt Demo-Reset-Policy (`apps/demo/`), kein Reference-Application-Verhalten. Entscheidung fällt in 1.D / Candidate #9 (Demo runtime reset adapter).
-- **Open (Build-/Deployment-Thema, kein Spec-Thema)**: `packages/wot-vault/wot-core-dist/` should be purged. Wird durch die Standalone-Publikation (1.C) und die `package.json`-`exports`-Map automatisch obsolet, sobald `wot-vault` über das normale Pakettarball konsumiert.
+- **Open (Build-/Deployment-Thema, kein Spec-Thema)**: `packages/wot-vault/wot-core-dist/` should be purged. Wahrscheinlich aufgelöst durch die Standalone-Publikation (1.C) und die `package.json`-`exports`-Map, sobald `wot-vault` über das normale Pakettarball konsumiert. Vor Lösch-Entscheidung: Cross-Repo-Abhängigkeits-Check (`grep` in `wot-vault`, `wot-profiles`, `wot-agent-runner-prototype`, `runner-dashboard`) durchführen; siehe `migration/SPEC-AUDIT.md` A2-1-Befund.
 
 ## Legacy-Purge Completion Criteria
+
+> **Scope-Hinweis**: Diese 12 Punkte sind die **Vollkriterien über Phase 1 + 2**. Der Phase-1-Sprint-Plan (`migration/PHASE-1-WOT-CORE-DEMO.md`) hat eine straffere 8-Punkte-DoD, die nur die in Phase 1 erreichbaren Endzustände nennt. Punkte 9-12 dieser Liste (Index-Cleanup, vendored Artifacts, Compatibility-Decisions, Spec-Ambiguities) hängen teilweise am CRDT-Adapter-Stack-Refactor in Phase 2.
 
 The legacy boundary is complete only when these can become blocking tasks:
 
