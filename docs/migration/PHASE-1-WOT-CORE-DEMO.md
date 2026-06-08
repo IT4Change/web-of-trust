@@ -89,6 +89,10 @@ Bei Konflikt zwischen alter Implementation und Spec gewinnt die Spec. Ohne Ausna
 5. **Konsumenten umhängen** auf neue API. Konsumenten-Verhalten wird gegen eigene Spec-Domäne geprüft (Demo-UX, CLI-Output), nicht gegen alte Implementation.
 6. **Alte Datei löschen.** Re-Exports + `exports`-Map cleanup. Keine Bridge-Module, kein `@deprecated`-Anker, keine Shims.
 
+### Hygiene-Regel: Workflows produzieren keine Legacy-Form
+
+Neue `application/*`-Workflows liefern ausschließlich spec-konforme Wire-Form (Sync 003 DIDComm-Plaintext-Envelope, Sync 001 `nonce ‖ ciphertext+tag`-Blob, etc.). Wenn ein Adapter aktuell noch eine Legacy-Form wrappt (z.B. Automerge-/Yjs-Stack mit altem `MessageEnvelope` mit `v: 1`, `fromDid`, `signature`), bleibt die Legacy-Form auf Adapter-Ebene — der Workflow darf sie nicht selbst bauen oder zurückliefern. Phase 2 räumt die Adapter-Schicht auf.
+
 ### Wenn die Spec wirklich schweigt
 
 1. Issue in `real-life-org/wot-spec` mit Label `spec-conformance`. Body: Spec-Stelle (Datei:Zeile), beobachtete Mehrdeutigkeit, 2-3 Resolution-Optionen mit Trade-offs.
@@ -99,14 +103,23 @@ Vor Issue-Erstellung muss dokumentiert sein: "Ich habe Section X.Y vollständig 
 
 ---
 
-## PR-Pflichtbausteine (Checkliste)
+## PR-Pflichtbausteine
 
-Jeder Slice-PR enthält:
+### Slice-Tabelle (zentrales Artefakt)
 
-- [ ] **Spec-Zitat-Block** im Body: pro Implementations-Entscheidung `Entscheidung / Spec-Zitat (wot-spec/datei:zeile) / Code-Anker (pfad:zeile)`. Leerer Block ist nur für reine Struktur-Slices erlaubt und muss explizit benannt werden.
-- [ ] **Konsumenten-Migration-Trace**: welche alten Call-Sites wurden auf welche neue API umgehängt.
+Jeder Slice-PR enthält im Body eine Tabelle, die die Migration mechanisch nachprüfbar macht:
+
+| Spec-Regel | Neuer Modul-Ort | Alte Konsumenten | Test/Vektor | Gelöschte Legacy-Stelle |
+|---|---|---|---|---|
+| `wot-spec/datei:zeile` + Originalzitat | `pfad:zeile` (was die Stelle tut) | Liste der umgehängten Call-Sites (`pfad:zeile`) | Spec-Vektor-Name + Application-Use-Case-Test-Pfad | gelöschte Datei/Symbol (`pfad:zeile`) oder explizit "—" |
+
+Eine Zeile pro Implementations-Entscheidung. Leere Tabelle ist nur für reine Struktur-Slices erlaubt und muss explizit benannt werden.
+
+### Checkliste
+
 - [ ] **Doku-Sync**: für jeden umbenannten, verschobenen oder gelöschten Pfad/Symbol/Wert `grep` gegen `docs/CURRENT_IMPLEMENTATION.md`, `docs/architecture/`, `docs/reference-implementation/`, `docs/migration/`, `packages/wot-core/src/protocol/COVERAGE.md` (ab 1.C: README). Leere Liste = "gegrept, nichts gefunden", nicht "nicht gesucht".
 - [ ] **Test-First-Commits markiert**: pro neuem oder verschobenem Workflow mindestens ein Application-Use-Case-Test, der zeitlich vor der Implementation liegt.
+- [ ] **Scope-Stop**: Externe Runtime-Consumer (CLI, `wot-vault`, `wot-profiles`, `wot-agent-runner-prototype`, externer Code) werden NICHT stillschweigend "mitmigriert". Wenn ein Slice einen externen Consumer berührt, ist das eine bewusste Scope-Entscheidung mit Owner-Name + Begründung im PR-Body.
 - [ ] **5-Punkte-Traceability-Block** (aus `reference-implementation/README.md`): Spec-Refs, Conformance-Profil, Implementation-Modul, Tests/Vektoren, Open Spec Questions.
 - [ ] **Bestätigung**: kein "behavior-preserving"-Anker verwendet; alter Code wurde nur für Konsumenten-Identifikation konsultiert.
 
@@ -138,7 +151,17 @@ Test schwer zu schreiben = Spec-Lücke oder Architektur-Frage. Sofort Issue, kei
 5. **TDD-Spur pro Workflow nachweisbar** in Commit-History oder PR-Body.
 6. **`src/crypto/` minimal**: nur `envelope-auth.ts` + `index.ts` mit Spec-Divergenz-Doku (Verweis auf [wot-spec#96](https://github.com/real-life-org/wot-spec/issues/96) und Sync 003 Z.343/410) + Phase-2-Sterbe-Marker.
 7. **`SPEC-AUDIT.md` ohne offene `blocker`-Drifts**: alle Befunde adressiert oder explizit nach Phase 2 verortet.
-8. **Spec-Zitat-Block in jedem Slice-PR**.
+8. **Slice-Tabelle in jedem PR-Body** (siehe §PR-Pflichtbausteine).
+
+### Harte Merge-Gates ab Slice 1.C
+
+Ab `1.C Standalone-Publikation` werden die folgenden DoD-Items vor Merge geprüft, nicht nur "im Trend grün":
+
+- `scripts/smoke-third-party-consumer.mjs` grün in CI (DoD #2)
+- `pnpm --filter @web_of_trust/core test/typecheck/build` + `pnpm --filter demo test/build` + `npm run validate` in `wot-spec` grün (DoD #4)
+- Spec-Test-Vektoren reproduziert in `protocol`-Tests
+
+Roter Status bei einem dieser Gates blockiert den Merge bis zur Behebung — kein "wird in nachfolgendem Slice gefixt".
 
 ---
 
