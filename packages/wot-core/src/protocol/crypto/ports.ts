@@ -14,5 +14,6 @@ export interface ProtocolCryptoAdapter {
   x25519SharedSecret(privateSeed: Uint8Array, publicKey: Uint8Array): Promise<Uint8Array>
   aes256GcmEncrypt(key: Uint8Array, nonce: Uint8Array, plaintext: Uint8Array): Promise<Uint8Array>
   aes256GcmDecrypt(key: Uint8Array, nonce: Uint8Array, ciphertext: Uint8Array): Promise<Uint8Array>
+  randomBytes(length: number): Promise<Uint8Array>
   createIdentityVaultCryptoHandle?(bip39Seed: Uint8Array): Promise<ProtocolIdentityVaultCryptoHandle>
 }

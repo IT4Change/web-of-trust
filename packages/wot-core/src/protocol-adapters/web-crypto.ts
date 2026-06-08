@@ -96,6 +96,16 @@ export class WebCryptoProtocolCryptoAdapter implements ProtocolCryptoAdapter {
     return new Uint8Array(plaintext)
   }
 
+  async randomBytes(length: number): Promise<Uint8Array> {
+    // Sync 001 Z.103-105: OneShot nonces MUST be cryptographically random.
+    // The nonce source lives on the crypto adapter so a caller can never
+    // substitute a deterministic value for a random-nonce payload.
+    if (!Number.isSafeInteger(length) || length <= 0) {
+      throw new Error('randomBytes length must be a positive safe integer')
+    }
+    return globalThis.crypto.getRandomValues(new Uint8Array(length))
+  }
+
   async createIdentityVaultCryptoHandle(bip39Seed: Uint8Array): Promise<ProtocolIdentityVaultCryptoHandle> {
     if (bip39Seed.length !== BIP39_SEED_LENGTH) throw new Error('Invalid identity seed format')
     const masterKey = await crypto.subtle.importKey('raw', toBuffer(bip39Seed), 'HKDF', false, ['deriveBits'])
