@@ -121,11 +121,11 @@ Trust 001 Z.147 + `CONFORMANCE.md` Z.69 sagen explizit: `wot-trust@0.1` definier
 
 > **Wichtige Klarstellung gegenüber älteren Plan-Versionen**: frühere Formulierungen wie "jede `accepted`-Modellierung wird entfernt" waren zu pauschal. `accepted` als Trust-Akzeptanzbestätigung (gibt es nicht) ≠ `accepted` als Publish-Consent (legitimes Produktfeature). Spec-Anker für die Trennung: Trust 001 Z.147/Z.149 + `CONFORMANCE.md` Z.69 + [wot-spec#21](https://github.com/real-life-org/wot-spec/issues/21)-Resolution.
 
-##### 1.B.2-verification — Verification-Delivery-Workflow (Candidate #3) — ✅ geliefert in PR #173
+##### 1.B.2-verification — Verification-Delivery-Workflow (Candidate #3) — 🔵 in PR #173 (offen, Review läuft)
 
 Echter TDD-Refactor: `useVerification.ts` (~307 Zeilen) aufgeteilt in framework-freien Verification-Delivery-Workflow plus React-Hook über Application-Use-Case. Relay-Envelope-Konstruktion + Contact/Profile-Side-Effects hinter den Workflow gezogen. Demo + `wot-cli` Konsumenten migriert. Byte-identische Behavior, echter Rot→Grün-TDD-Trace.
 
-Vor 1.F-Audit gemerged. **Audit-Pflicht für diesen Slice**: 1.F.0 prüft den Verification-Delivery-Workflow gegen Trust 002 (Verifikation) retroaktiv und ergänzt einen nachträglichen Spec-Zitat-Block im PR-Body oder als Doku-Update, falls Drift gefunden wird.
+Vor der Spec-Rigor-Regel (§ Spec-Lektüre-Verbindlichkeit, in diesem Plan-Patch eingeführt) erstellt. **Audit-Pflicht für diesen Slice**: nach Merge prüft 1.F.0 den Verification-Delivery-Workflow gegen Trust 002 (Verifikation) retroaktiv und ergänzt einen nachträglichen Spec-Zitat-Block als Doku-Update, falls Drift gefunden wird.
 
 #### 1.B.3 — `wot-sync@0.1` (größter Brocken)
 
@@ -319,7 +319,7 @@ Strikte Reihenfolge wegen Abhängigkeiten:
 4. **1.F Spec-Conformance-Audit** parallel zu B3.1-Abschluss starten — kritisch, blockiert ab hier 1.B.3-B3.2/B3.4/B3.5, 1.B.2-verification, 1.D.
 5. **Retroaktiver Audit für 1.A.* + 1.B.1 + 1.B.2-ack** als erster 1.F-Sub-Task. Drift-Befunde gehen in den 1.F-Backlog.
 6. **1.F-Sub-Slices (1.F.1..N)** abarbeiten — `blocker` zuerst, dann `should-fix`. Pro Sub-Slice eigener PR mit Spec-Zitat-Block.
-7. **1.B.3-B3.2/B3.4/B3.5** (Sync-Workflows) als 1.F.N priorisiert aus Audit-Befunden — alle mit zwingendem Spec-Zitat-Block, Spec-Lektüre-Verbindlichkeit + TDD-Verbindlichkeit + Doku-Sync-Verbindlichkeit gelten kumulativ. **1.B.2-verification** ist bereits in PR #173 geliefert vor der neuen Regel; 1.F.0 prüft retroaktiv gegen Trust 002.
+7. **1.B.3-B3.2/B3.4/B3.5** (Sync-Workflows) als 1.F.N priorisiert aus Audit-Befunden — alle mit zwingendem Spec-Zitat-Block, Spec-Lektüre-Verbindlichkeit + TDD-Verbindlichkeit + Doku-Sync-Verbindlichkeit gelten kumulativ. **1.B.2-verification** wartet in PR #173 auf Merge (vor der Spec-Rigor-Regel erstellt); 1.F.0 prüft den Slice nach Merge retroaktiv gegen Trust 002.
 8. **1.D Demo-Hooks** wenn 1.F + 1.B.* abgeschlossen sind. Verarbeitet auch Issues [#154](https://github.com/real-life-org/web-of-trust/issues/154), [#156](https://github.com/real-life-org/web-of-trust/issues/156).
 9. **1.E Test-Migration** parallel zu 1.D, plus [#165](https://github.com/real-life-org/web-of-trust/issues/165) WotIdentity-Doku-Restbestand.
 10. **1.C Standalone-Publikation** ganz am Ende — finalisiert die öffentliche API + [#154](https://github.com/real-life-org/web-of-trust/issues/154) + [#162](https://github.com/real-life-org/web-of-trust/issues/162) NodeNext-Fix.
