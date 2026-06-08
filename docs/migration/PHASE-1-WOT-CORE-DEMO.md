@@ -23,7 +23,11 @@ UltraCode darf von diesen Dokumenten nicht abweichen. **Bei Widersprüchen zwisc
 | Normative `wot-spec/`: `01-wot-identity/`, `02-wot-trust/`, `03-wot-sync/`, `CONFORMANCE.md`, `conformance/manifest.json`, `test-vectors/` | Spec-Quelle der Wahrheit |
 | `wot-spec/decisions/0001-identity-seed-protection-conformance-bar.md` | ADR für Identity Seed Protection |
 
-## Status quo am 2026-06-04 (nicht in Docs aktualisiert)
+## Status quo am 2026-06-08
+
+> Aktueller Spec-Conformance-Stand siehe **`docs/migration/SPEC-AUDIT.md`** (Rebuild 2026-06-08 gegen `spec-vnext` @ `1e39f4d`). Auflistung offener Drift-Befunde: A2-1, A2-2, B2ack-1 (5 Stellen), B2ack-2, B2ack-3. Verortung pro Slice in den `1.B.*`-Beschreibungen unten.
+
+### Doc-Konsistenz-Backlog (vor UltraCode-Sessions)
 
 Vor UltraCode-Sessions wird ein **separates Doc-Konsistenz-Update** die nachfolgenden Inkonsistenzen beheben (eigene PR, kein UltraCode):
 
@@ -134,6 +138,13 @@ Neuer Slice **1.B.2-verification-v2** schreibt den `verification-delivery-workfl
 - **Spec-Anker**: Sync 003 §WoT Transport Envelope (Z.343-392 Felder-Tabelle) + Trust 002 §Verifikation (Envelope-Inhalt für Verification-Attestation).
 - **Methode**: § Methode für Workflow-/Service-Migration. Workflow wird aus Spec geschrieben, nicht aus altem Code abgeschaut. Konsumenten (Demo-Hook + CLI) werden auf die neue API umgehängt, entscheiden ihre Caller-Behandlung selbst.
 - **Spec-konforme Eigenschaften**: kein `ref` im Envelope (Spec kennt es nicht). Workflow propagiert Errors by default. Side-Effect-Sequencing (contact-add, profile-sync, persist) ist Caller-Entscheidung — Workflow ist die spec-getreue Envelope+Sign+Send-Operation.
+- **Konsumenten-Umhängung (B2ack-1, verifiziert in `SPEC-AUDIT.md`)**: **5 produktive Legacy-Envelope-Stellen mit `ref: createResourceRef('attestation', ...)`** in Demo müssen umgestellt werden. Slice-Akzeptanz nur wenn alle 5 weg sind:
+  - `apps/demo/src/services/AttestationService.ts:154` (retryAttestation)
+  - `apps/demo/src/services/AttestationService.ts:203` (createAttestation)
+  - `apps/demo/src/hooks/useVerification.ts:159` (confirmAndRespond)
+  - `apps/demo/src/hooks/useVerification.ts:209` (confirmIncoming)
+  - `apps/demo/src/hooks/useVerification.ts:272` (counterVerify)
+- **Vor-Klärung B2ack-3**: `DeliveryReceipt.status: 'accepted'` (in `packages/wot-core/src/types/messaging.ts:49`) ist wot-core API-Surface; Sync 003 §ack/1.0 definiert `accepted` aber nur als Inbox-Signal. Vor Slice-Start (~30 Min): Sync 003 Z.590ff lesen, entscheiden ob der neue Workflow `'accepted'` weiterträgt oder ob das Status-Mapping aufgehoben werden muss. Ergebnis in PR-Body als Spec-Anker-Block.
 - **TDD-Verbindlichkeit gilt**: Spec-Vektor-Test → Application-Use-Case-Test → Implementation → Adapter-Contract → Hook-Test.
 - **Closes** wot-spec#... falls neue Spec-Lücken auftauchen.
 
@@ -145,7 +156,10 @@ Neuer Slice **1.B.2-verification-v2** schreibt den `verification-delivery-workfl
 
 - **Spec-Anker**: Sync 001 Z.87 (deterministische Nonce für Log-Payloads) + Z.103-105 (Random-Nonce für Snapshots/Messaging/OneShots) + Sync 002 Log-Entry-Format + bestehende `protocol/sync/encryption.ts` und `protocol/sync/aes-gcm-frame.ts` als Vektor-validiertes Fundament.
 - **API**: `encryptLogEntry` (deterministisch, MUSS für Log-Payloads) + `encryptOneShot` (random, MUSS für alles andere). Getrennte Funktionen sind normativ (Sync 001 Z.87).
-- **Konsumenten**: 17 Call-Sites in `adapter-yjs/`, `adapter-automerge/`, `wot-core/services/EncryptedSyncService` Tests. Jede Call-Site wird klassifiziert: Log-Payload → `encryptLogEntry`, Snapshot/Messaging/OneShot → `encryptOneShot`. Bei Unsicherheit → `encryptOneShot` (sicher per Random-Nonce).
+- **Konsumenten (verifiziert in `SPEC-AUDIT.md`)**: **~29 produktive Call-Sites über 7 Files in beiden Adapter-Stacks** — Automerge (4 Files, ~13 Calls) UND Yjs (3 Files, ~16 Calls). Plus Benchmark in wot-core (separat). Jede Call-Site wird klassifiziert: Log-Payload → `encryptLogEntry`, Snapshot/Messaging/OneShot → `encryptOneShot`. Bei Unsicherheit → `encryptOneShot` (sicher per Random-Nonce).
+- **Größe**: Mindestens doppelt so groß wie ursprünglich (14→29 Calls). Slice-Optionen:
+  - **Option a)** EIN Slice mit beiden Stacks, ~4-5 Tage realistisch.
+  - **Option b)** Zwei Sub-Slices `1.B.3-encrypted-sync-automerge` + `1.B.3-encrypted-sync-yjs`, je ~2-3 Tage. Empfohlen wenn Worktree-Parallelisierung mit zweitem UltraCode-Run möglich ist.
 - **Schließt** wot-spec#82 (closed via #83) und obsoletes web-of-trust PR #144.
 
 **1.B.3-group-key** — `services/GroupKeyService.ts` löschen + neuer `application/sync/group-key-workflow.ts` + `ports/key-management.ts`
@@ -167,6 +181,7 @@ Neuer Slice **1.B.2-verification-v2** schreibt den `verification-delivery-workfl
 
 - **Spec-Anker**: Sync 005 §member-update + DID-Resolution-Pfad + Sync 003 §Capability-JWS.
 - **Status**: UltraCode hatte einen Slice (`phase-1/b3-sync-workflows`) angefangen aber nicht gepusht. Da auch der vor der Spec-Rigor-Regel entstand, wird er als Variante-B-Slice neu geschrieben — alter Worktree gelöscht, neuer Slice aus Sync 005 §member-update.
+- **A2-2 Re-Aktivierung (verifiziert in `SPEC-AUDIT.md`)**: `protocol/sync/space-capability.ts` (`createSpaceCapabilityJws` / `verifySpaceCapabilityJws`) ist heute exportiert aber **nur in Tests konsumiert**. Der spec-normative Sync-005-Code muss in diesem Slice **produktiv konsumiert** werden — der Member-Update-Pfad geht über die Space-Capability-JWS. Slice-Akzeptanz: mindestens ein produktiver in-repo Konsument von `createSpaceCapabilityJws` oder `verifySpaceCapabilityJws` außerhalb der Tests.
 
 **1.B.3-sync-recovery** (Candidate #7)
 
@@ -200,6 +215,8 @@ Neuer Slice **1.B.2-verification-v2** schreibt den `verification-delivery-workfl
 - **Composition Root sauber halten**: `apps/demo/src/runtime/appRuntime.ts` als einzige Adapter-Wire-Stelle. `AdapterContext.tsx` entlasten — Recovery/Migration/Sync-Orchestrierung in Application-Use-Cases.
 - **ESLint-Regel**: `no-restricted-imports` für `@web_of_trust/core` außerhalb von `hooks/wot/` und `runtime/`.
 - Candidate **#9** (Demo runtime reset adapter): IndexedDB-Cleanup als expliziter Runtime-Reset-Adapter, nicht React-Provider-Verhalten.
+- **B2ack-2 (verifiziert in `SPEC-AUDIT.md`)**: `apps/demo/src/hooks/useProfileSync.ts:51` baut Legacy-`MessageEnvelope` ohne `ref` für `profile-update`-Notification. Migration auf Sync-003-konformen Envelope-Builder im Rahmen der Hooks-Konsolidierung.
+- **A2-1 Cross-Repo-Check vor Aufräum-Commit**: vor dem `AuthorizationAdapter`-Löschen `grep` in `wot-vault`, `wot-profiles`, `wot-agent-runner-prototype`, `runner-dashboard`, ggf. externen Konsumenten. Wenn 0 → in 1.D oder 1.F.N-Mini-Slice löschen. Wenn >0 → Konsumenten mitmigrieren oder Lösch-Entscheidung verschieben.
 
 ### 1.F — Spec-Conformance-Audit (Sessions ~2, Variante B)
 
@@ -406,7 +423,7 @@ Verboten: Spec-Lücke mit lokalem Workaround dauerhaft auflösen.
 15. **COVERAGE.md neu generieren oder weglassen**: mechanischer Generator aus `wot-spec/conformance/manifest.json` + Code-Lokationen, ODER entfernt mit Hinweis auf `IMPLEMENTATION-ARCHITECTURE.md` als Lage-Karte.
 16. **TDD-Spur pro Workflow nachweisbar**: für jeden neu geschriebenen oder verschobenen Workflow in 1.B existiert mindestens ein Application-Use-Case-Test, der commit-weise vor der Implementation liegt (Commit-History oder PR-Body weist die Reihenfolge aus). Adapter-Contract-Tests und Hook-Tests sind pro Workflow vorhanden. Reine Datei-Verschiebungen sind ausgenommen.
 17. **`src/crypto/` minimal mit Legacy-Doku**: nach 1.A.1+1.A.1.1+1.A.2 enthält das Verzeichnis ausschließlich `envelope-auth.ts` + `index.ts` mit dokumentierter Spec-Divergenz (Verweis auf [wot-spec#96](https://github.com/real-life-org/wot-spec/issues/96) und Sync 003 Z.343/410) und Phase-2-Sterbe-Marker. Vollständige Löschung erbt Phase 2 (Automerge-Stack-Refactor).
-18. **Spec-Conformance-Audit abgeschlossen** (§ 1.F): `docs/migration/SPEC-AUDIT.md` existiert mit vollständiger Diff-Liste, alle Drifts der Klassifikation `blocker` und `should-fix` sind in 1.F-Sub-Slices abgearbeitet, alle `minor`-Drifts haben eine dokumentierte Verortung (Phase 1.E oder Phase 2+).
+18. **Spec-Conformance-Audit abgeschlossen** (§ 1.F): `docs/migration/SPEC-AUDIT.md` existiert mit vollständiger Diff-Liste, alle Drifts der Klassifikation `blocker` und `should-fix` sind in 1.F-Sub-Slices abgearbeitet, alle `minor`-Drifts haben eine dokumentierte Verortung (Phase 1.E oder Phase 2+). Stand 2026-06-08 (Rebuild gegen `spec-vnext` @ `1e39f4d`): **A2-1, A2-2, B2ack-1 (5 Stellen), B2ack-2, B2ack-3** sind die offenen Befunde aus 1.F.0 und müssen vor DoD #18 adressiert sein (mit den im jeweiligen Sub-Slice genannten Schließungs-Kriterien).
 19. **Spec-Zitat-Block in jedem Code-Slice-PR**: rückwirkend nicht erzwingbar für 1.A/1.B-merges, aber alle Slices ab 1.B.3-B3.1 müssen den Spec-Zitat-Output-Kontrakt erfüllen (siehe § Spec-Lektüre-Verbindlichkeit).
 
 Plus Test/Build-Garantien:
@@ -426,16 +443,16 @@ Strategischer Stand 2026-06-08:
 
 | Woche | Sub-Phase | Spec-Anker |
 |---|---|---|
-| **W1 Tag 1-2** | Master-Plan-Patch (dieser PR) mergen, PR #173 schließen, alter B3.1-Worktree entsorgen, 1.F.0 Spot-Check 1.A.2 (capabilities-Verwendung) + 1.B.2-ack (`accepted`-Implementation) | — |
-| **W1 Tag 3-5** | **1.B.3-encrypted-sync**: `services/EncryptedSyncService.ts` löschen, `application/sync/encrypted-change-workflow.ts` neu | Sync 001 Z.87+103-105 + Sync 002 |
-| **W1 Tag 6-7** | **1.B.3-group-key**: `services/GroupKeyService.ts` löschen, `application/sync/group-key-workflow.ts` + `ports/key-management.ts` neu | Sync 005 Z.243-252 + §Verantwortlichkeitsgrenzen |
-| **W2 Tag 1-2** | **1.B.3-profile-service**: `services/ProfileService.ts` löschen, Funktionalität auf richtige Schichten verteilen | Sync 004 Z.20 + Z.153 |
-| **W2 Tag 3** | **1.B.2-verification-v2**: `verification-delivery-workflow` neu (ersetzt PR #173) | Sync 003 §Envelope + Trust 002 |
-| **W2 Tag 4** | **1.B.3-member-key-directory**: Member-Key-Directory neu (ersetzt verworfenen UltraCode-Slice) | Sync 005 §member-update |
-| **W2 Tag 5-6** | **1.B.3-sync-recovery** + **1.B.3-discovery-recovery** | Sync 004 §Recovery |
-| **W2 Tag 7** | **1.B.3-device-keys** + Application-Audit für Restschichten | Identity 004 |
-| **W3 Tag 1-2** | **Adapter-Audit + Lösch-/Neu-Schreib-Slices** für nicht-konforme Adapter | Sync 003 §Envelope + Sync 004 HTTP |
-| **W3 Tag 3-5** | **1.D Demo-Hooks** Migration auf neue Workflows + Issues [#154](https://github.com/real-life-org/web-of-trust/issues/154)/[#156](https://github.com/real-life-org/web-of-trust/issues/156) | — |
+| **W1 Tag 1-2** | PR #176 (Master-Plan-Patch + SPEC-AUDIT.md Rebuild) mergen, PR #173 schließen ✅, alter B3.1-Worktree entsorgen ✅, 1.F.0 Spot-Check 1.A.2 + 1.B.2-ack ✅ | — |
+| **W1 Tag 3 — W2 Tag 1** | **1.B.3-encrypted-sync** (~4-5 Tage wegen Yjs-Stack): `services/EncryptedSyncService.ts` löschen, `application/sync/encrypted-change-workflow.ts` neu, **~29 Call-Sites in 7 Files (Automerge + Yjs)** umhängen. Ggf. in zwei Sub-Slices `*-automerge` + `*-yjs` parallel | Sync 001 Z.87+103-105 + Sync 002 |
+| **W2 Tag 2-3** | **1.B.3-group-key**: `services/GroupKeyService.ts` löschen, `application/sync/group-key-workflow.ts` + `ports/key-management.ts` neu | Sync 005 Z.243-252 + §Verantwortlichkeitsgrenzen |
+| **W2 Tag 4** | **1.B.3-profile-service**: `services/ProfileService.ts` löschen, Funktionalität auf richtige Schichten verteilen | Sync 004 Z.20 + Z.153 |
+| **W2 Tag 5** | **B2ack-3 Klärung** (~30 Min) → **1.B.2-verification-v2**: `verification-delivery-workflow` neu (ersetzt PR #173, **5 Demo-Stellen umstellen**) | Sync 003 §Envelope + Trust 002 |
+| **W2 Tag 6** | **1.B.3-member-key-directory** (inkl. A2-2 Re-Aktivierung von `space-capability.ts`) | Sync 005 §member-update |
+| **W2 Tag 7 — W3 Tag 1** | **1.B.3-sync-recovery** + **1.B.3-discovery-recovery** | Sync 004 §Recovery |
+| **W3 Tag 2** | **1.B.3-device-keys** + Application-Audit für Restschichten | Identity 004 |
+| **W3 Tag 2-3** | **Adapter-Audit + Lösch-/Neu-Schreib-Slices** für nicht-konforme Adapter | Sync 003 §Envelope + Sync 004 HTTP |
+| **W3 Tag 3-5** | **1.D Demo-Hooks** Migration auf neue Workflows (inkl. **B2ack-2** useProfileSync.ts:51 + **A2-1 Cross-Repo-Check** vor Aufräum-Commit) + Issues [#154](https://github.com/real-life-org/web-of-trust/issues/154)/[#156](https://github.com/real-life-org/web-of-trust/issues/156) | — |
 | **W3 Tag 5-6** | **1.E Test-Migration** + [#165](https://github.com/real-life-org/web-of-trust/issues/165) | — |
 | **W3 Tag 6-7** | **1.C Standalone-Publikation** + [#162](https://github.com/real-life-org/web-of-trust/issues/162) NodeNext-Fix | — |
 
