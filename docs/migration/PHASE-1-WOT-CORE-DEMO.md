@@ -1,486 +1,164 @@
-# Phase 1: WoT Core + Demo — Master Plan
-
-> **Operational layer.** Konkrete Anleitung für die UltraCode-Sessions, die `@web_of_trust/core` zur Spec-konformen, stand-alone publizierbaren Referenzimplementierung machen und die Demo-App vollständig darauf migrieren. Architektonische und normative Anforderungen stehen in den referenzierten Dokumenten — dieses Dokument konsolidiert nicht, sondern verweist.
+# Phase 1: WoT Core + Demo — Sprint Plan
 
 ## Ziel
 
-Am Ende dieser Phase ist `@web_of_trust/core` eine **stand-alone publizierbare TypeScript-Bibliothek**, die eine zu 100% saubere Abbildung der WoT-Spec darstellt — ohne Legacy-Code, ohne implizite Architekturentscheidungen, mit klaren Schichten-Grenzen. Die Demo-App nutzt sie zu 100% über wiederverwendbare React-Hooks. Drittkonsumenten können das Paket nutzen ohne die Demo zu kennen.
+Am Ende dieser drei Wochen ist `@web_of_trust/core` eine stand-alone publizierbare TypeScript-Bibliothek, deren Verhalten jede normative Regel der WoT-Spec messbar erfüllt. Die Demo-App nutzt sie zu 100% über React-Hooks. Drittkonsumenten können das Paket installieren, ohne die Demo zu kennen.
 
-## Single Source of Truth (verbindliche Grundlagen)
+## Endzustand (Sprint-Erfolg)
 
-UltraCode darf von diesen Dokumenten nicht abweichen. **Bei Widersprüchen zwischen ihnen oder zum Status quo: Spec gewinnt, dann jüngeres Doc.**
-
-| Dokument | Rolle |
+| # | Was steht am Ende |
 |---|---|
-| `wot-spec/IMPLEMENTATION-ARCHITECTURE.md` | Layer-Regeln, Import-Regeln, Migrationsreihenfolge, DoD (7 Punkte) für TS-Umbau |
-| `wot-spec/ARCHITECTURE.md` | Arbeitsprinzipien (insb. Punkt 6: Implementierungsdetails dürfen Spec informieren, nicht ersetzen) |
-| `web-of-trust/docs/reference-implementation/README.md` | Authority Model ("Programm der Replacement"), Layer-Tabelle, 5-Punkte-Traceability-Block für PRs, Mapping zu Spec-Profilen |
-| `web-of-trust/docs/reference-implementation-refactor.md` | Vertical-Slices-Status, Composition Root, TDD-Strategie, Spec-Feedback-Rule |
-| `web-of-trust/docs/reference-implementation/legacy-boundary-map.md` | Modul-Klassifikation, **12-Punkte DoD = unser Phase-1-Abschluss-Kriterium**, Mixed-Boundary-Findings |
-| `web-of-trust/docs/reference-implementation/runtime-port-contract-map.md` | **9 Follow-Up Runner Task Candidates** als Detail-Backlog mit Prerequisites + Allowed Scope |
-| `web-of-trust/docs/reference-implementation/demo-consumer-map.md` | Demo-Flows mit Spec-Profil-Mapping, **Import-Debt-Inventory** (13 Stellen), Adapter-Capability-Requirements |
-| `web-of-trust/docs/wot-core-test-migration.md` | Test-Klassifikation (22 Files in Buckets) |
-| Normative `wot-spec/`: `01-wot-identity/`, `02-wot-trust/`, `03-wot-sync/`, `CONFORMANCE.md`, `conformance/manifest.json`, `test-vectors/` | Spec-Quelle der Wahrheit |
-| `wot-spec/decisions/0001-identity-seed-protection-conformance-bar.md` | ADR für Identity Seed Protection |
+| 1 | `services/*` (EncryptedSyncService, GroupKeyService, ProfileService) gelöscht; Funktionalität als Workflows in `application/*` |
+| 2 | `pnpm pack` produziert installierbares Tarball, `scripts/smoke-third-party-consumer.mjs` grün in CI, `exports`-Map sauber, README dokumentiert Subpaths |
+| 3 | Demo zu 100% über Hooks: ESLint-Regel verhindert direkte Core-Imports außerhalb von `hooks/wot/` und `runtime/` |
+| 4 | `pnpm --filter @web_of_trust/core test/typecheck/build` + `pnpm --filter demo test/build` + `npm run validate` in `wot-spec` grün |
+| 5 | `SPEC-AUDIT.md` ohne offene `blocker`-Drifts: A2-1, A2-2, B2ack-1 (5 Stellen), B2ack-2, B2ack-3 adressiert oder explizit nach Phase 2 verortet |
 
-## Status quo am 2026-06-08
+## Status (was schon erledigt ist)
 
-> Aktueller Spec-Conformance-Stand siehe **`docs/migration/SPEC-AUDIT.md`** (Rebuild 2026-06-08 gegen `spec-vnext` @ `1e39f4d`). Auflistung offener Drift-Befunde: A2-1, A2-2, B2ack-1 (5 Stellen), B2ack-2, B2ack-3. Verortung pro Slice in den `1.B.*`-Beschreibungen unten.
+| Sub-Phase | Status |
+|---|---|
+| 1.A.1, 1.A.1.1, 1.A.2 | ✅ gemerged (PR #153, #160, #163); 1.F.0 Spot-Check → A2-1, A2-2 in `SPEC-AUDIT.md` |
+| 1.B.1 (`wot-identity@0.1`) | ✅ gemerged (PR #158) |
+| 1.B.2-ack | ✅ gemerged (PR #166); 1.F.0 Spot-Check → B2ack-1, B2ack-2, B2ack-3 in `SPEC-AUDIT.md` |
+| 1.B.2-verification (PR #173) | ❌ verworfen wegen "behavior-preserving"-Anker; neu als 1.B.2-verification-v2 |
+| 1.F.0 Spot-Check | ✅ in `SPEC-AUDIT.md` (Rebuild 2026-06-08 gegen `spec-vnext` @ `1e39f4d`) |
+| Master-Plan-Patch + Audit-Rebuild | 🟡 PR #176 (dieses Dokument), bereit für Merge |
 
-### Doc-Konsistenz-Backlog (vor UltraCode-Sessions)
+## 3-Wochen-Sprint (wochengranular)
 
-Vor UltraCode-Sessions wird ein **separates Doc-Konsistenz-Update** die nachfolgenden Inkonsistenzen beheben (eigene PR, kein UltraCode):
+| Woche | Schwerpunkt | Spec-Anker |
+|---|---|---|
+| **W1** | `1.B.3-encrypted-sync` (~29 Call-Sites in Automerge + Yjs; ggf. zwei Sub-Slices parallel) | Sync 001 Z.87 + Z.103-105, Sync 002 |
+| **W2** | `1.B.3-group-key` → `1.B.3-profile-service` → `1.B.2-verification-v2` (5 Demo-Stellen, B2ack-3 vorgeklärt) → `1.B.3-member-key-directory` (inkl. A2-2-Re-Aktivierung) | Sync 003/004/005 + Trust 002 |
+| **W3** | `1.B.3-sync-recovery` + `1.B.3-discovery-recovery` + `1.B.3-device-keys` + Adapter-Audit → `1.D Demo-Hooks` (inkl. B2ack-2 + A2-1-Cross-Repo-Check) → `1.E Test-Migration` → `1.C Standalone-Publikation` | Sync 004 §Recovery + Identity 004 |
 
-- `IMPLEMENTATION-ARCHITECTURE.md` "Bekannte Abweichungen Punkt 2" (Ports in `adapters/interfaces/`) ist **erledigt** (0 Files dort, 16 in `src/ports/`).
-- `legacy-boundary-map.md` Z.28 referenziert `src/identity/WotIdentity.ts` — **Verzeichnis entfernt**, Legacy WotIdentity ist weg.
-- `runtime-port-contract-map.md` Z.58 + README.md Z.62 referenzieren `src/ports/SeedStorageAdapter.ts` — **existiert nicht**, vermutlich in `IdentitySeedVault` konsolidiert.
-- **Alle als "blocked / human-decision / pending clarification" markierten Items in den Docs sind aufgelöst.** Konkret:
-  - `runtime-port-contract-map.md` "Blocked Or Human-Decision Items": **7/7 aufgelöst** durch wot-spec-PRs (#13, #15, #22, #35, #48, #53, #56, #74) und durch Trust 001 Z.147 + CONFORMANCE Z.69 (attestation-ack klar non-existent).
-  - `legacy-boundary-map.md` "Ambiguous Items": **4/5 spec-aufgelöst** (capabilities/envelope-auth → Sync 003; ProfileService Boundary → Sync 004; CRDT Port-Contract → Sync 005 Z.173-175; wot-vault/wot-core-dist ist Build-Thema, kein Spec-Thema). Nur "Demo identity-change cleanup" bleibt — als bewusste Demo-Produkt-Entscheidung von Anton.
-  - `demo-consumer-map.md` "Open Questions": **4/4 spec-aufgelöst** (key-rotation naming → Sync 005 Z.243; invite/member-update validation → Sync 005 §Verantwortlichkeitsgrenzen; discovery recovery → Sync 004 Z.115-120; delivery receipts → Trust 001 Z.147).
-  
-  Die "open"-Markierungen in allen drei Docs sind **veraltet** und werden in der Doc-Konsistenz-PR auf "resolved" mit Spec-Referenz umgestellt.
-- `ROADMAP.md` vom 16.03. — strukturell veraltet, in dieser Doc-Konsistenz-PR mit Pointer zum Master-Plan versehen; vollständige Neuaufstellung nach Phase-1-Abschluss.
-- `CURRENT_IMPLEMENTATION.md` vom 12.05. — vermutlich teilweise veraltet, am Phase-1-Ende neu generieren.
+Parallelisierung erlaubt: file-isolierte 1.B.3-Sub-Slices können in mehreren Worktrees parallel laufen. 1.D + 1.E ebenfalls parallel.
 
-## Sub-Phasen
+Tag-Granularität ist bewusst weggelassen — Slice-Größen verschieben sich realistisch. Wochen-Schwerpunkte sind verbindlich.
 
-Jede Sub-Phase = eine UltraCode-Session (Worktree-isoliert, eigener PR, Output-Kontrakt fixiert vor Start).
+## Slice-Liste (kompakt)
 
-### 1.A.1 — Querschnitt-Konsolidierung ohne Crypto (Sessions ~1) — ✅ geliefert in PR #153
+| Slice | Löscht | Schreibt neu | Spec-Anker |
+|---|---|---|---|
+| `1.B.3-encrypted-sync` | `services/EncryptedSyncService.ts` | `application/sync/encrypted-change-workflow.ts` mit `encryptLogEntry` (deterministisch) + `encryptOneShot` (random) | Sync 001 Z.87, Z.103-105 |
+| `1.B.3-group-key` | `services/GroupKeyService.ts` | `application/sync/group-key-workflow.ts` + `ports/key-management.ts` | Sync 005 Z.243-252, §Verantwortlichkeitsgrenzen |
+| `1.B.3-profile-service` | `services/ProfileService.ts` | Funktionalität verteilt auf `application/discovery/*`, `application/identity/*`, `adapters/discovery/*` | Sync 004 Z.20, Z.153 |
+| `1.B.2-verification-v2` | PR-#173-Approach (5 Legacy-Envelope-Stellen mit `ref` in Demo) | `application/verification/*` aus Spec | Sync 003 §Envelope + Trust 002 |
+| `1.B.3-member-key-directory` | verworfener UltraCode-Worktree `phase-1/b3-sync-workflows` | Member-Update + Re-Aktivierung von `protocol/sync/space-capability.ts` (A2-2) | Sync 005 §member-update |
+| `1.B.3-sync-recovery` | — | Framework-freier State-Machine-Workflow | Sync 004 §Recovery, Z.115-120 |
+| `1.B.3-discovery-recovery` | — | Profile-JWS/DID-Verification + HTTP-Adapter | Sync 004 |
+| `1.B.3-device-keys` | — | Device-Key-Creation/Binding als Application-Use-Case | Identity 004 |
+| Adapter-Audit | nicht-konforme Wire-Formate | spec-konforme Adapter | Sync 003/004 |
+| `1.D Demo-Hooks` | direkte Core-Imports in Demo | Hook-basierte Migration (inkl. B2ack-2 `useProfileSync.ts:51`, A2-1-Cross-Repo-Check vor Aufräum-Commit) | — |
+| `1.E Test-Migration` | Legacy-Test-Verzeichnisse | Tests in `protocol`/`application`/`adapter`/`react`/`e2e`-Buckets | — |
+| `1.C Standalone-Publikation` | — | `exports`-Map finalisiert, Smoke-Test, README | — |
 
-Adressiert die **horizontalen** Punkte aus `IMPLEMENTATION-ARCHITECTURE.md#bekannte-abweichungen`, die nicht workflow-spezifisch sind und **nicht** am Crypto-Refactor hängen:
+Details pro Slice (Call-Sites, Konsumenten, Akzeptanz-Kriterien): siehe `SPEC-AUDIT.md` und Slice-PR-Body.
 
-- **Root-Export schichten**: `package.json` `exports`-Map mit klaren Subpath-Exports (`@web_of_trust/core/protocol`, `/application`, `/ports`, `/adapters/*`). Tree-shakeable.
-- **Browser-Adapter aus Core herauslösen**: `HttpDiscoveryAdapter`, `WebSocketMessagingAdapter`, IndexedDB-/LocalStorage-Adapter aus dem flachen Core-Root entfernen. Eigene Adapter-Entry-Points oder Sub-Pakete.
-- **Services klassifizieren + verschieben**: `GraphCacheService`, `VaultClient`, `VaultPushScheduler` nach `adapters/` verschieben (rein adapter-only). Die 4 verbleibenden Services (`AttestationDeliveryService`, `EncryptedSyncService`, `GroupKeyService`, `ProfileService`) bleiben mit `// PHASE-1.B.x: REMOVE` / `// CLASSIFY:`-Markern bis zu ihren jeweiligen 1.B-Slices.
-- Bezug: Candidate **#8** (Adapter entry-point cleanup) aus `runtime-port-contract-map.md`.
+---
 
-### 1.A.1.1 — `did.ts` Auflösung (Mini-Slice, Sessions ~0.5)
+## Variante B (Disziplin)
 
-Resolution-Plan aus [wot-spec#97](https://github.com/real-life-org/wot-spec/issues/97#issuecomment-4642708927):
+> **Variante B ist die einzige Methode für Workflow-/Service-Migration in Phase 1.** Sie ersetzt die früheren Begriffe "Refactor", "Move", "umformen". Drift wird durch Löschen + Neuschreiben aus Spec behoben, nicht durch Verhaltens-Konservierung.
 
-- `createDid`, `didToPublicKeyBytes` → ersatzlos löschen (existieren byte-identisch in `protocol/identity/did-key.ts`).
-- `isValidDid` → ersatzlos löschen (tot in wot-core).
-- `getDefaultDisplayName` → nach `application/identity/display-name.ts` verschieben (UX-Convention, kein normatives Protokoll).
-- Konsumenten umbiegen, `src/crypto/did.ts` löschen.
-- Demo-Inline-Fallback-Vereinheitlichung als separates Issue [#156](https://github.com/real-life-org/web-of-trust/issues/156) für 1.D.
+### Regel
 
-Voraussetzung: 1.B.1 PR muss gemerged sein (vermeidet File-Konflikte in `application/identity/`).
+> **Spec-konform implementieren. Alter Code wird nur konsultiert, um Konsumenten zu identifizieren — nicht um Verhalten abzulesen.**
 
-### 1.A.2 — Crypto-Cleanup + Legacy-Marker — ✅ gemerged in PR #163, ⚠️ Audit-Kandidat für 1.F.0
+Bei Konflikt zwischen alter Implementation und Spec-Konformität gewinnt die Spec. Ohne Ausnahme. Ohne Übergangs-Periode. Ohne "wir migrieren erst mal, später korrigieren wir".
 
-> **Variante-B-Audit-Pflicht**: Der Slice hatte Move-Charakter. Die `capabilities`/`AuthorizationAdapter`-Funktionalität wurde nach `application/authorization/` verschoben. 1.F.0 prüft, ob die jetzige Verwendung in Konsumenten (`adapters/vault/VaultClient.ts`, `adapters/authorization/InMemoryAuthorizationAdapter.ts`) spec-konform ist oder Legacy-Übernahme.
+### Verbotene Anker
 
-> **Status 2026-06-07**: Alle drei Spec-Issues [#95](https://github.com/real-life-org/wot-spec/issues/95) (capabilities), [#96](https://github.com/real-life-org/wot-spec/issues/96) (envelope-auth), [#97](https://github.com/real-life-org/wot-spec/issues/97) (did.ts) sind beantwortet. **Kein Spec-Gate mehr.**
+- "behavior-preserving" / "byte-for-byte" / "exact equivalence" als Refactor-Ziel
+- "Der alte Code macht das so, also vermutlich aus gutem Grund"
+- "Wir behalten das alte Verhalten erst mal um Tests grün zu halten"
+- "Demo Hook macht das so" / "CLI macht das so" als Workflow-Begründung
+- Optionsfragen zu Themen, die in der Spec eine MUSS/SOLL/DARF-NICHT-Regel haben
 
-Die ursprüngliche Annahme (Port-Injection-Refactor + komplette `src/crypto/`-Entfernung) entfällt nach Spec-Klärung:
+### Verfahren pro Slice
 
-- **#95 capabilities.ts**: Nicht normativ. Move nach `application/authorization/capabilities.ts`. `AuthorizationAdapter`-Port wandert mit, weil er rein an Capability-Typen hängt. `protocol -/-> protocol-adapters`-Verstoß löst sich automatisch (in `application/` ist Adapter-Nutzung erlaubt).
-- **#96 envelope-auth.ts**: Pipe-separiertes Top-Level-Signing widerspricht Sync 003 (Envelope = DIDComm-Plaintext, Authentizität via Inner-JWS im `body`). Legacy-Status. **Bleibt** in `src/crypto/` mit Legacy-Marker + Spec-Divergenz-Doku. Stirbt mit Automerge-Adapter-Stack-Refactor in Phase 2+.
-- **#97 did.ts**: in 1.A.1.1 verortet.
+1. **Spec-Section vollständig lesen.** Spec-Zitate (Datei:Zeile + Originaltext) für jede MUSS-Regel sammeln.
+2. **Konsumenten identifizieren** im alten Code via `grep`. Liste anlegen.
+3. **Neuen Code aus Spec-Zitaten schreiben.** Nicht aus altem Code abschreiben. Wenn man sich versucht zu erinnern "wie war es vorher": stoppen, Spec nochmal lesen.
+4. **Tests aus Spec-Test-Vektoren** (falls vorhanden) + Application-Use-Case-Tests gegen Fake-Ports.
+5. **Konsumenten umhängen** auf neue API. Konsumenten-Verhalten wird gegen eigene Spec-Domäne geprüft (Demo-UX, CLI-Output), nicht gegen alte Implementation.
+6. **Alte Datei löschen.** Re-Exports + `exports`-Map cleanup. Keine Bridge-Module, kein `@deprecated`-Anker, keine Shims.
 
-**Konkrete Sub-Tasks für 1.A.2**:
+### Wenn die Spec wirklich schweigt (selten)
 
-1. `crypto/capabilities.ts` + Typen → `application/authorization/capabilities.ts` (Move + Konsumenten umbiegen).
-2. `ports/AuthorizationAdapter.ts` → `application/authorization/AuthorizationService.ts` (Move; oder Name beibehalten als `AuthorizationAdapter` falls Refactor-Scope minimal halten gewünscht).
-3. `crypto/encoding.ts` klassifizieren — vermutlich `protocol/crypto/` falls Funktionalität dort fehlt, sonst Demo-internal.
-4. Legacy-Marker auf `crypto/envelope-auth.ts` + `types/messaging.MessageEnvelope` mit Spec-Divergenz-Doku + Phase-2-Verweis.
-5. `crypto/index.ts` auf das Minimum reduzieren (nur envelope-auth-Re-Exports).
-6. `types/messaging.MessageEnvelope` Legacy-Marker.
+1. Issue in `real-life-org/wot-spec` mit Label `spec-conformance`. Body: Spec-Stelle (Datei:Zeile), beobachtete Mehrdeutigkeit, 2-3 Resolution-Optionen mit Trade-offs.
+2. Im Code: temporäre Wahl + `// SPEC-UNKLAR: real-life-org/wot-spec#NN`-Kommentar.
+3. Im PR-Body: erzeugte Spec-Issues auflisten.
 
-**Endzustand `src/crypto/` nach 1.A.1 + 1.A.1.1 + 1.A.2**:
+Vor Issue-Erstellung muss dokumentiert sein: "Ich habe Section X.Y vollständig gelesen, suche nach Begriff Z, finde keine Aussage" mit `grep`-Output als Beleg. Verboten: Spec-Lücke mit lokalem Workaround dauerhaft auflösen.
 
-```text
-src/crypto/
-├── envelope-auth.ts    (Legacy-Marker + Spec-Divergenz-Doku, Phase-2-Sterben)
-├── index.ts            (nur envelope-auth-Re-Export)
-```
+---
 
-`./crypto`-Subpath in `exports`-Map bleibt zunächst (exportiert Legacy-MessageEnvelope-Operationen) mit `@deprecated`-Marker. Phase-2-Refactor des Automerge-Stacks entfernt finale Files.
+## PR-Pflichtbausteine (Checkliste)
 
-**Keine TDD-Verbindlichkeit** in 1.A.2 — reine Moves + Klassifikation + Marker.
+Jeder Slice-PR ab 1.B.3 enthält:
 
-### 1.B — Per-Workflow-Slices (Sessions ~3, nach Spec-Profil)
+- [ ] **Spec-Zitat-Block** im Body: pro Implementations-Entscheidung `Entscheidung / Spec-Zitat (wot-spec/datei:zeile) / Code-Anker (pfad:zeile)`. Leerer Block ist nur für reine Struktur-Slices erlaubt und muss explizit benannt werden.
+- [ ] **Konsumenten-Migration-Trace**: welche alten Call-Sites wurden auf welche neue API umgehängt.
+- [ ] **Doku-Sync**: für jeden umbenannten, verschobenen oder gelöschten Pfad/Symbol/Wert `grep` gegen `docs/CURRENT_IMPLEMENTATION.md`, `docs/architecture/`, `docs/reference-implementation/`, `docs/migration/`, `packages/wot-core/src/protocol/COVERAGE.md` (ab 1.C: README). Leere Liste = "gegrept, nichts gefunden", nicht "nicht gesucht".
+- [ ] **Test-First-Commits markiert**: pro neuem oder verschobenem Workflow mindestens ein Application-Use-Case-Test, der zeitlich vor der Implementation liegt.
+- [ ] **5-Punkte-Traceability-Block** (aus `reference-implementation/README.md`): Spec-Refs, Conformance-Profil, Implementation-Modul, Tests/Vektoren, Open Spec Questions.
+- [ ] **Bestätigung**: kein "behavior-preserving"-Anker verwendet; alter Code wurde nur für Konsumenten-Identifikation konsultiert.
 
-#### 1.B.1 — `wot-identity@0.1` (klein, größtenteils erledigt)
+Loop-Review-Should-Fix wegen Spec-Drift oder Doku-Drift gilt als vermeidbar. Findings werden im Folge-Commit gefixt, nicht im Folge-PR.
 
-- Candidate **#1** (Identity seed-vault contract hardening) — Legacy `SeedStorage` Direct-Internal-Source-Tests entfernen, `IdentityWorkflow` als alleiniger Recovery-Pfad, runtime-spezifische Non-Extractable-Handle-Doku.
-- ADR 0001 Drei-Layer-Bar respektieren.
+---
 
-#### 1.B.2 — `wot-trust@0.1` (in zwei Sub-Slices aufgeteilt)
+## TDD-Reihenfolge
 
-Während der Vorbereitung wurde klar: die zwei Candidates sind unterschiedlich groß und logisch unabhängig. Splitting hilft Review-Qualität und entkoppelt einen TDD-Refactor von einer surgical Entfernung.
+Verbindlich für 1.B.* und 1.D (reine Datei-Verschiebungen ausgenommen):
 
-##### 1.B.2-ack — `attestation-ack` entfernen (Candidate #4) — ✅ geliefert in PR #166, ⚠️ Audit-Kandidat für 1.F.0
-
-> **Variante-B-Audit-Pflicht**: Der Slice hat `attestation-ack` korrekt entfernt (nicht-spec-konform), aber `accepted` als Publish-Consent erhalten. 1.F.0 prüft, ob die Demo-`AttestationService`-Implementation des `accepted`-Flags wirklich spec-konformes Publish-Consent ist oder schmuggelt sie an irgendeiner Stelle Trust-Semantik mit. Plus: ist die `setAttestationAccepted(id, accepted)`-API auf der richtigen Schicht (App-Layer, nicht in Workflow)?
-
-Trust 001 Z.147 + `CONFORMANCE.md` Z.69 sagen explizit: `wot-trust@0.1` definiert KEIN `attestation-ack` und keine semantische Annahmebestätigung. Konkret entfernt:
-
-- Core `AttestationDeliveryService` (war Dead Code, 0 Real-Konsumenten)
-- Message-Type `attestation-ack`
-- `DeliveryStatus`-Wert `acknowledged`
-
-**Was bewusst BLEIBT** (Stop-Bedingung aus Implementation gegriffen, Anton-bestätigt):
-
-- **Sync 003 `ack/1.0` als Transport-Inbox-ACK** (Sync-Layer, normativ, getrennt vom Trust-Layer) — `DeliveryStatus: 'queued'/'sending'/'delivered'/'failed'` in Demo `AttestationService` plus Outbox/Retry/Receipt-Plumbing.
-- **`accepted`-Flag als Publish-Consent** (nicht Trust-Akzeptanz): `setAttestationAccepted(id, accepted)`, AttestationList-Toggle, AdapterContext-Upload-Gating, Automerge-Schema-Feld. Steuert ausschließlich, ob eine empfangene Attestation in das öffentliche Profil des Holders aufgenommen wird. Das ist die **"Profil-Veröffentlichung als sichtbares Holder-Feedback"** als Application-Workflow, keine Trust-Wire-Semantik. Spec-Anker: Trust 001 Z.147/Z.149 + `CONFORMANCE.md` Z.69 (kein `attestation-ack`), und [wot-spec#21](https://github.com/real-life-org/wot-spec/issues/21) (closed: Klassifikation delivery receipts vs. attestation-ack).
-
-> **Wichtige Klarstellung gegenüber älteren Plan-Versionen**: frühere Formulierungen wie "jede `accepted`-Modellierung wird entfernt" waren zu pauschal. `accepted` als Trust-Akzeptanzbestätigung (gibt es nicht) ≠ `accepted` als Publish-Consent (legitimes Produktfeature). Spec-Anker für die Trennung: Trust 001 Z.147/Z.149 + `CONFORMANCE.md` Z.69 + [wot-spec#21](https://github.com/real-life-org/wot-spec/issues/21)-Resolution.
-
-##### 1.B.2-verification — Verification-Delivery-Workflow (Candidate #3) — ❌ PR #173 verworfen, wird neu geschrieben
-
-> **Status 2026-06-08**: PR #173 wird **ohne Merge geschlossen**. Codex-Loop-Review hat zwei Drifts gefunden (siehe [#175](https://github.com/real-life-org/web-of-trust/issues/175)): `ref` im Envelope (Spec-Drift gegen Sync 003) und internes `try/catch` (Caller-Verhaltens-Konservierung als globale Default). Beide Drifts sind die Wurzel des "behavior-preserving"-Ankers — der gesamte Slice ist Legacy-Konservierung statt Spec-Implementation.
-
-Neuer Slice **1.B.2-verification-v2** schreibt den `verification-delivery-workflow` aus Spec:
-
-- **Spec-Anker**: Sync 003 §WoT Transport Envelope (Z.343-392 Felder-Tabelle) + Trust 002 §Verifikation (Envelope-Inhalt für Verification-Attestation).
-- **Methode**: § Methode für Workflow-/Service-Migration. Workflow wird aus Spec geschrieben, nicht aus altem Code abgeschaut. Konsumenten (Demo-Hook + CLI) werden auf die neue API umgehängt, entscheiden ihre Caller-Behandlung selbst.
-- **Spec-konforme Eigenschaften**: kein `ref` im Envelope (Spec kennt es nicht). Workflow propagiert Errors by default. Side-Effect-Sequencing (contact-add, profile-sync, persist) ist Caller-Entscheidung — Workflow ist die spec-getreue Envelope+Sign+Send-Operation.
-- **Konsumenten-Umhängung (B2ack-1, verifiziert in `SPEC-AUDIT.md`)**: **5 produktive Legacy-Envelope-Stellen mit `ref: createResourceRef('attestation', ...)`** in Demo müssen umgestellt werden. Slice-Akzeptanz nur wenn alle 5 weg sind:
-  - `apps/demo/src/services/AttestationService.ts:154` (retryAttestation)
-  - `apps/demo/src/services/AttestationService.ts:203` (createAttestation)
-  - `apps/demo/src/hooks/useVerification.ts:159` (confirmAndRespond)
-  - `apps/demo/src/hooks/useVerification.ts:209` (confirmIncoming)
-  - `apps/demo/src/hooks/useVerification.ts:272` (counterVerify)
-- **Vor-Klärung B2ack-3**: `DeliveryReceipt.status: 'accepted'` (in `packages/wot-core/src/types/messaging.ts:49`) ist wot-core API-Surface; Sync 003 §ack/1.0 definiert `accepted` aber nur als Inbox-Signal. Vor Slice-Start (~30 Min): Sync 003 Z.590ff lesen, entscheiden ob der neue Workflow `'accepted'` weiterträgt oder ob das Status-Mapping aufgehoben werden muss. Ergebnis in PR-Body als Spec-Anker-Block.
-- **TDD-Verbindlichkeit gilt**: Spec-Vektor-Test → Application-Use-Case-Test → Implementation → Adapter-Contract → Hook-Test.
-- **Closes** wot-spec#... falls neue Spec-Lücken auftauchen.
-
-#### 1.B.3 — `wot-sync@0.1` (Variante B: `services/*` ersatzlos löschen + neu schreiben aus Spec)
-
-> **Methodischer Hinweis 2026-06-08**: Frühere Plan-Formulierungen sprachen von "umformen / split / Move + neue Ports" für die drei `services/*`-Files. Das war Refactor-Sprache und hat zu der Drift geführt, die wir gerade auflösen. Variante B: **ersatzlos löschen, neu schreiben aus Spec.** Methode siehe § Methode für Workflow-/Service-Migration.
-
-**1.B.3-encrypted-sync** — `services/EncryptedSyncService.ts` löschen + neuer `application/sync/encrypted-change-workflow.ts`
-
-- **Spec-Anker**: Sync 001 Z.87 (deterministische Nonce für Log-Payloads) + Z.103-105 (Random-Nonce für Snapshots/Messaging/OneShots) + Sync 002 Log-Entry-Format + bestehende `protocol/sync/encryption.ts` und `protocol/sync/aes-gcm-frame.ts` als Vektor-validiertes Fundament.
-- **API**: `encryptLogEntry` (deterministisch, MUSS für Log-Payloads) + `encryptOneShot` (random, MUSS für alles andere). Getrennte Funktionen sind normativ (Sync 001 Z.87).
-- **Konsumenten (verifiziert in `SPEC-AUDIT.md`)**: **~29 produktive Call-Sites über 7 Files in beiden Adapter-Stacks** — Automerge (4 Files, ~13 Calls) UND Yjs (3 Files, ~16 Calls). Plus Benchmark in wot-core (separat). Jede Call-Site wird klassifiziert: Log-Payload → `encryptLogEntry`, Snapshot/Messaging/OneShot → `encryptOneShot`. Bei Unsicherheit → `encryptOneShot` (sicher per Random-Nonce).
-- **Größe**: Mindestens doppelt so groß wie ursprünglich (14→29 Calls). Slice-Optionen:
-  - **Option a)** EIN Slice mit beiden Stacks, ~4-5 Tage realistisch.
-  - **Option b)** Zwei Sub-Slices `1.B.3-encrypted-sync-automerge` + `1.B.3-encrypted-sync-yjs`, je ~2-3 Tage. Empfohlen wenn Worktree-Parallelisierung mit zweitem UltraCode-Run möglich ist.
-- **Schließt** wot-spec#82 (closed via #83) und obsoletes web-of-trust PR #144.
-
-**1.B.3-group-key** — `services/GroupKeyService.ts` löschen + neuer `application/sync/group-key-workflow.ts` + `ports/key-management.ts`
-
-- **Spec-Anker**: Sync 005 Z.173-175 (Protocol/Application/Adapter-Tripartition) + Z.243-252 (key-rotation als Application-Workflow) + §Verantwortlichkeitsgrenzen + §member-update.
-- **Neue Ports**: `KeyManagementPort` für durable Pending-Rotation-Store. Adapter-Implementation in Yjs/Automerge.
-- **Konsumenten**: CRDT-Adapter (Yjs/Automerge) importieren über Port, nicht direkt.
-
-**1.B.3-profile-service** — `services/ProfileService.ts` löschen, Funktionalität auf richtige Schichten verteilen
-
-- **Spec-Anker**: Sync 004 Z.20 + Z.153 (Profile Service als optionaler externer Dienst, `didDocument` ist kanonische Quelle).
-- **Funktionale Aufteilung**:
-  - Profile-JWS-Verify-Logik → `application/discovery/profile-verify-workflow.ts` aus Sync 004.
-  - Profile-Doc-Construction → `application/identity/profile-doc-builder.ts` (falls dort sinnvoll), oder direkt in Demo-Code wenn nur dort genutzt.
-  - HTTP-Concerns → `adapters/discovery/HttpDiscoveryAdapter.ts` (existiert, ggf. erweitern).
-- **Konsumenten**: Demo, CLI, `wot-profiles` Server-Paket.
-
-**1.B.3-member-key-directory** (Candidate #5)
-
-- **Spec-Anker**: Sync 005 §member-update + DID-Resolution-Pfad + Sync 003 §Capability-JWS.
-- **Status**: UltraCode hatte einen Slice (`phase-1/b3-sync-workflows`) angefangen aber nicht gepusht. Da auch der vor der Spec-Rigor-Regel entstand, wird er als Variante-B-Slice neu geschrieben — alter Worktree gelöscht, neuer Slice aus Sync 005 §member-update.
-- **A2-2 Re-Aktivierung (verifiziert in `SPEC-AUDIT.md`)**: `protocol/sync/space-capability.ts` (`createSpaceCapabilityJws` / `verifySpaceCapabilityJws`) ist heute exportiert aber **nur in Tests konsumiert**. Der spec-normative Sync-005-Code muss in diesem Slice **produktiv konsumiert** werden — der Member-Update-Pfad geht über die Space-Capability-JWS. Slice-Akzeptanz: mindestens ein produktiver in-repo Konsument von `createSpaceCapabilityJws` oder `verifySpaceCapabilityJws` außerhalb der Tests.
-
-**1.B.3-sync-recovery** (Candidate #7)
-
-- **Spec-Anker**: Sync 004 §Recovery + Z.115-120.
-- Framework-freier State-Machine-Workflow.
-
-**1.B.3-discovery-recovery** (Candidate #2)
-
-- **Spec-Anker**: Sync 004.
-- Profile-JWS/DID-Verification-Authority in `protocol/`/`application/`, HTTP in `adapters/discovery/`.
-
-**1.B.3-device-keys** (Slice 5 aus `refactor.md`)
-
-- **Spec-Anker**: Identity 004 (Device-Key-Delegation) + `protocol/identity/device-key-binding.ts` (vektor-validiert).
-- Device-Key-Creation/Binding als Application-Use-Case.
-
-**Endzustand `services/*` nach 1.B.3**: leer oder gelöscht.
-
-### 1.C — Standalone-Publikation (Sessions ~1)
-
-- `package.json` `exports`-Map (knüpft an 1.A an, hier wird die Publish-Schnittstelle finalisiert).
-- `pnpm pack` produziert installierbares Tarball.
-- `scripts/smoke-third-party-consumer.mjs`: minimales Node-Snippet das nur `@web_of_trust/core/protocol` importiert, in CI grün.
-- `README.md` von `@web_of_trust/core` mit öffentlichen Subpaths + "How to consume"-Beispiel.
-
-### 1.D — Demo-Hooks-Konsolidierung (Sessions ~1-2)
-
-- **Import-Debt-Inventory abarbeiten**: die 13 Stellen aus `demo-consumer-map.md` über Application-Workflows / Ports lösen.
-- **60 noch nicht migrierte Demo-Files** auf wot-core via Hooks umstellen (heute 34/94 = 36%, Ziel 100%).
-- **Hook-Inventar konsolidieren**: 16 existierende Hooks reviewen, Doppelungen zusammenführen, App-agnostische Signaturen.
-- **Composition Root sauber halten**: `apps/demo/src/runtime/appRuntime.ts` als einzige Adapter-Wire-Stelle. `AdapterContext.tsx` entlasten — Recovery/Migration/Sync-Orchestrierung in Application-Use-Cases.
-- **ESLint-Regel**: `no-restricted-imports` für `@web_of_trust/core` außerhalb von `hooks/wot/` und `runtime/`.
-- Candidate **#9** (Demo runtime reset adapter): IndexedDB-Cleanup als expliziter Runtime-Reset-Adapter, nicht React-Provider-Verhalten.
-- **B2ack-2 (verifiziert in `SPEC-AUDIT.md`)**: `apps/demo/src/hooks/useProfileSync.ts:51` baut Legacy-`MessageEnvelope` ohne `ref` für `profile-update`-Notification. Migration auf Sync-003-konformen Envelope-Builder im Rahmen der Hooks-Konsolidierung.
-- **A2-1 Cross-Repo-Check vor Aufräum-Commit**: vor dem `AuthorizationAdapter`-Löschen `grep` in `wot-vault`, `wot-profiles`, `wot-agent-runner-prototype`, `runner-dashboard`, ggf. externen Konsumenten. Wenn 0 → in 1.D oder 1.F.N-Mini-Slice löschen. Wenn >0 → Konsumenten mitmigrieren oder Lösch-Entscheidung verschieben.
-
-### 1.F — Spec-Conformance-Audit (Sessions ~2, Variante B)
-
-> **Hinzugefügt 2026-06-07, refined 2026-06-08 für Variante B**: Phase 1 hat bisher primär Architektur repariert (Schichten, Imports, Re-Exports), aber **Spec-Konformität nicht systematisch hergestellt**. Punktuell, wo es aufgefallen ist (z.B. `attestation-ack`-Entfernung in 1.B.2-ack), aber nicht systematisch durchgegangen.
->
-> **Variante-B-Methode**: Der Audit identifiziert Drift. Drift-Behebung ist immer **"Code löschen + spec-zuerst neu schreiben"** — niemals "Refactor zur Drift-Korrektur". Audit produziert eine Klassifikations-Liste, kein Fix-Plan im Refactor-Sinne.
-
-**Mission**: jede normative Spec-Section systematisch gegen den aktuellen Code-Stand auditieren. Output: Diff-Liste, klassifiziert nach Schwere und Slice-Verortung. Drift-tragende Code-Bereiche werden in 1.B.3-Sub-Slices oder eigenen 1.F.N-Slices **ersatzlos gelöscht und neu geschrieben**, nicht "korrigiert".
-
-**Pflicht-Audit-Locations** (gegen `wot-spec/` Quelldateien):
-
-```text
-wot-spec/01-wot-identity/001..004.md
-wot-spec/02-wot-trust/001..002.md
-wot-spec/03-wot-sync/001..006.md
-wot-spec/CONFORMANCE.md
-wot-spec/decisions/0001-identity-seed-protection-conformance-bar.md
-wot-spec/test-vectors/phase-1-interop.json
-```
-
-**Audit-Methodik pro Spec-Section**:
-
-1. Section vollständig lesen, MUSS-/SOLL-/DARF-NICHT-Regeln extrahieren.
-2. Für jede Regel: zugehörige Code-Stelle(n) finden (grep nach Schlüsselbegriffen, Funktionsnamen, Wire-Formaten).
-3. Klassifizieren:
-   - **konform** (Regel ist im Code umgesetzt, Test-Vektor grün)
-   - **drift** (Code weicht ab — Schwere: blocker / should-fix / minor)
-   - **fehlt** (Regel ist im Code nicht abgedeckt)
-   - **n/a** (Regel betrifft anderen Layer / Phase 2+)
-4. Eintrag in Audit-Diff-Liste mit: Spec-Zitat, Code-Stelle, Klassifikation, Begründung, Slice-Verortung.
-
-**Retroaktiver Sub-Task — vor systematischem Audit**:
-
-Die bereits gemergten Slices (1.A.1, 1.A.1.1, 1.A.2, 1.B.1, 1.B.2-ack) werden retroaktiv geprüft. Nicht "war der Refactor strukturell sauber" — das wurde geprüft —, sondern: **ist der Code in dem Bereich, den der Refactor berührt hat, jetzt spec-konform**. Bereiche mit Drift gehen direkt in den 1.F-Backlog mit Slice-Verortungs-Vorschlag.
-
-**Audit-Output-Artefakt**: `docs/migration/SPEC-AUDIT.md` mit der vollständigen Diff-Liste. Drift-tragende Code-Bereiche werden entweder direkt in 1.B.3-Sub-Slices (für `services/*`, `application/sync/*`) oder in eigenen 1.F.N-Slices **gelöscht + neu geschrieben** aus Spec.
-
-**Voraussetzung für 1.D**: 1.F-Audit-Diff-Liste muss existieren und alle Drift-Befunde in `application/*` und `adapters/*` müssen über Sub-Slices spec-konform neu geschrieben sein. Demo-Hooks dürfen erst migriert werden, wenn die Workflows tatsächlich spec-konform sind.
-
-**Voraussetzung für 1.C**: alle Drift-Befunde der Klassifikation `blocker` müssen über neu geschriebene Sub-Slices ersetzt sein. Standalone-Publikation darf keine spec-nicht-konforme Implementation als Referenz veröffentlichen.
-
-**Audit-Fokus bei Variante B**: Da `services/*` bereits klar als Löschen-+-Neu-Schreiben in 1.B.3-Sub-Slices verortet ist, konzentriert sich der Audit auf:
-
-- `application/{attestations,verification-workflow,authorization,spaces}` — wurden sie spec-zuerst entwickelt oder migriert?
-- `adapters/{messaging,discovery,replication,storage}` — sind die Wire-Formate (Envelope, Profile, Capability) Sync-konform?
-- `types/{messaging,attestation,...}` — sind die Typen aus Spec abgeleitet oder ad-hoc gewachsen?
-- `ports/*` — sind die Interfaces sauber, oder erzwingen sie Legacy-Patterns?
-
-**Realistische Größenordnung**: 1-2 Sessions Audit (parallelisierbar pro Spec-Familie) plus die nachfolgenden Lösch-+-Neu-Schreib-Slices.
-
-### 1.E — Test-Migration (Sessions ~1)
-
-- Nach `wot-core-test-migration.md`-Klassifikation jeden Test in seinen Bucket (`protocol` / `application` / `adapter` / `react` / `e2e`) bringen.
-- **Migrations-Regel**: keine Legacy-Test-Löschung ohne äquivalenten Ersatz auf der korrekten Schicht.
-- Endergebnis: keine Tests mehr in legacy-Verzeichnissen oder gemischten Buckets. Tests in `apps/demo/` analog klassifiziert.
-- Kann parallel zu 1.D laufen.
-
-## Anti-Pattern "behavior-preserving" (HÖCHSTE Priorität)
-
-> **Anlass (2026-06-08)**: Wiederholte Drift-Befunde in Slice-PRs zeigen einen gemeinsamen Anker — "byte-for-byte / behavior-preserving" als Refactor-Ziel. PR #173 ist das deutlichste Beispiel: der `verification-delivery-workflow` hat `ref` im Envelope (Spec-Drift gegen Sync 003) und ein internes `try/catch` (Caller-Verhaltens-Konservierung) als globale Default kodifiziert, weil der alte Demo-Code es so machte. Das ist nicht Refactor — das ist Legacy-Konservierung.
-
-**Refactors mit dem Anker "byte-for-byte / behavior-preserving / equivalent" sind in der Referenzimplementierung verboten.** Sie konservieren Drift statt sie aufzulösen.
-
-Der einzige zulässige Anker für jede Workflow-/Adapter-Migration ist:
-
-> **"Spec-konform implementieren. Alter Code wird nur konsultiert, um Konsumenten zu identifizieren — nicht um Verhalten abzulesen."**
-
-Wenn alte Implementation und Spec-Konformität sich unterscheiden, gewinnt die Spec. Immer. Ohne Ausnahme. Ohne Übergangs-Periode. Ohne "wir migrieren erst mal, später korrigieren wir".
-
-**Operative Konsequenzen:**
-
-- PR-Body darf das Wort "behavior-preserving" / "byte-for-byte" / "exact equivalence" NICHT enthalten. Ein PR der das behauptet, ist gegen diese Regel und wird zurückgewiesen.
-- Tests die "alte Behavior" festschreiben sind nur erlaubt, wenn die alte Behavior nachweislich spec-konform ist (über Spec-Zitat im Test-Kommentar).
-- Bei Konflikt zwischen "alter Test grün halten" und "neuer Spec-konformer Implementation" gewinnt die Spec. Der alte Test wird umgeschrieben oder gelöscht, mit Begründung im Commit-Body.
-- "Demo Hook macht das so" / "CLI macht das so" sind keine Begründungen für Workflow-Verhalten. Was Demo + CLI tun, ist Application-Layer-Entscheidung. Was der Workflow tut, ist Spec-Implementation.
-
-Loop-Review-Should-Fix wegen "behavior-preserving"-Ankerung ist genauso schwerwiegend wie Spec-Drift selbst — beides untergräbt die Referenzimplementierungs-Behauptung.
-
-## Methode für Workflow-/Service-Migration (Variante B)
-
-> **Strategische Entscheidung 2026-06-08**: Nach Befund "Phase 1 hat strukturell saubergemacht aber Spec-Konformität nicht systematisch hergestellt" wurde Variante B festgelegt:
->
-> - `protocol/` bleibt — gegen Test-Vektoren validiertes Fundament.
-> - `services/*` wird **ersatzlos gelöscht**, nicht "umstrukturiert" oder "verschoben". Konkret betroffen: `EncryptedSyncService`, `GroupKeyService`, `ProfileService` (3 Files).
-> - `application/*` Workflows die unter Verdacht stehen (1.B.2-verification, ggf. capabilities-Verwendung aus 1.A.2 und `accepted`-Implementation aus 1.B.2-ack) werden **neu geschrieben aus Spec**, nicht "refaktoriert".
-> - `adapters/*` werden gegen Spec-Wire-Format auditiert, nicht-konforme Adapter neu geschrieben.
-> - Demo + CLI sind Konsumenten der neuen Lib, keine Verhaltens-Vorlagen.
-
-**Methode pro Workflow-/Service-Neuschreibung:**
-
-1. **Spec-Section vollständig lesen.** Spec-Zitat-Block sammeln (Datei:Zeile + Originaltext) für jede MUSS-/SOLL-/DARF-NICHT-Regel.
-2. **Alte Datei nur kurz öffnen, um Konsumenten zu identifizieren.** Wer ruft `services/X.ts` aus Demo / CLI / Adapters? Liste anlegen.
-3. **Neue Datei schreiben aus den Spec-Zitaten.** Nicht aus der alten Datei abschreiben. Wenn man sich versucht zu erinnern "wie war es vorher" — stoppen, Spec nochmal lesen.
-4. **Tests schreiben aus Spec-Test-Vektoren** (falls vorhanden) + Application-Use-Case-Tests gegen Fake-Ports. Nicht aus alten Tests übernehmen.
-5. **Konsumenten umhängen** auf neue API. Konsumenten-Verhalten wird gegen ihre eigene Spec-Domäne (Demo-UX, CLI-Output) geprüft, nicht gegen ihre alte Implementation.
-6. **Alte Datei löschen.** Re-Exports löschen. `exports`-Map cleanup. Keine Bridge-Module.
-7. **PR-Body** enthält Spec-Zitat-Block + Konsumenten-Migration-Trace + explizite Bestätigung "keine behavior-preserving-Anker verwendet, alter Code wurde nur für Konsumenten-Identifikation konsultiert".
-
-**Anti-Verfahren (verboten):**
-
-- "Lass mich erst den Code refaktorieren, dann später spec-konform machen" — niemals. Beides passiert in einem Slice oder gar nicht.
-- "Der alte Code macht das so, also vermutlich aus gutem Grund" — niemals. Der Grund ist Code-Historie, nicht Spec-Konformität.
-- "Wir behalten das alte Verhalten erst mal um Tests grün zu halten" — niemals. Test ist Spec-Bezeugung, nicht Verhaltens-Konservierung.
-
-## Spec-Lektüre-Verbindlichkeit (HÖCHSTE Priorität)
-
-> **Anlass (2026-06-07)**: 1.B.3-Session-Befund zeigte: weder UltraCode noch Reviewer haben Sync 001 vollständig gelesen, obwohl die Frage (Nonce-Konstruktion für CRDT-Change-Crypto) dort normativ geklärt ist (Sync 001 Z.87 + Z.103-105, fixiert durch wot-spec PR #83). Statt die Klärung anzuwenden, wurde eine Optionsfrage formuliert ("Random behalten oder migrieren?") — auf einer Spec-Section, die keine Optionen hat, sondern MUSS-Regeln. Das ist die Wurzel jeder vermeidbaren Spec-Drift in Phase 1.
-
-**Die Spec ist die normative Vorlage für die Referenzimplementierung. Nicht der bestehende Code.** Für jede Slice-Session und jede Implementations-Entscheidung gilt:
-
-1. **Erst Spec lesen, dann implementieren.** Die in den verbindlichen Grundlagen aufgelisteten Spec-Files sind nicht "zur Orientierung", sondern verbindliche Anker. Für jede Sub-Task MUSS UltraCode die relevante Spec-Section vollständig lesen und das normative Zitat (Datei + Zeile + Originaltext) sammeln, **bevor** Code geschrieben wird oder eine Optionsfrage formuliert wird.
-
-2. **Verboten: Optionsfragen zu normativ geklärten Themen.** Wenn die Spec MUSS-/SOLL-/DARF-NICHT-Regeln zur Frage enthält, gibt es keine Optionen — nur "wie wendet die Implementation die Regel an". Optionsfragen unter dieser Bedingung sind ein vermeidbarer Fehler (analog zur Doku-Sync-Should-Fix-Klassifikation).
-
-3. **Verboten: Code-zuerst-Logik.** UltraCode darf nicht aus dem bestehenden Code rückwärts inferieren ("der Code macht X, also vermutlich richtig"). Der Code ist historisch ohne Spec entstanden (Memory: "Spec wurde NACH beiden Impls geschrieben") — er ist Audit-Subjekt, nicht Vorlage.
-
-4. **Spec-Zitat-Output-Kontrakt**: PR-Body bekommt einen Pflicht-Block **"Spec-Anker pro Implementations-Entscheidung"**. Format pro Entscheidung:
-   ```
-   Entscheidung: <kurze Beschreibung>
-   Spec-Zitat: wot-spec/<datei>:<zeile> — "<Originaltext>"
-   Code-Anker: <pfad>:<zeile> — <was die Stelle tut>
-   ```
-   Leerer Block bedeutet: keine spec-relevanten Entscheidungen im Slice. Das ist erlaubt für reine Struktur-Slices, aber muss explizit benannt werden.
-
-5. **Spec-Härtung-Loop bleibt nur für ECHTE Lücken**: ein Spec-Issue wird nur erstellt, wenn die Spec wirklich nicht spricht — nicht als Default-Reaktion auf Unsicherheit. Vor Issue-Erstellung MUSS UltraCode dokumentieren: "Ich habe Section X.Y vollständig gelesen, suche nach Begriff Z, finde keine Aussage" mit grep-Output als Beleg.
-
-6. **Doppel-Audit-Verfahren**: Vor PR-Open prüft UltraCode den eigenen Code gegen den Spec-Zitat-Block. Nach PR-Open prüft Loop-Review die Spec-Zitate ebenfalls. Beide stellen sicher, dass die Implementation tatsächlich aus dem Zitat abgeleitet ist und nicht aus Code-Patterns.
-
-Loop-Review-Should-Fix wegen Spec-Drift ist die schwerwiegendste Klassifikation — schwerer als Doku-Drift, weil sie die Referenzimplementierungs-Behauptung selbst untergräbt.
-
-## TDD-Verbindlichkeit
-
-Quelle: `reference-implementation-refactor.md#tdd-strategy`. **Verbindlich** für jede Sub-Phase mit neuer oder verschobener Workflow-Logik (1.B.* und alle 1.D-Hooks). Reine Datei-Verschiebungen ohne Verhaltensänderung sind ausgenommen.
-
-Reihenfolge pro Workflow-Slice:
-
-1. **Protocol-Vektor-Test** (rot oder grün laden) — direkt gegen `wot-spec/test-vectors/`. Falls ein nötiger Vektor fehlt: Spec-Issue (siehe Spec-Härtung-Loop) und temporär lokale Fixture mit `// SPEC-UNKLAR:`-Kommentar.
-2. **Application-Use-Case-Test mit Fake-Ports** (rot). In-Memory-Stores, fixe Clocks, deterministische RNG. Testet das Produktverhalten, nicht die UI.
+1. **Protocol-Vektor-Test** gegen `wot-spec/test-vectors/` (rot oder grün laden).
+2. **Application-Use-Case-Test** mit Fake-Ports (rot). In-Memory-Stores, fixe Clocks, deterministische RNG.
 3. **Workflow implementieren** bis (2) grün ist.
-4. **Adapter-Contract-Test** (gegen den neuen Port). Gleicher Contract läuft gegen In-Memory- und reale Adapter.
+4. **Adapter-Contract-Test** gegen den neuen Port. Gleicher Contract läuft gegen In-Memory- und reale Adapter.
 5. **React-Hook-Test** (State-Transitions, Error-Handling). Keine Crypto-Wiederholung im Hook.
 6. **Refactor** bei grünen Tests.
 
-Operative Konsequenzen:
+Test schwer zu schreiben = Spec-Lücke oder Architektur-Frage. Sofort Issue, kein "ich denk's mir aus".
 
-- **Test-zuerst-Commits sind erlaubt und erwünscht** (PR-Body weist sie aus). UltraCode darf einen failing-test-Commit pushen, bevor die Implementation folgt.
-- **Wenn ein Test schwer zu schreiben ist** (unklare Erwartung, unklarer Port-Vertrag): Spec-Lücke oder Architektur-Frage → sofort Issue, kein "ich denk's mir aus".
-- **Existierende Tests werden nach `wot-core-test-migration.md` in Buckets klassifiziert** — neue Tests landen direkt im richtigen Bucket, nicht in legacy-Verzeichnissen.
-- **Keine Schreib-und-dann-Test-Sprints**: UltraCode darf nicht erst die ganze Workflow-Klasse implementieren und am Ende Tests nachziehen. Pro Use-Case ein Test-First-Loop.
+---
 
-## Doku-Sync-Verbindlichkeit
+## Definition of Done
 
-> **Anlass**: drei aufeinanderfolgende Slice-PRs (1.A.1.1/#160, 1.A.2/#163, 1.B.2-ack/#166) bekamen Loop-Review-Should-Fix-Findings wegen veralteter Doku-Referenzen — jeweils mit Folge-Commit nachgepflegt. Das Pattern ist vermeidbar.
+1. **`services/*` leer oder gelöscht** (EncryptedSyncService, GroupKeyService, ProfileService).
+2. **Standalone-Publikation funktioniert**: `pnpm pack` Tarball, Smoke-Test grün in CI, `exports`-Map dokumentiert.
+3. **Demo zu 100% via Hooks**: ESLint-Regel aktiv, 0 direkte Core-Imports außerhalb `hooks/wot/` + `runtime/`.
+4. **Test-Suite grün**: `pnpm --filter @web_of_trust/core test/typecheck/build` + `pnpm --filter demo test/build` + `npm run validate` in `wot-spec`.
+5. **TDD-Spur pro Workflow nachweisbar** in Commit-History oder PR-Body.
+6. **`src/crypto/` minimal**: nur `envelope-auth.ts` + `index.ts` mit Spec-Divergenz-Doku (Verweis auf [wot-spec#96](https://github.com/real-life-org/wot-spec/issues/96) und Sync 003 Z.343/410) + Phase-2-Sterbe-Marker. Vollständige Löschung erbt Phase 2.
+7. **`SPEC-AUDIT.md` ohne offene `blocker`-Drifts**: A2-1, A2-2, B2ack-1 (5 Stellen), B2ack-2, B2ack-3 adressiert oder explizit nach Phase 2 verortet.
+8. **Spec-Zitat-Block in jedem Code-Slice-PR ab 1.B.3** (rückwirkend nicht erzwingbar für 1.A/1.B.1/1.B.2-ack).
 
-**Verbindlich für jede Slice-Session**: Vor PR-Open MUSS jedes umbenannte, verschobene oder gelöschte Modul/Symbol/Path gegen die folgenden Doku-Locations gegrept werden. Veraltete Referenzen sind entweder zu aktualisieren (wenn sie aktuellen Stand behaupten) oder als historisch zu markieren (mit Slice-Verweis, z.B. "removed in 1.A.1.1", "moved in 1.A.2").
-
-**Pflicht-Grep-Locations**:
-
-```text
-docs/CURRENT_IMPLEMENTATION.md
-docs/GLOSSARY.md
-docs/ROADMAP.md
-docs/architecture/**.md
-docs/flows/**.md
-docs/security/**.md
-docs/reference-implementation/**.md
-docs/migration/**.md
-packages/wot-core/src/protocol/COVERAGE.md
-packages/wot-core/README.md   # ab Slice 1.C
-```
-
-**Was zählt als zu prüfender Change** (Beispiele):
-
-- Datei verschoben/umbenannt → grep alten Pfad in allen Pflicht-Locations.
-- Funktion/Klasse/Type gelöscht → grep Namen.
-- Status-/Enum-Wert entfernt (z.B. `acknowledged`) → grep den Wert.
-- Modul als `@deprecated` markiert → grep Modul-Namen, ergänze Deprecation-Hinweis in jeder aktuellen Erwähnung.
-
-**Was nicht aufgeräumt werden muss**:
-
-- Historische Migrations-Dokus (`docs/concepts/wot-rust-migration.md` etc.) die explizit damalige Zustände beschreiben — bleiben unverändert.
-- Spec-Files (`wot-spec/`) — andere Repo-Verantwortung.
-
-**Output-Kontrakt-Erweiterung**: PR-Body listet die durchgeführten Doku-Sync-Updates als eigenen Block (analog zur 5-Punkte-Traceability). Leerer Block bedeutet: nichts gefunden bei systematischer Grep-Suche, nicht: nicht gesucht.
-
-**Loop-Review-Should-Fix wegen Doku-Drift gilt als vermeidbarer Fehler.** Aktuell aufgelaufene Folge-Commits (`32a9f62` nach PR #160, `20300ac` nach PR #163, `d7adc14` + `ebe8a95` nach PR #166) dokumentieren den Workflow; sollten in zukünftigen Slices nicht mehr nötig sein.
-
-## Spec-Härtung-Loop
-
-`reference-implementation-refactor.md#spec-feedback-rule` gilt verbindlich. Wenn UltraCode auf Spec-Unklarheit stößt:
-
-1. **Sofort Issue in `real-life-org/wot-spec`** mit Label `spec-conformance` / `architecture-decision`. Body: Spec-Stelle (Datei:Zeile), beobachtete Mehrdeutigkeit, 2-3 Resolution-Optionen mit Trade-offs.
-2. **Im Code temporäre Wahl** + Kommentar `// SPEC-UNKLAR: real-life-org/wot-spec#NN` direkt an der Stelle.
-3. **Im PR-Body** alle erzeugten Spec-Issues als Liste auflisten — als sichtbarer Spec-Härtungs-Output.
-
-Verboten: Spec-Lücke mit lokalem Workaround dauerhaft auflösen.
-
-## Phase-1 Definition of Done
-
-**Verbindlich = 12-Punkte aus `legacy-boundary-map.md#legacy-purge-completion-criteria`**, ergänzt um drei Anforderungen aus der heutigen Diskussion:
-
-13. **Standalone-Publikation**: `scripts/smoke-third-party-consumer.mjs` läuft grün in CI, `package.json` hat `exports`-Map, `README.md` dokumentiert Subpaths.
-14. **Demo zu 100% via Hooks**: ESLint-Regel verhindert direkte `@web_of_trust/core`-Imports in Demo-UI außer in `hooks/wot/` und `runtime/`.
-15. **COVERAGE.md neu generieren oder weglassen**: mechanischer Generator aus `wot-spec/conformance/manifest.json` + Code-Lokationen, ODER entfernt mit Hinweis auf `IMPLEMENTATION-ARCHITECTURE.md` als Lage-Karte.
-16. **TDD-Spur pro Workflow nachweisbar**: für jeden neu geschriebenen oder verschobenen Workflow in 1.B existiert mindestens ein Application-Use-Case-Test, der commit-weise vor der Implementation liegt (Commit-History oder PR-Body weist die Reihenfolge aus). Adapter-Contract-Tests und Hook-Tests sind pro Workflow vorhanden. Reine Datei-Verschiebungen sind ausgenommen.
-17. **`src/crypto/` minimal mit Legacy-Doku**: nach 1.A.1+1.A.1.1+1.A.2 enthält das Verzeichnis ausschließlich `envelope-auth.ts` + `index.ts` mit dokumentierter Spec-Divergenz (Verweis auf [wot-spec#96](https://github.com/real-life-org/wot-spec/issues/96) und Sync 003 Z.343/410) und Phase-2-Sterbe-Marker. Vollständige Löschung erbt Phase 2 (Automerge-Stack-Refactor).
-18. **Spec-Conformance-Audit abgeschlossen** (§ 1.F): `docs/migration/SPEC-AUDIT.md` existiert mit vollständiger Diff-Liste, alle Drifts der Klassifikation `blocker` und `should-fix` sind in 1.F-Sub-Slices abgearbeitet, alle `minor`-Drifts haben eine dokumentierte Verortung (Phase 1.E oder Phase 2+). Stand 2026-06-08 (Rebuild gegen `spec-vnext` @ `1e39f4d`): **A2-1, A2-2, B2ack-1 (5 Stellen), B2ack-2, B2ack-3** sind die offenen Befunde aus 1.F.0 und müssen vor DoD #18 adressiert sein (mit den im jeweiligen Sub-Slice genannten Schließungs-Kriterien).
-19. **Spec-Zitat-Block in jedem Code-Slice-PR**: rückwirkend nicht erzwingbar für 1.A/1.B-merges, aber alle Slices ab 1.B.3-B3.1 müssen den Spec-Zitat-Output-Kontrakt erfüllen (siehe § Spec-Lektüre-Verbindlichkeit).
-
-Plus Test/Build-Garantien:
-- `pnpm --filter @web_of_trust/core test/typecheck/build` grün
-- `pnpm --filter demo test/build` grün
-- `npm run validate` in `wot-spec` grün
-
-## Reihenfolge / 3-Wochen-Plan (Variante B)
-
-Strategischer Stand 2026-06-08:
-
-- **Bereits gemerged**: 1.A.1, 1.A.1.1, 1.A.2 (Audit-Kandidaten), 1.B.1 ✅, 1.B.2-ack (Audit-Kandidat).
-- **Verworfen**: PR #173 (1.B.2-verification) wegen "behavior-preserving"-Anker — wird neu als 1.B.2-verification-v2 geschrieben.
-- **Nicht gepusht, ebenfalls verworfen**: UltraCode's `phase-1/b3-sync-workflows`-Worktree (1.B.3-B3.1 Member-Key-Directory) — vor der Spec-Rigor-Regel entstanden, wird als Variante-B-Slice neu.
-
-**Wochen-Plan** (engagiert aber machbar):
-
-| Woche | Sub-Phase | Spec-Anker |
-|---|---|---|
-| **W1 Tag 1-2** | PR #176 (Master-Plan-Patch + SPEC-AUDIT.md Rebuild) mergen, PR #173 schließen ✅, alter B3.1-Worktree entsorgen ✅, 1.F.0 Spot-Check 1.A.2 + 1.B.2-ack ✅ | — |
-| **W1 Tag 3 — W2 Tag 1** | **1.B.3-encrypted-sync** (~4-5 Tage wegen Yjs-Stack): `services/EncryptedSyncService.ts` löschen, `application/sync/encrypted-change-workflow.ts` neu, **~29 Call-Sites in 7 Files (Automerge + Yjs)** umhängen. Ggf. in zwei Sub-Slices `*-automerge` + `*-yjs` parallel | Sync 001 Z.87+103-105 + Sync 002 |
-| **W2 Tag 2-3** | **1.B.3-group-key**: `services/GroupKeyService.ts` löschen, `application/sync/group-key-workflow.ts` + `ports/key-management.ts` neu | Sync 005 Z.243-252 + §Verantwortlichkeitsgrenzen |
-| **W2 Tag 4** | **1.B.3-profile-service**: `services/ProfileService.ts` löschen, Funktionalität auf richtige Schichten verteilen | Sync 004 Z.20 + Z.153 |
-| **W2 Tag 5** | **B2ack-3 Klärung** (~30 Min) → **1.B.2-verification-v2**: `verification-delivery-workflow` neu (ersetzt PR #173, **5 Demo-Stellen umstellen**) | Sync 003 §Envelope + Trust 002 |
-| **W2 Tag 6** | **1.B.3-member-key-directory** (inkl. A2-2 Re-Aktivierung von `space-capability.ts`) | Sync 005 §member-update |
-| **W2 Tag 7 — W3 Tag 1** | **1.B.3-sync-recovery** + **1.B.3-discovery-recovery** | Sync 004 §Recovery |
-| **W3 Tag 2** | **1.B.3-device-keys** + Application-Audit für Restschichten | Identity 004 |
-| **W3 Tag 2-3** | **Adapter-Audit + Lösch-/Neu-Schreib-Slices** für nicht-konforme Adapter | Sync 003 §Envelope + Sync 004 HTTP |
-| **W3 Tag 3-5** | **1.D Demo-Hooks** Migration auf neue Workflows (inkl. **B2ack-2** useProfileSync.ts:51 + **A2-1 Cross-Repo-Check** vor Aufräum-Commit) + Issues [#154](https://github.com/real-life-org/web-of-trust/issues/154)/[#156](https://github.com/real-life-org/web-of-trust/issues/156) | — |
-| **W3 Tag 5-6** | **1.E Test-Migration** + [#165](https://github.com/real-life-org/web-of-trust/issues/165) | — |
-| **W3 Tag 6-7** | **1.C Standalone-Publikation** + [#162](https://github.com/real-life-org/web-of-trust/issues/162) NodeNext-Fix | — |
-
-**Parallelisierungs-Potenzial**: 1.B.3-Sub-Slices sind file-isoliert (verschiedene Workflows, verschiedene Spec-Sections) — können in mehreren Worktrees parallel laufen. Demo-Migration kann parallel zu Test-Migration laufen.
-
-**Wichtig**: jeder Code-Slice ab heute liefert einen **Spec-Zitat-Block** im PR-Body. Slices ohne Block werden zurückgewiesen. Anti-Pattern "behavior-preserving" ist verboten.
+---
 
 ## Nicht-Ziele
 
 - Kein `packages/wot-react/`-Paket extrahieren (Phase 2 mit RLS).
+- Kein CRDT-Adapter-Stack-Refactor (Phase 2: Legacy-MessageEnvelope-Cleanup in Automerge + Yjs).
 - Kein RLS-/HMC-Extensions-Refactor (Phase 2/3).
-- Kein UI-Redesign außer wo eine Komponente sowieso umgeschrieben werden muss.
+- Kein UI-Redesign.
 - Keine DIDComm-Mediator-/JWE-Erweiterung außerhalb existierender Spec.
 - Keine Mobile-Release-Pipeline-Änderungen (Phase 4).
 
-## Operative Anmerkungen für UltraCode-Sessions
+---
 
-- **Output-Kontrakt vor `/effort ultracode`**: Session-Prompt verweist auf diese Datei + DoD-Punkte + Candidate-Nummern + den **Spec-Lektüre-Block (§ Spec-Lektüre-Verbindlichkeit — HÖCHSTE Priorität)** + den TDD-Block (§ TDD-Verbindlichkeit) + den Doku-Sync-Block (§ Doku-Sync-Verbindlichkeit). Kein "improvise".
-- **Spec-Lektüre vor jeder Implementations-Entscheidung verbindlich**. Optionsfragen zu normativ geklärten Themen sind verboten. Details: § Spec-Lektüre-Verbindlichkeit.
-- **TDD-Reihenfolge ist verbindlich** für 1.B.* und 1.D. Test-First-Commits werden im PR-Body markiert. Details: § TDD-Verbindlichkeit.
-- **Doku-Sync vor PR-Open ist verbindlich** für jede Slice-Session. Details: § Doku-Sync-Verbindlichkeit. Loop-Review-Should-Fix wegen Doku-Drift gilt als vermeidbar.
-- **Worktree-Isolation pro Sub-Phase**: 1.A in eigenem Worktree, 1.B.1 in anderem etc.
-- **5-Punkte-Traceability-Block** (aus `reference-implementation/README.md`) im PR-Body Pflicht: Spec-Refs, Conformance-Profil, Implementation-Modul, Tests/Vektoren, Open Spec Questions.
-- **Max-Iterationen mitgeben**: bei Nicht-Erreichen der Sub-Phase-DoD nach N Agenten-Iterationen → **stoppen statt brennen**.
-- **Ein PR pro Sub-Phase**, Body verweist auf erreichte DoD-Punkte. Anton merged manuell.
-- **Manager-Loop pausiert während UltraCode-Sessions** — Token-Konkurrenz vermeiden.
-- **Kein Legacy-Workaround-Vokabular**: keine Aliase, Re-Export-Shims, Bridge-Module, Compatibility-Wrapper, `@deprecated`-Marker, Übergangs-Re-Exports oder "temporäre" Kompatibilitäts-Pfade. Der Authority-Model-Grundsatz aus `reference-implementation/README.md` ("Programm der Replacement, nicht Programm der Erweiterung") gilt strikt.
-- **Wenn UltraCode während einer Session merkt, dass ein Legacy-Import einen Konsumenten brechen würde** (z.B. `wot-cli`, `wot-relay`, `wot-profiles`, `wot-vault` importiert noch direkt aus dem Legacy-Pfad), gilt strikte Priorisierung:
-  1. **(b) Konsument mitmigrieren** — Standard. Scope wird erweitert um den brechenden Konsumenten; alle Imports auf die neue API umgestellt. Gilt für jeden Konsumenten innerhalb dieses Monorepos. Migration ist Teil der laufenden Session, nicht ein Folge-PR.
-  2. **(c) Bewusste Ausnahme dokumentieren** — nur falls (b) den Session-Scope wirklich sprengt (z.B. ein externes Drittpaket außerhalb dieses Monorepos hängt davon ab). Ausnahme bekommt im PR-Body: Owner-Name, konkreter Begründung, Deletion-Date. Kein silent Shim.
-  3. **(a) Hard stop** — Session stoppt, Anton entscheidet. Nur wenn (b) und (c) beide nicht greifen oder die Migrationsbreite eine fundamentale Architekturfrage aufwirft.
+## Verweise
+
+| Dokument | Wofür |
+|---|---|
+| `docs/migration/SPEC-AUDIT.md` | aktuelle Drift-Befunde + Slice-Verortung pro Befund |
+| `wot-spec/IMPLEMENTATION-ARCHITECTURE.md` | Layer-Regeln, Import-Regeln, Migrations-DoD |
+| `wot-spec/ARCHITECTURE.md` | Arbeitsprinzipien (Punkt 6: Implementierungsdetails dürfen Spec informieren, nicht ersetzen) |
+| `wot-spec/CONFORMANCE.md` + `wot-spec/test-vectors/` | normative Profil-Definitionen + Test-Vektoren |
+| `web-of-trust/docs/reference-implementation/README.md` | Authority Model, 5-Punkte-Traceability-Block für PRs |
+| `web-of-trust/docs/reference-implementation/legacy-boundary-map.md` | 12-Punkte DoD aus Modul-Klassifikation |
+| `web-of-trust/docs/reference-implementation/runtime-port-contract-map.md` | Detail-Backlog (Candidate-Liste) |
+| `web-of-trust/docs/reference-implementation/demo-consumer-map.md` | Import-Debt-Inventory, Adapter-Capability-Requirements |
+| `web-of-trust/docs/wot-core-test-migration.md` | Test-Bucket-Klassifikation |
