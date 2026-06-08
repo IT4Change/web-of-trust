@@ -23,11 +23,12 @@
  */
 import * as Y from 'yjs'
 import { bench, describe, beforeAll } from 'vitest'
-import { GroupKeyService } from '@web_of_trust/core/services'
+import { createSpaceKey } from '@web_of_trust/core/application'
+import { InMemoryKeyManagementAdapter } from '@web_of_trust/core/adapters'
 import { encryptOneShot, decryptOneShot } from '@web_of_trust/core/protocol'
 import { WebCryptoProtocolCryptoAdapter } from '@web_of_trust/core/protocol-adapters'
 
-const gks = new GroupKeyService()
+const keyManagement = new InMemoryKeyManagementAdapter()
 const cryptoAdapter = new WebCryptoProtocolCryptoAdapter()
 
 // --- Space content generators ---
@@ -121,7 +122,7 @@ beforeAll(async () => {
     addAttestations(singleDoc, 'data', s.attestations)
     addChat(singleDoc, 'data', s.chatMessages)
 
-    const singleKey = await gks.createKey(`single-${s.name}`)
+    const singleKey = await createSpaceKey({ crypto: cryptoAdapter, keyPort: keyManagement, spaceId: `single-${s.name}` })
     singleDocFixtures[s.name] = {
       doc: singleDoc,
       snapshot: Y.encodeStateAsUpdate(singleDoc),
@@ -138,7 +139,7 @@ beforeAll(async () => {
     const chatDoc = new Y.Doc()
     addChat(chatDoc, 'data', s.chatMessages)
 
-    const multiKey = await gks.createKey(`multi-${s.name}`)
+    const multiKey = await createSpaceKey({ crypto: cryptoAdapter, keyPort: keyManagement, spaceId: `multi-${s.name}` })
     multiDocFixtures[s.name] = {
       contactsDoc,
       attestationsDoc,

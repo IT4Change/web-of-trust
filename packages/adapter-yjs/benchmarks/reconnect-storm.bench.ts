@@ -11,7 +11,8 @@
  */
 import * as Y from 'yjs'
 import { bench, describe, beforeAll } from 'vitest'
-import { GroupKeyService } from '@web_of_trust/core/services'
+import { createSpaceKey } from '@web_of_trust/core/application'
+import { InMemoryKeyManagementAdapter } from '@web_of_trust/core/adapters'
 import { encryptOneShot, decryptOneShot } from '@web_of_trust/core/protocol'
 import { WebCryptoProtocolCryptoAdapter } from '@web_of_trust/core/protocol-adapters'
 
@@ -22,7 +23,7 @@ interface SpaceFixture {
   groupKey: Uint8Array
 }
 
-const gks = new GroupKeyService()
+const keyManagement = new InMemoryKeyManagementAdapter()
 const cryptoAdapter = new WebCryptoProtocolCryptoAdapter()
 
 /** Create a space with realistic content (contacts + attestations + meta) */
@@ -131,7 +132,7 @@ beforeAll(async () => {
       const s = scenario.spaces[i]
       const id = `space-${scenario.name}-${i}`
       const doc = createRealisticSpace(id, s.members, s.contactsPerMember)
-      const groupKey = await gks.createKey(id)
+      const groupKey = await createSpaceKey({ crypto: cryptoAdapter, keyPort: keyManagement, spaceId: id })
       const snapshot = Y.encodeStateAsUpdate(doc)
       spaceFixtures.push({ id, doc, snapshot, groupKey })
     }

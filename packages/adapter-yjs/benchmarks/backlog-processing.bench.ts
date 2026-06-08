@@ -11,12 +11,13 @@
  */
 import * as Y from 'yjs'
 import { bench, describe, beforeAll } from 'vitest'
-import { GroupKeyService } from '@web_of_trust/core/services'
+import { createSpaceKey } from '@web_of_trust/core/application'
+import { InMemoryKeyManagementAdapter } from '@web_of_trust/core/adapters'
 import { encryptOneShot, decryptOneShot } from '@web_of_trust/core/protocol'
 import { WebCryptoProtocolCryptoAdapter } from '@web_of_trust/core/protocol-adapters'
 
 const SPACE_ID = 'bench-backlog-00000000-0000-0000-0000-000000000000'
-const gks = new GroupKeyService()
+const keyManagement = new InMemoryKeyManagementAdapter()
 let groupKey: Uint8Array
 const cryptoAdapter = new WebCryptoProtocolCryptoAdapter()
 
@@ -105,7 +106,7 @@ const scenarios: BacklogScenario[] = [
 const backlogs: Record<string, { baseSnapshot: Uint8Array; updates: QueuedUpdate[] }> = {}
 
 beforeAll(async () => {
-  groupKey = await gks.createKey(SPACE_ID)
+  groupKey = await createSpaceKey({ crypto: cryptoAdapter, keyPort: keyManagement, spaceId: SPACE_ID })
 
   for (const s of scenarios) {
     const baseDoc = createBaseDoc(s.baseContacts)

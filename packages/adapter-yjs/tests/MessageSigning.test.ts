@@ -1,8 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import type { PublicIdentitySession } from '../../wot-core/src/application/identity'
 import { createTestIdentity } from '../../wot-core/tests/helpers/identity-session'
-import { InMemoryMessagingAdapter, InMemorySpaceMetadataStorage, InMemoryCompactStore } from '@web_of_trust/core/adapters'
-import { GroupKeyService } from '@web_of_trust/core/services'
+import { InMemoryMessagingAdapter, InMemorySpaceMetadataStorage, InMemoryCompactStore, InMemoryKeyManagementAdapter } from '@web_of_trust/core/adapters'
 import { verifyEnvelope } from '@web_of_trust/core/crypto'
 import { YjsReplicationAdapter } from '../src/YjsReplicationAdapter'
 import type { MessageEnvelope } from '@web_of_trust/core/types'
@@ -58,14 +57,14 @@ describe('Message Signing — All messages leaving the device must be signed', (
     aliceAdapter = new YjsReplicationAdapter({
       identity: alice,
       messaging: aliceMessaging,
-      groupKeyService: new GroupKeyService(),
+      keyManagement: new InMemoryKeyManagementAdapter(),
       metadataStorage: new InMemorySpaceMetadataStorage(),
       compactStore: new InMemoryCompactStore(),
     })
     bobAdapter = new YjsReplicationAdapter({
       identity: bob,
       messaging: bobMessaging,
-      groupKeyService: new GroupKeyService(),
+      keyManagement: new InMemoryKeyManagementAdapter(),
       metadataStorage: new InMemorySpaceMetadataStorage(),
     })
 

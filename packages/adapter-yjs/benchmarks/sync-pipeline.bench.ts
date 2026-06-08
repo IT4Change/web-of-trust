@@ -13,7 +13,8 @@
  */
 import * as Y from 'yjs'
 import { bench, describe, beforeAll } from 'vitest'
-import { GroupKeyService } from '@web_of_trust/core/services'
+import { createSpaceKey } from '@web_of_trust/core/application'
+import { InMemoryKeyManagementAdapter } from '@web_of_trust/core/adapters'
 import { encryptOneShot, decryptOneShot } from '@web_of_trust/core/protocol'
 import { WebCryptoProtocolCryptoAdapter } from '@web_of_trust/core/protocol-adapters'
 
@@ -48,8 +49,8 @@ const docs: Record<number, Y.Doc> = {}
 const snapshots: Record<number, Uint8Array> = {}
 
 beforeAll(async () => {
-  const gks = new GroupKeyService()
-  groupKey = await gks.createKey(SPACE_ID)
+  const keyManagement = new InMemoryKeyManagementAdapter()
+  groupKey = await createSpaceKey({ crypto: cryptoAdapter, keyPort: keyManagement, spaceId: SPACE_ID })
 
   for (const n of docSizes) {
     docs[n] = createPopulatedDoc(n)

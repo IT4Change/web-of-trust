@@ -1,8 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import type { PublicIdentitySession } from '../../wot-core/src/application/identity'
 import { createTestIdentity } from '../../wot-core/tests/helpers/identity-session'
-import { InMemoryMessagingAdapter, InMemorySpaceMetadataStorage } from '@web_of_trust/core/adapters'
-import { GroupKeyService } from '@web_of_trust/core/services'
+import { InMemoryMessagingAdapter, InMemorySpaceMetadataStorage, InMemoryKeyManagementAdapter } from '@web_of_trust/core/adapters'
 import { VaultClient, base64ToUint8 } from '@web_of_trust/core/adapters'
 import { createCapability } from '@web_of_trust/core/application'
 import { createResourceRef } from '@web_of_trust/core/types'
@@ -251,7 +250,7 @@ describe('Vault Integration', () => {
       const adapter = new AutomergeReplicationAdapter({
         identity: alice,
         messaging,
-        groupKeyService: new GroupKeyService(),
+        keyManagement: new InMemoryKeyManagementAdapter(),
         metadataStorage: new InMemorySpaceMetadataStorage(),
         vaultUrl: 'https://test-vault.local',
       })
@@ -281,13 +280,13 @@ describe('Vault Integration', () => {
       // --- Device A: Create space and push to vault ---
       const messagingA = new InMemoryMessagingAdapter()
       await messagingA.connect(alice.getDid())
-      const groupKeyServiceA = new GroupKeyService()
+      const keyManagementA = new InMemoryKeyManagementAdapter()
       const metadataA = new InMemorySpaceMetadataStorage()
 
       const adapterA = new AutomergeReplicationAdapter({
         identity: alice,
         messaging: messagingA,
-        groupKeyService: groupKeyServiceA,
+        keyManagement: keyManagementA,
         metadataStorage: metadataA,
         vaultUrl: 'https://test-vault.local',
       })
@@ -310,7 +309,7 @@ describe('Vault Integration', () => {
       // --- Device B: Restore from vault ---
       const messagingB = new InMemoryMessagingAdapter()
       await messagingB.connect(alice.getDid())
-      const groupKeyServiceB = new GroupKeyService()
+      const keyManagementB = new InMemoryKeyManagementAdapter()
       const metadataB = new InMemorySpaceMetadataStorage()
 
       // Simulate personal doc sync: copy metadata + keys to Device B
@@ -324,7 +323,7 @@ describe('Vault Integration', () => {
       const adapterB = new AutomergeReplicationAdapter({
         identity: alice,
         messaging: messagingB,
-        groupKeyService: groupKeyServiceB,
+        keyManagement: keyManagementB,
         metadataStorage: metadataB,
         vaultUrl: 'https://test-vault.local',
       })
@@ -354,7 +353,7 @@ describe('Vault Integration', () => {
       const adapter = new AutomergeReplicationAdapter({
         identity: alice,
         messaging,
-        groupKeyService: new GroupKeyService(),
+        keyManagement: new InMemoryKeyManagementAdapter(),
         metadataStorage: new InMemorySpaceMetadataStorage(),
         vaultUrl: 'https://test-vault.local',
       })
