@@ -1,5 +1,5 @@
 /**
- * Benchmarks for EncryptedSyncService — AES-256-GCM encrypt/decrypt performance.
+ * Benchmarks for encryptOneShot/decryptOneShot — AES-256-GCM encrypt/decrypt performance.
  *
  * Measures throughput at various payload sizes to understand the crypto cost
  * in our sync pipeline. Inspired by secsync benchmarks (secsync.com/docs/benchmarks).
@@ -39,7 +39,7 @@ beforeAll(() => {
   }
 })
 
-describe('EncryptedSyncService.encryptChange', () => {
+describe('encryptOneShot', () => {
   for (const [label] of Object.entries(sizes)) {
     bench(`encrypt ${label}`, async () => {
       await encryptOneShot({ crypto: cryptoAdapter, spaceContentKey: groupKey, plaintext: payloads[label] })
@@ -47,7 +47,7 @@ describe('EncryptedSyncService.encryptChange', () => {
   }
 })
 
-describe('EncryptedSyncService.decryptChange', () => {
+describe('decryptOneShot', () => {
   const encrypted: Record<string, Awaited<ReturnType<typeof encryptOneShot>>> = {}
 
   beforeAll(async () => {
@@ -63,7 +63,7 @@ describe('EncryptedSyncService.decryptChange', () => {
   }
 })
 
-describe('EncryptedSyncService.roundtrip (encrypt + decrypt)', () => {
+describe('OneShot roundtrip (encrypt + decrypt)', () => {
   for (const [label] of Object.entries(sizes)) {
     bench(`roundtrip ${label}`, async () => {
       const enc = await encryptOneShot({ crypto: cryptoAdapter, spaceContentKey: groupKey, plaintext: payloads[label] })
