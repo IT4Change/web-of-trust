@@ -4,6 +4,7 @@ import {
   OfflineFirstDiscoveryAdapter,
   OutboxMessagingAdapter,
   PersonalDocSpaceMetadataStorage,
+  InMemoryKeyManagementAdapter,
 } from '@web_of_trust/core/adapters'
 import { WebSocketMessagingAdapter } from '@web_of_trust/core/adapters/messaging/websocket'
 import { HttpDiscoveryAdapter } from '@web_of_trust/core/adapters/discovery/http'
@@ -11,7 +12,6 @@ import {
   CompactStorageManager,
   getMetrics,
 } from '@web_of_trust/core/storage'
-import { GroupKeyService } from '@web_of_trust/core/services'
 import type {
   CryptoAdapter,
   MessagingAdapter,
@@ -236,7 +236,7 @@ export function AdapterProvider({ children, identity }: AdapterProviderProps) {
         attestationService.initFromOutbox(outboxStore)
 
         lap('attestation-service')
-        const groupKeyService = new GroupKeyService()
+        const keyManagement = new InMemoryKeyManagementAdapter()
         const spaceMetadataStorage = new PersonalDocSpaceMetadataStorage(docFns)
         spaceCompactStore = new CompactStorageManager('wot-space-compact-store')
         await spaceCompactStore.open()
@@ -245,7 +245,7 @@ export function AdapterProvider({ children, identity }: AdapterProviderProps) {
           replicationAdapter = new YjsReplicationAdapter({
             identity,
             messaging: outboxAdapter,
-            groupKeyService,
+            keyManagement,
             metadataStorage: spaceMetadataStorage,
             compactStore: spaceCompactStore,
             vaultUrl: appRuntimeConfig.vaultUrl,
@@ -258,7 +258,7 @@ export function AdapterProvider({ children, identity }: AdapterProviderProps) {
           replicationAdapter = new AutomergeReplicationAdapter({
             identity,
             messaging: outboxAdapter,
-            groupKeyService,
+            keyManagement,
             metadataStorage: spaceMetadataStorage,
             repoStorage: spaceSyncStorage,
             compactStore: spaceCompactStore,

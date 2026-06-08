@@ -19,10 +19,10 @@ import {
   PersonalDocSpaceMetadataStorage,
   InMemoryPublishStateStore,
   InMemoryGraphCacheStore,
+  InMemoryKeyManagementAdapter,
 } from '@web_of_trust/core/adapters'
 import { WebSocketMessagingAdapter } from '@web_of_trust/core/adapters/messaging/websocket'
 import { HttpDiscoveryAdapter } from '@web_of_trust/core/adapters/discovery/http'
-import { GroupKeyService } from '@web_of_trust/core/services'
 import { WebCryptoProtocolCryptoAdapter } from '@web_of_trust/core/protocol-adapters'
 import { signEnvelope } from '@web_of_trust/core/crypto'
 import { parseQrChallenge } from '@web_of_trust/core/protocol'
@@ -118,7 +118,7 @@ export class WotCliClient {
     this.discovery = new OfflineFirstDiscoveryAdapter(httpDiscovery, publishStateStore, graphCacheStore)
 
     // 7. Replication (Yjs spaces)
-    const groupKeyService = new GroupKeyService()
+    const keyManagement = new InMemoryKeyManagementAdapter()
     const spaceMetadataStorage = new PersonalDocSpaceMetadataStorage({
       getPersonalDoc: getYjsPersonalDoc,
       changePersonalDoc: changeYjsPersonalDoc,
@@ -127,7 +127,7 @@ export class WotCliClient {
     this.replication = new YjsReplicationAdapter({
       identity,
       messaging: this.outboxAdapter,
-      groupKeyService,
+      keyManagement,
       metadataStorage: spaceMetadataStorage,
       compactStore: this.compactStore,
       vaultUrl: this.options.vaultUrl,
