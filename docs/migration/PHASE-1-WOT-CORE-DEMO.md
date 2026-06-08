@@ -316,7 +316,7 @@ Strikte Reihenfolge wegen Abhängigkeiten:
 1. **1.A.1 / 1.A.1.1 / 1.A.2** ✅ in PR #153 / #160 / #163.
 2. **1.B.1 Identity** ✅ in PR #158.
 3. **1.B.2-ack** ✅ in PR #166. **1.B.3-B3.1** (Member-Key-Directory) abschließen, dann **STOP für Sync-Sub-Slices**.
-4. **1.F Spec-Conformance-Audit** parallel zu B3.1-Abschluss starten — kritisch, blockiert ab hier 1.B.3-B3.2/B3.4/B3.5, 1.B.2-verification, 1.D.
+4. **1.F Spec-Conformance-Audit** parallel zu B3.1-Abschluss starten — kritisch, blockiert ab hier 1.B.3-B3.2/B3.4/B3.5 und 1.D. **Ausnahme**: PR #173 (1.B.2-verification) wurde vor der Spec-Rigor-Regel erstellt und darf mergen, sobald er review-grün ist; er wird durch 1.F.0 retroaktiv gegen Trust 002 geprüft (siehe Punkt 7).
 5. **Retroaktiver Audit für 1.A.* + 1.B.1 + 1.B.2-ack** als erster 1.F-Sub-Task. Drift-Befunde gehen in den 1.F-Backlog.
 6. **1.F-Sub-Slices (1.F.1..N)** abarbeiten — `blocker` zuerst, dann `should-fix`. Pro Sub-Slice eigener PR mit Spec-Zitat-Block.
 7. **1.B.3-B3.2/B3.4/B3.5** (Sync-Workflows) als 1.F.N priorisiert aus Audit-Befunden — alle mit zwingendem Spec-Zitat-Block, Spec-Lektüre-Verbindlichkeit + TDD-Verbindlichkeit + Doku-Sync-Verbindlichkeit gelten kumulativ. **1.B.2-verification** wartet in PR #173 auf Merge (vor der Spec-Rigor-Regel erstellt); 1.F.0 prüft den Slice nach Merge retroaktiv gegen Trust 002.
