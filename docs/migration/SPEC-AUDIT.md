@@ -127,7 +127,7 @@ Total: 6 produktive `createResourceRef`-Stellen. 5 davon in Demo-Attestation-/Ve
 
 - **drift:blocker für Phase 2**, **drift:minor für Phase 1** — innerhalb Phase 1 ist der CRDT-Adapter-Stack bewusst Legacy (siehe `crypto/envelope-auth.ts` `@deprecated`-Marker + Master-Plan DoD #17). Phase-1-Refactor des Adapter-Stacks ist nicht im Scope.
 
-**Konsequenz für Phase 1 1.B.3**: Neue Workflows (`application/sync/encrypted-change-workflow.ts`, `application/verification/*`) dürfen **nicht** Legacy-`MessageEnvelope`-Form produzieren oder davon abhängen. Sie liefern spec-konforme DIDComm-Plaintext-Envelope-Form (oder rohes Crypto-Material, das der Adapter dann legacy-wrappt — letzteres ist bewusst dokumentierte Phase-1-Übergangs-Grenze).
+**Konsequenz für Phase 1 1.B.3**: Neue Slice-Outputs (z.B. die Crypto-Primitive `encryptOneShot`/`decryptOneShot` in `protocol/sync/encryption.ts` aus PR #178, oder kommende Workflows in `application/verification/*`) dürfen **nicht** Legacy-`MessageEnvelope`-Form produzieren oder davon abhängen. Sie liefern spec-konforme DIDComm-Plaintext-Envelope-Form (oder rohes Crypto-Material, das der Adapter dann legacy-wrappt — letzteres ist bewusst dokumentierte Phase-1-Übergangs-Grenze).
 
 **Helper-Funktionen**: `signEnvelope()` (Legacy-Signatur-Wrapper, kein interner Bau). `makeEnvelope()` in `packages/wot-core/tests/EnvelopeAuth.test.ts` (Test-only). Keine produktiven Builder wie `buildEnvelope`, `createMessageEnvelope`.
 
@@ -208,10 +208,10 @@ Eine 8-Agent-Mapping-Analyse pro Call-Site bestätigte: **0 Abweichungen von der
 | **B2ack-2**: `useProfileSync.ts:51` Legacy-Envelope ohne `ref` | drift:minor | Demo-Sync-003-Migration (Phase 1 Schluss oder Phase 2) |
 | **B2ack-3**: `DeliveryReceipt.status: 'accepted'` Sync-003-Verankerung unklar | drift:offen | Vor 1.B.2-verification-v2 klären |
 | **CRDT-Adapter Legacy-MessageEnvelope** (Automerge 5 + Yjs 10 Stellen) | drift:blocker für Phase 2 | Phase 2+ (außerhalb Phase 1-Scope) |
-| **`services/EncryptedSyncService.ts`** Spec-Drift (random Nonce für alles) | drift:blocker | 1.B.3-encrypted-sync |
+| ~~**`services/EncryptedSyncService.ts`**~~ ✅ erledigt | gelöst in [PR #178](https://github.com/real-life-org/web-of-trust/pull/178) | `protocol/sync/encryption.ts`: `encryptOneShot`/`decryptOneShot` (Random-Nonce, vektor-validiert), 32 Call-Sites umgehängt, Service ersatzlos gelöscht |
 | **`services/GroupKeyService.ts`** noch nicht detailliert auditiert | (offen) | 1.B.3-group-key |
 | **`services/ProfileService.ts`** noch nicht detailliert auditiert | (offen) | 1.B.3-profile-service |
 
-**Aktion direkt jetzt**: Nach Merge dieses Audits → 1.B.3-encrypted-sync starten. Pre-Audit-Inventar ist vollständig.
+**Aktion direkt jetzt**: Nächster Slice ist **1.B.3-group-key** (Sync 005 Z.243-252 + §Verantwortlichkeitsgrenzen). Davor: Cleanup-PR #179 mergen, damit der nächste Slice den korrigierten Audit-Stand sieht. Lehre aus 1.B.3-encrypted-sync: Direktive folgt direkt der Spec, nicht der Vor-Klassifikation im Audit (siehe Vorrang-Klausel in `PHASE-1-WOT-CORE-DEMO.md` §PR-Pflichtbausteine).
 
 **Cross-Repo-Check für A2-1 vor Lösch-Entscheidung**: separate Aktion (`grep` in `wot-vault`, `wot-profiles`, `runner`, etc.) — nicht in diesem Audit erledigt.
