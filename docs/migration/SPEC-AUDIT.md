@@ -2,10 +2,10 @@
 
 **Erstausgabe**: 2026-06-08 (Rebuild gegen `spec-vnext` @ `1e39f4d`)
 **Audit-Subjekt**: `web-of-trust` `spec-vnext`
-**Methodik**: § 1.F im Master-Plan + § Methode für Workflow-/Service-Migration (Variante B)
+**Methodik**: 1.F-Audit gemäß `PHASE-1-WOT-CORE-DEMO.md` §Migrations-Methode (löschen + spec-zuerst neu schreiben)
 **Auditor**: Claude-Session 2026-06-08, jede Behauptung verifiziert per `grep` + `Read` gegen den echten Code; Memory wurde NICHT als Quelle akzeptiert.
 
-> **Variante-B-Prinzip**: Drift-tragender Code wird **ersatzlos gelöscht und neu aus Spec geschrieben**, nicht "refaktoriert". Audit klassifiziert nur — Behebung passiert in 1.B.3-Sub-Slices oder eigenen 1.F.N-Slices.
+> **Prinzip**: Drift-tragender Code wird **ersatzlos gelöscht und neu aus Spec geschrieben**, nicht "refaktoriert". Audit klassifiziert nur — Behebung passiert in 1.B.3-Sub-Slices oder eigenen 1.F.N-Slices.
 
 > **Disziplin dieses Audits**: Jede Pfad-/Zeilen-Angabe wurde am Working-Tree von `docs/spec-audit-f0` (head: `b9975ea`, base: `spec-vnext` @ `1e39f4d`) verifiziert. Wo eine frühere Version dieses Audits einen ungenauen Scope (z.B. "Yjs-Stack nicht direkt") oder eine ungenaue Stellen-Zahl hatte, ist die korrigierte Form unten + im Tabellen-Anhang dokumentiert. Cross-Repo-/Public-API-Konsumenten wurden NICHT geprüft — alle "0 Konsumenten"-Aussagen sind in-repo + non-test.
 
