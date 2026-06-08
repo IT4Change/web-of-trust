@@ -1,8 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import type { PublicIdentitySession } from '../../wot-core/src/application/identity'
 import { createTestIdentity } from '../../wot-core/tests/helpers/identity-session'
-import { InMemoryMessagingAdapter, InMemorySpaceMetadataStorage, InMemoryCompactStore } from '@web_of_trust/core/adapters'
-import { GroupKeyService } from '@web_of_trust/core/services'
+import { InMemoryMessagingAdapter, InMemorySpaceMetadataStorage, InMemoryCompactStore, InMemoryKeyManagementAdapter } from '@web_of_trust/core/adapters'
 import { AutomergeReplicationAdapter } from '../src/AutomergeReplicationAdapter'
 import { InMemoryRepoStorageAdapter } from '../src/InMemoryRepoStorageAdapter'
 import { WebCryptoProtocolCryptoAdapter } from '@web_of_trust/core/protocol-adapters'
@@ -17,7 +16,7 @@ function createAdapter(identity: PublicIdentitySession, messaging: InMemoryMessa
   return new AutomergeReplicationAdapter({
     identity,
     messaging,
-    groupKeyService: new GroupKeyService(),
+    keyManagement: new InMemoryKeyManagementAdapter(),
   })
 }
 
@@ -63,7 +62,7 @@ describe('AutomergeReplicationAdapter', () => {
     const adapter = new AutomergeReplicationAdapter({
       identity,
       messaging,
-      groupKeyService: new GroupKeyService(),
+      keyManagement: new InMemoryKeyManagementAdapter(),
       crypto: customCrypto,
     })
     await adapter.start()
@@ -316,7 +315,7 @@ describe('AutomergeReplicationAdapter', () => {
       await aliceAdapter.removeMember(space.id, bob.getDid())
 
       // Verify key generation incremented
-      const generation = aliceAdapter.getKeyGeneration(space.id)
+      const generation = await aliceAdapter.getKeyGeneration(space.id)
       expect(generation).toBe(1) // Was 0, now 1
     })
 
@@ -763,13 +762,13 @@ describe('AutomergeReplicationAdapter', () => {
     it('should persist and restore space metadata across restarts', async () => {
       const metadataStorage = new InMemorySpaceMetadataStorage()
       const repoStorage = new InMemoryRepoStorageAdapter()
-      const groupKeyService = new GroupKeyService()
+      const keyManagement = new InMemoryKeyManagementAdapter()
 
       // Create adapter with storage
       const adapter1 = new AutomergeReplicationAdapter({
         identity: alice,
         messaging: aliceMessaging,
-        groupKeyService,
+        keyManagement,
         metadataStorage,
         repoStorage,
       })
@@ -794,11 +793,11 @@ describe('AutomergeReplicationAdapter', () => {
       await adapter1.stop()
 
       // Create a NEW adapter with the same storages (simulates restart)
-      const groupKeyService2 = new GroupKeyService()
+      const keyManagement2 = new InMemoryKeyManagementAdapter()
       const adapter2 = new AutomergeReplicationAdapter({
         identity: alice,
         messaging: aliceMessaging,
-        groupKeyService: groupKeyService2,
+        keyManagement: keyManagement2,
         metadataStorage,
         repoStorage,
       })
@@ -817,7 +816,7 @@ describe('AutomergeReplicationAdapter', () => {
       expect(doc.items).toEqual(['persisted'])
 
       // Group key should be restored
-      expect(adapter2.getKeyGeneration(space.id)).toBe(0)
+      expect(await adapter2.getKeyGeneration(space.id)).toBe(0)
 
       restoredHandle.close()
       await adapter2.stop()
@@ -826,12 +825,12 @@ describe('AutomergeReplicationAdapter', () => {
     it('should persist group key rotations across restarts', async () => {
       const metadataStorage = new InMemorySpaceMetadataStorage()
       const repoStorage = new InMemoryRepoStorageAdapter()
-      const groupKeyService = new GroupKeyService()
+      const keyManagement = new InMemoryKeyManagementAdapter()
 
       const adapter1 = new AutomergeReplicationAdapter({
         identity: alice,
         messaging: aliceMessaging,
-        groupKeyService,
+        keyManagement,
         metadataStorage,
         repoStorage,
       })
@@ -849,23 +848,23 @@ describe('AutomergeReplicationAdapter', () => {
       await adapter1.removeMember(space.id, bob.getDid())
       await new Promise(r => setTimeout(r, 50))
 
-      expect(adapter1.getKeyGeneration(space.id)).toBe(1)
+      expect(await adapter1.getKeyGeneration(space.id)).toBe(1)
 
       await adapter1.stop()
 
       // Restart with new adapter
-      const groupKeyService2 = new GroupKeyService()
+      const keyManagement2 = new InMemoryKeyManagementAdapter()
       const adapter2 = new AutomergeReplicationAdapter({
         identity: alice,
         messaging: aliceMessaging,
-        groupKeyService: groupKeyService2,
+        keyManagement: keyManagement2,
         metadataStorage,
         repoStorage,
       })
       await adapter2.start()
 
       // Key generation should be restored
-      expect(adapter2.getKeyGeneration(space.id)).toBe(1)
+      expect(await adapter2.getKeyGeneration(space.id)).toBe(1)
 
       await adapter2.stop()
     })
@@ -875,12 +874,12 @@ describe('AutomergeReplicationAdapter', () => {
     it('should save snapshot to CompactStore on transact', async () => {
       const metadataStorage = new InMemorySpaceMetadataStorage()
       const compactStore = new InMemoryCompactStore()
-      const groupKeyService = new GroupKeyService()
+      const keyManagement = new InMemoryKeyManagementAdapter()
 
       const adapter = new AutomergeReplicationAdapter({
         identity: alice,
         messaging: aliceMessaging,
-        groupKeyService,
+        keyManagement,
         metadataStorage,
         compactStore,
       })
@@ -911,13 +910,13 @@ describe('AutomergeReplicationAdapter', () => {
     it('should restore space from CompactStore on restart (before vault)', async () => {
       const metadataStorage = new InMemorySpaceMetadataStorage()
       const compactStore = new InMemoryCompactStore()
-      const groupKeyService = new GroupKeyService()
+      const keyManagement = new InMemoryKeyManagementAdapter()
 
       // Create adapter and space
       const adapter1 = new AutomergeReplicationAdapter({
         identity: alice,
         messaging: aliceMessaging,
-        groupKeyService,
+        keyManagement,
         metadataStorage,
         compactStore,
       })
@@ -941,11 +940,11 @@ describe('AutomergeReplicationAdapter', () => {
       await adapter1.stop()
 
       // Restart with same compactStore + metadata (no repoStorage!)
-      const groupKeyService2 = new GroupKeyService()
+      const keyManagement2 = new InMemoryKeyManagementAdapter()
       const adapter2 = new AutomergeReplicationAdapter({
         identity: alice,
         messaging: aliceMessaging,
-        groupKeyService: groupKeyService2,
+        keyManagement: keyManagement2,
         metadataStorage,
         compactStore,
       })
@@ -968,12 +967,12 @@ describe('AutomergeReplicationAdapter', () => {
     it('should use history-free compaction for CompactStore snapshots', async () => {
       const metadataStorage = new InMemorySpaceMetadataStorage()
       const compactStore = new InMemoryCompactStore()
-      const groupKeyService = new GroupKeyService()
+      const keyManagement = new InMemoryKeyManagementAdapter()
 
       const adapter = new AutomergeReplicationAdapter({
         identity: alice,
         messaging: aliceMessaging,
-        groupKeyService,
+        keyManagement,
         metadataStorage,
         compactStore,
       })
@@ -1028,12 +1027,12 @@ describe('AutomergeReplicationAdapter', () => {
     it('should debounce CompactStore saves on remote changes', async () => {
       const metadataStorage = new InMemorySpaceMetadataStorage()
       const compactStore = new InMemoryCompactStore()
-      const groupKeyService = new GroupKeyService()
+      const keyManagement = new InMemoryKeyManagementAdapter()
 
       const adapter = new AutomergeReplicationAdapter({
         identity: alice,
         messaging: aliceMessaging,
-        groupKeyService,
+        keyManagement,
         metadataStorage,
         compactStore,
       })

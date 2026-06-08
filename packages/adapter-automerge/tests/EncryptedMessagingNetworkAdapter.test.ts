@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import type { PeerId, DocumentId, Message } from '@automerge/automerge-repo'
-import { InMemoryMessagingAdapter, WebCryptoAdapter } from '@web_of_trust/core/adapters'
-import { GroupKeyService } from '@web_of_trust/core/services'
+import { InMemoryMessagingAdapter, WebCryptoAdapter, InMemoryKeyManagementAdapter } from '@web_of_trust/core/adapters'
+import { importKey } from '@web_of_trust/core/application'
 import { encryptOneShot } from '@web_of_trust/core/protocol'
 import { WebCryptoProtocolCryptoAdapter } from '@web_of_trust/core/protocol-adapters'
 import type { MessageEnvelope } from '@web_of_trust/core/types'
@@ -23,8 +23,8 @@ function createMockIdentity(did: string) {
 describe('EncryptedMessagingNetworkAdapter', () => {
   let aliceMessaging: InMemoryMessagingAdapter
   let bobMessaging: InMemoryMessagingAdapter
-  let aliceGroupKeys: GroupKeyService
-  let bobGroupKeys: GroupKeyService
+  let aliceGroupKeys: InMemoryKeyManagementAdapter
+  let bobGroupKeys: InMemoryKeyManagementAdapter
   let aliceAdapter: EncryptedMessagingNetworkAdapter
   let bobAdapter: EncryptedMessagingNetworkAdapter
   let groupKey: Uint8Array
@@ -38,11 +38,11 @@ describe('EncryptedMessagingNetworkAdapter', () => {
     const crypto = new WebCryptoAdapter()
     groupKey = await crypto.generateSymmetricKey()
 
-    aliceGroupKeys = new GroupKeyService()
-    aliceGroupKeys.importKey(SPACE_ID, groupKey, 0)
+    aliceGroupKeys = new InMemoryKeyManagementAdapter()
+    await importKey(aliceGroupKeys, SPACE_ID, 0, groupKey)
 
-    bobGroupKeys = new GroupKeyService()
-    bobGroupKeys.importKey(SPACE_ID, groupKey, 0)
+    bobGroupKeys = new InMemoryKeyManagementAdapter()
+    await importKey(bobGroupKeys, SPACE_ID, 0, groupKey)
 
     aliceAdapter = new EncryptedMessagingNetworkAdapter(
       aliceMessaging,
@@ -178,7 +178,7 @@ describe('EncryptedMessagingNetworkAdapter', () => {
     })
 
     it('should not send without group key', async () => {
-      const noKeyService = new GroupKeyService()
+      const noKeyService = new InMemoryKeyManagementAdapter()
       const adapter = new EncryptedMessagingNetworkAdapter(
         aliceMessaging,
         createMockIdentity(ALICE_DID),
@@ -293,7 +293,7 @@ describe('EncryptedMessagingNetworkAdapter', () => {
 
     it('should ignore messages without group key', async () => {
       const bobMessaging2 = new InMemoryMessagingAdapter()
-      const noKeyService = new GroupKeyService() // Empty — no keys
+      const noKeyService = new InMemoryKeyManagementAdapter() // Empty — no keys
       const adapter = new EncryptedMessagingNetworkAdapter(
         bobMessaging2,
         createMockIdentity(BOB_DID),

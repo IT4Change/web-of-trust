@@ -1,8 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import type { PublicIdentitySession } from '../../wot-core/src/application/identity'
 import { createTestIdentity } from '../../wot-core/tests/helpers/identity-session'
-import { InMemoryMessagingAdapter, InMemorySpaceMetadataStorage, InMemoryCompactStore } from '@web_of_trust/core/adapters'
-import { GroupKeyService } from '@web_of_trust/core/services'
+import { InMemoryMessagingAdapter, InMemorySpaceMetadataStorage, InMemoryCompactStore, InMemoryKeyManagementAdapter } from '@web_of_trust/core/adapters'
 import { YjsReplicationAdapter } from '../src/YjsReplicationAdapter'
 
 interface TestDoc {
@@ -17,7 +16,7 @@ function createAdapter(
   return new YjsReplicationAdapter({
     identity,
     messaging,
-    groupKeyService: new GroupKeyService(),
+    keyManagement: new InMemoryKeyManagementAdapter(),
     metadataStorage: opts?.metadataStorage,
     compactStore: opts?.compactStore,
   })
@@ -226,7 +225,7 @@ describe('YjsReplicationAdapter — Space Metadata (_meta)', () => {
       const adapter1 = new YjsReplicationAdapter({
         identity: alice,
         messaging: aliceMessaging,
-        groupKeyService: new GroupKeyService(),
+        keyManagement: new InMemoryKeyManagementAdapter(),
         metadataStorage,
         compactStore,
       })
@@ -243,7 +242,7 @@ describe('YjsReplicationAdapter — Space Metadata (_meta)', () => {
       const adapter2 = new YjsReplicationAdapter({
         identity: alice,
         messaging: aliceMessaging,
-        groupKeyService: new GroupKeyService(),
+        keyManagement: new InMemoryKeyManagementAdapter(),
         metadataStorage,
         compactStore,
       })
@@ -274,7 +273,7 @@ describe('YjsReplicationAdapter — Space Metadata (_meta)', () => {
       const adapter = new YjsReplicationAdapter({
         identity: alice,
         messaging: aliceMessaging,
-        groupKeyService: new GroupKeyService(),
+        keyManagement: new InMemoryKeyManagementAdapter(),
         metadataStorage,
         compactStore,
       })
@@ -288,7 +287,7 @@ describe('YjsReplicationAdapter — Space Metadata (_meta)', () => {
       const adapter2 = new YjsReplicationAdapter({
         identity: alice,
         messaging: aliceMessaging,
-        groupKeyService: new GroupKeyService(),
+        keyManagement: new InMemoryKeyManagementAdapter(),
         metadataStorage,
         compactStore,
       })

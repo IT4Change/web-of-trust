@@ -118,7 +118,6 @@ export type {
 
 // Services
 export { ProfileService } from './services/ProfileService'
-export { GroupKeyService } from './services/GroupKeyService'
 export { GraphCacheService } from './adapters/discovery/GraphCacheService'
 export type { GraphCacheOptions } from './adapters/discovery/GraphCacheService'
 export { VaultClient, base64ToUint8 } from './adapters/vault/VaultClient'
