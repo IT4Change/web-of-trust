@@ -18,7 +18,7 @@ export default defineConfig(({ mode }) => {
     alias: [
       { find: /^@web_of_trust\/core$/, replacement: path.resolve(coreSrc, 'index.ts') },
       { find: /^@web_of_trust\/core\/protocol$/, replacement: coreAlias('protocol') },
-      { find: /^@web_of_trust\/core\/protocol-adapters$/, replacement: coreAlias('protocol-adapters') },
+      { find: /^@web_of_trust\/core\/protocol-adapters$/, replacement: path.resolve(coreSrc, 'adapters/protocol-crypto/index.ts') },
       { find: /^@web_of_trust\/core\/crypto$/, replacement: coreAlias('crypto') },
       { find: /^@web_of_trust\/core\/application$/, replacement: coreAlias('application') },
       { find: /^@web_of_trust\/core\/ports$/, replacement: coreAlias('ports') },
