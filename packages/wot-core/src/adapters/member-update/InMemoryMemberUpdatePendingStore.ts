@@ -19,10 +19,10 @@ export class InMemoryMemberUpdatePendingStore implements MemberUpdatePendingStor
 
   async savePending(signal: SeenMemberUpdateSignal): Promise<void> {
     const list = this.seen.get(signal.spaceId) ?? []
-    const duplicate = list.some(
-      (s) => sameTuple(s, signal) && s.signerDid === signal.signerDid && s.storedDisposition === signal.storedDisposition,
-    )
-    if (duplicate) return
+    // Sync 005 Z.179: exactly one pending record per tuple. A higher-authority signal
+    // upgrades the existing record via upgradePending — never a second entry — so the
+    // tuple match below stays unambiguous regardless of which signer arrives first.
+    if (list.some((s) => sameTuple(s, signal))) return
     list.push({ ...signal })
     this.seen.set(signal.spaceId, list)
   }
@@ -31,8 +31,8 @@ export class InMemoryMemberUpdatePendingStore implements MemberUpdatePendingStor
     const list = this.seen.get(signal.spaceId)
     const existing = list?.find((s) => sameTuple(s, signal))
     if (!existing) return
+    // Upgrade only the authority/disposition; preserve the original signer provenance.
     existing.storedDisposition = signal.storedDisposition
-    existing.signerDid = signal.signerDid
   }
 
   async bufferFuture(signal: MemberUpdateSignal): Promise<void> {

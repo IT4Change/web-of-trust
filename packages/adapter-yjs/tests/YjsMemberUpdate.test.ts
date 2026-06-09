@@ -221,3 +221,54 @@ describe('YjsReplicationAdapter — #181 (b) saveSpaceMetadata fingerprint', () 
     expect(saveSpy).toHaveBeenCalledTimes(3)
   })
 })
+
+describe('YjsReplicationAdapter — member-update review fixes', () => {
+  let h: Harness
+  let spaceId: string
+
+  beforeEach(async () => {
+    h = await setup()
+    const space = await h.adapter.createSpace('shared', {}, { name: 'S' })
+    spaceId = space.id
+    spaceState(h.adapter, spaceId).info.members = [ADMIN, h.alice.getDid()]
+  })
+  afterEach(async () => {
+    await h.adapter.stop()
+    InMemoryMessagingAdapter.resetAll()
+    try { await h.alice.deleteStoredIdentity() } catch {}
+  })
+
+  it('pendingAddition and pendingRemoval are mutually exclusive', async () => {
+    const local = h.alice.getDid()
+    await (h.adapter as any).handleMemberUpdate(memberUpdateEnvelope(ADMIN,
+      { spaceId, action: 'added', memberDid: local, effectiveKeyGeneration: 0 }, local))
+    expect(spaceState(h.adapter, spaceId).pendingAddition).toBeDefined()
+
+    await (h.adapter as any).handleMemberUpdate(memberUpdateEnvelope(ADMIN,
+      { spaceId, action: 'removed', memberDid: local, effectiveKeyGeneration: 0 }, local))
+    expect(spaceState(h.adapter, spaceId).pendingRemoval).toBeDefined()
+    expect(spaceState(h.adapter, spaceId).pendingAddition).toBeUndefined()
+  })
+})
+
+describe('YjsReplicationAdapter — member-update rethrows on missing durable store', () => {
+  it('rethrows PendingMessageNotDurableError instead of silently dropping', async () => {
+    InMemoryMessagingAdapter.resetAll()
+    const alice = (await createTestIdentity('mku-nodurable')).identity
+    const messaging = new InMemoryMessagingAdapter()
+    await messaging.connect(alice.getDid())
+    // No compactStore → no durable pending store.
+    const adapter = new YjsReplicationAdapter({ identity: alice, messaging, keyManagement: new InMemoryKeyManagementAdapter() })
+    await adapter.start()
+    const space = await adapter.createSpace('shared', {}, { name: 'S' })
+
+    const env = memberUpdateEnvelope(alice.getDid(), {
+      encrypted: true, spaceId: space.id, generation: 99,
+      ciphertext: [1, 2, 3], nonce: Array.from({ length: 12 }, () => 0),
+    }, alice.getDid())
+    await expect((adapter as any).handleMemberUpdate(env)).rejects.toThrow(/durable pending store/)
+
+    await adapter.stop()
+    try { await alice.deleteStoredIdentity() } catch {}
+  })
+})

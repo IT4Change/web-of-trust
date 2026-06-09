@@ -1443,9 +1443,11 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
       switch (result.localImpact) {
         case 'mark-removal-pending':
           state.pendingRemoval = { effectiveKeyGeneration: signal.effectiveKeyGeneration }
+          delete state.pendingAddition // mutually exclusive
           break
         case 'mark-addition-pending':
           state.pendingAddition = { effectiveKeyGeneration: signal.effectiveKeyGeneration }
+          delete state.pendingRemoval // mutually exclusive
           break
         case 'none':
           break
@@ -1458,6 +1460,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
       // ACK-Wire ist W3 Adapter-Audit (inbox/1.0 + ack/1.0). Hier nur Logging.
       console.debug('[YjsReplication] member-update disposition:', result.disposition)
     } catch (err) {
+      if (err instanceof PendingMessageNotDurableError) throw err
       console.debug('[YjsReplication] Failed to handle member update:', err)
     }
   }

@@ -21,20 +21,22 @@ describe('InMemoryMemberUpdatePendingStore', () => {
     expect(await store.listFutureForSpace(SPACE)).toHaveLength(0)
   })
 
-  it('savePending is idempotent for an exact tuple+signer+disposition duplicate', async () => {
+  it('keeps exactly one pending record per tuple regardless of signer (Sync 005 Z.179)', async () => {
     const store = new InMemoryMemberUpdatePendingStore()
-    await store.savePending(seen('store-pending-and-sync'))
-    await store.savePending(seen('store-pending-and-sync'))
+    await store.savePending(seen('store-unverified-pending-and-sync'))
+    await store.savePending(seen('store-unverified-pending-and-sync')) // exact duplicate
+    await store.savePending(seen('store-pending-and-sync', { signerDid: 'did:key:z6MkOther' })) // same tuple, other signer
     expect(await store.listSeenForSpace(SPACE)).toHaveLength(1)
   })
 
-  it('upgradePending changes the stored authority level of the matching tuple', async () => {
+  it('upgradePending lifts the disposition but preserves the original signer provenance', async () => {
     const store = new InMemoryMemberUpdatePendingStore()
-    await store.savePending(seen('store-unverified-pending-and-sync'))
-    await store.upgradePending(seen('store-pending-and-sync'))
+    await store.savePending(seen('store-unverified-pending-and-sync')) // signer ADMIN (helper default)
+    await store.upgradePending({ ...signal({ signerDid: 'did:key:z6MkUpgrader' }), storedDisposition: 'store-pending-and-sync' })
     const list = await store.listSeenForSpace(SPACE)
     expect(list).toHaveLength(1)
     expect(list[0].storedDisposition).toBe('store-pending-and-sync')
+    expect(list[0].signerDid).toBe(ADMIN) // provenance not overwritten
   })
 
   it('bufferFuture stores separately from seen (no storedDisposition leaks into seen)', async () => {

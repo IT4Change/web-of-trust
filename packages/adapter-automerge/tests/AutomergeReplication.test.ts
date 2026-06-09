@@ -395,6 +395,29 @@ describe('AutomergeReplicationAdapter', () => {
       expect(pending.some(p => p.action === 'removed' && p.memberDid === target)).toBe(true)
       expect(st.info.members).toContain(target) // durable state survives (Z.191)
     })
+
+    it('pendingAddition and pendingRemoval are mutually exclusive (member-update)', async () => {
+      const space = await aliceAdapter.createSpace<TestDoc>('shared', { counter: 0, items: [] })
+      const admin = 'did:key:z6MkAdminSignerSigner'
+      const local = alice.getDid()
+      const st = (aliceAdapter as unknown as {
+        spaces: Map<string, { info: { members: string[] }; pendingAddition?: unknown; pendingRemoval?: unknown }>
+      }).spaces.get(space.id)!
+      st.info.members = [admin, local]
+      const mk = (action: 'added' | 'removed') => ({
+        v: 1, id: crypto.randomUUID(), type: 'member-update',
+        fromDid: admin, toDid: local, createdAt: new Date().toISOString(), encoding: 'json' as const,
+        payload: JSON.stringify({ spaceId: space.id, action, memberDid: local, effectiveKeyGeneration: 0 }),
+        signature: '',
+      })
+      const call = (e: unknown) => (aliceAdapter as unknown as { handleMemberUpdate(e: unknown): Promise<void> }).handleMemberUpdate(e)
+
+      await call(mk('added'))
+      expect(st.pendingAddition).toBeDefined()
+      await call(mk('removed'))
+      expect(st.pendingRemoval).toBeDefined()
+      expect(st.pendingAddition).toBeUndefined()
+    })
   })
 
   describe('onRemoteUpdate', () => {

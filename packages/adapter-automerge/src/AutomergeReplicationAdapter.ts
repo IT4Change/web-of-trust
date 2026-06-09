@@ -1166,9 +1166,11 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
     switch (result.localImpact) {
       case 'mark-removal-pending':
         space.pendingRemoval = { effectiveKeyGeneration: signal.effectiveKeyGeneration }
+        delete space.pendingAddition // mutually exclusive
         break
       case 'mark-addition-pending':
         space.pendingAddition = { effectiveKeyGeneration: signal.effectiveKeyGeneration }
+        delete space.pendingRemoval // mutually exclusive
         break
       case 'none':
         break
