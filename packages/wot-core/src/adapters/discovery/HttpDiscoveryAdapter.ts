@@ -103,6 +103,10 @@ export class HttpDiscoveryAdapter implements DiscoveryAdapter {
           crypto: this.crypto,
         })
       } catch {
+        // Graceful degradation: an unverifiable or malformed profile resource is
+        // treated as absent (profile: null), not surfaced — see the
+        // verification-fails test. A fetch/transport fault still throws via the
+        // outer catch; only verification failures are absorbed here.
         payload = null
       }
       if (!payload) {
@@ -143,6 +147,10 @@ export class HttpDiscoveryAdapter implements DiscoveryAdapter {
         })
         payload = verified.payload
       } catch {
+        // Graceful degradation: an unverifiable attestations resource is treated as
+        // empty (see the invalid-signature test), not surfaced. A fetch/transport
+        // fault still throws via the outer catch; only verification failures are
+        // absorbed here.
         payload = null
       }
       if (!payload) return []
@@ -152,7 +160,11 @@ export class HttpDiscoveryAdapter implements DiscoveryAdapter {
       // eigener Slice (1.B.3-discovery-attestations). Hier bewusst Behavior-Erhalt:
       // Payload weiter als PublicAttestationsData behandeln.
       const data = payload as unknown as PublicAttestationsData
-      const attestations = data.attestations ?? []
+      // Runtime guard: a correctly signed but malformed payload must not break the
+      // Promise<Attestation[]> contract — keep only array entries that are objects.
+      const attestations = (Array.isArray(data.attestations) ? data.attestations : []).filter(
+        (entry): entry is Attestation => typeof entry === 'object' && entry !== null,
+      )
       trace.log({ store: 'profiles', operation: 'read', label: `resolveAttestations ${did.slice(0, 24)}…`, durationMs: Math.round(performance.now() - start), success: true, meta: { did, count: attestations.length } })
       return attestations
     } catch (err) {

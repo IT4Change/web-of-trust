@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import {
   createDidKeyResolver,
   encodeBase64Url,
+  resolveDidKey,
   verifyJwsByDidResolver,
 } from '../src/protocol'
 import type { DidResolver, ProtocolCryptoAdapter } from '../src/protocol'
@@ -110,5 +111,16 @@ describe('verifyJwsByDidResolver', () => {
     await expect(
       verifyJwsByDidResolver(jws, { didResolver: createDidKeyResolver(), crypto: cryptoWithVerify(async () => true) }),
     ).rejects.toThrow('JWS payload DID does not match kid DID')
+  })
+
+  it('rejects a resolved DID document whose id does not match the kid DID', async () => {
+    // A buggy/misconfigured resolver returns a foreign document whose
+    // verificationMethod happens to match the kid — must be rejected.
+    const foreignDoc = { ...resolveDidKey(DID), id: OTHER_DID }
+    const badResolver: DidResolver = { resolve: async () => foreignDoc }
+    const jws = compactJws(validHeader, { did: DID })
+    await expect(
+      verifyJwsByDidResolver(jws, { didResolver: badResolver, crypto: cryptoWithVerify(async () => true) }),
+    ).rejects.toThrow('does not match')
   })
 })

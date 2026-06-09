@@ -73,7 +73,7 @@ async function main() {
     console.log(`  Bio: ${payload.profile.bio ?? ''}`)
     console.log(`  DID: ${payload.did}`)
   } catch (err) {
-    console.log(`✓ Profil verifiziert: FEHLER! — ${err instanceof Error ? err.message : String(err)}`)
+    console.log(`✗ Profil verifiziert: FEHLER! — ${err instanceof Error ? err.message : String(err)}`)
   }
 
   // 7. Tampered JWS — sollte 400 sein

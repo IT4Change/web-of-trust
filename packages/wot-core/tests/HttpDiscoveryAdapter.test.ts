@@ -148,6 +148,23 @@ describe('HttpDiscoveryAdapter resolve', () => {
     expect(await adapter.resolveAttestations(identity.getDid())).toEqual([])
   })
 
+  it('resolveAttestations returns [] for a signed payload whose attestations field is not an array', async () => {
+    const did = identity.getDid()
+    const jws = await identity.signJws({ did, attestations: 'not-an-array', updatedAt: '2026-05-18T10:43:25.976Z' })
+    fetchMock = vi.fn().mockResolvedValue(new Response(jws, { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+    expect(await adapter.resolveAttestations(did)).toEqual([])
+  })
+
+  it('resolveAttestations filters out non-object entries from a signed list', async () => {
+    const did = identity.getDid()
+    const valid = { id: 'att-1', type: 'knows', from: did, to: 'did:key:zPeer1', createdAt: '2026-05-18T10:43:25.976Z' }
+    const jws = await identity.signJws({ did, attestations: [valid, 'garbage', null, 42], updatedAt: '2026-05-18T10:43:25.976Z' })
+    fetchMock = vi.fn().mockResolvedValue(new Response(jws, { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+    expect(await adapter.resolveAttestations(did)).toEqual([valid])
+  })
+
   it('resolveProfile returns { profile: null } when verification fails', async () => {
     fetchMock = vi.fn().mockResolvedValue(new Response('not.a.jws', { status: 200 }))
     vi.stubGlobal('fetch', fetchMock)

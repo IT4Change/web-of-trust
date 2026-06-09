@@ -560,10 +560,6 @@ packages/wot-core/src/
 ├── protocol/sync/
 │   ├── encryption.ts               # encryptOneShot/decryptOneShot + encryptLogPayload/decryptLogPayload
 │   └── key-rotation-disposition.ts # evaluateKeyRotationDisposition (apply/ignore/future)
-├── services/
-│   ├── GraphCacheService.ts        # Batch Profile Resolution
-│   ├── VaultClient.ts             # HTTP Client for wot-vault
-│   └── VaultPushScheduler.ts      # Debounced Vault Push
 ├── storage/
 │   ├── YjsPersonalDocManager.ts    # Yjs CRDT (Default)
 │   ├── PersonalDocManager.ts       # Automerge CRDT (Option)

@@ -52,6 +52,10 @@ export async function verifyJwsByDidResolver(
 
   const didDocument = await options.didResolver.resolve(kidDid)
   if (!didDocument) throw new Error('Unable to resolve DID')
+  // Bind the resolved document to the requested DID, so a buggy/misconfigured
+  // resolver cannot return a foreign document whose verificationMethod happens to
+  // match the kid (mirrors the check in profile-service-resource.ts).
+  if (didDocument.id !== kidDid) throw new Error('Resolved DID document does not match DID')
 
   const verificationMethod = didDocument.verificationMethod.find(
     (method) => method.id === header.kid || (method.id.startsWith('#') && `${kidDid}${method.id}` === header.kid),
