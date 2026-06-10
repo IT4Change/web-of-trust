@@ -65,6 +65,9 @@ describe('demo legacy verification message payload type removal source guard', (
     const useVerification = readRepoFile('apps/demo/src/hooks/useVerification.ts')
     const verificationWorkflow = readRepoFile('apps/demo/src/services/verificationWorkflow.ts')
     const app = readRepoFile('apps/demo/src/App.tsx')
+    // M-A: die Listener-Logik ist aus App.tsx nach services/attestationListener.ts
+    // extrahiert, damit Tests den produktiven Code treffen.
+    const attestationListener = readRepoFile('apps/demo/src/services/attestationListener.ts')
 
     expect(useVerification).toMatch(/from\s+['"]\.\.\/services\/verificationWorkflow['"]/)
     expect(useVerification).toContain('verificationWorkflow.createVerificationAttestation')
@@ -76,6 +79,8 @@ describe('demo legacy verification message payload type removal source guard', (
     expect(verificationWorkflow).toContain("export { verificationWorkflow } from '../runtime/appRuntime'")
     expect(app).toContain('inboxReception.onAttestation')
     expect(app).not.toContain('envelope.type')
-    expect(app).toContain('setPendingIncoming({ attestation, fromDid: attestation.from })')
+    expect(app).toContain('createAttestationListener')
+    expect(attestationListener).not.toContain('envelope.type')
+    expect(attestationListener).toContain('setPendingIncoming({ attestation, fromDid: attestation.from })')
   })
 })

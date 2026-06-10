@@ -11,7 +11,7 @@ import type { PublicProfile as PublicProfileType } from '@web_of_trust/core/type
 import { LanguageProvider, useLanguage } from './i18n'
 import { DebugPanel } from './components/debug/DebugPanel'
 import { verificationWorkflow } from './services/verificationWorkflow'
-import type { AttestationVcPayload } from '@web_of_trust/core/protocol'
+import { createAttestationListener } from './services/attestationListener'
 
 /**
  * Mounts useProfileSync globally so profile-update listeners
@@ -27,10 +27,9 @@ function ProfileSyncEffect() {
  * Must be global (not inside useAttestations) so attestations are received
  * regardless of which page is currently rendered.
  *
- * Der Inbox-Reception-Host authentifiziert den Umschlag (Inner-JWS) und
- * liefert {vcJws, senderDid} — die VC-Verifikation (Trust 002) bleibt hier.
- * Lokale Attestation-Felder werden aus dem VC-Payload abgeleitet (K2),
- * nie aus Wire-Feldern.
+ * Die Listener-Logik lebt in services/attestationListener.ts (M-A:
+ * testbar extrahiert; deterministische Drops enden normal → Host ackt,
+ * transiente Fehler werfen durch → kein ack, Relay-Redelivery).
  */
 function AttestationListenerEffect() {
   const { inboxReception, attestationService } = useAdapters()
@@ -46,79 +45,20 @@ function AttestationListenerEffect() {
   activeContactsRef.current = activeContacts
 
   useEffect(() => {
-    const unsubscribe = inboxReception.onAttestation(async (delivery) => {
-      // Deterministische Drops (ungültiger VC, Duplikat, nicht an mich) enden
-      // normal — der Host wertet das als angewendet und ACKt (Queue-Hygiene).
-      try {
-        const { attestation, payload } = await attestationService.decodeIncomingAttestation(delivery.vcJws)
-
-        const localDid = didRef.current
-        const localIdentity = identityRef.current
-
-        if (isVerificationAttestationPayload(payload)) {
-          if (!localDid || !localIdentity) return
-          if (payload.sub !== localDid || payload.credentialSubject.id !== localDid) return
-
-          const decision = payload.inResponseTo
-            ? await verificationWorkflow.acceptVerifiedCounterVerification(localIdentity, payload)
-            : await verificationWorkflow.acceptVerifiedVerificationAttestation(localIdentity, payload)
-
-          if (decision.decision === 'accept-in-person') {
-            let isNew = true
-            try {
-              await attestationService.saveIncomingAttestation(attestation)
-            } catch {
-              isNew = false
-            }
-            setChallengeNonce(null)
-            if (isNew) setPendingIncoming({ attestation, fromDid: attestation.from })
-          } else if (decision.decision === 'accept-mutual-in-person') {
-            try {
-              await attestationService.saveIncomingAttestation(attestation)
-            } catch {
-              // Duplicate counter-verifications are ignored.
-            }
-          }
-          return
-        }
-
-        // Try to save — may throw on duplicate or invalid signature
-        let isNew = true
-        try {
-          await attestationService.saveIncomingAttestation(attestation)
-        } catch {
-          isNew = false
-        }
-
-        // Only show dialog for new attestations
-        if (isNew) {
-          const contact = activeContactsRef.current.find(c => c.did === attestation.from)
-          const name = contact?.name || 'Kontakt'
-          triggerAttestationDialog({
-            attestationId: attestation.id,
-            senderName: name,
-            senderDid: attestation.from,
-            claim: attestation.claim,
-          })
-        }
-      } catch (error) {
-        console.debug('Incoming attestation skipped:', error)
-      }
+    const listener = createAttestationListener({
+      attestationService,
+      verificationWorkflow,
+      getLocalDid: () => didRef.current,
+      getLocalIdentity: () => identityRef.current,
+      findContactName: (contactDid) => activeContactsRef.current.find(c => c.did === contactDid)?.name,
+      setChallengeNonce,
+      setPendingIncoming,
+      triggerAttestationDialog,
     })
-    return unsubscribe
+    return inboxReception.onAttestation(listener)
   }, [inboxReception, attestationService, triggerAttestationDialog, setChallengeNonce, setPendingIncoming])
 
   return null
-}
-
-const VERIFICATION_ATTESTATION_CLAIM = 'in-person verifiziert'
-
-function isVerificationAttestationPayload(payload: AttestationVcPayload): boolean {
-  return (
-    payload.type.includes('VerifiableCredential') &&
-    payload.type.includes('WotAttestation') &&
-    payload.credentialSubject.claim === VERIFICATION_ATTESTATION_CLAIM
-  )
 }
 
 /**

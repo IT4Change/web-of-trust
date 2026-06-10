@@ -27,6 +27,22 @@ const URN_UUID_PREFIX = 'urn:uuid:'
 const CANONICAL_UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
 
 /**
+ * Deterministisches Duplikat: die Attestation-ID ist bereits gespeichert.
+ * Eigener Fehlertyp (M-A), damit der Inbox-Listener Duplikate konklusiv von
+ * transienten Persist-Fehlern unterscheiden kann — nur Letztere dürfen als
+ * processing-incomplete in die Relay-Redelivery laufen.
+ */
+export class DuplicateAttestationError extends Error {
+  constructor(attestationId: string) {
+    super('Diese Attestation existiert bereits.')
+    this.name = 'DuplicateAttestationError'
+    this.attestationId = attestationId
+  }
+
+  readonly attestationId: string
+}
+
+/**
  * Demo-local storage port for attestation persistence.
  * Keeps AttestationService independent from the broad core storage surface.
  */
@@ -321,7 +337,8 @@ export class AttestationService {
 
   /**
    * Validate, verify, and save an incoming attestation (e.g. from relay).
-   * Throws on invalid/duplicate attestations.
+   * Wirft DuplicateAttestationError bei bekannter ID (deterministisch,
+   * konklusiv) — alle anderen Fehler gelten als transient (M-A).
    */
   async saveIncomingAttestation(attestation: Attestation): Promise<Attestation> {
     return this.storeIncomingAttestation(attestation, false)
@@ -345,7 +362,7 @@ export class AttestationService {
 
     const existing = await this.storage.getAttestation(attestation.id)
     if (existing) {
-      throw new Error('Diese Attestation existiert bereits.')
+      throw new DuplicateAttestationError(attestation.id)
     }
 
     if (!preverified) {
