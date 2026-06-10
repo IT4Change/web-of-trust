@@ -225,4 +225,41 @@ describe('Automerge key-rotation + invite wire form (C5/C6/S2)', () => {
     expect(await receiver.getSpace(spaceId)).not.toBeNull()
     expect(events.some((e) => e.spaceId === spaceId && e.fromDid === alice.getDid())).toBe(true)
   })
+
+  it('rejects an invite for an unknown space with missing or malformed documentUrl — no partial key state', async () => {
+    const { adapter: receiver, keyPort: bobKeys } = await startBobAdapter()
+    const spaceId = crypto.randomUUID()
+    const senderPort = new InMemoryKeyManagementAdapter()
+    await createSpaceKey({ crypto: protocolCrypto, keyPort: senderPort, spaceId, ownerDid: alice.getDid() })
+    const body = await buildSpaceInviteBody({
+      keyPort: senderPort, spaceId, recipientDid: bob.getDid(),
+      brokerUrls: ['wss://broker.example.com'], adminDids: [alice.getDid()],
+    })
+    const ecies = await alice.encryptForRecipient(new TextEncoder().encode(JSON.stringify(body)), await bob.getEncryptionPublicKeyBytes())
+    const eciesField = {
+      ciphertext: Array.from(ecies.ciphertext),
+      nonce: Array.from(ecies.nonce),
+      ephemeralPublicKey: Array.from(ecies.ephemeralPublicKey!),
+    }
+
+    for (const payload of [
+      JSON.stringify({ ecies: eciesField }), // missing documentUrl
+      JSON.stringify({ ecies: eciesField, documentUrl: 'not-an-automerge-url' }), // malformed documentUrl
+    ]) {
+      const envelope: MessageEnvelope = {
+        v: 1, id: crypto.randomUUID(), type: 'space-invite',
+        fromDid: alice.getDid(), toDid: bob.getDid(),
+        createdAt: new Date().toISOString(), encoding: 'json',
+        payload, signature: '',
+      }
+      await aliceMsg.send(await signEnvelope(envelope, (d) => alice.sign(d)))
+    }
+    await wait()
+
+    // The container is validated BEFORE applySpaceInviteBody — neither variant may
+    // persist ANY key material or register the space (no partial state).
+    expect(await bobKeys.getKeyByGeneration(spaceId, 0)).toBeNull()
+    expect(await bobKeys.getCapabilityVerificationKey(spaceId, 0)).toBeNull()
+    expect(await receiver.getSpace(spaceId)).toBeNull()
+  })
 })

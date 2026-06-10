@@ -3,7 +3,7 @@ import type { KeyManagementPort } from '../../ports/key-management'
 import { encodeBase64Url, decodeBase64Url } from '../../protocol/crypto/encoding'
 import { createSpaceCapabilityJws, verifySpaceCapabilityJws } from '../../protocol/sync/space-capability'
 import { assertSpaceInviteBody, type SpaceInviteBody, type SpaceContentKeyMaterial } from '../../protocol/sync/membership-messages'
-import { SIX_MONTHS_MS } from '../sync/group-key-workflow'
+import { resolveCapabilityValidityMs } from '../sync/group-key-workflow'
 
 export interface BuildSpaceInviteBodyOptions {
   keyPort: KeyManagementPort
@@ -44,7 +44,7 @@ export async function buildSpaceInviteBody(options: BuildSpaceInviteBodyOptions)
       permissions: ['read', 'write'],
       generation: currentGen,
       issuedAt: now.toISOString(),
-      validUntil: new Date(now.getTime() + (options.validityDurationMs ?? SIX_MONTHS_MS)).toISOString(),
+      validUntil: new Date(now.getTime() + resolveCapabilityValidityMs(options.validityDurationMs)).toISOString(),
     },
     signingSeed,
   })

@@ -158,4 +158,21 @@ describe('group-key-workflow', () => {
       }),
     ).resolves.toBeDefined()
   })
+
+  it('rejects an invalid validityDurationMs before persisting anything (create + rotate)', async () => {
+    for (const bad of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+      const keyPort = new InMemoryKeyManagementAdapter()
+      await expect(
+        createSpaceKey({ crypto, keyPort, spaceId: SPACE, ownerDid: OWNER, validityDurationMs: bad }),
+      ).rejects.toThrow(/validityDurationMs/)
+      expect(await keyPort.getCurrentGeneration(SPACE)).toBe(-1) // nothing persisted
+
+      const keyPort2 = new InMemoryKeyManagementAdapter()
+      await createSpaceKey({ crypto, keyPort: keyPort2, spaceId: SPACE, ownerDid: OWNER })
+      await expect(
+        rotateSpaceKey({ crypto, keyPort: keyPort2, spaceId: SPACE, ownerDid: OWNER, validityDurationMs: bad }),
+      ).rejects.toThrow(/validityDurationMs/)
+      expect(await keyPort2.getCurrentGeneration(SPACE)).toBe(0) // rotation not applied
+    }
+  })
 })

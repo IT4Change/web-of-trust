@@ -1083,6 +1083,25 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
       assertSpaceInviteBody(body)
       const spaceId = body.spaceId
 
+      // documentUrl is the REQUIRED Automerge container extension for a previously
+      // unknown space — the repo doc handle is created under the sender's docId.
+      // Validate BEFORE applying the spec body so a missing/malformed container can
+      // never leave partially persisted key state (keys without space state) behind.
+      const existing = this.spaces.get(spaceId)
+      let senderDocId: DocumentId | null = null
+      if (!existing) {
+        if (typeof container.documentUrl !== 'string') {
+          console.warn('[ReplicationAdapter] Rejected space-invite without documentUrl for unknown space', spaceId)
+          return
+        }
+        try {
+          senderDocId = parseAutomergeUrl(container.documentUrl as AutomergeUrl).documentId
+        } catch {
+          console.warn('[ReplicationAdapter] Rejected space-invite with malformed documentUrl for unknown space', spaceId)
+          return
+        }
+      }
+
       const result = await applySpaceInviteBody({
         crypto: this.crypto,
         keyPort: this.keyManagement,
@@ -1113,7 +1132,6 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
 
       // If space already exists (discovered via metadata restore / multi-device sync),
       // merge the snapshot instead of ignoring it — the existing doc may be empty
-      const existing = this.spaces.get(spaceId)
       if (existing) {
         if (docBinary) {
           const existingHandle = this.repo.handles[existing.documentId]
@@ -1125,11 +1143,11 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
 
       // Import the doc into automerge-repo with the SAME documentId as the sender
       // so automerge-repo can sync them via the NetworkAdapter. documentUrl is the
-      // automerge-repo doc id (not key material), carried in the container.
-      // repo.import() is what creates the doc handle under the sender's docId — without a
-      // snapshot, import an empty Automerge doc so content arrives via regular live-sync.
-      const { documentId: senderDocId } = parseAutomergeUrl(container.documentUrl as AutomergeUrl)
-      const docHandle = this.repo.import<any>(docBinary ?? Automerge.save(Automerge.init()), { docId: senderDocId })
+      // automerge-repo doc id (not key material), carried in the container and
+      // validated above. repo.import() is what creates the doc handle under the
+      // sender's docId — without a snapshot, import an empty Automerge doc so content
+      // arrives via regular live-sync.
+      const docHandle = this.repo.import<any>(docBinary ?? Automerge.save(Automerge.init()), { docId: senderDocId! })
       // Note: repo.import() with docId does NOT call doneLoading() (automerge-repo bug),
       // so whenReady() would timeout. The doc IS loaded though — call doneLoading() ourselves.
       if (!docHandle.isReady()) {

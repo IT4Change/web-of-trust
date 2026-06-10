@@ -40,6 +40,15 @@ describe('invite-workflow', () => {
     expect(payload.audience).toBe(RECIPIENT)
   })
 
+  it('buildSpaceInviteBody rejects an invalid validityDurationMs', async () => {
+    const sender = await senderPortAtGen(0)
+    for (const bad of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+      await expect(
+        buildSpaceInviteBody({ keyPort: sender, spaceId: SPACE, recipientDid: RECIPIENT, brokerUrls: BROKERS, adminDids: [ADMIN], validityDurationMs: bad }),
+      ).rejects.toThrow(/validityDurationMs/)
+    }
+  })
+
   it('buildSpaceInviteBody throws on empty brokerUrls (Sync 005 Z.42)', async () => {
     const sender = await senderPortAtGen(0)
     await expect(build(sender, RECIPIENT, [])).rejects.toThrow(/brokerUrls/)

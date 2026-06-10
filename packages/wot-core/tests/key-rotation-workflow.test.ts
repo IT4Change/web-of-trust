@@ -42,6 +42,15 @@ describe('key-rotation-workflow', () => {
     expect(payload.audience).toBe(RECIPIENT)
   })
 
+  it('buildKeyRotationBody rejects an invalid validityDurationMs', async () => {
+    const sender = await senderPortAtGen(1)
+    for (const bad of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+      await expect(
+        buildKeyRotationBody({ keyPort: sender, spaceId: SPACE, newGeneration: 1, recipientDid: RECIPIENT, validityDurationMs: bad }),
+      ).rejects.toThrow(/validityDurationMs/)
+    }
+  })
+
   it('buildKeyRotationBody throws when the content key is missing', async () => {
     const sender = await senderPortAtGen(0)
     await expect(buildKeyRotationBody({ keyPort: sender, spaceId: SPACE, newGeneration: 5, recipientDid: RECIPIENT })).rejects.toThrow()

@@ -3,7 +3,7 @@ import type { KeyManagementPort } from '../../ports/key-management'
 import { encodeBase64Url, decodeBase64Url } from '../../protocol/crypto/encoding'
 import { createSpaceCapabilityJws, verifySpaceCapabilityJws } from '../../protocol/sync/space-capability'
 import { assertKeyRotationBody, type KeyRotationBody } from '../../protocol/sync/membership-messages'
-import { applyKeyRotation, SIX_MONTHS_MS } from './group-key-workflow'
+import { applyKeyRotation, resolveCapabilityValidityMs } from './group-key-workflow'
 
 export interface BuildKeyRotationBodyOptions {
   keyPort: KeyManagementPort
@@ -30,7 +30,7 @@ export async function buildKeyRotationBody(options: BuildKeyRotationBodyOptions)
       permissions: ['read', 'write'],
       generation: options.newGeneration,
       issuedAt: now.toISOString(),
-      validUntil: new Date(now.getTime() + (options.validityDurationMs ?? SIX_MONTHS_MS)).toISOString(),
+      validUntil: new Date(now.getTime() + resolveCapabilityValidityMs(options.validityDurationMs)).toISOString(),
     },
     signingSeed,
   })
