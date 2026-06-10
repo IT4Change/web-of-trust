@@ -20,12 +20,25 @@ import {
   InMemoryPublishStateStore,
   InMemoryGraphCacheStore,
   InMemoryKeyManagementAdapter,
+  InMemoryMessageIdHistory,
 } from '@web_of_trust/core/adapters'
 import { WebSocketMessagingAdapter } from '@web_of_trust/core/adapters/messaging/websocket'
 import { HttpDiscoveryAdapter } from '@web_of_trust/core/adapters/discovery/http'
 import { WebCryptoProtocolCryptoAdapter } from '@web_of_trust/core/protocol-adapters'
 import { signEnvelope } from '@web_of_trust/core/crypto'
-import { parseQrChallenge } from '@web_of_trust/core/protocol'
+import {
+  INBOX_MESSAGE_TYPE,
+  assertAttestationDeliveryBody,
+  createAckMessage,
+  createDidKeyResolver,
+  decodeBase64Url,
+  evaluateInboxAckDisposition,
+  isDidcommMessage,
+  parseQrChallenge,
+  x25519MultibaseToPublicKeyBytes,
+} from '@web_of_trust/core/protocol'
+import type { DidcommPlaintextMessage, InboxAckLocalOutcome } from '@web_of_trust/core/protocol'
+import { deliverInboxMessage, receiveInboxMessage } from '@web_of_trust/core/application'
 import type { StorageAdapter, ReactiveStorageAdapter } from '@web_of_trust/core/ports'
 import type { SpaceInfo, Contact, Attestation, MessageEnvelope, MessageType } from '@web_of_trust/core/types'
 import {
@@ -66,6 +79,9 @@ export class WotCliClient {
   private outboxStore: SqliteOutboxStore | null = null
   private protocolCrypto = new WebCryptoProtocolCryptoAdapter()
   private verificationWorkflow = new VerificationWorkflow({ crypto: this.protocolCrypto })
+  // Inbox-Empfang (Sync 003 Z.460-466): Inner-JWS-Verify + Message-ID-History.
+  private didResolver = createDidKeyResolver()
+  private messageIdHistory = new InMemoryMessageIdHistory()
   private options: Required<WotCliClientOptions>
 
   constructor(options: WotCliClientOptions) {
@@ -165,11 +181,12 @@ export class WotCliClient {
       console.warn('[wot-cli] Relay not available, running offline')
     }
 
-    // Register message handlers
-    this.wsAdapter.onMessage(async (envelope) => {
-      if (envelope.type === 'attestation') {
-        await this.handleIncomingAttestation(envelope)
-      }
+    // Register message handlers — der CLI-Client ist der Reception-Host für
+    // inbox/1.0 (VE-9 analog Demo); die Membership-Typen empfängt und ACKt
+    // der Replication-Adapter selbst.
+    this.wsAdapter.onMessage(async (message) => {
+      if (!isDidcommMessage(message) || message.type !== INBOX_MESSAGE_TYPE) return
+      await this.handleInboxMessage(message)
     })
 
     // Start replication (restores spaces, listens for messages)
@@ -251,8 +268,18 @@ export class WotCliClient {
 
   // --- Messaging ---
 
+  /**
+   * Generischer Old-World-Versand (CRDT-Sync-/Demo-Kanal: content,
+   * profile-update, personal-sync). Die Inbox-Familie (Sync 003) reist NICHT
+   * über diesen Pfad — Attestations gehen via createAttestation/
+   * respondToChallenge (inbox/1.0 mit Inner-JWS + ECIES).
+   */
   async sendMessage(toDid: string, type: MessageType, payload: unknown): Promise<void> {
     if (!this.outboxAdapter) throw new Error('Not initialized')
+    const inboxFamily: MessageType[] = ['attestation', 'space-invite', 'key-rotation', 'member-update']
+    if (inboxFamily.includes(type)) {
+      throw new Error(`Message type ${type} is an inbox message (Sync 003) — use the dedicated flows instead of sendMessage`)
+    }
     const envelope: MessageEnvelope = {
       v: 1,
       id: crypto.randomUUID(),
@@ -267,6 +294,44 @@ export class WotCliClient {
     // Sign before sending — all messages leaving the device must be signed
     await signEnvelope(envelope, (data) => this.requireIdentity().sign(data))
     await this.outboxAdapter.send(envelope)
+  }
+
+  /**
+   * K2-Versand (Sync 003 Z.446-456): Klartext-Body {vcJws} → Inner-JWS
+   * (Identity-Key) → ECIES für den Empfänger → DIDComm inbox/1.0. Lokale
+   * Attestation-Felder reisen nicht im Wire-Body.
+   */
+  private async deliverAttestation(attestation: Attestation, toDid: string): Promise<void> {
+    if (!this.outboxAdapter) throw new Error('Not initialized')
+    const recipientKey = await this.resolveRecipientEncryptionKey(toDid)
+    if (!recipientKey) {
+      // Kein Klartext-Fallback: ohne keyAgreement-Key (Sync 004) keine
+      // spec-konforme Zustellung.
+      throw new Error(`No encryption key published for ${toDid} — cannot deliver attestation`)
+    }
+    const envelope = await deliverInboxMessage({
+      type: INBOX_MESSAGE_TYPE,
+      body: { vcJws: attestation.vcJws },
+      from: this.requireIdentity().getDid(),
+      to: toDid,
+      recipientEncryptionPublicKey: recipientKey,
+      sign: (input) => this.requireIdentity().signEd25519(input),
+      crypto: this.protocolCrypto,
+    })
+    await this.outboxAdapter.send(envelope)
+  }
+
+  /** X25519-Empfänger-Key aus dem keyAgreement des DID-Dokuments (Sync 004). */
+  private async resolveRecipientEncryptionKey(did: string): Promise<Uint8Array | null> {
+    if (!this.discovery) return null
+    try {
+      const result = await this.discovery.resolveProfile(did)
+      const keyAgreement = result.didDocument?.keyAgreement?.[0]?.publicKeyMultibase
+      if (!keyAgreement) return null
+      return x25519MultibaseToPublicKeyBytes(keyAgreement)
+    } catch {
+      return null
+    }
   }
 
   // --- Verification ---
@@ -325,48 +390,120 @@ export class WotCliClient {
     })
     await this.storage.saveAttestation(attestation)
 
-    // Send via relay
-    const envelope: MessageEnvelope = {
-      v: 1,
-      id: attestation.id,
-      type: 'attestation' as MessageType,
-      fromDid: this.requireIdentity().getDid(),
-      toDid: peerDid,
-      createdAt: attestation.createdAt,
-      encoding: 'json',
-      payload: JSON.stringify(attestation),
-      signature: '',
-    }
-    await signEnvelope(envelope, (data) => this.requireIdentity().sign(data))
-    await this.outboxAdapter.send(envelope)
+    // Send via relay (inbox/1.0, Sync 003)
+    await this.deliverAttestation(attestation, peerDid)
 
     console.log(`[wot-cli] Verification attestation sent to ${peerName}`)
     return { peerDid, peerName }
   }
 
   /**
-   * Handle incoming attestation message — verify, save, and counter-verify.
+   * Empfangspfad inbox/1.0: receiveInboxMessage (ECIES-Decrypt + Inner-JWS-
+   * Prüfungen + Message-ID-History) → Anwendung → ack/1.0 nach Ack-Disposition
+   * (K1: ACK-Ownership liegt hier, nicht im Transport-Adapter).
    */
-  private async handleIncomingAttestation(envelope: MessageEnvelope): Promise<void> {
-    if (!this.storage || !this.outboxAdapter) return
+  private async handleInboxMessage(message: DidcommPlaintextMessage<object>): Promise<void> {
+    const result = await receiveInboxMessage({
+      message,
+      ownDid: this.requireIdentity().getDid(),
+      decryptEcies: (ecies) => this.requireIdentity().decryptForMe({
+        ephemeralPublicKey: decodeBase64Url(ecies.epk),
+        nonce: decodeBase64Url(ecies.nonce),
+        ciphertext: decodeBase64Url(ecies.ciphertext),
+      }),
+      crypto: this.protocolCrypto,
+      didResolver: this.didResolver,
+      messageIdHistory: this.messageIdHistory,
+    })
 
-    try {
-      const attestation: Attestation = JSON.parse(envelope.payload)
-      const workflow = new AttestationWorkflow({ crypto: this.protocolCrypto })
-      const isValid = await workflow.verifyAttestation(attestation)
-      if (!isValid) {
-        console.warn(`[wot-cli] Invalid attestation from ${attestation.from}`)
+    if (result.decision === 'reject') {
+      if (result.reason === 'replay') {
+        // Sync 003 Z.619: Duplikat sicher erkannt → ack, sonst staut die
+        // Relay-Redelivery die Queue.
+        await this.ackByDisposition(message.id, { kind: 'duplicate', source: 'replay-history' }, 'duplicate-known')
         return
       }
+      // K1: fehlgeschlagene Verarbeitung → KEIN ack/1.0 (Redelivery-Pfad).
+      console.warn('[wot-cli] Rejected inbox/1.0 message:', result.reason)
+      return
+    }
 
-      // Save the attestation
+    let outcome: InboxAckLocalOutcome
+    try {
+      assertAttestationDeliveryBody(result.body)
+      outcome = await this.applyIncomingAttestationDelivery(result.body.vcJws)
+    } catch (err) {
+      // Body verletzt den K2-Vertrag — deterministisch ungültig; kein ack
+      // ('may-ack-invalid-and-drop' wird bewusst nicht genutzt).
+      console.warn('[wot-cli] Invalid attestation delivery body:', err)
+      return
+    }
+    await this.ackByDisposition(result.outerId, outcome)
+  }
+
+  /**
+   * K2-Empfang: VC-JWS verifizieren und die lokale Attestation-View aus dem
+   * VC-Payload ableiten (importAttestation: jti/iss/sub/claim/validFrom) —
+   * danach speichern, Kontakt sicherstellen, ggf. counter-verifizieren.
+   */
+  private async applyIncomingAttestationDelivery(vcJws: string): Promise<InboxAckLocalOutcome> {
+    if (!this.storage || !this.outboxAdapter) {
+      return { kind: 'processing-incomplete', waitingOn: 'durable-apply' }
+    }
+
+    let attestation: Attestation
+    try {
+      const workflow = new AttestationWorkflow({ crypto: this.protocolCrypto })
+      attestation = await workflow.importAttestation(vcJws)
+    } catch (err) {
+      console.warn('[wot-cli] Invalid attestation VC-JWS:', err)
+      return { kind: 'invalid-rejected', rejection: 'malformed', authoritativeStateChanged: false }
+    }
+
+    try {
       await this.storage.saveAttestation(attestation)
-      console.log(`[wot-cli] Received attestation from ${attestation.from.slice(0, 25)}...: "${attestation.claim}"`)
+    } catch (err) {
+      console.error('[wot-cli] Failed to persist attestation:', err)
+      return { kind: 'processing-incomplete', waitingOn: 'durable-apply' }
+    }
+    console.log(`[wot-cli] Received attestation from ${attestation.from.slice(0, 25)}...: "${attestation.claim}"`)
 
+    // Folgeaktionen sind best effort — sie ändern die ack-Disposition der
+    // bereits durabel angewendeten Inbox-Nachricht nicht mehr.
+    try {
       await this.ensureContactForAttestationIssuer(attestation)
       await this.maybeSendCounterVerification(attestation)
     } catch (err) {
-      console.error('[wot-cli] Failed to handle attestation:', err)
+      console.error('[wot-cli] Attestation follow-up failed:', err)
+    }
+    return { kind: 'applied', durable: true }
+  }
+
+  /** ack/1.0 an den Broker (Sync 003 Z.594-609): thid = body.messageId = Original-id. */
+  private async ackByDisposition(
+    outerId: string,
+    outcome: InboxAckLocalOutcome,
+    replayCheck: 'unique' | 'duplicate-known' = 'unique',
+  ): Promise<void> {
+    const disposition = evaluateInboxAckDisposition({
+      messageKind: 'inbox',
+      decryption: 'complete',
+      innerVerification: 'complete',
+      replayCheck,
+      localOutcome: outcome,
+    })
+    if (disposition.action !== 'send-ack' || !this.outboxAdapter) return
+    try {
+      const ack = createAckMessage({
+        id: crypto.randomUUID(),
+        from: this.requireIdentity().getDid(),
+        createdTime: Math.floor(Date.now() / 1000),
+        thid: outerId,
+        body: { messageId: outerId },
+      })
+      await this.outboxAdapter.send(ack)
+    } catch (err) {
+      console.warn('[wot-cli] Failed to send ack/1.0 for', outerId, err)
     }
   }
 
@@ -418,19 +555,7 @@ export class WotCliClient {
     })
     await this.storage.saveAttestation(counter)
 
-    const counterEnvelope: MessageEnvelope = {
-      v: 1,
-      id: counter.id,
-      type: 'attestation' as MessageType,
-      fromDid: this.requireIdentity().getDid(),
-      toDid: attestation.from,
-      createdAt: counter.createdAt,
-      encoding: 'json',
-      payload: JSON.stringify(counter),
-      signature: '',
-    }
-    await signEnvelope(counterEnvelope, (data) => this.requireIdentity().sign(data))
-    await this.outboxAdapter.send(counterEnvelope)
+    await this.deliverAttestation(counter, attestation.from)
     console.log(`[wot-cli] Counter-verification attestation sent to ${attestation.from.slice(0, 25)}...`)
   }
 
@@ -449,7 +574,6 @@ export class WotCliClient {
     if (!this.storage || !this.outboxAdapter) throw new Error('Not initialized')
 
     const identity = this.requireIdentity()
-    const did = identity.getDid()
     const workflow = new AttestationWorkflow({ crypto: this.protocolCrypto })
     const attestation = await workflow.createAttestation({
       issuer: identity,
@@ -461,20 +585,8 @@ export class WotCliClient {
     // Save locally
     await this.storage.saveAttestation(attestation)
 
-    // Send via relay
-    const envelope: MessageEnvelope = {
-      v: 1,
-      id: attestation.id,
-      type: 'attestation' as MessageType,
-      fromDid: did,
-      toDid,
-      createdAt: attestation.createdAt,
-      encoding: 'json',
-      payload: JSON.stringify(attestation),
-      signature: '',
-    }
-    await signEnvelope(envelope, (data) => this.requireIdentity().sign(data))
-    await this.outboxAdapter.send(envelope)
+    // Send via relay (inbox/1.0, Sync 003)
+    await this.deliverAttestation(attestation, toDid)
 
     console.log(`[wot-cli] Attestation sent to ${toDid.slice(0, 25)}...: "${claim}"`)
     return attestation

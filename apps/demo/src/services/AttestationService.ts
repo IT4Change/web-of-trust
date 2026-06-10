@@ -6,14 +6,25 @@ import type {
 import type {
   Attestation,
   IdentitySession,
-  MessageEnvelope,
 } from '@web_of_trust/core/types'
 import type { AttestationVcPayload } from '@web_of_trust/core/protocol'
-import { createResourceRef } from '@web_of_trust/core/types'
-import { signEnvelope } from '@web_of_trust/core/crypto'
-import { createAttestationWorkflow } from '../runtime/appRuntime'
+import { INBOX_MESSAGE_TYPE, isDidcommMessage } from '@web_of_trust/core/protocol'
+import { deliverInboxMessage } from '@web_of_trust/core/application'
+import { createAttestationWorkflow, protocolCrypto } from '../runtime/appRuntime'
 
 export type DeliveryStatus = 'sending' | 'queued' | 'delivered' | 'failed'
+
+/** Löst den X25519-Encryption-Key eines Empfängers auf (Sync 004 keyAgreement im DID-Dokument). */
+export type RecipientEncryptionKeyResolver = (did: string) => Promise<Uint8Array | null>
+
+export interface AttestationDeliveryConfig {
+  /** Unlocked Identity — signiert den Inner-JWS (Sync 003 Z.446-456). */
+  identity: IdentitySession
+  resolveRecipientEncryptionKey: RecipientEncryptionKeyResolver
+}
+
+const URN_UUID_PREFIX = 'urn:uuid:'
+const CANONICAL_UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
 
 /**
  * Demo-local storage port for attestation persistence.
@@ -40,8 +51,20 @@ export class AttestationService {
   private receiptUnsubscribe: (() => void) | null = null
   private persistFn: ((attestationId: string, status: string) => Promise<void>) | null = null
   private workflow = createAttestationWorkflow()
+  private deliveryConfig: AttestationDeliveryConfig | null = null
+  /** Wire-Message-ID → Attestation-ID (Receipt-Zuordnung innerhalb der Session). */
+  private deliveryMessageIds = new Map<string, string>()
 
   constructor(private storage: AttestationStoragePort) {}
+
+  /**
+   * K2-Wire-Vertrag (Sync 003): Attestations reisen als inbox/1.0 mit Body
+   * {vcJws} — Inner-JWS + ECIES für den Empfänger. Ohne Konfiguration werden
+   * Attestations nur lokal gespeichert, nicht zugestellt.
+   */
+  configureDelivery(config: AttestationDeliveryConfig): void {
+    this.deliveryConfig = config
+  }
 
   /** Set a persistence callback for delivery status (called on every status change) */
   setPersistDeliveryStatus(fn: (attestationId: string, status: string) => Promise<void>): void {
@@ -102,11 +125,12 @@ export class AttestationService {
 
     // Listen for relay delivery receipts
     this.receiptUnsubscribe = messaging.onReceipt((receipt) => {
-      if (!this.deliveryStatus.has(receipt.messageId)) return
+      const attestationId = this.attestationIdForMessageId(receipt.messageId)
+      if (!attestationId || !this.deliveryStatus.has(attestationId)) return
       if (receipt.status === 'delivered') {
-        this.setStatus(receipt.messageId, 'delivered')
+        this.setStatus(attestationId, 'delivered')
       } else if (receipt.status === 'failed') {
-        this.setStatus(receipt.messageId, 'failed')
+        this.setStatus(attestationId, 'failed')
       }
     })
   }
@@ -118,16 +142,19 @@ export class AttestationService {
    */
   async initFromOutbox(outboxStore: OutboxStore): Promise<void> {
     const pending = await outboxStore.getPending()
-    const outboxIds = new Set<string>()
+    const attestationIds = new Set<string>()
     for (const entry of pending) {
-      if (entry.envelope.type === 'attestation') {
-        outboxIds.add(entry.envelope.id)
-        this.setStatus(entry.envelope.id, 'queued')
-      }
+      // In der Demo-Outbox sind inbox/1.0-Envelopes ausschließlich
+      // Attestation-Zustellungen (Membership-Typen haben eigene Type-URIs).
+      if (!isDidcommMessage(entry.envelope) || entry.envelope.type !== INBOX_MESSAGE_TYPE) continue
+      const attestationId = `${URN_UUID_PREFIX}${entry.envelope.id}`
+      this.deliveryMessageIds.set(entry.envelope.id, attestationId)
+      attestationIds.add(attestationId)
+      this.setStatus(attestationId, 'queued')
     }
     // Any 'sending' status not in the outbox means the send was interrupted — mark as failed
     for (const [id, status] of this.deliveryStatus) {
-      if (status === 'sending' && !outboxIds.has(id)) {
+      if (status === 'sending' && !attestationIds.has(id)) {
         this.setStatus(id, 'failed')
       }
     }
@@ -135,28 +162,16 @@ export class AttestationService {
 
   /**
    * Retry sending a failed/queued attestation.
+   * Benötigt configureDelivery() — der Inner-JWS wird mit der Identity neu signiert.
    */
   async retryAttestation(attestationId: string): Promise<void> {
-    if (!this.messaging) return
+    if (!this.messaging || !this.deliveryConfig) return
     const attestation = await this.storage.getAttestation(attestationId)
     if (!attestation) return
 
-    const envelope: MessageEnvelope = {
-      v: 1,
-      id: attestation.id,
-      type: 'attestation',
-      fromDid: attestation.from,
-      toDid: attestation.to,
-      createdAt: attestation.createdAt,
-      encoding: 'json',
-      payload: JSON.stringify(attestation),
-      signature: '',
-      ref: createResourceRef('attestation', attestation.id),
-    }
-
     this.setStatus(attestationId, 'sending')
     try {
-      const receipt = await this.messaging.send(envelope)
+      const receipt = await this.sendDelivery(this.deliveryConfig.identity, attestation)
       if (receipt.reason === 'queued-in-outbox') {
         this.setStatus(attestationId, 'queued')
       } else if (receipt.status === 'delivered' || receipt.status === 'accepted') {
@@ -190,21 +205,8 @@ export class AttestationService {
 
     // Send to recipient via relay (Empfänger-Prinzip)
     if (this.messaging) {
-      const envelope: MessageEnvelope = {
-        v: 1,
-        id: attestation.id,
-        type: 'attestation',
-        fromDid: attestation.from,
-        toDid: toDid,
-        createdAt: attestation.createdAt,
-        encoding: 'json',
-        payload: JSON.stringify(attestation),
-        signature: '',
-        ref: createResourceRef('attestation', attestation.id),
-      }
-      await signEnvelope(envelope, (data) => issuer.sign(data))
       this.setStatus(attestation.id, 'sending')
-      this.messaging.send(envelope).then((receipt) => {
+      this.sendDelivery(issuer, attestation).then((receipt) => {
         if (receipt.reason === 'queued-in-outbox') {
           this.setStatus(attestation.id, 'queued')
         } else if (receipt.status === 'delivered' || receipt.status === 'accepted') {
@@ -218,12 +220,85 @@ export class AttestationService {
     return attestation
   }
 
+  /**
+   * K2-Versand (Sync 003 Z.446-456): Klartext-Body {vcJws} → Inner-JWS
+   * (Identity-Key) → ECIES für den Empfänger → DIDComm inbox/1.0.
+   * Lokale Attestation-Felder reisen NICHT im Wire-Body — der Empfänger
+   * leitet sie nach VC-Verifikation aus dem VC-Payload ab.
+   */
+  async sendAttestation(issuer: IdentitySession, attestation: Attestation): Promise<void> {
+    if (!this.messaging) throw new Error('Messaging not configured')
+    await this.sendDelivery(issuer, attestation)
+  }
+
+  private async sendDelivery(issuer: IdentitySession, attestation: Attestation) {
+    if (!this.messaging) throw new Error('Messaging not configured')
+    const resolver = this.deliveryConfig?.resolveRecipientEncryptionKey
+    if (!resolver) throw new Error('Attestation delivery not configured (configureDelivery)')
+
+    const recipientKey = await resolver(attestation.to)
+    if (!recipientKey) {
+      // Kein Klartext-Fallback: ohne keyAgreement-Key des Empfängers ist keine
+      // spec-konforme Zustellung möglich (Sync 003 Z.446-456 / Sync 004).
+      throw new Error(`No encryption key published for ${attestation.to}`)
+    }
+
+    const messageId = this.messageIdForAttestation(attestation.id)
+    const envelope = await deliverInboxMessage({
+      type: INBOX_MESSAGE_TYPE,
+      body: { vcJws: attestation.vcJws },
+      from: issuer.getDid(),
+      to: attestation.to,
+      recipientEncryptionPublicKey: recipientKey,
+      sign: (input) => issuer.signEd25519(input),
+      crypto: protocolCrypto,
+      randomId: () => messageId,
+    })
+    this.deliveryMessageIds.set(envelope.id, attestation.id)
+    return this.messaging.send(envelope)
+  }
+
+  /**
+   * Wire-Message-ID für eine Attestation: die UUID aus `urn:uuid:<uuid>`
+   * (deterministisch — Receipt- und Outbox-Zuordnung überleben einen Reload),
+   * sonst eine frische UUID v4 (Sync 003: Message-ID MUSS UUID v4 sein).
+   */
+  private messageIdForAttestation(attestationId: string): string {
+    if (attestationId.startsWith(URN_UUID_PREFIX)) {
+      const bare = attestationId.slice(URN_UUID_PREFIX.length)
+      if (CANONICAL_UUID_V4.test(bare)) return bare
+    }
+    return crypto.randomUUID()
+  }
+
+  private attestationIdForMessageId(messageId: string): string | null {
+    const mapped = this.deliveryMessageIds.get(messageId)
+    if (mapped) return mapped
+    // Deterministische Ableitung (siehe messageIdForAttestation) für Receipts
+    // nach einem Reload, wenn die Session-Map leer ist.
+    const candidate = `${URN_UUID_PREFIX}${messageId}`
+    return this.deliveryStatus.has(candidate) ? candidate : null
+  }
+
   async verifyAttestation(attestation: Attestation): Promise<boolean> {
     return this.workflow.verifyAttestation(attestation)
   }
 
   async verifyAttestationVcJws(vcJws: string): Promise<AttestationVcPayload> {
     return this.workflow.verifyAttestationVcJws(vcJws)
+  }
+
+  /**
+   * K2-Empfang: verifiziert den VC-JWS (Trust 002) und leitet die lokale
+   * Attestation-View aus dem VC-Payload ab (jti/iss/sub/credentialSubject.claim/
+   * validFrom≙nbf) — nie aus Wire-Feldern.
+   */
+  async decodeIncomingAttestation(vcJws: string): Promise<{
+    attestation: Attestation
+    payload: AttestationVcPayload
+  }> {
+    const payload = await this.verifyAttestationVcJws(vcJws)
+    return { payload, attestation: attestationFromVcPayload(payload, vcJws) }
   }
 
   /**
@@ -282,5 +357,33 @@ export class AttestationService {
 
     await this.storage.saveAttestation(attestation)
     return attestation
+  }
+}
+
+/**
+ * Attestation-View aus einem VERIFIZIERTEN VC-Payload (K2): id ← jti (Fallback
+ * payload.id), from ← issuer, to ← credentialSubject.id, claim ←
+ * credentialSubject.claim, createdAt ← validFrom (≙ nbf, Konsistenz von
+ * assertAttestationVcPayload erzwungen).
+ */
+function attestationFromVcPayload(payload: AttestationVcPayload, vcJws: string): Attestation {
+  const tags = payload.credentialSubject.tags
+  const context = payload.credentialSubject.context
+  const id = typeof payload.jti === 'string'
+    ? payload.jti
+    : typeof payload.id === 'string'
+      ? payload.id
+      : `wot:attestation:${payload.iss}:${payload.sub}:${payload.nbf}`
+
+  return {
+    id,
+    from: payload.issuer,
+    to: payload.credentialSubject.id,
+    claim: payload.credentialSubject.claim,
+    ...(typeof payload.inResponseTo === 'string' ? { inResponseTo: payload.inResponseTo } : {}),
+    ...(Array.isArray(tags) && tags.every(tag => typeof tag === 'string') ? { tags } : {}),
+    ...(typeof context === 'string' ? { context } : {}),
+    createdAt: payload.validFrom,
+    vcJws,
   }
 }

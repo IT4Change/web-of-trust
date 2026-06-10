@@ -5,9 +5,9 @@ import { AppShell, IdentityManagement, Confetti } from './components'
 import { Avatar } from './components/shared/Avatar'
 import { X, Award, Users } from 'lucide-react'
 import { Home, Identity, Contacts, Verify, Attestations, PublicProfile, Spaces, Network } from './pages'
-import { useProfileSync, useMessaging, useContacts, useVerification, useLocalIdentity } from './hooks'
+import { useProfileSync, useContacts, useVerification, useLocalIdentity } from './hooks'
 import { useVerificationStatus, getVerificationStatus } from './hooks/useVerificationStatus'
-import type { Attestation, PublicProfile as PublicProfileType } from '@web_of_trust/core/types'
+import type { PublicProfile as PublicProfileType } from '@web_of_trust/core/types'
 import { LanguageProvider, useLanguage } from './i18n'
 import { DebugPanel } from './components/debug/DebugPanel'
 import { verificationWorkflow } from './services/verificationWorkflow'
@@ -23,13 +23,17 @@ function ProfileSyncEffect() {
 }
 
 /**
- * Global listener for incoming attestation relay messages.
+ * Global listener for incoming attestation deliveries (inbox/1.0, VE-9).
  * Must be global (not inside useAttestations) so attestations are received
  * regardless of which page is currently rendered.
+ *
+ * Der Inbox-Reception-Host authentifiziert den Umschlag (Inner-JWS) und
+ * liefert {vcJws, senderDid} — die VC-Verifikation (Trust 002) bleibt hier.
+ * Lokale Attestation-Felder werden aus dem VC-Payload abgeleitet (K2),
+ * nie aus Wire-Feldern.
  */
 function AttestationListenerEffect() {
-  const { onMessage } = useMessaging()
-  const { attestationService } = useAdapters()
+  const { inboxReception, attestationService } = useAdapters()
   const { identity, did } = useIdentity()
   const { triggerAttestationDialog, setChallengeNonce, setPendingIncoming } = useConfetti()
   const { activeContacts } = useContacts()
@@ -42,36 +46,22 @@ function AttestationListenerEffect() {
   activeContactsRef.current = activeContacts
 
   useEffect(() => {
-    const unsubscribe = onMessage(async (envelope) => {
-      if (envelope.type !== 'attestation') return
+    const unsubscribe = inboxReception.onAttestation(async (delivery) => {
+      // Deterministische Drops (ungültiger VC, Duplikat, nicht an mich) enden
+      // normal — der Host wertet das als angewendet und ACKt (Queue-Hygiene).
       try {
-        const attestation: Attestation = JSON.parse(envelope.payload)
-        if (!attestation.id || !attestation.from || !attestation.to ||
-            !attestation.claim || !attestation.createdAt || !attestation.vcJws) return
+        const { attestation, payload } = await attestationService.decodeIncomingAttestation(delivery.vcJws)
 
         const localDid = didRef.current
         const localIdentity = identityRef.current
 
-        let payload: AttestationVcPayload | null = null
-        try {
-          payload = await attestationService.verifyAttestationVcJws(attestation.vcJws)
-        } catch {
-          payload = null
-        }
-
-        const payloadClaimsVerification = payload !== null && isVerificationAttestationPayload(payload)
-        const wrapperClaimsVerification = attestation.claim === VERIFICATION_ATTESTATION_CLAIM
-        if (payloadClaimsVerification || wrapperClaimsVerification) {
-          if (!payload || !payloadClaimsVerification || !wrapperClaimsVerification) return
-          if (!payloadMatchesAttestation(payload, attestation)) return
-
-          const verifiedPayload = payload
+        if (isVerificationAttestationPayload(payload)) {
           if (!localDid || !localIdentity) return
-          if (attestation.to !== localDid || verifiedPayload.sub !== localDid || verifiedPayload.credentialSubject.id !== localDid) return
+          if (payload.sub !== localDid || payload.credentialSubject.id !== localDid) return
 
-          const decision = verifiedPayload.inResponseTo
-            ? await verificationWorkflow.acceptVerifiedCounterVerification(localIdentity, verifiedPayload)
-            : await verificationWorkflow.acceptVerifiedVerificationAttestation(localIdentity, verifiedPayload)
+          const decision = payload.inResponseTo
+            ? await verificationWorkflow.acceptVerifiedCounterVerification(localIdentity, payload)
+            : await verificationWorkflow.acceptVerifiedVerificationAttestation(localIdentity, payload)
 
           if (decision.decision === 'accept-in-person') {
             let isNew = true
@@ -116,7 +106,7 @@ function AttestationListenerEffect() {
       }
     })
     return unsubscribe
-  }, [onMessage, attestationService, triggerAttestationDialog, setChallengeNonce, setPendingIncoming])
+  }, [inboxReception, attestationService, triggerAttestationDialog, setChallengeNonce, setPendingIncoming])
 
   return null
 }
@@ -128,20 +118,6 @@ function isVerificationAttestationPayload(payload: AttestationVcPayload): boolea
     payload.type.includes('VerifiableCredential') &&
     payload.type.includes('WotAttestation') &&
     payload.credentialSubject.claim === VERIFICATION_ATTESTATION_CLAIM
-  )
-}
-
-function payloadMatchesAttestation(payload: AttestationVcPayload, attestation: Attestation): boolean {
-  return (
-    payload.issuer === attestation.from &&
-    payload.iss === attestation.from &&
-    payload.sub === attestation.to &&
-    payload.credentialSubject.id === attestation.to &&
-    payload.credentialSubject.claim === attestation.claim &&
-    payload.validFrom === attestation.createdAt &&
-    (payload.inResponseTo == null ? attestation.inResponseTo == null : payload.inResponseTo === attestation.inResponseTo) &&
-    (payload.jti == null || payload.jti === attestation.id) &&
-    (payload.id == null || payload.id === attestation.id)
   )
 }
 

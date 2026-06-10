@@ -1,9 +1,6 @@
 import { useState, useCallback, useRef } from 'react'
-import type { MessageEnvelope } from '@web_of_trust/core/types'
-import { createResourceRef } from '@web_of_trust/core/types'
 import type { QrChallenge } from '@web_of_trust/core/protocol'
 import { parseQrChallenge } from '@web_of_trust/core/protocol'
-import { signEnvelope } from '@web_of_trust/core/crypto'
 import { useAdapters } from '../context'
 import { useIdentity } from '../context'
 import { useConfetti } from '../context/PendingVerificationContext'
@@ -35,10 +32,10 @@ type VerificationStep =
  * (reactive, watches allVerifications for mutual transitions).
  */
 export function useVerification() {
-  const { storage } = useAdapters()
+  const { storage, attestationService } = useAdapters()
   const { identity, did } = useIdentity()
   const { addContact } = useContacts()
-  const { send, isConnected } = useMessaging()
+  const { isConnected } = useMessaging()
   const { syncContactProfile } = useProfileSync()
   const { setChallengeNonce, pendingIncoming, setPendingIncoming } = useConfetti()
 
@@ -146,20 +143,8 @@ export function useVerification() {
         })
         await storage.saveAttestation(attestation)
 
-        const envelope: MessageEnvelope = {
-          v: 1,
-          id: attestation.id,
-          type: 'attestation',
-          fromDid: did!,
-          toDid: decodedChallenge.did,
-          createdAt: new Date().toISOString(),
-          encoding: 'json',
-          payload: JSON.stringify(attestation),
-          signature: '',
-          ref: createResourceRef('attestation', attestation.id),
-        }
-        await signEnvelope(envelope, (data) => identity.sign(data))
-        send(envelope).catch(() => {})
+        // K2 (Sync 003): Zustellung als inbox/1.0 {vcJws} — Inner-JWS + ECIES.
+        attestationService.sendAttestation(identity, attestation).catch(() => {})
 
         pendingChallengeCodeRef.current = null
         setChallengeNonce(null)
@@ -171,7 +156,7 @@ export function useVerification() {
         throw err
       }
     },
-    [identity, addContact, send, did, syncContactProfile, storage]
+    [identity, addContact, attestationService, syncContactProfile, storage, setChallengeNonce]
   )
 
   // Confirm incoming verification-attestation: add sender as contact + counter-verify
@@ -196,20 +181,8 @@ export function useVerification() {
         })
         await storage.saveAttestation(counter)
 
-        const envelope: MessageEnvelope = {
-          v: 1,
-          id: counter.id,
-          type: 'attestation',
-          fromDid: did,
-          toDid: attestation.from,
-          createdAt: new Date().toISOString(),
-          encoding: 'json',
-          payload: JSON.stringify(counter),
-          signature: '',
-          ref: createResourceRef('attestation', counter.id),
-        }
-        await signEnvelope(envelope, (data) => identity.sign(data))
-        send(envelope).catch(() => {})
+        // K2 (Sync 003): Zustellung als inbox/1.0 {vcJws} — Inner-JWS + ECIES.
+        attestationService.sendAttestation(identity, counter).catch(() => {})
 
         setPendingIncoming(null)
         setStep('done')
@@ -220,7 +193,7 @@ export function useVerification() {
         throw err
       }
     },
-    [identity, did, pendingIncoming, addContact, syncContactProfile, storage, send, setPendingIncoming]
+    [identity, did, pendingIncoming, addContact, syncContactProfile, storage, attestationService, setPendingIncoming]
   )
 
   const rejectIncoming = useCallback(() => {
@@ -259,22 +232,10 @@ export function useVerification() {
       })
       await storage.saveAttestation(counter)
 
-      const envelope: MessageEnvelope = {
-        v: 1,
-        id: counter.id,
-        type: 'attestation',
-        fromDid: did,
-        toDid: targetDid,
-        createdAt: new Date().toISOString(),
-        encoding: 'json',
-        payload: JSON.stringify(counter),
-        signature: '',
-        ref: createResourceRef('attestation', counter.id),
-      }
-      await signEnvelope(envelope, (data) => identity.sign(data))
-      send(envelope).catch(() => {})
+      // K2 (Sync 003): Zustellung als inbox/1.0 {vcJws} — Inner-JWS + ECIES.
+      attestationService.sendAttestation(identity, counter).catch(() => {})
     },
-    [identity, did, addContact, syncContactProfile, storage, send]
+    [identity, did, addContact, syncContactProfile, storage, attestationService]
   )
 
   const reset = useCallback(() => {

@@ -34,7 +34,10 @@ describe('demo legacy VerificationService removal source guard', () => {
     expect(useVerification).toContain('verificationWorkflow.createVerificationAttestation')
     expect(useVerification).toContain('verificationWorkflow.createCounterVerificationAttestation')
     expect(useVerification).toContain('storage.saveAttestation')
-    expect(useVerification).toContain("type: 'attestation'")
+    // Inbox-Wire-Migration (K2): Versand läuft über inbox/1.0 statt
+    // Old-World-Envelopes mit type 'attestation'.
+    expect(useVerification).toContain('attestationService.sendAttestation')
+    expect(useVerification).not.toContain("type: 'attestation'")
     expect(useVerification).not.toContain('VerificationService')
     expect(verificationWorkflow).toContain("export { verificationWorkflow } from '../runtime/appRuntime'")
   })

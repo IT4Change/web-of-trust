@@ -7,7 +7,7 @@ import { useAdapters } from '../context'
 import { useSubscribable } from './useSubscribable'
 
 export function useSpaces() {
-  const { replication, discovery, messaging } = useAdapters()
+  const { replication, discovery } = useAdapters()
   const [loading, setLoading] = useState(true)
   const memberKeys = useMemo<SpaceMemberKeyDirectory>(() => ({
     async resolveMemberEncryptionKey(did: string) {
@@ -42,21 +42,10 @@ export function useSpaces() {
     if (spaces !== undefined) setLoading(false)
   }, [spaces])
 
-  // Also refresh on space-invite / member-update messages
-  // (belt-and-suspenders: watchSpaces handles most cases, but
-  //  invite processing is async and may not have updated yet)
-  useEffect(() => {
-    const unsub = messaging.onMessage(async (envelope) => {
-      const type = envelope.type as string
-      if (type === 'space-invite' || type === 'member-update') {
-        // Give the adapter time to process the message, then force a re-read
-        setTimeout(async () => {
-          // watchSpaces will notify automatically, but just in case
-        }, 500)
-      }
-    })
-    return unsub
-  }, [messaging])
+  // Inbox-Wire-Migration: der frühere onMessage-Listener auf die Old-World-Typen
+  // 'space-invite'/'member-update' ist tot — die Typen existieren auf dem Wire
+  // nicht mehr (DIDComm-Type-URIs, vom Replication-Adapter dekodiert) und der
+  // Handler war ein No-op. watchSpaces() ist der reaktive Pfad.
 
   const createSpace = useCallback(async (name: string) => {
     const space = await spacesWorkflow.createSpace({ name })

@@ -1,8 +1,20 @@
 import { describe, expect, it } from 'vitest'
-import { AttestationWorkflow, IdentityWorkflow, type PublicIdentitySession } from '@web_of_trust/core/application'
+import { AttestationWorkflow, IdentityWorkflow, receiveInboxMessage, type PublicIdentitySession } from '@web_of_trust/core/application'
 import { WebCryptoProtocolCryptoAdapter } from '@web_of_trust/core/protocol-adapters'
-import type { Attestation, Contact, Identity, MessageEnvelope } from '@web_of_trust/core/types'
-import type { ReactiveStorageAdapter, StorageAdapter } from '@web_of_trust/core/ports'
+import {
+  ACK_MESSAGE_TYPE,
+  INBOX_MESSAGE_TYPE,
+  assertAttestationDeliveryBody,
+  createDidKeyResolver,
+  decodeBase64Url,
+  isDidcommMessage,
+  resolveDidKey,
+  x25519PublicKeyToMultibase,
+} from '@web_of_trust/core/protocol'
+import type { DidcommPlaintextMessage } from '@web_of_trust/core/protocol'
+import { InMemoryMessageIdHistory } from '@web_of_trust/core/adapters'
+import type { Attestation, Contact, Identity } from '@web_of_trust/core/types'
+import type { ReactiveStorageAdapter, StorageAdapter, WireMessage } from '@web_of_trust/core/ports'
 import { WotCliClient } from '../src/WotCliClient.js'
 
 const cryptoAdapter = new WebCryptoProtocolCryptoAdapter()
@@ -85,10 +97,32 @@ class MemoryCliStorage implements StorageAdapter, Partial<ReactiveStorageAdapter
 }
 
 class MemoryOutbox {
-  sent: MessageEnvelope[] = []
+  sent: WireMessage[] = []
 
-  async send(envelope: MessageEnvelope): Promise<void> {
-    this.sent.push(envelope)
+  async send(message: WireMessage): Promise<void> {
+    this.sent.push(message)
+  }
+}
+
+/** Discovery-Stub: liefert das DID-Dokument mit keyAgreement (Sync 004) pro DID. */
+function createDiscoveryStub(identities: PublicIdentitySession[]) {
+  const byDid = new Map(identities.map((identity) => [identity.getDid(), identity]))
+  return {
+    async resolveProfile(did: string) {
+      const identity = byDid.get(did)
+      if (!identity) return { profile: null, didDocument: null }
+      return {
+        profile: null,
+        didDocument: resolveDidKey(did, {
+          keyAgreement: [{
+            id: '#enc-0',
+            type: 'X25519KeyAgreementKey2020',
+            controller: did,
+            publicKeyMultibase: x25519PublicKeyToMultibase(identity.x25519PublicKey),
+          }],
+        }),
+      }
+    },
   }
 }
 
@@ -96,8 +130,8 @@ interface TestableWotCliClient {
   identity: PublicIdentitySession
   storage: MemoryCliStorage
   outboxAdapter: MemoryOutbox
-  discovery: null
-  handleIncomingAttestation(envelope: MessageEnvelope): Promise<void>
+  discovery: ReturnType<typeof createDiscoveryStub>
+  handleInboxMessage(message: DidcommPlaintextMessage<object>): Promise<void>
 }
 
 async function createIdentity(passphrase: string): Promise<PublicIdentitySession> {
@@ -107,7 +141,11 @@ async function createIdentity(passphrase: string): Promise<PublicIdentitySession
   })).identity
 }
 
-function createClient(identity: PublicIdentitySession, name: string): {
+function createClient(
+  identity: PublicIdentitySession,
+  name: string,
+  discovery: ReturnType<typeof createDiscoveryStub>,
+): {
   client: WotCliClient
   storage: MemoryCliStorage
   outbox: MemoryOutbox
@@ -120,26 +158,65 @@ function createClient(identity: PublicIdentitySession, name: string): {
     identity,
     storage,
     outboxAdapter: outbox,
-    discovery: null,
+    discovery,
   })
 
   return { client, storage, outbox }
 }
 
-describe('WotCliClient Trust 002 verification-attestation delivery', () => {
-  it('counter-verifies an incoming verification-attestation without legacy Verification storage', async () => {
+function inboxMessages(outbox: MemoryOutbox): DidcommPlaintextMessage<object>[] {
+  return outbox.sent.filter(
+    (message): message is DidcommPlaintextMessage<object> =>
+      isDidcommMessage(message) && message.type === INBOX_MESSAGE_TYPE,
+  )
+}
+
+function ackMessages(outbox: MemoryOutbox): DidcommPlaintextMessage<object>[] {
+  return outbox.sent.filter(
+    (message): message is DidcommPlaintextMessage<object> =>
+      isDidcommMessage(message) && message.type === ACK_MESSAGE_TYPE,
+  )
+}
+
+/** Entschlüsselt + verifiziert eine inbox/1.0-Zustellung aus Empfänger-Sicht. */
+async function receiveAsRecipient(message: unknown, recipient: PublicIdentitySession) {
+  return receiveInboxMessage({
+    message,
+    ownDid: recipient.getDid(),
+    decryptEcies: (ecies) => recipient.decryptForMe({
+      ephemeralPublicKey: decodeBase64Url(ecies.epk),
+      nonce: decodeBase64Url(ecies.nonce),
+      ciphertext: decodeBase64Url(ecies.ciphertext),
+    }),
+    crypto: cryptoAdapter,
+    didResolver: createDidKeyResolver(),
+    messageIdHistory: new InMemoryMessageIdHistory(),
+  })
+}
+
+describe('WotCliClient inbox/1.0 attestation delivery (K2/K3)', () => {
+  it('counter-verifies an incoming verification-attestation over the DIDComm inbox wire and acks it', async () => {
     const aliceIdentity = await createIdentity('cli-alice')
     const bobIdentity = await createIdentity('cli-bob')
-    const alice = createClient(aliceIdentity, 'Alice')
-    const bob = createClient(bobIdentity, 'Bob')
+    const discovery = createDiscoveryStub([aliceIdentity, bobIdentity])
+    const alice = createClient(aliceIdentity, 'Alice', discovery)
+    const bob = createClient(bobIdentity, 'Bob', discovery)
 
     const challenge = await alice.client.createChallenge()
     await bob.client.respondToChallenge(challenge.code)
 
-    const verificationEnvelope = bob.outbox.sent.find((envelope) => envelope.type === 'attestation')
-    expect(verificationEnvelope).toBeDefined()
+    // K2-Wire-Vertrag: Versand als DIDComm inbox/1.0, Body = ECIES-Container.
+    const verificationEnvelopes = inboxMessages(bob.outbox)
+    expect(verificationEnvelopes).toHaveLength(1)
+    const verificationEnvelope = verificationEnvelopes[0]
+    expect(verificationEnvelope.to).toEqual([aliceIdentity.getDid()])
+    expect(Object.keys(verificationEnvelope.body)).toEqual(
+      expect.arrayContaining(['epk', 'nonce', 'ciphertext']),
+    )
+    // Kein Klartext-Attestation-Objekt im Wire-Body (K2).
+    expect(JSON.stringify(verificationEnvelope.body)).not.toContain('"claim"')
 
-    await (alice.client as unknown as TestableWotCliClient).handleIncomingAttestation(verificationEnvelope!)
+    await (alice.client as unknown as TestableWotCliClient).handleInboxMessage(verificationEnvelope)
 
     const incoming = alice.storage.attestations.find((attestation) => attestation.from === bobIdentity.getDid())
     const counter = alice.storage.attestations.find((attestation) => attestation.from === aliceIdentity.getDid())
@@ -155,17 +232,73 @@ describe('WotCliClient Trust 002 verification-attestation delivery', () => {
       }),
     ])
 
-    const sentTypes = alice.outbox.sent.map((envelope) => envelope.type)
-    expect(sentTypes).toEqual(['attestation'])
+    // Counter-Attestation reist ebenfalls als inbox/1.0 an Bob.
+    const counterEnvelopes = inboxMessages(alice.outbox)
+    expect(counterEnvelopes).toHaveLength(1)
+    expect(counterEnvelopes[0].to).toEqual([bobIdentity.getDid()])
 
-    const counterEnvelope = alice.outbox.sent[0]
-    expect(counterEnvelope).toMatchObject({
-      type: 'attestation',
-      fromDid: aliceIdentity.getDid(),
-      toDid: bobIdentity.getDid(),
-    })
+    // ack/1.0 nach Anwendung (K1): thid = body.messageId = Original-id.
+    const acks = ackMessages(alice.outbox)
+    expect(acks).toHaveLength(1)
+    expect(acks[0].thid).toBe(verificationEnvelope.id)
+    expect((acks[0].body as { messageId: string }).messageId).toBe(verificationEnvelope.id)
 
+    // Bob kann die Counter-Zustellung entschlüsseln, der Inner-JWS-Sender ist
+    // Alice (Sync 003 Z.460-464), und der VC verifiziert.
+    const received = await receiveAsRecipient(counterEnvelopes[0], bobIdentity)
+    expect(received.decision).toBe('accept')
+    if (received.decision !== 'accept') throw new Error('unreachable')
+    expect(received.senderDid).toBe(aliceIdentity.getDid())
+    assertAttestationDeliveryBody(received.body)
     const workflow = new AttestationWorkflow({ crypto: cryptoAdapter })
-    await expect(workflow.verifyAttestation(JSON.parse(counterEnvelope.payload) as Attestation)).resolves.toBe(true)
+    const verifiedCounter = await workflow.importAttestation(received.body.vcJws)
+    expect(verifiedCounter.from).toBe(aliceIdentity.getDid())
+    expect(verifiedCounter.to).toBe(bobIdentity.getDid())
+    expect(verifiedCounter.inResponseTo).toBe(incoming?.id)
+  })
+
+  it('does not ack an inbox message whose processing fails (K1) and acks replays', async () => {
+    const aliceIdentity = await createIdentity('cli-alice-k1')
+    const bobIdentity = await createIdentity('cli-bob-k1')
+    const discovery = createDiscoveryStub([aliceIdentity, bobIdentity])
+    const alice = createClient(aliceIdentity, 'Alice', discovery)
+    const bob = createClient(bobIdentity, 'Bob', discovery)
+
+    const challenge = await alice.client.createChallenge()
+    await bob.client.respondToChallenge(challenge.code)
+    const envelope = inboxMessages(bob.outbox)[0]
+
+    // Manipulierter Ciphertext → decrypt-failed → KEIN ack/1.0 (Redelivery-Pfad).
+    const body = envelope.body as Record<string, string>
+    const tampered = {
+      ...envelope,
+      body: { ...body, ciphertext: body.ciphertext.slice(0, -2) + 'AA' },
+    }
+    await (alice.client as unknown as TestableWotCliClient).handleInboxMessage(
+      tampered as unknown as DidcommPlaintextMessage<object>,
+    )
+    expect(ackMessages(alice.outbox)).toHaveLength(0)
+    expect(alice.storage.attestations).toHaveLength(0)
+
+    // Erste gültige Zustellung → genau ein ack.
+    await (alice.client as unknown as TestableWotCliClient).handleInboxMessage(envelope)
+    expect(ackMessages(alice.outbox)).toHaveLength(1)
+
+    // Redelivery derselben Nachricht → Replay → ack (Sync 003 Z.619), keine
+    // doppelte Anwendung.
+    const attestationCountAfterFirst = alice.storage.attestations.length
+    await (alice.client as unknown as TestableWotCliClient).handleInboxMessage(envelope)
+    expect(ackMessages(alice.outbox)).toHaveLength(2)
+    expect(alice.storage.attestations).toHaveLength(attestationCountAfterFirst)
+  })
+
+  it('rejects inbox-family types on the generic old-world sendMessage path', async () => {
+    const aliceIdentity = await createIdentity('cli-alice-guard')
+    const discovery = createDiscoveryStub([aliceIdentity])
+    const alice = createClient(aliceIdentity, 'Alice', discovery)
+
+    await expect(
+      alice.client.sendMessage('did:key:z6MkTarget', 'attestation', { claim: 'x' }),
+    ).rejects.toThrow(/inbox message/)
   })
 })

@@ -13,7 +13,9 @@ export const appRuntimeConfig = {
   vaultUrl: import.meta.env.VITE_VAULT_URL ?? 'https://vault.utopia-lab.org',
 }
 
-const protocolCrypto = new WebCryptoProtocolCryptoAdapter()
+// Eine ProtocolCryptoAdapter-Instanz für die ganze App — auch der
+// Inbox-Reception-Host und die Attestation-Zustellung (Sync 003) nutzen sie.
+export const protocolCrypto = new WebCryptoProtocolCryptoAdapter()
 
 export const verificationWorkflow = new VerificationWorkflow({
   crypto: protocolCrypto,

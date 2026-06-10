@@ -3,7 +3,9 @@ import { readFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
+  INBOX_MESSAGE_TYPE,
   encodeBase64Url,
+  isDidcommMessage,
 } from '@web_of_trust/core/protocol'
 import {
   InMemoryMessagingAdapter,
@@ -18,6 +20,8 @@ import { AttestationService, type AttestationStoragePort } from '../src/services
 
 const ALICE_DID = 'did:key:z6MkAlice1234567890abcdefghijklmnopqrstuvwxyz'
 const BOB_DID = 'did:key:z6MkBob1234567890abcdefghijklmnopqrstuvwxyzab'
+// Gültiger X25519-Public-Key-Input (32 Bytes) für den ECIES-Wrap im Test.
+const RECIPIENT_ENCRYPTION_KEY = new Uint8Array(32).fill(7)
 const testDir = path.dirname(fileURLToPath(import.meta.url))
 const demoRoot = path.resolve(testDir, '..')
 
@@ -103,6 +107,11 @@ describe('AttestationService delivery tracking', () => {
     alice = createMockIdentity(ALICE_DID)
     service = new AttestationService(storage)
     service.setMessaging(aliceMessaging)
+    // K2-Versand braucht den X25519-Key des Empfängers (Sync 004 keyAgreement).
+    service.configureDelivery({
+      identity: alice,
+      resolveRecipientEncryptionKey: async () => RECIPIENT_ENCRYPTION_KEY,
+    })
 
     await bobAdapter.connect(BOB_DID)
     await aliceMessaging.connect(ALICE_DID)
@@ -122,6 +131,27 @@ describe('AttestationService delivery tracking', () => {
     // But we verify the map has an entry
     const status = service.getDeliveryStatus(attestation.id)
     expect(status).toBeDefined()
+  })
+
+  it('sends attestations as DIDComm inbox/1.0 with an ECIES body (K2 — no plaintext attestation on the wire)', async () => {
+    const received: unknown[] = []
+    bobAdapter.onMessage((message) => { received.push(message) })
+
+    const attestation = await service.createAttestation(alice, BOB_DID, 'Great person')
+    await new Promise((r) => setTimeout(r, 50))
+
+    expect(received).toHaveLength(1)
+    const envelope = received[0] as Record<string, unknown>
+    expect(isDidcommMessage(envelope)).toBe(true)
+    expect(envelope.type).toBe(INBOX_MESSAGE_TYPE)
+    expect(envelope.to).toEqual([BOB_DID])
+    expect(Object.keys(envelope.body as object)).toEqual(
+      expect.arrayContaining(['epk', 'nonce', 'ciphertext']),
+    )
+    // Deterministische Message-ID: UUID aus urn:uuid:<uuid> (Receipt-/Outbox-Zuordnung).
+    expect(`urn:uuid:${envelope.id}`).toBe(attestation.id)
+    // Kein Klartext-Attestation-Objekt im Wire-Body (K2).
+    expect(JSON.stringify(envelope.body)).not.toContain('"claim"')
   })
 
   it('should set status to "delivered" when receipt comes back', async () => {
@@ -212,6 +242,8 @@ describe('AttestationService delivery tracking', () => {
     // Queue a message in outbox while disconnected
     await aliceMessaging.disconnect()
     await service.createAttestation(alice, BOB_DID, 'Great person')
+    // Der Versand (Inner-JWS + ECIES) läuft fire-and-forget — auf das Enqueue warten.
+    await new Promise((r) => setTimeout(r, 50))
 
     // Create fresh service (simulating app restart)
     const service2 = new AttestationService(storage)

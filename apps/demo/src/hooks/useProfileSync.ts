@@ -1,5 +1,6 @@
 import { useEffect, useCallback, useRef } from 'react'
 import type { Attestation, PublicProfile, MessageEnvelope } from '@web_of_trust/core/types'
+import { isDidcommMessage } from '@web_of_trust/core/protocol'
 import { useAdapters } from '../context'
 import { useIdentity } from '../context'
 
@@ -176,7 +177,12 @@ export function useProfileSync() {
    * Listen for profile-update messages and re-fetch.
    */
   useEffect(() => {
-    const unsubscribe = messaging.onMessage(async (envelope) => {
+    const unsubscribe = messaging.onMessage(async (message) => {
+      // VE-1: die DIDComm-Inbox-Familie gehört dem InboxReceptionHost bzw.
+      // Replication-Adapter — dieser Hook hört nur den Old-World-Kanal
+      // (profile-update bleibt Old-World bis 1.D Demo-Hooks).
+      if (isDidcommMessage(message)) return
+      const envelope = message as MessageEnvelope
       if (envelope.type === 'profile-update') {
         fetchedRef.current.delete(envelope.fromDid)
         const profile = await fetchContactProfile(envelope.fromDid)

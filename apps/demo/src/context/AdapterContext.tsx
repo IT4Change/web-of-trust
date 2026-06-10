@@ -33,12 +33,14 @@ import type { YjsReplicationAdapter } from '@web_of_trust/adapter-yjs'
 import {
   ContactService,
   AttestationService,
+  InboxReceptionHost,
 } from '../services'
+import { x25519MultibaseToPublicKeyBytes } from '@web_of_trust/core/protocol'
 import { AutomergePublishStateStore } from '../adapters/AutomergePublishStateStore'
 import { AutomergeGraphCacheStore } from '../adapters/AutomergeGraphCacheStore'
 import { LocalCacheStore } from '../adapters/LocalCacheStore'
 import { LocalOutboxStore } from '../adapters/LocalOutboxStore'
-import { appRuntimeConfig, createHttpDiscoveryAdapter, getOrCreateBrowserDeviceId } from '../runtime/appRuntime'
+import { appRuntimeConfig, createHttpDiscoveryAdapter, getOrCreateBrowserDeviceId, protocolCrypto } from '../runtime/appRuntime'
 import { useIdentity } from './IdentityContext'
 // Yjs and Automerge adapters are dynamically imported to keep WASM out of the default bundle
 
@@ -93,6 +95,7 @@ interface AdapterContextValue {
   messagingState: MessagingState
   contactService: ContactService
   attestationService: AttestationService
+  inboxReception: InboxReceptionHost
   syncDiscovery: () => Promise<void>
   flushOutbox: () => Promise<void>
   reconnectRelay: () => Promise<void>
@@ -120,6 +123,7 @@ export function AdapterProvider({ children, identity }: AdapterProviderProps) {
   useEffect(() => {
     let cancelled = false
     let outboxAdapter: OutboxMessagingAdapter | null = null
+    let inboxReception: InboxReceptionHost | null = null
     let replicationAdapter: AutomergeReplicationAdapter | YjsReplicationAdapter | null = null
     let localCacheStore: LocalCacheStore | null = null
     let spaceCompactStore: CompactStorageManager | null = null
@@ -229,6 +233,30 @@ export function AdapterProvider({ children, identity }: AdapterProviderProps) {
         attestationService.setMessaging(outboxAdapter)
         attestationService.listenForReceipts(outboxAdapter)
         attestationService.setPersistDeliveryStatus((id, status) => storage.setDeliveryStatus(id, status))
+        // K2-Versand (Sync 003): inbox/1.0 mit Inner-JWS + ECIES — der
+        // Empfänger-Key kommt aus dem keyAgreement des DID-Dokuments (Sync 004).
+        attestationService.configureDelivery({
+          identity,
+          resolveRecipientEncryptionKey: async (recipientDid) => {
+            const result = await discovery.resolveProfile(recipientDid)
+            const keyAgreement = result.didDocument?.keyAgreement?.[0]?.publicKeyMultibase
+            if (!keyAgreement) return null
+            try {
+              return x25519MultibaseToPublicKeyBytes(keyAgreement)
+            } catch {
+              return null
+            }
+          },
+        })
+
+        // Inbox-Reception-Host (VE-9): besitzt inbox/1.0 inkl. ack/1.0-Ownership
+        // (K1) — die Membership-Typen empfängt der Replication-Adapter selbst.
+        inboxReception = new InboxReceptionHost({
+          messaging: outboxAdapter,
+          identity,
+          crypto: protocolCrypto,
+        })
+        inboxReception.start()
 
         // Restore persisted delivery statuses, then overlay outbox state
         const savedStatuses = await storage.getAllDeliveryStatuses()
@@ -461,6 +489,7 @@ export function AdapterProvider({ children, identity }: AdapterProviderProps) {
             outboxStore,
             contactService: new ContactService(storage),
             attestationService,
+            inboxReception,
             syncDiscovery,
             flushOutbox,
             reconnectRelay,
@@ -538,6 +567,7 @@ export function AdapterProvider({ children, identity }: AdapterProviderProps) {
       if (offlineHandler) window.removeEventListener('offline', offlineHandler)
       if (unsubRemoteSync) unsubRemoteSync()
       replicationAdapter?.stop().catch(() => {})
+      inboxReception?.stop()
       outboxAdapter?.disconnect()
       localCacheStore?.close()
       spaceCompactStore?.close()
