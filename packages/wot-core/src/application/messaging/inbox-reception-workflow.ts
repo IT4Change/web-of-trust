@@ -4,6 +4,7 @@ import type { EciesMessage } from '../../protocol/sync/encryption'
 import { assertPlaintextMessage } from '../../protocol/sync/membership-messages'
 import { verifyInboxInnerJws } from '../../protocol/messaging/inbox-inner-jws'
 import {
+  ENCRYPTED_INBOX_MESSAGE_TYPES,
   assertInboxEncryptedBody,
   extractInboxExtensionFields,
 } from '../../protocol/messaging/inbox-message'
@@ -20,6 +21,13 @@ export interface ReceiveInboxMessageOptions {
   messageIdHistory: MessageIdHistoryPort
   now?: () => Date
   maxAgeMs?: number
+  /**
+   * Erlaubte Type-URIs. Default: die vier normativen Inbox-Typen aus der
+   * Authentizitätsmatrix (Sync 003 Z.420-426) — nur sie haben die
+   * Envelope-Form "Encrypted (ECIES) + Inner-JWS". Aufrufer mit engerem
+   * Besitz (z.B. Reception-Host: nur inbox/1.0) übergeben ihre Teilmenge.
+   */
+  expectedTypes?: readonly string[]
 }
 
 export type ReceiveInboxMessageResult =
@@ -48,7 +56,7 @@ export type ReceiveInboxMessageResult =
     }
   | {
       decision: 'reject'
-      reason: 'malformed-envelope' | 'decrypt-failed' | 'invalid-inner-jws' | 'replay'
+      reason: 'malformed-envelope' | 'unexpected-type' | 'decrypt-failed' | 'invalid-inner-jws' | 'replay'
     }
 
 /**
@@ -70,6 +78,16 @@ export async function receiveInboxMessage(options: ReceiveInboxMessageOptions): 
   } catch {
     return { decision: 'reject', reason: 'malformed-envelope' }
   }
+
+  // Sync 003 Z.420-426 (Authentizitätsmatrix, NORMATIV): nur die vier
+  // Inbox-Typen mit Envelope-Form "Encrypted (ECIES) + Inner-JWS" dürfen
+  // diesen Empfangspfad durchlaufen — fremde Type-URIs werden vor jedem
+  // Decrypt-Versuch abgewiesen.
+  const expectedTypes = options.expectedTypes ?? ENCRYPTED_INBOX_MESSAGE_TYPES
+  if (!expectedTypes.includes(envelope.type)) {
+    return { decision: 'reject', reason: 'unexpected-type' }
+  }
+
   const body = envelope.body
 
   let innerJws: string

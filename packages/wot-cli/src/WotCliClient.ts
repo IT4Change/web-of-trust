@@ -414,6 +414,9 @@ export class WotCliClient {
       crypto: this.protocolCrypto,
       didResolver: this.didResolver,
       messageIdHistory: this.messageIdHistory,
+      // Sync 003 Z.420-426: die CLI besitzt ausschließlich inbox/1.0 —
+      // engere Teilmenge der normativen Inbox-Typen.
+      expectedTypes: [INBOX_MESSAGE_TYPE],
     })
 
     if (result.decision === 'reject') {

@@ -145,6 +145,9 @@ export class InboxReceptionHost {
       didResolver: this.didResolver,
       messageIdHistory: this.messageIdHistory,
       now: this.now,
+      // Sync 003 Z.420-426: der Host besitzt ausschließlich inbox/1.0 —
+      // engere Teilmenge der normativen Inbox-Typen.
+      expectedTypes: [INBOX_MESSAGE_TYPE],
       ...(this.maxAgeMs !== undefined ? { maxAgeMs: this.maxAgeMs } : {}),
     })
 

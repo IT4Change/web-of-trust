@@ -4,6 +4,7 @@ import {
   ENCRYPTED_INBOX_MESSAGE_TYPES,
   INBOX_MESSAGE_TYPE,
   MEMBER_UPDATE_MESSAGE_TYPE,
+  SPACE_INVITE_MESSAGE_TYPE,
   createDidKeyResolver,
   decodeBase64Url,
   type EciesMessage,
@@ -130,6 +131,32 @@ describe('deliverInboxMessage / receiveInboxMessage', () => {
     await expect(
       deliverInboxMessage(deliverOptions(sender, recipient, { extensionFields: { epk: 'evil' } })),
     ).rejects.toThrow('collides with ECIES container')
+  })
+
+  it('MINOR-4: gated auf die vier normativen Inbox-Type-URIs (Sync 003 Z.420-426)', async () => {
+    // Die Authentizitätsmatrix definiert genau vier Typen mit Envelope-Form
+    // "Encrypted (ECIES) + Inner-JWS" — alles andere darf den Pfad nicht laufen.
+    const { sender, recipient } = await pair()
+    const envelope = await deliverInboxMessage(
+      deliverOptions(sender, recipient, { type: 'https://web-of-trust.de/protocols/log-entry/1.0' }),
+    )
+    const result = await receiveInboxMessage(receiveOptions(recipient, envelope))
+    expect(result).toEqual({ decision: 'reject', reason: 'unexpected-type' })
+  })
+
+  it('MINOR-4: expectedTypes-Override erlaubt eine engere Teilmenge', async () => {
+    const { sender, recipient } = await pair()
+    const envelope = await deliverInboxMessage(deliverOptions(sender, recipient, {}))
+    // Host-Szenario: ein Aufrufer, der nur space-invite/1.0 besitzt, weist
+    // inbox/1.0 ab, obwohl der Typ normativ gültig ist.
+    const rejected = await receiveInboxMessage(
+      receiveOptions(recipient, envelope, { expectedTypes: [SPACE_INVITE_MESSAGE_TYPE] }),
+    )
+    expect(rejected).toEqual({ decision: 'reject', reason: 'unexpected-type' })
+    const accepted = await receiveInboxMessage(
+      receiveOptions(recipient, envelope, { expectedTypes: [INBOX_MESSAGE_TYPE] }),
+    )
+    expect(accepted.decision).toBe('accept')
   })
 
   it('rejects malformed wire input instead of throwing (P2-Konvention)', async () => {
