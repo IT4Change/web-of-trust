@@ -434,7 +434,7 @@ export class WotCliClient {
     let outcome: InboxAckLocalOutcome
     try {
       assertAttestationDeliveryBody(result.body)
-      outcome = await this.applyIncomingAttestationDelivery(result.body.vcJws)
+      outcome = await this.applyIncomingAttestationDelivery(result.body.vcJws, result.senderDid)
     } catch (err) {
       // Body verletzt den K2-Vertrag — deterministisch ungültig und damit
       // konklusiv (Sync 003 Z.466 + Z.620-622): Message-ID recorden, kein ack
@@ -451,7 +451,7 @@ export class WotCliClient {
    * VC-Payload ableiten (importAttestation: jti/iss/sub/claim/validFrom) —
    * danach speichern, Kontakt sicherstellen, ggf. counter-verifizieren.
    */
-  private async applyIncomingAttestationDelivery(vcJws: string): Promise<InboxAckLocalOutcome> {
+  private async applyIncomingAttestationDelivery(vcJws: string, senderDid: string): Promise<InboxAckLocalOutcome> {
     if (!this.storage || !this.outboxAdapter) {
       return { kind: 'processing-incomplete', waitingOn: 'durable-apply' }
     }
@@ -463,6 +463,18 @@ export class WotCliClient {
     } catch (err) {
       console.warn('[wot-cli] Invalid attestation VC-JWS:', err)
       return { kind: 'invalid-rejected', rejection: 'malformed', authoritativeStateChanged: false }
+    }
+
+    // M-C (Sync 003 Z.460-464; normative Klärung angefragt in
+    // real-life-org/wot-spec#98): der VC-Issuer MUSS der per Inner-JWS
+    // authentifizierte Inbox-Sender sein und der VC-Subject die eigene DID —
+    // sonst legt die CLI für einen öffentlich abrufbaren Dritt-VC den
+    // VC-Issuer als aktiven Kontakt an, obwohl der nie etwas gesendet hat.
+    // Verstoß ist deterministisch → konklusiv (record, Redelivery endet über
+    // die Replay-Disposition), KEINE Endlos-Redelivery.
+    if (attestation.from !== senderDid || attestation.to !== this.requireIdentity().getDid()) {
+      console.warn('[wot-cli] Rejected attestation delivery: VC issuer/subject does not match inbox sender/own DID')
+      return { kind: 'invalid-rejected', rejection: 'inner-verification-failed', authoritativeStateChanged: false }
     }
 
     try {

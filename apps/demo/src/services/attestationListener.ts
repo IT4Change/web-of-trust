@@ -78,6 +78,22 @@ export function createAttestationListener(deps: AttestationListenerDeps): Attest
       throw new Error('No unlocked identity for incoming attestation')
     }
 
+    // M-C (Sync 003 Z.460-464; normative Klärung angefragt in
+    // real-life-org/wot-spec#98): der VC-Issuer MUSS der per Inner-JWS
+    // authentifizierte Inbox-Sender sein und das abgeleitete `to`
+    // (credentialSubject.id) die eigene DID — sonst könnte jeder einen
+    // öffentlich abrufbaren Dritt-VC mit eigenem gültigem Inner-JWS einliefern
+    // und den Dialog dem VC-Issuer unterschieben. Verstoß ist deterministisch
+    // → konklusiv (record + ack), keine Endlos-Redelivery.
+    if (payload.iss !== delivery.senderDid) {
+      console.debug('Incoming attestation rejected: VC issuer does not match authenticated inbox sender')
+      return
+    }
+    if (attestation.to !== localDid) {
+      console.debug('Incoming attestation rejected: VC subject is not the local DID')
+      return
+    }
+
     if (isVerificationAttestationPayload(payload)) {
       if (payload.sub !== localDid || payload.credentialSubject.id !== localDid) return
 

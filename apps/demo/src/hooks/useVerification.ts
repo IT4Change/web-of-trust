@@ -144,7 +144,15 @@ export function useVerification() {
         await storage.saveAttestation(attestation)
 
         // K2 (Sync 003): Zustellung als inbox/1.0 {vcJws} — Inner-JWS + ECIES.
-        attestationService.sendAttestation(identity, attestation).catch(() => {})
+        // M-B: der Encryption-Key des Peers steht bereits im QR-Challenge-
+        // Payload (Trust 002 `enc`) — kein Discovery-Roundtrip; offline landet
+        // die Zustellung in der Outbox. Fehler markieren die Attestation als
+        // 'failed' (Retry in der Attestation-Liste).
+        attestationService.sendAttestation(identity, attestation, {
+          recipientEncryptionKey: verificationWorkflow.base64UrlToBytes(decodedChallenge.enc),
+        }).catch((error) => {
+          console.warn('Verification attestation delivery failed (status failed, retry available):', error)
+        })
 
         pendingChallengeCodeRef.current = null
         setChallengeNonce(null)
@@ -182,7 +190,11 @@ export function useVerification() {
         await storage.saveAttestation(counter)
 
         // K2 (Sync 003): Zustellung als inbox/1.0 {vcJws} — Inner-JWS + ECIES.
-        attestationService.sendAttestation(identity, counter).catch(() => {})
+        // M-B: kein Silent-Drop — Fehler setzen den Delivery-Status auf
+        // 'failed' (Retry in der Attestation-Liste über retryAttestation).
+        attestationService.sendAttestation(identity, counter).catch((error) => {
+          console.warn('Counter-verification delivery failed (status failed, retry available):', error)
+        })
 
         setPendingIncoming(null)
         setStep('done')
@@ -233,7 +245,11 @@ export function useVerification() {
       await storage.saveAttestation(counter)
 
       // K2 (Sync 003): Zustellung als inbox/1.0 {vcJws} — Inner-JWS + ECIES.
-      attestationService.sendAttestation(identity, counter).catch(() => {})
+      // M-B: kein Silent-Drop — Fehler setzen den Delivery-Status auf
+      // 'failed' (Retry in der Attestation-Liste über retryAttestation).
+      attestationService.sendAttestation(identity, counter).catch((error) => {
+        console.warn('Counter-verification delivery failed (status failed, retry available):', error)
+      })
     },
     [identity, did, addContact, syncContactProfile, storage, attestationService]
   )

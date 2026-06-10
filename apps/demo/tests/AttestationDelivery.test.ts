@@ -238,6 +238,62 @@ describe('AttestationService delivery tracking', () => {
     expect(['sending', 'delivered']).toContain(status)
   })
 
+  // --- M-B: kein stiller Attestationsverlust beim Versand ---
+
+  function makeAttestation(): Attestation {
+    return {
+      id: 'urn:uuid:7a1c2f80-aabb-4cdd-9eef-112233445566',
+      from: ALICE_DID,
+      to: BOB_DID,
+      claim: 'in-person verifiziert',
+      createdAt: '2026-06-10T10:00:00Z',
+      vcJws: 'aGVhZGVy.cGF5bG9hZA.c2lnbmF0dXJl',
+    }
+  }
+
+  it('M-B: sendAttestation uses an explicit recipient key without a discovery roundtrip', async () => {
+    // Verification-Flow: der Peer-Key kommt aus dem QR-Challenge-Payload
+    // (Trust 002 `enc`) — Discovery (Peer-Profil evtl. nie publiziert) darf
+    // nicht auf dem Versandpfad liegen.
+    const resolver = vi.fn(async () => null)
+    service.configureDelivery({ identity: alice, resolveRecipientEncryptionKey: resolver })
+    const received: unknown[] = []
+    bobAdapter.onMessage((message) => { received.push(message) })
+
+    const attestation = makeAttestation()
+    await service.sendAttestation(alice, attestation, { recipientEncryptionKey: RECIPIENT_ENCRYPTION_KEY })
+    await new Promise((r) => setTimeout(r, 50))
+
+    expect(resolver).not.toHaveBeenCalled()
+    expect(received).toHaveLength(1)
+    expect((received[0] as { type: string }).type).toBe(INBOX_MESSAGE_TYPE)
+    expect(['queued', 'delivered']).toContain(service.getDeliveryStatus(attestation.id))
+  })
+
+  it('M-B: sendAttestation with an explicit recipient key queues in the outbox when offline', async () => {
+    await aliceMessaging.disconnect()
+    const attestation = makeAttestation()
+
+    await service.sendAttestation(alice, attestation, { recipientEncryptionKey: RECIPIENT_ENCRYPTION_KEY })
+
+    expect(service.getDeliveryStatus(attestation.id)).toBe('queued')
+    expect(await outboxStore.count()).toBe(1)
+  })
+
+  it('M-B: sendAttestation surfaces a missing recipient key as failed status and rejects', async () => {
+    // Old-World hat gequeued; ohne Empfänger-Key ist keine spec-konforme
+    // Zustellung möglich (Sync 003 Z.446-456) — aber der Fehler muss sichtbar
+    // werden (Status 'failed' + Retry), kein Silent-Drop mit UI "done".
+    service.configureDelivery({ identity: alice, resolveRecipientEncryptionKey: async () => null })
+    const attestation = makeAttestation()
+
+    await expect(
+      service.sendAttestation(alice, attestation),
+    ).rejects.toThrow(`No encryption key published for ${BOB_DID}`)
+
+    expect(service.getDeliveryStatus(attestation.id)).toBe('failed')
+  })
+
   it('initFromOutbox() should mark pending outbox entries as "queued"', async () => {
     // Queue a message in outbox while disconnected
     await aliceMessaging.disconnect()

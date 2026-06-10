@@ -241,18 +241,47 @@ export class AttestationService {
    * (Identity-Key) → ECIES für den Empfänger → DIDComm inbox/1.0.
    * Lokale Attestation-Felder reisen NICHT im Wire-Body — der Empfänger
    * leitet sie nach VC-Verifikation aus dem VC-Payload ab.
+   *
+   * M-B: kein Silent-Drop mehr — der Versand trackt den Delivery-Status
+   * (sending/queued/delivered/failed); Fehler markieren die Attestation als
+   * 'failed' (Retry über retryAttestation in der UI) und werden geworfen.
+   * Optional kann der Empfänger-Key direkt mitgegeben werden (z.B. aus dem
+   * QR-Challenge-Payload, Trust 002 `enc`) — dann entfällt der
+   * Discovery-Roundtrip und der Versand funktioniert offline (Outbox).
    */
-  async sendAttestation(issuer: IdentitySession, attestation: Attestation): Promise<void> {
+  async sendAttestation(
+    issuer: IdentitySession,
+    attestation: Attestation,
+    options: { recipientEncryptionKey?: Uint8Array } = {},
+  ): Promise<void> {
     if (!this.messaging) throw new Error('Messaging not configured')
-    await this.sendDelivery(issuer, attestation)
+    this.setStatus(attestation.id, 'sending')
+    try {
+      const receipt = await this.sendDelivery(issuer, attestation, options.recipientEncryptionKey)
+      if (receipt.reason === 'queued-in-outbox') {
+        this.setStatus(attestation.id, 'queued')
+      } else if (receipt.status === 'delivered' || receipt.status === 'accepted') {
+        this.setStatus(attestation.id, 'delivered')
+      }
+    } catch (error) {
+      this.setStatus(attestation.id, 'failed')
+      throw error
+    }
   }
 
-  private async sendDelivery(issuer: IdentitySession, attestation: Attestation) {
+  private async sendDelivery(
+    issuer: IdentitySession,
+    attestation: Attestation,
+    recipientEncryptionKey?: Uint8Array,
+  ) {
     if (!this.messaging) throw new Error('Messaging not configured')
-    const resolver = this.deliveryConfig?.resolveRecipientEncryptionKey
-    if (!resolver) throw new Error('Attestation delivery not configured (configureDelivery)')
 
-    const recipientKey = await resolver(attestation.to)
+    let recipientKey = recipientEncryptionKey ?? null
+    if (!recipientKey) {
+      const resolver = this.deliveryConfig?.resolveRecipientEncryptionKey
+      if (!resolver) throw new Error('Attestation delivery not configured (configureDelivery)')
+      recipientKey = await resolver(attestation.to)
+    }
     if (!recipientKey) {
       // Kein Klartext-Fallback: ohne keyAgreement-Key des Empfängers ist keine
       // spec-konforme Zustellung möglich (Sync 003 Z.446-456 / Sync 004).

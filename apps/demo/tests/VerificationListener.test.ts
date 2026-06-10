@@ -226,6 +226,34 @@ describe('Trust 002 verification attestation listener (real listener code)', () 
     expect(setPendingIncoming).not.toHaveBeenCalled()
   })
 
+  // --- M-C: senderDid ↔ VC-iss-Bindung (Sync 003 Z.460-464, wot-spec#98) ---
+
+  it('M-C: rejects deliveries whose VC issuer does not match the authenticated senderDid', async () => {
+    const handler = buildListener()
+
+    // Bobs öffentlich abrufbarer VC, von Carol mit EIGENEM gültigem Inner-JWS
+    // eingeliefert — Verstoß ist deterministisch → konklusiv, kein Throw.
+    await expect(handler(makeDelivery(makeVcJws(), CAROL_DID))).resolves.toBeUndefined()
+
+    expect(acceptVerifiedVerificationAttestation).not.toHaveBeenCalled()
+    expect(saveIncomingAttestation).not.toHaveBeenCalled()
+    expect(setPendingIncoming).not.toHaveBeenCalled()
+    expect(triggerAttestationDialog).not.toHaveBeenCalled()
+  })
+
+  it('M-C: rejects generic attestations addressed to a third party (to !== ownDid)', async () => {
+    const handler = buildListener()
+
+    await expect(handler(makeDelivery(makeVcJws({
+      to: CAROL_DID,
+      id: 'urn:uuid:third-party-attestation',
+      claim: 'Knows TypeScript',
+    })))).resolves.toBeUndefined()
+
+    expect(saveIncomingAttestation).not.toHaveBeenCalled()
+    expect(triggerAttestationDialog).not.toHaveBeenCalled()
+  })
+
   // --- M-A: Fehlerdisziplin (Sync 003 Z.466 + Z.620-622) ---
 
   it('M-A: rethrows transient storage errors so the host classifies processing-incomplete', async () => {
@@ -311,5 +339,10 @@ describe('Trust 002 verification source guard', () => {
     expect(text).not.toContain("type: 'attestation'")
     expect(text).not.toContain('MessageEnvelope')
     expect(text.match(/attestationService\.sendAttestation\(identity, \w+/g)).toHaveLength(3)
+    // M-B: kein Silent-Drop — Fehler werden sichtbar behandelt (Status
+    // 'failed' im Service + Warn-Log), und der Verification-Flow nutzt den
+    // Peer-Key direkt aus dem QR-Challenge-Payload (Trust 002 `enc`).
+    expect(text).not.toContain('.catch(() => {})')
+    expect(text).toContain('recipientEncryptionKey: verificationWorkflow.base64UrlToBytes(decodedChallenge.enc)')
   })
 })

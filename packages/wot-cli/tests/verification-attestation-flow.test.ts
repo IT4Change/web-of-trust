@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { AttestationWorkflow, IdentityWorkflow, receiveInboxMessage, type PublicIdentitySession } from '@web_of_trust/core/application'
+import { AttestationWorkflow, IdentityWorkflow, deliverInboxMessage, receiveInboxMessage, type PublicIdentitySession } from '@web_of_trust/core/application'
 import { WebCryptoProtocolCryptoAdapter } from '@web_of_trust/core/protocol-adapters'
 import {
   ACK_MESSAGE_TYPE,
@@ -323,6 +323,83 @@ describe('WotCliClient inbox/1.0 attestation delivery (K2/K3)', () => {
     expect(alice.storage.attestations.filter((a) => a.from === bobIdentity.getDid())).toHaveLength(1)
     expect(ackMessages(alice.outbox)).toHaveLength(1)
     expect(ackMessages(alice.outbox)[0].thid).toBe(envelope.id)
+  })
+
+  it('M-C: rejects a relayed third-party VC whose issuer is not the inbox sender (konklusiv)', async () => {
+    // Sync 003 Z.460-464 + real-life-org/wot-spec#98: der VC-Issuer MUSS der
+    // per Inner-JWS authentifizierte Inbox-Sender sein. Sonst legt die CLI
+    // für einen öffentlich abrufbaren Dritt-VC den VC-Issuer als aktiven
+    // Kontakt an, obwohl der nie etwas gesendet hat.
+    const aliceIdentity = await createIdentity('cli-alice-mc1')
+    const bobIdentity = await createIdentity('cli-bob-mc1')
+    const malloryIdentity = await createIdentity('cli-mallory-mc1')
+    const discovery = createDiscoveryStub([aliceIdentity, bobIdentity, malloryIdentity])
+    const alice = createClient(aliceIdentity, 'Alice', discovery)
+
+    // Bobs gültiger VC für Alice — von Mallory mit EIGENEM gültigem Inner-JWS
+    // eingeliefert.
+    const workflow = new AttestationWorkflow({ crypto: cryptoAdapter })
+    const bobsAttestation = await workflow.createAttestation({
+      issuer: bobIdentity,
+      subjectDid: aliceIdentity.getDid(),
+      claim: 'Great person',
+    })
+    const envelope = await deliverInboxMessage({
+      type: INBOX_MESSAGE_TYPE,
+      body: { vcJws: bobsAttestation.vcJws },
+      from: malloryIdentity.getDid(),
+      to: aliceIdentity.getDid(),
+      recipientEncryptionPublicKey: aliceIdentity.x25519PublicKey,
+      sign: (input) => malloryIdentity.signEd25519(input),
+      crypto: cryptoAdapter,
+    })
+
+    await (alice.client as unknown as TestableWotCliClient).handleInboxMessage(envelope)
+
+    // Konklusiv ungültig: nichts gespeichert, kein Kontakt, kein sofortiges
+    // ack ('may-ack-invalid-and-drop' wird bewusst nicht genutzt).
+    expect(alice.storage.attestations).toHaveLength(0)
+    expect(alice.storage.contacts).toHaveLength(0)
+    expect(ackMessages(alice.outbox)).toHaveLength(0)
+
+    // Aber recorded (M1-Disziplin): die Redelivery endet als Replay mit
+    // duplicate-known-ack — KEINE Endlos-Redelivery.
+    await (alice.client as unknown as TestableWotCliClient).handleInboxMessage(envelope)
+    expect(ackMessages(alice.outbox)).toHaveLength(1)
+    expect(alice.storage.attestations).toHaveLength(0)
+    expect(alice.storage.contacts).toHaveLength(0)
+  })
+
+  it('M-C: rejects a delivered VC whose subject is not the own DID (konklusiv)', async () => {
+    const aliceIdentity = await createIdentity('cli-alice-mc2')
+    const bobIdentity = await createIdentity('cli-bob-mc2')
+    const carolIdentity = await createIdentity('cli-carol-mc2')
+    const discovery = createDiscoveryStub([aliceIdentity, bobIdentity, carolIdentity])
+    const alice = createClient(aliceIdentity, 'Alice', discovery)
+
+    // Bob liefert seinen VC ÜBER Carol bei Alice ein — iss stimmt mit dem
+    // Inbox-Sender überein, aber das Subject ist nicht Alices DID.
+    const workflow = new AttestationWorkflow({ crypto: cryptoAdapter })
+    const carolsAttestation = await workflow.createAttestation({
+      issuer: bobIdentity,
+      subjectDid: carolIdentity.getDid(),
+      claim: 'Great person',
+    })
+    const envelope = await deliverInboxMessage({
+      type: INBOX_MESSAGE_TYPE,
+      body: { vcJws: carolsAttestation.vcJws },
+      from: bobIdentity.getDid(),
+      to: aliceIdentity.getDid(),
+      recipientEncryptionPublicKey: aliceIdentity.x25519PublicKey,
+      sign: (input) => bobIdentity.signEd25519(input),
+      crypto: cryptoAdapter,
+    })
+
+    await (alice.client as unknown as TestableWotCliClient).handleInboxMessage(envelope)
+
+    expect(alice.storage.attestations).toHaveLength(0)
+    expect(alice.storage.contacts).toHaveLength(0)
+    expect(ackMessages(alice.outbox)).toHaveLength(0)
   })
 
   it('rejects inbox-family types on the generic old-world sendMessage path', async () => {
