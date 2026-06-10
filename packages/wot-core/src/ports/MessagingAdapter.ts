@@ -3,6 +3,30 @@ import type {
   DeliveryReceipt,
   MessagingState,
 } from '../types/messaging'
+import type { DidcommPlaintextMessage } from '../protocol/sync/membership-messages'
+
+/**
+ * VE-8: Zwei normative Message-Familien bis zum Sync-002-Slice (Sync 003
+ * Z.328-341) — Old-World `MessageEnvelope` für den CRDT-Sync-Kanal
+ * (content/personal-sync/space-sync-request/profile-update) und
+ * DIDComm-Transport-Envelopes für die Inbox-Familie. Kein Typ existiert in
+ * beiden Familien; discriminiert wird über `isDidcommMessage` (typ-Feld).
+ */
+export type WireMessage = MessageEnvelope | DidcommPlaintextMessage<object>
+
+/** Routing-Empfänger beider Familien: Old-World `toDid`, DIDComm `to[0]`. */
+export function wireMessageRecipient(message: WireMessage): string | undefined {
+  if ('toDid' in message && typeof message.toDid === 'string') return message.toDid
+  const to = (message as DidcommPlaintextMessage).to
+  return Array.isArray(to) ? to[0] : undefined
+}
+
+/** Routing-Absender beider Familien: Old-World `fromDid`, DIDComm `from`. */
+export function wireMessageSender(message: WireMessage): string | undefined {
+  if ('fromDid' in message && typeof message.fromDid === 'string') return message.fromDid
+  const from = (message as DidcommPlaintextMessage).from
+  return typeof from === 'string' ? from : undefined
+}
 
 /**
  * Messaging adapter interface for cross-user message delivery.
@@ -11,8 +35,9 @@ import type {
  * Matrix (production), or InMemory (tests).
  *
  * Follows the Empfänger-Prinzip: Messages are delivered to the recipient.
- * Handles attestation/verification delivery, contact requests,
- * item-key delivery, space invitations, and arbitrary DID-to-DID messages.
+ * Trägt beide Familien (VE-8): die DIDComm-Inbox-Familie (inbox/1.0,
+ * space-invite, member-update, key-rotation) und die Old-World-Envelopes
+ * des CRDT-Sync-Kanals.
  */
 export interface MessagingAdapter {
   // Connection Lifecycle
@@ -23,11 +48,12 @@ export interface MessagingAdapter {
   // State Changes — notifies when connection state changes (connected/disconnected/reconnecting)
   onStateChange(callback: (state: MessagingState) => void): () => void
 
-  // Sending — takes an envelope, returns receipt
-  send(envelope: MessageEnvelope): Promise<DeliveryReceipt>
+  // Sending — takes an envelope (either family), returns receipt
+  send(envelope: WireMessage): Promise<DeliveryReceipt>
 
-  // Receiving — callback may be async (ACK is deferred until callback resolves)
-  onMessage(callback: (envelope: MessageEnvelope) => void | Promise<void>): () => void
+  // Receiving — callback may be async (Old-World-ACK is deferred until callback
+  // resolves; DIDComm-Inbox-ACK ownership lies with the reception host, K1)
+  onMessage(callback: (envelope: WireMessage) => void | Promise<void>): () => void
 
   // Receipt Updates (async: delivered comes later)
   onReceipt(callback: (receipt: DeliveryReceipt) => void): () => void

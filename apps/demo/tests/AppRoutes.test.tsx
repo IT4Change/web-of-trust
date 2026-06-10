@@ -16,8 +16,12 @@ import path from 'node:path'
 // Mock the heavy dependencies before importing App components
 vi.mock('../src/context/AdapterContext', () => ({
   AdapterProvider: ({ children }: { children: React.ReactNode }) => <>{children}</>,
-  // SpaceInviteListenerEffect subscribes to replication.onSpaceInvite on mount
-  useAdapters: () => ({ replication: { onSpaceInvite: () => () => {} } }),
+  // SpaceInviteListenerEffect subscribes to replication.onSpaceInvite on mount;
+  // AttestationListenerEffect subscribes to inboxReception.onAttestation (VE-9).
+  useAdapters: () => ({
+    replication: { onSpaceInvite: () => () => {} },
+    inboxReception: { onAttestation: () => () => {} },
+  }),
   useOptionalAdapters: () => null,
 }))
 

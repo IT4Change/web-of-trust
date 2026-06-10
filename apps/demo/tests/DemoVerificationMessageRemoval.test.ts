@@ -57,19 +57,30 @@ describe('demo legacy verification message payload type removal source guard', (
     expect(hits).toEqual([])
   })
 
-  it('keeps the active Trust 002 verification flow on attestation messages', () => {
+  // Inbox-Wire-Migration (Direktive 1.7): die Old-World-Envelopes mit
+  // type 'attestation' sind tot — Versand läuft über attestationService.
+  // sendAttestation (inbox/1.0, K2), Empfang über das typed
+  // inboxReception.onAttestation-Event (VE-9) statt envelope.type-Parsing.
+  it('keeps the active Trust 002 verification flow on attestation deliveries', () => {
     const useVerification = readRepoFile('apps/demo/src/hooks/useVerification.ts')
     const verificationWorkflow = readRepoFile('apps/demo/src/services/verificationWorkflow.ts')
     const app = readRepoFile('apps/demo/src/App.tsx')
+    // M-A: die Listener-Logik ist aus App.tsx nach services/attestationListener.ts
+    // extrahiert, damit Tests den produktiven Code treffen.
+    const attestationListener = readRepoFile('apps/demo/src/services/attestationListener.ts')
 
     expect(useVerification).toMatch(/from\s+['"]\.\.\/services\/verificationWorkflow['"]/)
     expect(useVerification).toContain('verificationWorkflow.createVerificationAttestation')
     expect(useVerification).toContain('verificationWorkflow.createCounterVerificationAttestation')
     expect(useVerification).toContain('storage.saveAttestation')
-    const attestationEnvelopeTypes = useVerification.match(/type:\s*['"]attestation['"]/g) ?? []
-    expect(attestationEnvelopeTypes.length).toBeGreaterThanOrEqual(2)
+    const attestationDeliveries = useVerification.match(/attestationService\.sendAttestation\(/g) ?? []
+    expect(attestationDeliveries.length).toBeGreaterThanOrEqual(2)
+    expect(useVerification).not.toMatch(/type:\s*['"]attestation['"]/)
     expect(verificationWorkflow).toContain("export { verificationWorkflow } from '../runtime/appRuntime'")
-    expect(app).toMatch(/if\s*\(\s*envelope\.type\s*!==\s*['"]attestation['"]\s*\)\s*return/)
-    expect(app).toContain('setPendingIncoming({ attestation, fromDid: attestation.from })')
+    expect(app).toContain('inboxReception.onAttestation')
+    expect(app).not.toContain('envelope.type')
+    expect(app).toContain('createAttestationListener')
+    expect(attestationListener).not.toContain('envelope.type')
+    expect(attestationListener).toContain('setPendingIncoming({ attestation, fromDid: attestation.from })')
   })
 })

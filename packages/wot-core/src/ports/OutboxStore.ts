@@ -1,11 +1,11 @@
-import type { MessageEnvelope } from '../types/messaging'
+import type { WireMessage } from './MessagingAdapter'
 import type { Subscribable } from './Subscribable'
 
 /**
  * Outbox entry with metadata for retry logic.
  */
 export interface OutboxEntry {
-  envelope: MessageEnvelope
+  envelope: WireMessage
   createdAt: string      // ISO 8601 — when the message was first queued
   retryCount: number     // number of failed send attempts
 }
@@ -13,14 +13,14 @@ export interface OutboxEntry {
 /**
  * Persistent store for the messaging outbox.
  *
- * Stores unsent MessageEnvelopes for retry when connectivity is restored.
- * Implementations:
- * - InMemoryOutboxStore (for tests)
- * - EvoluOutboxStore (for Demo App, backed by Evolu/SQLite)
+ * Stores unsent wire messages (both families, VE-8) for retry when
+ * connectivity is restored. Implementations: InMemoryOutboxStore (Tests),
+ * PersonalDocOutboxStore/AutomergeOutboxStore (CRDT-Personal-Doc),
+ * SqliteOutboxStore (CLI), LocalOutboxStore (Demo, IndexedDB).
  */
 export interface OutboxStore {
   /** Add an envelope to the outbox. Idempotent on envelope.id. */
-  enqueue(envelope: MessageEnvelope): Promise<void>
+  enqueue(envelope: WireMessage): Promise<void>
 
   /** Remove a successfully sent envelope from the outbox. */
   dequeue(envelopeId: string): Promise<void>

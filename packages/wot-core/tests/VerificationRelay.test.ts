@@ -74,7 +74,7 @@ describe('Verification over Relay', () => {
     const responseEnvelope: MessageEnvelope = {
       v: 1,
       id: `ver-${crypto.randomUUID()}`,
-      type: 'verification',
+      type: 'content',
       fromDid: bobDid,
       toDid: aliceDid,
       createdAt: new Date().toISOString(),
@@ -91,7 +91,7 @@ describe('Verification over Relay', () => {
 
     // Alice should receive Bob's response
     expect(aliceReceived).toHaveLength(1)
-    expect(aliceReceived[0].type).toBe('verification')
+    expect(aliceReceived[0].type).toBe('content')
 
     const receivedPayload = JSON.parse(aliceReceived[0].payload)
     expect(receivedPayload.action).toBe('response')
@@ -116,7 +116,7 @@ describe('Verification over Relay', () => {
     const completeEnvelope: MessageEnvelope = {
       v: 1,
       id: verification.id,
-      type: 'verification',
+      type: 'content',
       fromDid: aliceDid,
       toDid: bobDid,
       createdAt: new Date().toISOString(),
@@ -132,7 +132,7 @@ describe('Verification over Relay', () => {
 
     // Bob should receive Alice's complete message
     expect(bobReceived).toHaveLength(1)
-    expect(bobReceived[0].type).toBe('verification')
+    expect(bobReceived[0].type).toBe('content')
 
     const completeReceived = JSON.parse(bobReceived[0].payload)
     expect(completeReceived.action).toBe('complete')
@@ -165,7 +165,7 @@ describe('Verification over Relay', () => {
     const completeEnvelope: MessageEnvelope = {
       v: 1,
       id: verification.id,
-      type: 'verification',
+      type: 'content',
       fromDid: aliceDid,
       toDid: bobDid,
       createdAt: new Date().toISOString(),

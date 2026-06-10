@@ -207,6 +207,11 @@ export function parseKeyRotationMessage(value: unknown): KeyRotationMessage {
   return value
 }
 
+/**
+ * Validates the LOGICAL (decrypted) message form used by spec interop vectors.
+ * NOT a wire validator — on the wire the body is the ECIES container (see
+ * ../messaging/inbox-message.ts). The clear body travels in the Inner-JWS payload.
+ */
 export function assertSpaceInviteMessage(value: unknown): asserts value is SpaceInviteMessage {
   const message = assertRecord(value, 'space-invite message')
   if (message.typ !== DIDCOMM_PLAINTEXT_TYP) throw new Error('Invalid space-invite typ')
@@ -220,6 +225,11 @@ export function assertSpaceInviteMessage(value: unknown): asserts value is Space
   assertSpaceInviteBody(message.body)
 }
 
+/**
+ * Validates the LOGICAL (decrypted) message form used by spec interop vectors.
+ * NOT a wire validator — on the wire the body is the ECIES container (see
+ * ../messaging/inbox-message.ts). The clear body travels in the Inner-JWS payload.
+ */
 export function assertMemberUpdateMessage(value: unknown): asserts value is MemberUpdateMessage {
   const message = assertRecord(value, 'member-update message')
   if (message.typ !== DIDCOMM_PLAINTEXT_TYP) throw new Error('Invalid member-update typ')
@@ -233,6 +243,11 @@ export function assertMemberUpdateMessage(value: unknown): asserts value is Memb
   assertMemberUpdateBody(message.body)
 }
 
+/**
+ * Validates the LOGICAL (decrypted) message form used by spec interop vectors.
+ * NOT a wire validator — on the wire the body is the ECIES container (see
+ * ../messaging/inbox-message.ts). The clear body travels in the Inner-JWS payload.
+ */
 export function assertKeyRotationMessage(value: unknown): asserts value is KeyRotationMessage {
   const message = assertRecord(value, 'key-rotation message')
   if (message.typ !== DIDCOMM_PLAINTEXT_TYP) throw new Error('Invalid key-rotation typ')

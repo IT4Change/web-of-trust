@@ -1,16 +1,29 @@
 /**
- * Tests for the Trust 002 in-person Verification-Attestation relay flow.
+ * Tests for the Trust 002 in-person Verification-Attestation flow over the
+ * inbox/1.0 event path (VE-9).
  *
- * The app listener should receive verification attestations through the normal
- * attestation envelope path, verify/decode the VC-JWS, require this device as
- * the recipient, accept only nonce-bound in-person credentials, and open the
- * incoming verification confirmation dialog without also opening the generic
- * attestation dialog.
+ * Getestet wird der ECHTE App-Listener (createAttestationListener aus
+ * services/attestationListener.ts, M-A-Extraktion) — keine Reimplementierung.
+ * Er konsumiert das typed onAttestation-Event des InboxReceptionHost
+ * ({vcJws, senderDid, outerId}), verifiziert/dekodiert den VC-JWS, leitet die
+ * Attestation-View aus dem VC-Payload ab (K2 — kein Wire-Wrapper mehr),
+ * verlangt dieses Gerät als Empfänger, akzeptiert nur nonce-gebundene
+ * In-Person-Credentials und öffnet den Bestätigungs-Dialog ohne den
+ * generischen Attestation-Dialog.
+ *
+ * Fehlerdisziplin (M-A): Duplikate (DuplicateAttestationError) sind konklusiv
+ * und enden normal; transiente Persist-Fehler werden durchgeworfen, damit der
+ * Host processing-incomplete klassifiziert (kein ack, kein record).
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { existsSync, readFileSync } from 'node:fs'
-import type { Attestation, MessageEnvelope } from '@web_of_trust/core/types'
-import { createResourceRef } from '@web_of_trust/core/types'
+import type { Attestation, IdentitySession } from '@web_of_trust/core/types'
+import type { AttestationVcPayload } from '@web_of_trust/core/protocol'
+import {
+  createAttestationListener,
+  type AttestationListenerDeps,
+} from '../src/services/attestationListener'
+import { DuplicateAttestationError } from '../src/services/AttestationService'
 
 const ALICE_DID = 'did:key:z6MkAlice'
 const BOB_DID = 'did:key:z6MkBob'
@@ -18,263 +31,269 @@ const CAROL_DID = 'did:key:z6MkCarol'
 const CHALLENGE_NONCE = '550e8400-e29b-41d4-a716-446655440000'
 const VERIFICATION_CLAIM = 'in-person verifiziert'
 
-type VerifiedPayload = {
-  id?: string
-  type: string[]
-  issuer: string
-  validFrom: string
-  iss: string
-  sub: string
-  jti?: string
-  inResponseTo?: string
-  credentialSubject: {
-    id: string
-    claim: string
-  }
+interface IncomingAttestationDelivery {
+  vcJws: string
+  senderDid: string
+  outerId: string
 }
 
-type AcceptanceDecision =
-  | { decision: 'accept-in-person'; nonce: string }
-  | { decision: 'remote-unbound'; reason: string }
-  | { decision: 'reject'; reason: string }
-
-function makeVerificationAttestation(input: {
+function makeVcJws(input: {
   from?: string
   to?: string
   id?: string
   claim?: string
   inResponseTo?: string
-} = {}): Attestation {
+} = {}): string {
   const from = input.from ?? BOB_DID
   const to = input.to ?? ALICE_DID
   const id = input.id ?? `urn:uuid:${CHALLENGE_NONCE}`
-  return {
+  return `header.${Buffer.from(JSON.stringify({
     id,
-    from,
-    to,
-    claim: input.claim ?? VERIFICATION_CLAIM,
+    type: ['VerifiableCredential', 'WotAttestation'],
+    issuer: from,
+    validFrom: '2026-05-22T10:00:00Z',
+    iss: from,
+    sub: to,
+    jti: id,
     ...(input.inResponseTo ? { inResponseTo: input.inResponseTo } : {}),
-    createdAt: '2026-05-22T10:00:00Z',
-    vcJws: `header.${Buffer.from(JSON.stringify({
-      id,
-      type: ['VerifiableCredential', 'WotAttestation'],
-      issuer: from,
-      validFrom: '2026-05-22T10:00:00Z',
-      iss: from,
-      sub: to,
-      jti: id,
-      ...(input.inResponseTo ? { inResponseTo: input.inResponseTo } : {}),
-      credentialSubject: {
-        id: to,
-        claim: input.claim ?? VERIFICATION_CLAIM,
-      },
-    })).toString('base64url')}.signature`,
-  }
+    credentialSubject: {
+      id: to,
+      claim: input.claim ?? VERIFICATION_CLAIM,
+    },
+  })).toString('base64url')}.signature`
 }
 
-function makeAttestationEnvelope(attestation: Attestation): MessageEnvelope {
-  return {
-    v: 1,
-    id: attestation.id,
-    type: 'attestation',
-    fromDid: attestation.from,
-    toDid: attestation.to,
-    createdAt: attestation.createdAt,
-    encoding: 'json',
-    payload: JSON.stringify(attestation),
-    signature: '',
-    ref: createResourceRef('attestation', attestation.id),
-  }
+function makeDelivery(vcJws: string, senderDid: string = BOB_DID): IncomingAttestationDelivery {
+  return { vcJws, senderDid, outerId: '550e8400-e29b-41d4-a716-446655440099' }
 }
 
 /**
- * Simulates the intended Trust 002 listener contract from App.tsx.
+ * Stub für decodeIncomingAttestation: simuliert eine erfolgreiche
+ * VC-Verifikation und die K2-Ableitung der Attestation-View aus dem
+ * VC-Payload (jti/iss/sub/credentialSubject) — nie aus Wire-Feldern.
  */
-function createTrust002Listener(deps: {
-  myDid: string
-  decodeVcJws: (vcJws: string) => Promise<VerifiedPayload>
-  acceptVerified: (payload: VerifiedPayload) => AcceptanceDecision | Promise<AcceptanceDecision>
-  saveAttestation: (attestation: Attestation) => Promise<void>
-  setPendingIncoming: (pending: { attestation: Attestation; fromDid: string } | null) => void
-  triggerAttestationDialog: (info: unknown) => void
-}) {
-  return async (envelope: MessageEnvelope) => {
-    if (envelope.type !== 'attestation') return
-
-    let attestation: Attestation
-    try {
-      attestation = JSON.parse(envelope.payload)
-    } catch {
-      return
-    }
-
-    if (!attestation.id || !attestation.from || !attestation.to || !attestation.claim || !attestation.vcJws) return
-
-    let payload: VerifiedPayload
-    try {
-      payload = await deps.decodeVcJws(attestation.vcJws)
-    } catch {
-      return
-    }
-
-    const payloadClaimsVerification =
-      payload.type.includes('VerifiableCredential') &&
-      payload.type.includes('WotAttestation') &&
-      payload.credentialSubject.claim === VERIFICATION_CLAIM
-    const wrapperClaimsVerification = attestation.claim === VERIFICATION_CLAIM
-
-    if (payloadClaimsVerification || wrapperClaimsVerification) {
-      if (!payloadClaimsVerification || !wrapperClaimsVerification) return
-      if (!payloadMatchesAttestation(payload, attestation)) return
-    } else {
-      await deps.saveAttestation(attestation)
-      deps.triggerAttestationDialog({
-        attestationId: attestation.id,
-        senderDid: attestation.from,
-        claim: attestation.claim,
-      })
-      return
-    }
-
-    if (attestation.to !== deps.myDid || payload.sub !== deps.myDid || payload.credentialSubject.id !== deps.myDid) return
-
-    const decision = await deps.acceptVerified(payload)
-    if (decision.decision !== 'accept-in-person') return
-
-    await deps.saveAttestation(attestation)
-    deps.setPendingIncoming({ attestation, fromDid: attestation.from })
+async function decodeStub(vcJws: string): Promise<{ attestation: Attestation; payload: AttestationVcPayload }> {
+  const [, payloadPart] = vcJws.split('.')
+  const payload = JSON.parse(Buffer.from(payloadPart, 'base64url').toString('utf8')) as AttestationVcPayload
+  const attestation: Attestation = {
+    id: typeof payload.jti === 'string' ? payload.jti : (payload.id as string),
+    from: payload.issuer,
+    to: payload.credentialSubject.id,
+    claim: payload.credentialSubject.claim,
+    ...(typeof payload.inResponseTo === 'string' ? { inResponseTo: payload.inResponseTo } : {}),
+    createdAt: payload.validFrom,
+    vcJws,
   }
+  return { attestation, payload }
 }
 
-function payloadMatchesAttestation(payload: VerifiedPayload, attestation: Attestation): boolean {
-  return (
-    payload.issuer === attestation.from &&
-    payload.iss === attestation.from &&
-    payload.sub === attestation.to &&
-    payload.credentialSubject.id === attestation.to &&
-    payload.credentialSubject.claim === attestation.claim &&
-    payload.validFrom === attestation.createdAt &&
-    (payload.inResponseTo == null ? attestation.inResponseTo == null : payload.inResponseTo === attestation.inResponseTo) &&
-    (payload.jti == null || payload.jti === attestation.id) &&
-    (payload.id == null || payload.id === attestation.id)
-  )
-}
-
-describe('Trust 002 verification attestation listener', () => {
-  let decodeVcJws: ReturnType<typeof vi.fn>
-  let acceptVerified: ReturnType<typeof vi.fn>
-  let saveAttestation: ReturnType<typeof vi.fn>
+describe('Trust 002 verification attestation listener (real listener code)', () => {
+  let decodeIncomingAttestation: ReturnType<typeof vi.fn>
+  let saveIncomingAttestation: ReturnType<typeof vi.fn>
+  let acceptVerifiedVerificationAttestation: ReturnType<typeof vi.fn>
+  let acceptVerifiedCounterVerification: ReturnType<typeof vi.fn>
   let setPendingIncoming: ReturnType<typeof vi.fn>
+  let setChallengeNonce: ReturnType<typeof vi.fn>
   let triggerAttestationDialog: ReturnType<typeof vi.fn>
 
   beforeEach(() => {
-    decodeVcJws = vi.fn(async (vcJws: string) => {
-      const [, payload] = vcJws.split('.')
-      return JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')) as VerifiedPayload
-    })
-    acceptVerified = vi.fn().mockReturnValue({ decision: 'accept-in-person', nonce: CHALLENGE_NONCE })
-    saveAttestation = vi.fn().mockResolvedValue(undefined)
+    decodeIncomingAttestation = vi.fn(decodeStub)
+    saveIncomingAttestation = vi.fn(async (attestation: Attestation) => attestation)
+    acceptVerifiedVerificationAttestation = vi.fn()
+      .mockResolvedValue({ decision: 'accept-in-person', nonce: CHALLENGE_NONCE })
+    acceptVerifiedCounterVerification = vi.fn()
+      .mockResolvedValue({ decision: 'accept-mutual-in-person', originalVerificationId: `urn:uuid:${CHALLENGE_NONCE}` })
     setPendingIncoming = vi.fn()
+    setChallengeNonce = vi.fn()
     triggerAttestationDialog = vi.fn()
   })
 
-  function defaultDeps(overrides?: Partial<Parameters<typeof createTrust002Listener>[0]>) {
-    return {
-      myDid: ALICE_DID,
-      decodeVcJws,
-      acceptVerified,
-      saveAttestation,
+  function buildListener(overrides: Partial<AttestationListenerDeps> = {}) {
+    const deps: AttestationListenerDeps = {
+      attestationService: {
+        decodeIncomingAttestation: decodeIncomingAttestation as unknown as AttestationListenerDeps['attestationService']['decodeIncomingAttestation'],
+        saveIncomingAttestation: saveIncomingAttestation as unknown as AttestationListenerDeps['attestationService']['saveIncomingAttestation'],
+      },
+      verificationWorkflow: {
+        acceptVerifiedVerificationAttestation: acceptVerifiedVerificationAttestation as unknown as AttestationListenerDeps['verificationWorkflow']['acceptVerifiedVerificationAttestation'],
+        acceptVerifiedCounterVerification: acceptVerifiedCounterVerification as unknown as AttestationListenerDeps['verificationWorkflow']['acceptVerifiedCounterVerification'],
+      },
+      getLocalDid: () => ALICE_DID,
+      getLocalIdentity: () => ({ getDid: () => ALICE_DID } as unknown as IdentitySession),
+      findContactName: () => undefined,
+      setChallengeNonce,
       setPendingIncoming,
       triggerAttestationDialog,
       ...overrides,
     }
+    return createAttestationListener(deps)
   }
 
-  it('accepts nonce-bound Trust 002 Verification-Attestations via attestation envelopes', async () => {
-    const handler = createTrust002Listener(defaultDeps())
-    const attestation = makeVerificationAttestation()
+  it('accepts nonce-bound Trust 002 Verification-Attestations via inbox deliveries', async () => {
+    const handler = buildListener()
+    const vcJws = makeVcJws()
 
-    await handler(makeAttestationEnvelope(attestation))
+    await handler(makeDelivery(vcJws))
 
-    expect(decodeVcJws).toHaveBeenCalledWith(attestation.vcJws)
-    expect(acceptVerified).toHaveBeenCalledWith(expect.objectContaining({
-      iss: BOB_DID,
-      sub: ALICE_DID,
-      jti: `urn:uuid:${CHALLENGE_NONCE}`,
+    expect(decodeIncomingAttestation).toHaveBeenCalledWith(vcJws)
+    expect(acceptVerifiedVerificationAttestation).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        iss: BOB_DID,
+        sub: ALICE_DID,
+        jti: `urn:uuid:${CHALLENGE_NONCE}`,
+      }),
+    )
+    expect(saveIncomingAttestation).toHaveBeenCalledWith(expect.objectContaining({
+      id: `urn:uuid:${CHALLENGE_NONCE}`,
+      from: BOB_DID,
+      to: ALICE_DID,
+      claim: VERIFICATION_CLAIM,
+      vcJws,
     }))
-    expect(saveAttestation).toHaveBeenCalledWith(attestation)
-    expect(setPendingIncoming).toHaveBeenCalledWith({ attestation, fromDid: BOB_DID })
+    expect(setChallengeNonce).toHaveBeenCalledWith(null)
+    expect(setPendingIncoming).toHaveBeenCalledWith({
+      attestation: expect.objectContaining({ from: BOB_DID, vcJws }),
+      fromDid: BOB_DID,
+    })
     expect(triggerAttestationDialog).not.toHaveBeenCalled()
   })
 
   it('rejects remote or unbound Verification-Attestations without saving or prompting', async () => {
-    acceptVerified.mockReturnValue({ decision: 'remote-unbound', reason: 'missing-jti-nonce' })
-    const handler = createTrust002Listener(defaultDeps())
-    const attestation = makeVerificationAttestation({ id: 'urn:uuid:remote-proof' })
+    acceptVerifiedVerificationAttestation.mockResolvedValue({ decision: 'remote-unbound', reason: 'missing-jti-nonce' })
+    const handler = buildListener()
 
-    await handler(makeAttestationEnvelope(attestation))
+    await handler(makeDelivery(makeVcJws({ id: 'urn:uuid:remote-proof' })))
 
-    expect(saveAttestation).not.toHaveBeenCalled()
+    expect(saveIncomingAttestation).not.toHaveBeenCalled()
     expect(setPendingIncoming).not.toHaveBeenCalled()
     expect(triggerAttestationDialog).not.toHaveBeenCalled()
   })
 
   it('rejects wrong-recipient Verification-Attestations before acceptance', async () => {
-    const handler = createTrust002Listener(defaultDeps())
-    const attestation = makeVerificationAttestation({ to: CAROL_DID })
+    const handler = buildListener()
 
-    await handler(makeAttestationEnvelope(attestation))
+    await handler(makeDelivery(makeVcJws({ to: CAROL_DID })))
 
-    expect(acceptVerified).not.toHaveBeenCalled()
-    expect(saveAttestation).not.toHaveBeenCalled()
+    expect(acceptVerifiedVerificationAttestation).not.toHaveBeenCalled()
+    expect(saveIncomingAttestation).not.toHaveBeenCalled()
     expect(setPendingIncoming).not.toHaveBeenCalled()
   })
 
-  it('rejects tampered Verification-Attestation wrappers before nonce acceptance', async () => {
-    const handler = createTrust002Listener(defaultDeps())
-    const signedForBob = makeVerificationAttestation()
-    const tamperedWrapper = {
-      ...signedForBob,
-      from: CAROL_DID,
-      createdAt: '2026-05-22T10:00:01Z',
-    }
+  // K2: einen manipulierbaren Wire-Wrapper gibt es nicht mehr — alle lokalen
+  // Felder stammen aus dem VERIFIZIERTEN VC-Payload. Ein ungültiger VC-JWS
+  // wird vom Decode-Schritt abgewiesen — deterministisch, also konklusiv
+  // (der Listener endet normal, der Host ackt).
+  it('drops deliveries whose VC-JWS fails verification without throwing', async () => {
+    decodeIncomingAttestation.mockRejectedValue(new Error('Invalid JWS signature'))
+    const handler = buildListener()
 
-    await handler(makeAttestationEnvelope(tamperedWrapper))
+    await expect(handler(makeDelivery(makeVcJws()))).resolves.toBeUndefined()
 
-    expect(acceptVerified).not.toHaveBeenCalled()
-    expect(saveAttestation).not.toHaveBeenCalled()
+    expect(acceptVerifiedVerificationAttestation).not.toHaveBeenCalled()
+    expect(saveIncomingAttestation).not.toHaveBeenCalled()
     expect(setPendingIncoming).not.toHaveBeenCalled()
     expect(triggerAttestationDialog).not.toHaveBeenCalled()
   })
 
   it('does not depend on legacy nonce placement in document identifiers', async () => {
-    const handler = createTrust002Listener(defaultDeps())
-    const attestation = makeVerificationAttestation({
-      id: `urn:uuid:${CHALLENGE_NONCE}`,
-    })
+    const handler = buildListener()
 
-    await handler(makeAttestationEnvelope(attestation))
+    await handler(makeDelivery(makeVcJws({ id: `urn:uuid:${CHALLENGE_NONCE}` })))
 
-    expect(acceptVerified).toHaveBeenCalledTimes(1)
-    expect(saveAttestation).toHaveBeenCalledWith(attestation)
+    expect(acceptVerifiedVerificationAttestation).toHaveBeenCalledTimes(1)
+    expect(saveIncomingAttestation).toHaveBeenCalledTimes(1)
   })
 
   it('keeps ordinary incoming attestations on the generic attestation path', async () => {
-    const handler = createTrust002Listener(defaultDeps())
-    const attestation = makeVerificationAttestation({
+    const handler = buildListener()
+
+    await handler(makeDelivery(makeVcJws({
       id: 'urn:uuid:ordinary-attestation',
       claim: 'Knows TypeScript',
-    })
+    })))
 
-    await handler(makeAttestationEnvelope(attestation))
-
-    expect(acceptVerified).not.toHaveBeenCalled()
-    expect(saveAttestation).toHaveBeenCalledWith(attestation)
+    expect(acceptVerifiedVerificationAttestation).not.toHaveBeenCalled()
+    expect(saveIncomingAttestation).toHaveBeenCalledWith(expect.objectContaining({
+      id: 'urn:uuid:ordinary-attestation',
+      claim: 'Knows TypeScript',
+    }))
     expect(triggerAttestationDialog).toHaveBeenCalledWith(expect.objectContaining({
-      attestationId: attestation.id,
+      attestationId: 'urn:uuid:ordinary-attestation',
       senderDid: BOB_DID,
       claim: 'Knows TypeScript',
     }))
+    expect(setPendingIncoming).not.toHaveBeenCalled()
+  })
+
+  // --- M-C: senderDid ↔ VC-iss-Bindung (Sync 003 Z.460-464, wot-spec#98) ---
+
+  it('M-C: rejects deliveries whose VC issuer does not match the authenticated senderDid', async () => {
+    const handler = buildListener()
+
+    // Bobs öffentlich abrufbarer VC, von Carol mit EIGENEM gültigem Inner-JWS
+    // eingeliefert — Verstoß ist deterministisch → konklusiv, kein Throw.
+    await expect(handler(makeDelivery(makeVcJws(), CAROL_DID))).resolves.toBeUndefined()
+
+    expect(acceptVerifiedVerificationAttestation).not.toHaveBeenCalled()
+    expect(saveIncomingAttestation).not.toHaveBeenCalled()
+    expect(setPendingIncoming).not.toHaveBeenCalled()
+    expect(triggerAttestationDialog).not.toHaveBeenCalled()
+  })
+
+  it('M-C: rejects generic attestations addressed to a third party (to !== ownDid)', async () => {
+    const handler = buildListener()
+
+    await expect(handler(makeDelivery(makeVcJws({
+      to: CAROL_DID,
+      id: 'urn:uuid:third-party-attestation',
+      claim: 'Knows TypeScript',
+    })))).resolves.toBeUndefined()
+
+    expect(saveIncomingAttestation).not.toHaveBeenCalled()
+    expect(triggerAttestationDialog).not.toHaveBeenCalled()
+  })
+
+  // --- M-A: Fehlerdisziplin (Sync 003 Z.466 + Z.620-622) ---
+
+  it('M-A: rethrows transient storage errors so the host classifies processing-incomplete', async () => {
+    saveIncomingAttestation.mockRejectedValue(new Error('storage offline'))
+    const handler = buildListener()
+
+    await expect(
+      handler(makeDelivery(makeVcJws({ id: 'urn:uuid:ordinary-attestation', claim: 'Knows TypeScript' }))),
+    ).rejects.toThrow('storage offline')
+
+    expect(triggerAttestationDialog).not.toHaveBeenCalled()
+  })
+
+  it('M-A: rethrows transient storage errors on the accepted verification path', async () => {
+    saveIncomingAttestation.mockRejectedValue(new Error('storage offline'))
+    const handler = buildListener()
+
+    await expect(handler(makeDelivery(makeVcJws()))).rejects.toThrow('storage offline')
+
+    expect(setPendingIncoming).not.toHaveBeenCalled()
+  })
+
+  it('M-A: treats DuplicateAttestationError as conclusive (no throw, no dialog)', async () => {
+    saveIncomingAttestation.mockRejectedValue(new DuplicateAttestationError('urn:uuid:ordinary-attestation'))
+    const handler = buildListener()
+
+    await expect(
+      handler(makeDelivery(makeVcJws({ id: 'urn:uuid:ordinary-attestation', claim: 'Knows TypeScript' }))),
+    ).resolves.toBeUndefined()
+
+    expect(triggerAttestationDialog).not.toHaveBeenCalled()
+  })
+
+  it('M-A: duplicate accepted verification clears the challenge nonce but opens no dialog', async () => {
+    saveIncomingAttestation.mockRejectedValue(new DuplicateAttestationError(`urn:uuid:${CHALLENGE_NONCE}`))
+    const handler = buildListener()
+
+    await expect(handler(makeDelivery(makeVcJws()))).resolves.toBeUndefined()
+
+    expect(setChallengeNonce).toHaveBeenCalledWith(null)
     expect(setPendingIncoming).not.toHaveBeenCalled()
   })
 })
@@ -285,6 +304,7 @@ describe('Trust 002 verification source guard', () => {
     const paths = [
       `${demoRoot}/src/hooks/useVerification.ts`,
       `${demoRoot}/src/App.tsx`,
+      `${demoRoot}/src/services/attestationListener.ts`,
       `${demoRoot}/tests/VerificationListener.test.ts`,
     ]
     const blockedTerms = [
@@ -307,11 +327,22 @@ describe('Trust 002 verification source guard', () => {
     expect(matches).toEqual([])
   })
 
-  it('signs outgoing verification-attestation envelopes before sending them', () => {
+  // Inbox-Wire-Migration (Direktive 1.7): die signEnvelope-Sites für den
+  // Attestation-Versand sind tot — Authentizität kommt aus dem Inner-JWS
+  // (Sync 003 Z.446-466). Alle drei Sends laufen über den K2-Pfad
+  // attestationService.sendAttestation (inbox/1.0, Body {vcJws}).
+  it('routes outgoing verification-attestations through the inbox/1.0 delivery path', () => {
     const demoRoot = existsSync('apps/demo/src') ? 'apps/demo' : '.'
     const text = readFileSync(`${demoRoot}/src/hooks/useVerification.ts`, 'utf8')
 
-    expect(text).toContain("import { signEnvelope } from '@web_of_trust/core/crypto'")
-    expect(text.match(/await signEnvelope\(envelope, \(data\) => identity\.sign\(data\)\)/g)).toHaveLength(3)
+    expect(text).not.toContain('signEnvelope')
+    expect(text).not.toContain("type: 'attestation'")
+    expect(text).not.toContain('MessageEnvelope')
+    expect(text.match(/attestationService\.sendAttestation\(identity, \w+/g)).toHaveLength(3)
+    // M-B: kein Silent-Drop — Fehler werden sichtbar behandelt (Status
+    // 'failed' im Service + Warn-Log), und der Verification-Flow nutzt den
+    // Peer-Key direkt aus dem QR-Challenge-Payload (Trust 002 `enc`).
+    expect(text).not.toContain('.catch(() => {})')
+    expect(text).toContain('recipientEncryptionKey: verificationWorkflow.base64UrlToBytes(decodedChallenge.enc)')
   })
 })

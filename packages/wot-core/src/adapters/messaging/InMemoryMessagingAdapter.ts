@@ -1,6 +1,8 @@
-import type { MessagingAdapter } from '../../ports/MessagingAdapter'
+import type { MessagingAdapter, WireMessage } from '../../ports/MessagingAdapter'
+import { wireMessageRecipient } from '../../ports/MessagingAdapter'
+import { isDidcommMessage } from '../../protocol/messaging/inbox-message'
+import { ACK_MESSAGE_TYPE } from '../../protocol/sync/ack-message'
 import type {
-  MessageEnvelope,
   DeliveryReceipt,
   MessagingState,
 } from '../../types/messaging'
@@ -18,12 +20,12 @@ import type {
 export class InMemoryMessagingAdapter implements MessagingAdapter {
   // Shared state across all instances (same process)
   private static registry = new Map<string, Set<InMemoryMessagingAdapter>>()
-  private static offlineQueue = new Map<string, MessageEnvelope[]>()
+  private static offlineQueue = new Map<string, WireMessage[]>()
   private static transportMap = new Map<string, string>()
 
   private myDid: string | null = null
   private state: MessagingState = 'disconnected'
-  private messageCallbacks = new Set<(envelope: MessageEnvelope) => void | Promise<void>>()
+  private messageCallbacks = new Set<(envelope: WireMessage) => void | Promise<void>>()
   private receiptCallbacks = new Set<(receipt: DeliveryReceipt) => void>()
   private stateCallbacks = new Set<(state: MessagingState) => void>()
 
@@ -80,15 +82,34 @@ export class InMemoryMessagingAdapter implements MessagingAdapter {
     return this.state
   }
 
-  async send(envelope: MessageEnvelope): Promise<DeliveryReceipt> {
+  async send(envelope: WireMessage): Promise<DeliveryReceipt> {
     if (this.state !== 'connected' || !this.myDid) {
       throw new Error('MessagingAdapter: must call connect() before send()')
     }
 
     const now = new Date().toISOString()
 
+    // Relay-Parität (Sync 003 ack/1.0): ein Inbox-ACK ist an den Broker gerichtet —
+    // er räumt den Store-and-Forward-Slot der referenzierten Nachricht und wird
+    // nicht geroutet.
+    if (isDidcommMessage(envelope) && envelope.type === ACK_MESSAGE_TYPE) {
+      const messageId = (envelope.body as Record<string, unknown>).messageId
+      for (const [did, queue] of InMemoryMessagingAdapter.offlineQueue) {
+        const next = queue.filter((queued) => queued.id !== messageId)
+        if (next.length > 0) InMemoryMessagingAdapter.offlineQueue.set(did, next)
+        else InMemoryMessagingAdapter.offlineQueue.delete(did)
+      }
+      return { messageId: envelope.id, status: 'delivered', timestamp: now }
+    }
+
+    // VE-8: Old-World routet über toDid, DIDComm über to[0] (wie das Relay).
+    const toDid = wireMessageRecipient(envelope)
+    if (!toDid) {
+      throw new Error('MessagingAdapter: envelope has no recipient (toDid / to[0])')
+    }
+
     // Deliver to all currently connected devices of recipient
-    const recipients = InMemoryMessagingAdapter.registry.get(envelope.toDid)
+    const recipients = InMemoryMessagingAdapter.registry.get(toDid)
     if (recipients && recipients.size > 0) {
       for (const device of recipients) {
         await device.deliverToSelf(envelope)
@@ -108,9 +129,9 @@ export class InMemoryMessagingAdapter implements MessagingAdapter {
     // Also queue for future devices that may connect later (multi-device).
     // The real relay does store-and-forward: delivered messages are kept until ACK.
     // On connect(), queued messages are delivered to newly connected device.
-    const queue = InMemoryMessagingAdapter.offlineQueue.get(envelope.toDid) ?? []
+    const queue = InMemoryMessagingAdapter.offlineQueue.get(toDid) ?? []
     queue.push(envelope)
-    InMemoryMessagingAdapter.offlineQueue.set(envelope.toDid, queue)
+    InMemoryMessagingAdapter.offlineQueue.set(toDid, queue)
 
     return {
       messageId: envelope.id,
@@ -119,7 +140,7 @@ export class InMemoryMessagingAdapter implements MessagingAdapter {
     }
   }
 
-  onMessage(callback: (envelope: MessageEnvelope) => void | Promise<void>): () => void {
+  onMessage(callback: (envelope: WireMessage) => void | Promise<void>): () => void {
     this.messageCallbacks.add(callback)
     return () => {
       this.messageCallbacks.delete(callback)
@@ -154,7 +175,7 @@ export class InMemoryMessagingAdapter implements MessagingAdapter {
     InMemoryMessagingAdapter.transportMap.clear()
   }
 
-  private async deliverToSelf(envelope: MessageEnvelope): Promise<void> {
+  private async deliverToSelf(envelope: WireMessage): Promise<void> {
     for (const cb of this.messageCallbacks) {
       try {
         await cb(envelope)

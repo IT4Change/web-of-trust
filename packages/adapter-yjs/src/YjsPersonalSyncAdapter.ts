@@ -11,6 +11,7 @@
  */
 import * as Y from 'yjs'
 import type { MessagingAdapter } from '@web_of_trust/core/ports'
+import type { MessageEnvelope } from '@web_of_trust/core/types'
 import type { ProtocolCryptoAdapter } from '@web_of_trust/core/protocol'
 import { decryptOneShot, encryptOneShot } from '@web_of_trust/core/protocol'
 import { WebCryptoProtocolCryptoAdapter } from '@web_of_trust/core/protocol-adapters'
@@ -72,8 +73,9 @@ export class YjsPersonalSyncAdapter {
     this.unsubDocUpdate = () => this.doc.off('update', updateHandler)
 
     // Listen for incoming messages → decrypt and apply to Y.Doc
-    this.unsubMessage = this.messaging.onMessage(async (envelope) => {
-      if ((envelope.type as string) !== 'personal-sync') return
+    this.unsubMessage = this.messaging.onMessage(async (incoming) => {
+      if ((incoming.type as string) !== 'personal-sync') return
+      const envelope = incoming as MessageEnvelope
 
       // Skip our own messages echoed back by the relay
       if (this.sentMessageIds.has(envelope.id)) {

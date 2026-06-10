@@ -2,9 +2,23 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import type { PublicIdentitySession } from '../../wot-core/src/application/identity'
 import { createTestIdentity } from '../../wot-core/tests/helpers/identity-session'
 import { InMemoryMessagingAdapter, InMemorySpaceMetadataStorage, InMemoryCompactStore, InMemoryKeyManagementAdapter } from '@web_of_trust/core/adapters'
+import { isDidcommMessage, assertEncryptedInboxEnvelope, SPACE_INVITE_MESSAGE_TYPE, MEMBER_UPDATE_MESSAGE_TYPE } from '@web_of_trust/core/protocol'
 import { AutomergeReplicationAdapter } from '../src/AutomergeReplicationAdapter'
 import { InMemoryRepoStorageAdapter } from '../src/InMemoryRepoStorageAdapter'
 import { WebCryptoProtocolCryptoAdapter } from '@web_of_trust/core/protocol-adapters'
+
+// Die Handler nehmen das DEKODIERTE Inbox-Ergebnis (receiveInboxMessage accept):
+// senderDid ist der verifizierte Inner-JWS-Signer (S1), der Klartext-Body kommt
+// aus dem Inner-JWS-Payload.
+function memberUpdateDecoded(senderDid: string, body: Record<string, unknown>) {
+  return {
+    type: MEMBER_UPDATE_MESSAGE_TYPE,
+    senderDid,
+    body,
+    outerId: crypto.randomUUID(),
+    extensionFields: {},
+  }
+}
 
 // Simple doc schema for testing
 interface TestDoc {
@@ -204,15 +218,106 @@ describe('AutomergeReplicationAdapter', () => {
 
       await new Promise(r => setTimeout(r, 10))
 
-      const invite = inviteMessages.find(m => m.type === 'space-invite')
+      // Inbox-Wire-Form (Sync 003): encrypted DIDComm-Envelope, kein Klartext-Body.
+      const invite = inviteMessages.find(m => isDidcommMessage(m) && m.type === SPACE_INVITE_MESSAGE_TYPE)
       expect(invite).toBeTruthy()
-      expect(invite.toDid).toBe(bob.getDid())
-      expect(invite.fromDid).toBe(alice.getDid())
+      expect(invite.to).toEqual([bob.getDid()])
+      expect(invite.from).toBe(alice.getDid())
+      expect(() => assertEncryptedInboxEnvelope(invite, SPACE_INVITE_MESSAGE_TYPE)).not.toThrow()
 
-      // Invite should contain documentUrl for automerge-repo sync
-      const payload = JSON.parse(invite.payload)
-      expect(payload.documentUrl).toBeTruthy()
-      expect(payload.documentUrl).toMatch(/^automerge:/)
+      // M2: documentUrl reist NICHT als unauthentifizierte Wire-Extension —
+      // sie steckt im Group-Key-verschlüsselten Snapshot-Blob (Sync 005
+      // Z.68-90: der signierte Body kennt kein documentUrl-Feld; ein
+      // untrusted Broker darf die Doc-Bindung nicht austauschen können).
+      expect(invite.body.documentUrl).toBeUndefined()
+      expect(JSON.stringify(invite)).not.toContain('automerge:')
+      expect(invite.body.encryptedDocSnapshot).toBeTruthy()
+    })
+
+    it('M2 PFLICHT: manipulierte documentUrl-Extension auf dem Wire bindet den Empfänger nicht', async () => {
+      // Angreifer-Modell: untrusted Broker tauscht beim Store-and-Forward
+      // Felder außerhalb des ECIES/Inner-JWS-Pfads aus. Die Doc-Bindung kommt
+      // ausschließlich aus dem Group-Key-geschützten Snapshot-Blob.
+      const space = await aliceAdapter.createSpace<TestDoc>('shared', { counter: 7, items: [] })
+      const decoy = await aliceAdapter.createSpace<TestDoc>('shared', { counter: 0, items: [] })
+
+      // Dave ist nie mit dem Live-Messaging verbunden — der Invite wird
+      // abgefangen, manipuliert und direkt in den Empfangspfad gegeben.
+      const dave = (await createTestIdentity('dave-pass')).identity
+      const daveEncPub = await dave.getEncryptionPublicKeyBytes()
+
+      const sentByAlice: any[] = []
+      const originalSend = aliceMessaging.send.bind(aliceMessaging)
+      ;(aliceMessaging as any).send = async (message: any) => {
+        sentByAlice.push(message)
+        return originalSend(message)
+      }
+      await aliceAdapter.addMember(space.id, dave.getDid(), daveEncPub)
+      const invite = sentByAlice.find(m => isDidcommMessage(m) && m.type === SPACE_INVITE_MESSAGE_TYPE)
+      expect(invite).toBeTruthy()
+
+      const attackerUrl = (aliceAdapter as any).spaces.get(decoy.id).documentUrl
+      const tampered = { ...invite, body: { ...invite.body, documentUrl: attackerUrl } }
+
+      const daveMessaging = new InMemoryMessagingAdapter()
+      const daveAdapter = new AutomergeReplicationAdapter({
+        identity: dave,
+        messaging: daveMessaging,
+        brokerUrls: ['wss://broker.example.com'],
+        keyManagement: new InMemoryKeyManagementAdapter(),
+      })
+      await daveAdapter.start()
+      await (daveAdapter as any).handleInboxEnvelope(tampered)
+
+      const daveSpace = (daveAdapter as any).spaces.get(space.id)
+      expect(daveSpace).toBeDefined()
+      // Bindung an die documentId aus dem geschützten Snapshot, NICHT an die Wire-Extension:
+      expect(daveSpace.documentId).toBe((aliceAdapter as any).spaces.get(space.id).documentId)
+      expect(daveSpace.documentId).not.toBe((aliceAdapter as any).spaces.get(decoy.id).documentId)
+
+      await daveAdapter.stop()
+      try { await dave.deleteStoredIdentity() } catch {}
+    })
+
+    it('M2: manipulierter encryptedDocSnapshot (GCM) → reject ohne Bindung und ohne Key-State', async () => {
+      const space = await aliceAdapter.createSpace<TestDoc>('shared', { counter: 7, items: [] })
+
+      const dave = (await createTestIdentity('dave2-pass')).identity
+      const daveEncPub = await dave.getEncryptionPublicKeyBytes()
+
+      const sentByAlice: any[] = []
+      const originalSend = aliceMessaging.send.bind(aliceMessaging)
+      ;(aliceMessaging as any).send = async (message: any) => {
+        sentByAlice.push(message)
+        return originalSend(message)
+      }
+      await aliceAdapter.addMember(space.id, dave.getDid(), daveEncPub)
+      const invite = sentByAlice.find(m => isDidcommMessage(m) && m.type === SPACE_INVITE_MESSAGE_TYPE)
+
+      const blob: string = invite.body.encryptedDocSnapshot
+      const tampered = {
+        ...invite,
+        body: { ...invite.body, encryptedDocSnapshot: blob.slice(0, -2) + 'AA' },
+      }
+
+      const daveKeyManagement = new InMemoryKeyManagementAdapter()
+      const daveMessaging = new InMemoryMessagingAdapter()
+      const daveAdapter = new AutomergeReplicationAdapter({
+        identity: dave,
+        messaging: daveMessaging,
+        brokerUrls: ['wss://broker.example.com'],
+        keyManagement: daveKeyManagement,
+      })
+      await daveAdapter.start()
+      await (daveAdapter as any).handleInboxEnvelope(tampered)
+
+      // GCM-Auth-Fehler → invalid-rejected VOR applySpaceInviteBody: weder
+      // Space-Bindung noch partieller Key-State.
+      expect((daveAdapter as any).spaces.get(space.id)).toBeUndefined()
+      expect(await daveKeyManagement.getCurrentKey(space.id)).toBeNull()
+
+      await daveAdapter.stop()
+      try { await dave.deleteStoredIdentity() } catch {}
     })
 
     it('should allow Bob to join a space after receiving invite', async () => {
@@ -382,20 +487,16 @@ describe('AutomergeReplicationAdapter', () => {
       }).spaces.get(space.id)!
       st.info.members = [admin, alice.getDid(), target] // SPEC-APPROX admin = members[0]
 
-      const env = {
-        v: 1, id: crypto.randomUUID(), type: 'member-update',
-        fromDid: admin, toDid: alice.getDid(),
-        createdAt: new Date().toISOString(), encoding: 'json' as const,
-        payload: JSON.stringify({ spaceId: space.id, action: 'removed', memberDid: target, effectiveKeyGeneration: 0 }),
-        signature: '',
-      }
-      await (aliceAdapter as unknown as { handleMemberUpdate(e: unknown): Promise<void> }).handleMemberUpdate(env)
+      const decoded = memberUpdateDecoded(admin, { spaceId: space.id, action: 'removed', memberDid: target, effectiveKeyGeneration: 0 })
+      const outcome = await (aliceAdapter as unknown as { handleMemberUpdate(d: unknown): Promise<unknown> }).handleMemberUpdate(decoded)
 
       const pending = await (aliceAdapter as unknown as {
         memberUpdateStore: { listSeenForSpace(id: string): Promise<Array<{ action: string; memberDid: string }>> }
       }).memberUpdateStore.listSeenForSpace(space.id)
       expect(pending.some(p => p.action === 'removed' && p.memberDid === target)).toBe(true)
       expect(st.info.members).toContain(target) // durable state survives (Z.191)
+      // STOP-10-Mapping: Signal recorded → applied/durable → ack.
+      expect(outcome).toEqual({ kind: 'applied', durable: true })
     })
 
     it('pendingAddition and pendingRemoval are mutually exclusive (member-update)', async () => {
@@ -406,13 +507,9 @@ describe('AutomergeReplicationAdapter', () => {
         spaces: Map<string, { info: { members: string[] }; pendingAddition?: unknown; pendingRemoval?: unknown }>
       }).spaces.get(space.id)!
       st.info.members = [admin, local]
-      const mk = (action: 'added' | 'removed') => ({
-        v: 1, id: crypto.randomUUID(), type: 'member-update',
-        fromDid: admin, toDid: local, createdAt: new Date().toISOString(), encoding: 'json' as const,
-        payload: JSON.stringify({ spaceId: space.id, action, memberDid: local, effectiveKeyGeneration: 0 }),
-        signature: '',
-      })
-      const call = (e: unknown) => (aliceAdapter as unknown as { handleMemberUpdate(e: unknown): Promise<void> }).handleMemberUpdate(e)
+      const mk = (action: 'added' | 'removed') =>
+        memberUpdateDecoded(admin, { spaceId: space.id, action, memberDid: local, effectiveKeyGeneration: 0 })
+      const call = (d: unknown) => (aliceAdapter as unknown as { handleMemberUpdate(d: unknown): Promise<unknown> }).handleMemberUpdate(d)
 
       await call(mk('added'))
       expect(st.pendingAddition).toBeDefined()
