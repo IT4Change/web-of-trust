@@ -1,9 +1,9 @@
-import type { MessagingAdapter } from '../../ports/MessagingAdapter'
+import type { MessagingAdapter, WireMessage } from '../../ports/MessagingAdapter'
 import type {
-  MessageEnvelope,
   DeliveryReceipt,
   MessagingState,
 } from '../../types/messaging'
+import { isDidcommMessage } from '../../protocol/messaging/inbox-message'
 import {
   buildBrokerAuthTranscript,
   createBrokerAuthTranscriptSigningBytes,
@@ -30,13 +30,13 @@ export type SignBrokerAuthTranscriptFn = (transcriptBytes: Uint8Array) => Promis
 export class WebSocketMessagingAdapter implements MessagingAdapter {
   private ws: WebSocket | null = null
   private state: MessagingState = 'disconnected'
-  private messageCallbacks = new Set<(envelope: MessageEnvelope) => void | Promise<void>>()
+  private messageCallbacks = new Set<(envelope: WireMessage) => void | Promise<void>>()
   private receiptCallbacks = new Set<(receipt: DeliveryReceipt) => void>()
   private stateCallbacks = new Set<(state: MessagingState) => void>()
   private transportMap = new Map<string, string>()
   private pendingReceipts = new Map<string, (receipt: DeliveryReceipt) => void>()
   /** Buffer for messages that arrive before any onMessage handler is registered */
-  private earlyMessageBuffer: MessageEnvelope[] = []
+  private earlyMessageBuffer: WireMessage[] = []
   private heartbeatInterval: ReturnType<typeof setInterval> | null = null
   private heartbeatTimeout: ReturnType<typeof setTimeout> | null = null
   private readonly HEARTBEAT_INTERVAL_MS = 15_000
@@ -176,7 +176,7 @@ export class WebSocketMessagingAdapter implements MessagingAdapter {
             break
 
           case 'message':
-            this.handleIncomingMessage(msg.envelope as MessageEnvelope)
+            this.handleIncomingMessage(msg.envelope as WireMessage)
             break
 
           case 'receipt': {
@@ -274,10 +274,10 @@ export class WebSocketMessagingAdapter implements MessagingAdapter {
   }
 
   /**
-   * Process incoming message: await all callbacks, then ACK.
+   * Process incoming message: await all callbacks, then ACK (Old-World only).
    * If no handlers are registered yet, buffer the message for later delivery.
    */
-  private async handleIncomingMessage(envelope: MessageEnvelope): Promise<void> {
+  private async handleIncomingMessage(envelope: WireMessage): Promise<void> {
     if (this.messageCallbacks.size === 0) {
       // No handlers yet — buffer for delivery when first handler registers
       this.earlyMessageBuffer.push(envelope)
@@ -293,8 +293,10 @@ export class WebSocketMessagingAdapter implements MessagingAdapter {
         console.error('Message callback error:', err)
       }
     }
-    // ACK: tell relay we processed the message (only after all callbacks resolved)
-    if (processed && this.ws && this.ws.readyState === WebSocket.OPEN) {
+    // K1 (Sync 003 Z.613-622): DIDComm-Inbox-Nachrichten werden NICHT auto-geACKt —
+    // ACK-Ownership liegt beim Inbox-Reception-Host nach evaluierter Ack-Disposition
+    // (Anwendung erfolgt ODER durabel gepuffert). Old-World-CRDT-Sync behält Auto-ACK.
+    if (processed && !isDidcommMessage(envelope) && this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify({ type: 'ack', messageId: envelope.id }))
     }
   }
@@ -307,7 +309,7 @@ export class WebSocketMessagingAdapter implements MessagingAdapter {
     }
   }
 
-  async send(envelope: MessageEnvelope): Promise<DeliveryReceipt> {
+  async send(envelope: WireMessage): Promise<DeliveryReceipt> {
     if (this.state !== 'connected' || !this.ws) {
       throw new Error('WebSocketMessagingAdapter: must call connect() before send()')
     }
@@ -337,7 +339,7 @@ export class WebSocketMessagingAdapter implements MessagingAdapter {
     })
   }
 
-  onMessage(callback: (envelope: MessageEnvelope) => void | Promise<void>): () => void {
+  onMessage(callback: (envelope: WireMessage) => void | Promise<void>): () => void {
     this.messageCallbacks.add(callback)
 
     // Flush buffered messages that arrived before any handler was registered

@@ -89,10 +89,7 @@ describe('InMemoryMessagingAdapter', () => {
 
     it('should deliver all message types', async () => {
       const types = [
-        'verification',
         'attestation',
-        'contact-request',
-        'item-key',
         'space-invite',
         'key-rotation',
         'ack',

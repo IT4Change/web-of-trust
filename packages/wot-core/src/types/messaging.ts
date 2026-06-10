@@ -1,10 +1,11 @@
 import type { ResourceRef } from './resource-ref'
 
+// VE-6: 'verification', 'contact-request' und 'item-key' wurden entfernt —
+// 0 produktive Sender (RED-PRE-CHECK 2026-06-10). 'attestation', 'space-invite',
+// 'key-rotation' und 'member-update' haben nach der Inbox-Wire-Migration ebenfalls
+// keine Old-World-Sender mehr; die Werte sterben mit dem CRDT-Sync-Slice (wot-spec#96).
 export type MessageType =
-  | 'verification'
   | 'attestation'
-  | 'contact-request'
-  | 'item-key'
   | 'space-invite'
   | 'key-rotation'
   | 'profile-update'

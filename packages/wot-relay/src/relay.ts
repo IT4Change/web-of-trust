@@ -17,6 +17,9 @@ const {
   verifyBrokerChallengeResponseControlFrame,
 } = protocol
 
+const DIDCOMM_PLAINTEXT_TYP = protocol.DIDCOMM_PLAINTEXT_TYP
+const ACK_MESSAGE_TYPE = protocol.ACK_MESSAGE_TYPE
+
 const protocolCrypto = new WebCryptoProtocolCryptoAdapter()
 
 export interface RelayServerOptions {
@@ -431,12 +434,25 @@ export class RelayServer {
       return
     }
 
-    const toDid = envelope.toDid as string | undefined
+    // Sync 003 ack/1.0: ein DIDComm-Inbox-ACK ist an den Broker gerichtet — er
+    // bestätigt durable Verarbeitung der referenzierten Inbox-Nachricht und wird
+    // auf queue.ack gemappt, nicht geroutet. Matcht NUR die Type-URI-Familie;
+    // der Old-World-Typ 'ack' bleibt eine opake Passthrough-Message.
+    if (envelope.typ === DIDCOMM_PLAINTEXT_TYP && envelope.type === ACK_MESSAGE_TYPE) {
+      this.handleInboxAckEnvelope(ws, envelope)
+      return
+    }
+
+    // Routing: Old-World `toDid`, DIDComm `to[0]` (Sync 003 Transport Envelope).
+    const to = envelope.to
+    const toDid =
+      (envelope.toDid as string | undefined) ??
+      (Array.isArray(to) && typeof to[0] === 'string' ? (to[0] as string) : undefined)
     if (!toDid) {
       this.sendTo(ws, {
         type: 'error',
         code: 'MISSING_RECIPIENT',
-        message: 'Envelope must have toDid field',
+        message: 'Envelope must have toDid or to[0] field',
       })
       return
     }
@@ -482,6 +498,38 @@ export class RelayServer {
     const did = this.socketToDid.get(ws)
     if (!did) return // Not registered — ignore
     this.queue.ack(messageId)
+  }
+
+  /**
+   * Sync 003 Z.594-624: `ack/1.0`-Transport-Envelope vom Inbox-Reception-Host.
+   * thid und body.messageId MÜSSEN die id der Original-Nachricht tragen und
+   * übereinstimmen. Existenz-/Inbox-Type-Checks pro Device (Z.611) sind
+   * SPEC-DEFERRED zusammen mit per-Device-Inboxen — die Queue ist heute per-DID.
+   */
+  private handleInboxAckEnvelope(ws: WebSocket, envelope: Record<string, unknown>): void {
+    const body = envelope.body
+    const messageId =
+      body !== null && typeof body === 'object' && !Array.isArray(body)
+        ? (body as Record<string, unknown>).messageId
+        : undefined
+    if (typeof messageId !== 'string' || messageId.length === 0 || envelope.thid !== messageId) {
+      this.sendTo(ws, {
+        type: 'error',
+        code: 'MALFORMED_MESSAGE',
+        message: 'ack/1.0 requires thid and body.messageId referencing the original inbox message',
+      })
+      return
+    }
+    this.queue.ack(messageId)
+    // Receipt, damit das client-seitige send() des ack-Envelopes auflöst.
+    this.sendTo(ws, {
+      type: 'receipt',
+      receipt: {
+        messageId: (envelope.id as string) ?? 'unknown',
+        status: 'delivered',
+        timestamp: new Date().toISOString(),
+      },
+    })
   }
 
   private sendTo(ws: WebSocket, msg: RelayMessage): void {

@@ -1,10 +1,8 @@
-import type { MessagingAdapter } from '../../ports/MessagingAdapter'
+import type { MessagingAdapter, WireMessage } from '../../ports/MessagingAdapter'
 import type { OutboxStore } from '../../ports/OutboxStore'
 import type {
-  MessageEnvelope,
   DeliveryReceipt,
   MessagingState,
-  MessageType,
 } from '../../types/messaging'
 
 /**
@@ -23,7 +21,8 @@ import type {
  */
 export class OutboxMessagingAdapter implements MessagingAdapter {
   private flushing = false
-  private skipTypes: Set<MessageType>
+  // VE-8: skip-Werte decken beide Familien ab (Old-World-Strings + Type-URIs).
+  private skipTypes: Set<string>
   private sendTimeoutMs: number
   private reconnectIntervalMs: number
   private maxRetries: number
@@ -36,7 +35,7 @@ export class OutboxMessagingAdapter implements MessagingAdapter {
     private inner: MessagingAdapter,
     private outbox: OutboxStore,
     options?: {
-      skipTypes?: MessageType[]
+      skipTypes?: readonly string[]
       sendTimeoutMs?: number
       /** Auto-reconnect interval in ms. Set to 0 to disable. Default: 10000 (10s). */
       reconnectIntervalMs?: number
@@ -74,7 +73,7 @@ export class OutboxMessagingAdapter implements MessagingAdapter {
 
   // --- Send with outbox ---
 
-  async send(envelope: MessageEnvelope): Promise<DeliveryReceipt> {
+  async send(envelope: WireMessage): Promise<DeliveryReceipt> {
     // Skip outbox for non-critical types (fire-and-forget)
     if (this.skipTypes.has(envelope.type)) {
       return this.inner.send(envelope)
@@ -108,7 +107,7 @@ export class OutboxMessagingAdapter implements MessagingAdapter {
 
   // --- Receiving: delegate to inner ---
 
-  onMessage(callback: (envelope: MessageEnvelope) => void | Promise<void>): () => void {
+  onMessage(callback: (envelope: WireMessage) => void | Promise<void>): () => void {
     return this.inner.onMessage(callback)
   }
 
@@ -211,7 +210,7 @@ export class OutboxMessagingAdapter implements MessagingAdapter {
     }
   }
 
-  private sendWithTimeout(envelope: MessageEnvelope): Promise<DeliveryReceipt> {
+  private sendWithTimeout(envelope: WireMessage): Promise<DeliveryReceipt> {
     if (this.sendTimeoutMs <= 0) {
       return this.inner.send(envelope)
     }

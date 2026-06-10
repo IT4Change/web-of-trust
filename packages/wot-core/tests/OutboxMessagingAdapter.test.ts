@@ -13,7 +13,7 @@ function createTestEnvelope(
   return {
     v: 1,
     id: crypto.randomUUID(),
-    type: 'verification',
+    type: 'content',
     fromDid: ALICE_DID,
     toDid: BOB_DID,
     createdAt: new Date().toISOString(),
@@ -123,7 +123,7 @@ describe('OutboxMessagingAdapter', () => {
     })
 
     it('should enqueue verification messages', async () => {
-      const envelope = createTestEnvelope({ type: 'verification' })
+      const envelope = createTestEnvelope({ type: 'content' })
       await adapter.send(envelope)
       expect(await outbox.count()).toBe(1)
     })

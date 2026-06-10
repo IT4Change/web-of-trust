@@ -6,9 +6,10 @@
  * Makes the outbox message flow fully visible in the debug dashboard.
  */
 
-import type { MessagingAdapter } from '../../ports/MessagingAdapter'
+import type { MessagingAdapter, WireMessage } from '../../ports/MessagingAdapter'
+import { wireMessageRecipient, wireMessageSender } from '../../ports/MessagingAdapter'
+import { isDidcommMessage } from '../../protocol/messaging/inbox-message'
 import type {
-  MessageEnvelope,
   DeliveryReceipt,
   MessagingState,
 } from '../../types/messaging'
@@ -16,8 +17,19 @@ import type { OutboxStore } from '../../ports/OutboxStore'
 import type { OutboxMessagingAdapter } from './OutboxMessagingAdapter'
 import { getTraceLog } from '../../storage/TraceLog'
 
-/** Extract envelope header fields (everything except payload + signature) for tracing. */
-function envelopeHeaders(envelope: MessageEnvelope): Record<string, unknown> {
+/** Extract envelope header fields (no payload/body content) for tracing — both families (VE-8). */
+function envelopeHeaders(envelope: WireMessage): Record<string, unknown> {
+  if (isDidcommMessage(envelope)) {
+    return {
+      id: envelope.id,
+      typ: envelope.typ,
+      type: envelope.type,
+      from: envelope.from,
+      to: envelope.to,
+      created_time: envelope.created_time,
+      thid: envelope.thid,
+    }
+  }
   return {
     id: envelope.id,
     v: envelope.v,
@@ -29,6 +41,10 @@ function envelopeHeaders(envelope: MessageEnvelope): Record<string, unknown> {
     ref: envelope.ref,
     payloadSize: envelope.payload?.length,
   }
+}
+
+function shortDid(did: string | undefined): string {
+  return did ? `${did.slice(0, 24)}…` : 'unknown'
 }
 
 export class TracedOutboxMessagingAdapter implements MessagingAdapter {
@@ -97,7 +113,7 @@ export class TracedOutboxMessagingAdapter implements MessagingAdapter {
     })
   }
 
-  async send(envelope: MessageEnvelope): Promise<DeliveryReceipt> {
+  async send(envelope: WireMessage): Promise<DeliveryReceipt> {
     const trace = getTraceLog()
     const start = performance.now()
     try {
@@ -105,7 +121,7 @@ export class TracedOutboxMessagingAdapter implements MessagingAdapter {
       trace.log({
         store: receipt.reason === 'queued-in-outbox' ? 'outbox' : 'relay',
         operation: 'send',
-        label: `send ${envelope.type} → ${envelope.toDid.slice(0, 24)}…`,
+        label: `send ${envelope.type} → ${shortDid(wireMessageRecipient(envelope))}`,
         durationMs: Math.round(performance.now() - start),
         success: true,
         meta: {
@@ -119,7 +135,7 @@ export class TracedOutboxMessagingAdapter implements MessagingAdapter {
       trace.log({
         store: 'relay',
         operation: 'send',
-        label: `send ${envelope.type} → ${envelope.toDid.slice(0, 24)}…`,
+        label: `send ${envelope.type} → ${shortDid(wireMessageRecipient(envelope))}`,
         durationMs: Math.round(performance.now() - start),
         success: false,
         error: err instanceof Error ? err.message : String(err),
@@ -129,12 +145,12 @@ export class TracedOutboxMessagingAdapter implements MessagingAdapter {
     }
   }
 
-  onMessage(callback: (envelope: MessageEnvelope) => void | Promise<void>): () => void {
+  onMessage(callback: (envelope: WireMessage) => void | Promise<void>): () => void {
     return this.inner.onMessage((envelope) => {
       getTraceLog().log({
         store: 'relay',
         operation: 'receive',
-        label: `receive ${envelope.type} ← ${envelope.fromDid.slice(0, 24)}…`,
+        label: `receive ${envelope.type} ← ${shortDid(wireMessageSender(envelope))}`,
         durationMs: 0,
         success: true,
         meta: envelopeHeaders(envelope),
