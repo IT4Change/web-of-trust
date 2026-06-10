@@ -1,5 +1,7 @@
 import type { MessagingAdapter, WireMessage } from '../../ports/MessagingAdapter'
 import { wireMessageRecipient } from '../../ports/MessagingAdapter'
+import { isDidcommMessage } from '../../protocol/messaging/inbox-message'
+import { ACK_MESSAGE_TYPE } from '../../protocol/sync/ack-message'
 import type {
   DeliveryReceipt,
   MessagingState,
@@ -86,6 +88,20 @@ export class InMemoryMessagingAdapter implements MessagingAdapter {
     }
 
     const now = new Date().toISOString()
+
+    // Relay-Parität (Sync 003 ack/1.0): ein Inbox-ACK ist an den Broker gerichtet —
+    // er räumt den Store-and-Forward-Slot der referenzierten Nachricht und wird
+    // nicht geroutet.
+    if (isDidcommMessage(envelope) && envelope.type === ACK_MESSAGE_TYPE) {
+      const messageId = (envelope.body as Record<string, unknown>).messageId
+      for (const [did, queue] of InMemoryMessagingAdapter.offlineQueue) {
+        const next = queue.filter((queued) => queued.id !== messageId)
+        if (next.length > 0) InMemoryMessagingAdapter.offlineQueue.set(did, next)
+        else InMemoryMessagingAdapter.offlineQueue.delete(did)
+      }
+      return { messageId: envelope.id, status: 'delivered', timestamp: now }
+    }
+
     // VE-8: Old-World routet über toDid, DIDComm über to[0] (wie das Relay).
     const toDid = wireMessageRecipient(envelope)
     if (!toDid) {

@@ -11,6 +11,7 @@ import { wireMessageRecipient, wireMessageSender } from '../../ports/MessagingAd
 import { isDidcommMessage } from '../../protocol/messaging/inbox-message'
 import type {
   DeliveryReceipt,
+  MessageEnvelope,
   MessagingState,
 } from '../../types/messaging'
 import type { OutboxStore } from '../../ports/OutboxStore'
@@ -30,16 +31,17 @@ function envelopeHeaders(envelope: WireMessage): Record<string, unknown> {
       thid: envelope.thid,
     }
   }
+  const oldWorld = envelope as MessageEnvelope
   return {
-    id: envelope.id,
-    v: envelope.v,
-    type: envelope.type,
-    fromDid: envelope.fromDid,
-    toDid: envelope.toDid,
-    createdAt: envelope.createdAt,
-    encoding: envelope.encoding,
-    ref: envelope.ref,
-    payloadSize: envelope.payload?.length,
+    id: oldWorld.id,
+    v: oldWorld.v,
+    type: oldWorld.type,
+    fromDid: oldWorld.fromDid,
+    toDid: oldWorld.toDid,
+    createdAt: oldWorld.createdAt,
+    encoding: oldWorld.encoding,
+    ref: oldWorld.ref,
+    payloadSize: oldWorld.payload?.length,
   }
 }
 

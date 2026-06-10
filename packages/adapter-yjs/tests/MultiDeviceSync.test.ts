@@ -526,37 +526,23 @@ describe('Multi-Device Sync', () => {
     const spaceId = await createSharedSpace()
     const gen1Key = crypto.getRandomValues(new Uint8Array(32))
 
-    // Build a spec-conformant FUTURE (gen 2) key-rotation via a sender port, ECIES-wrapped
-    // for alice (own-device multi-device path). alice is members[0] → authorized admin (C1).
+    // Build a spec-conformant FUTURE (gen 2) key-rotation via a sender port — als
+    // dekodiertes Inbox-Ergebnis (Inner-JWS bereits verifiziert, S1). alice ist
+    // members[0] → authorized admin (C1); own-device multi-device path.
     const senderPort = new InMemoryKeyManagementAdapter()
     await createSpaceKey({ crypto: protocolCrypto, keyPort: senderPort, spaceId, ownerDid: alice.getDid() })
     await rotateSpaceKey({ crypto: protocolCrypto, keyPort: senderPort, spaceId, ownerDid: alice.getDid() }) // gen 1
     await rotateSpaceKey({ crypto: protocolCrypto, keyPort: senderPort, spaceId, ownerDid: alice.getDid() }) // gen 2
     const rotationBody = await buildKeyRotationBody({ keyPort: senderPort, spaceId, newGeneration: 2, recipientDid: alice.getDid() })
-    const recipientKey = await alice.getEncryptionPublicKeyBytes()
-    const ecies = await alice.encryptForRecipient(new TextEncoder().encode(JSON.stringify(rotationBody)), recipientKey)
 
-    const envelope: MessageEnvelope = {
-      v: 1,
-      id: 'future-rotation-after-restart',
-      type: 'key-rotation',
-      fromDid: alice.getDid(),
-      toDid: alice.getDid(),
-      createdAt: new Date().toISOString(),
-      encoding: 'json',
-      payload: JSON.stringify({
-        ecies: {
-          ciphertext: Array.from(ecies.ciphertext),
-          nonce: Array.from(ecies.nonce),
-          ephemeralPublicKey: Array.from(ecies.ephemeralPublicKey!),
-        },
-      }),
-      signature: '',
-    }
-    const signed = await signEnvelope(envelope, (data) => alice.sign(data))
-
-    await (aliceAdapter2 as unknown as { handleKeyRotation(envelope: MessageEnvelope): Promise<void> })
-      .handleKeyRotation(signed)
+    await (aliceAdapter2 as unknown as { handleKeyRotation(decoded: unknown): Promise<unknown> })
+      .handleKeyRotation({
+        type: 'https://web-of-trust.de/protocols/key-rotation/1.0',
+        senderDid: alice.getDid(),
+        body: rotationBody as unknown as Record<string, unknown>,
+        outerId: '49d2f0a1-8b3c-4d5e-9f6a-7b8c9d0e1f2a',
+        extensionFields: {},
+      })
     expect(await aliceAdapter2.getKeyGeneration(spaceId)).toBe(0)
     expect((await aliceCompact2.list()).some((key) => key.includes('__wot_pending_space_message__'))).toBe(true)
 

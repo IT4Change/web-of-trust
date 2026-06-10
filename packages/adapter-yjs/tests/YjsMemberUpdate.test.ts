@@ -7,7 +7,8 @@ import {
   InMemoryCompactStore,
   InMemoryKeyManagementAdapter,
 } from '@web_of_trust/core/adapters'
-import { encryptOneShot } from '@web_of_trust/core/protocol'
+import { MEMBER_UPDATE_MESSAGE_TYPE, KEY_ROTATION_MESSAGE_TYPE } from '@web_of_trust/core/protocol'
+import { createSpaceKey, rotateSpaceKey, buildKeyRotationBody } from '@web_of_trust/core/application'
 import { WebCryptoProtocolCryptoAdapter } from '@web_of_trust/core/protocol-adapters'
 import { YjsReplicationAdapter } from '../src/YjsReplicationAdapter'
 
@@ -36,11 +37,16 @@ async function setup(): Promise<Harness> {
   return { adapter, alice, metadata, keyManagement, compactStore }
 }
 
-function memberUpdateEnvelope(fromDid: string, payload: unknown, toDid: string) {
+// Die Handler nehmen das DEKODIERTE Inbox-Ergebnis (receiveInboxMessage accept):
+// senderDid ist der verifizierte Inner-JWS-Signer (S1), der Klartext-Body kommt
+// aus dem Inner-JWS-Payload. Der Group-Key-Decrypt-Pfad ist tot (Sync 003 Z.500).
+function memberUpdateDecoded(senderDid: string, body: Record<string, unknown>) {
   return {
-    v: 1, id: crypto.randomUUID(), type: 'member-update',
-    fromDid, toDid, createdAt: new Date().toISOString(), encoding: 'json' as const,
-    payload: JSON.stringify(payload), signature: '',
+    type: MEMBER_UPDATE_MESSAGE_TYPE,
+    senderDid,
+    body,
+    outerId: crypto.randomUUID(),
+    extensionFields: {},
   }
 }
 
@@ -67,20 +73,22 @@ describe('YjsReplicationAdapter — member-update Authority-Split', () => {
 
   it('admin-signed removal of another member → store-pending, sync requested, no local pendingRemoval', async () => {
     const syncSpy = vi.spyOn(h.adapter as any, 'requestSync').mockResolvedValue(undefined)
-    const env = memberUpdateEnvelope(ADMIN, { spaceId, action: 'removed', memberDid: TARGET, effectiveKeyGeneration: 0 }, h.alice.getDid())
-    await (h.adapter as any).handleMemberUpdate(env)
+    const decoded = memberUpdateDecoded(ADMIN, { spaceId, action: 'removed', memberDid: TARGET, effectiveKeyGeneration: 0 })
+    const outcome = await (h.adapter as any).handleMemberUpdate(decoded)
 
     const seen = await (h.adapter as any).memberUpdateStore.listSeenForSpace(spaceId)
     expect(seen).toHaveLength(1)
     expect(seen[0].storedDisposition).toBe('store-pending-and-sync')
     expect(syncSpy).toHaveBeenCalledWith(spaceId)
     expect(spaceState(h.adapter, spaceId).pendingRemoval).toBeUndefined()
+    // STOP-10-Mapping: Signal recorded → applied/durable → ack.
+    expect(outcome).toEqual({ kind: 'applied', durable: true })
   })
 
   it('K3: admin-signed removal of the LOCAL did marks pendingRemoval but keeps durable state', async () => {
     const deleteSpy = vi.spyOn(h.metadata, 'deleteSpaceMetadata')
-    const env = memberUpdateEnvelope(ADMIN, { spaceId, action: 'removed', memberDid: h.alice.getDid(), effectiveKeyGeneration: 0 }, h.alice.getDid())
-    await (h.adapter as any).handleMemberUpdate(env)
+    const decoded = memberUpdateDecoded(ADMIN, { spaceId, action: 'removed', memberDid: h.alice.getDid(), effectiveKeyGeneration: 0 })
+    await (h.adapter as any).handleMemberUpdate(decoded)
 
     expect(spaceState(h.adapter, spaceId).pendingRemoval).toEqual({ effectiveKeyGeneration: 0 })
     // durable state survives — no destroy / delete (Sync 005 Z.191)
@@ -90,17 +98,19 @@ describe('YjsReplicationAdapter — member-update Authority-Split', () => {
   })
 
   it('future generation (> local+1) buffers without local impact (Sync 005 Z.205)', async () => {
-    const env = memberUpdateEnvelope(ADMIN, { spaceId, action: 'removed', memberDid: h.alice.getDid(), effectiveKeyGeneration: 5 }, h.alice.getDid())
-    await (h.adapter as any).handleMemberUpdate(env)
+    const decoded = memberUpdateDecoded(ADMIN, { spaceId, action: 'removed', memberDid: h.alice.getDid(), effectiveKeyGeneration: 5 })
+    const outcome = await (h.adapter as any).handleMemberUpdate(decoded)
 
     expect(await (h.adapter as any).memberUpdateStore.listFutureForSpace(spaceId)).toHaveLength(1)
     expect(await (h.adapter as any).memberUpdateStore.listSeenForSpace(spaceId)).toHaveLength(0)
     expect(spaceState(h.adapter, spaceId).pendingRemoval).toBeUndefined()
+    // buffer-future ist ackable (Signal durably im Store) → applied/durable.
+    expect(outcome).toEqual({ kind: 'applied', durable: true })
   })
 
   it('Anti-Regression: non-admin removal is stored unverified with no local UX impact (Z.183-184)', async () => {
-    const env = memberUpdateEnvelope(STRANGER, { spaceId, action: 'removed', memberDid: h.alice.getDid(), effectiveKeyGeneration: 0 }, h.alice.getDid())
-    await (h.adapter as any).handleMemberUpdate(env)
+    const decoded = memberUpdateDecoded(STRANGER, { spaceId, action: 'removed', memberDid: h.alice.getDid(), effectiveKeyGeneration: 0 })
+    await (h.adapter as any).handleMemberUpdate(decoded)
 
     const seen = await (h.adapter as any).memberUpdateStore.listSeenForSpace(spaceId)
     expect(seen).toHaveLength(1)
@@ -108,74 +118,22 @@ describe('YjsReplicationAdapter — member-update Authority-Split', () => {
     expect(spaceState(h.adapter, spaceId).pendingRemoval).toBeUndefined()
   })
 
-  it('malformed body is rejected (ignored), no pending stored', async () => {
-    const env = memberUpdateEnvelope(ADMIN, { spaceId, action: 'sideways', memberDid: TARGET, effectiveKeyGeneration: 0 }, h.alice.getDid())
-    await (h.adapter as any).handleMemberUpdate(env)
+  it('malformed body is rejected (no ack, nothing stored)', async () => {
+    const decoded = memberUpdateDecoded(ADMIN, { spaceId, action: 'sideways', memberDid: TARGET, effectiveKeyGeneration: 0 })
+    const outcome = await (h.adapter as any).handleMemberUpdate(decoded)
     expect(await (h.adapter as any).memberUpdateStore.listSeenForSpace(spaceId)).toHaveLength(0)
-  })
-})
-
-describe('YjsReplicationAdapter — #181 (a) member-update buffering + replay', () => {
-  let h: Harness
-  let spaceId: string
-  const crypto2 = new WebCryptoProtocolCryptoAdapter()
-
-  beforeEach(async () => {
-    h = await setup()
-    const space = await h.adapter.createSpace('shared', {}, { name: 'S' })
-    spaceId = space.id
-  })
-  afterEach(async () => {
-    await h.adapter.stop()
-    InMemoryMessagingAdapter.resetAll()
-    try { await h.alice.deleteStoredIdentity() } catch {}
+    expect(outcome).toMatchObject({ kind: 'invalid-rejected', rejection: 'malformed' })
   })
 
-  async function encryptedEnvelope(generation: number, body: unknown, key: Uint8Array) {
-    const plaintext = new TextEncoder().encode(JSON.stringify(body))
-    const enc = await encryptOneShot({ crypto: crypto2, spaceContentKey: key, plaintext })
-    return memberUpdateEnvelope(h.alice.getDid(), {
-      encrypted: true, spaceId, generation,
-      ciphertext: Array.from(enc.ciphertextTag), nonce: Array.from(enc.nonce),
-    }, h.alice.getDid())
-  }
-
-  function pending(adapter: YjsReplicationAdapter): any[] {
-    return (adapter as unknown as { pendingMessages: Map<string, any[]> }).pendingMessages.get(spaceId) ?? []
-  }
-
-  it('buffers an encrypted member-update when the group key is missing (no drop)', async () => {
-    const key = new Uint8Array(32).fill(7)
-    const env = await encryptedEnvelope(99, { spaceId, action: 'removed', memberDid: TARGET, effectiveKeyGeneration: 99 }, key)
-    await (h.adapter as any).handleMemberUpdate(env)
-    expect(pending(h.adapter)).toHaveLength(1)
-    expect(pending(h.adapter)[0].reason).toBe('blocked-by-key')
-  })
-
-  it('replays the buffered member-update after the key arrives', async () => {
-    const key = new Uint8Array(32).fill(7)
-    const env = await encryptedEnvelope(99, { spaceId, action: 'removed', memberDid: TARGET, effectiveKeyGeneration: 99 }, key)
-    await (h.adapter as any).handleMemberUpdate(env)
-    expect(pending(h.adapter)).toHaveLength(1)
-
-    await h.keyManagement.saveKey(spaceId, 99, key)
-    await (h.adapter as any).processPendingForSpace(spaceId)
-
-    // decrypt succeeded → processMemberUpdate ran (alice == members[0] admin → store-pending)
-    expect(await (h.adapter as any).memberUpdateStore.listSeenForSpace(spaceId)).toHaveLength(1)
-    expect(pending(h.adapter)).toHaveLength(0)
-  })
-
-  it('anti-loop: a wrong key on replay drops the message instead of re-buffering', async () => {
-    const key = new Uint8Array(32).fill(7)
-    const env = await encryptedEnvelope(99, { spaceId, action: 'removed', memberDid: TARGET, effectiveKeyGeneration: 99 }, key)
-    await (h.adapter as any).handleMemberUpdate(env)
-
-    await h.keyManagement.saveKey(spaceId, 99, new Uint8Array(32).fill(9)) // wrong key
-    await (h.adapter as any).processPendingForSpace(spaceId)
-
-    expect(pending(h.adapter)).toHaveLength(0) // not retried, not re-buffered
-    expect(await (h.adapter as any).memberUpdateStore.listSeenForSpace(spaceId)).toHaveLength(0)
+  it('unknown space → pending/not-buffered (kein ack, Relay-Redelivery bis der Invite kommt)', async () => {
+    const unknownSpaceId = crypto.randomUUID()
+    const decoded = memberUpdateDecoded(ADMIN, { spaceId: unknownSpaceId, action: 'removed', memberDid: TARGET, effectiveKeyGeneration: 0 })
+    const outcome = await (h.adapter as any).handleMemberUpdate(decoded)
+    expect(outcome).toEqual({
+      kind: 'pending',
+      durability: 'not-buffered',
+      dependencies: [{ kind: 'missing-space-invite', docId: unknownSpaceId }],
+    })
   })
 })
 
@@ -240,35 +198,54 @@ describe('YjsReplicationAdapter — member-update review fixes', () => {
 
   it('pendingAddition and pendingRemoval are mutually exclusive', async () => {
     const local = h.alice.getDid()
-    await (h.adapter as any).handleMemberUpdate(memberUpdateEnvelope(ADMIN,
-      { spaceId, action: 'added', memberDid: local, effectiveKeyGeneration: 0 }, local))
+    await (h.adapter as any).handleMemberUpdate(memberUpdateDecoded(ADMIN,
+      { spaceId, action: 'added', memberDid: local, effectiveKeyGeneration: 0 }))
     expect(spaceState(h.adapter, spaceId).pendingAddition).toBeDefined()
 
-    await (h.adapter as any).handleMemberUpdate(memberUpdateEnvelope(ADMIN,
-      { spaceId, action: 'removed', memberDid: local, effectiveKeyGeneration: 0 }, local))
+    await (h.adapter as any).handleMemberUpdate(memberUpdateDecoded(ADMIN,
+      { spaceId, action: 'removed', memberDid: local, effectiveKeyGeneration: 0 }))
     expect(spaceState(h.adapter, spaceId).pendingRemoval).toBeDefined()
     expect(spaceState(h.adapter, spaceId).pendingAddition).toBeUndefined()
   })
 })
 
-describe('YjsReplicationAdapter — member-update rethrows on missing durable store', () => {
-  it('rethrows PendingMessageNotDurableError instead of silently dropping', async () => {
+describe('YjsReplicationAdapter — key-rotation future-buffer ohne durablen Store', () => {
+  it('liefert pending/not-buffered (kein ack) statt zu werfen — Redelivery ist der Recovery-Pfad', async () => {
     InMemoryMessagingAdapter.resetAll()
+    const protocolCrypto = new WebCryptoProtocolCryptoAdapter()
     const alice = (await createTestIdentity('mku-nodurable')).identity
+    const admin = (await createTestIdentity('mku-admin')).identity
     const messaging = new InMemoryMessagingAdapter()
     await messaging.connect(alice.getDid())
     // No compactStore → no durable pending store.
     const adapter = new YjsReplicationAdapter({ identity: alice, messaging, keyManagement: new InMemoryKeyManagementAdapter() })
     await adapter.start()
     const space = await adapter.createSpace('shared', {}, { name: 'S' })
+    spaceState(adapter, space.id).info.members = [admin.getDid(), alice.getDid()]
 
-    const env = memberUpdateEnvelope(alice.getDid(), {
-      encrypted: true, spaceId: space.id, generation: 99,
-      ciphertext: [1, 2, 3], nonce: Array.from({ length: 12 }, () => 0),
-    }, alice.getDid())
-    await expect((adapter as any).handleMemberUpdate(env)).rejects.toThrow(/durable pending store/)
+    // Self-consistent gen-5-Rotation (future: local gen ist 0) vom Admin.
+    const port = new InMemoryKeyManagementAdapter()
+    await createSpaceKey({ crypto: protocolCrypto, keyPort: port, spaceId: space.id, ownerDid: admin.getDid() })
+    for (let i = 0; i < 5; i++) {
+      await rotateSpaceKey({ crypto: protocolCrypto, keyPort: port, spaceId: space.id, ownerDid: admin.getDid() })
+    }
+    const body = await buildKeyRotationBody({ keyPort: port, spaceId: space.id, newGeneration: 5, recipientDid: alice.getDid() })
+
+    const outcome = await (adapter as any).handleKeyRotation({
+      type: KEY_ROTATION_MESSAGE_TYPE,
+      senderDid: admin.getDid(),
+      body: body as unknown as Record<string, unknown>,
+      outerId: crypto.randomUUID(),
+      extensionFields: {},
+    })
+    expect(outcome).toEqual({
+      kind: 'pending',
+      durability: 'not-buffered',
+      dependencies: [{ kind: 'missing-key-generation', docId: space.id, keyGeneration: 4 }],
+    })
 
     await adapter.stop()
     try { await alice.deleteStoredIdentity() } catch {}
+    try { await admin.deleteStoredIdentity() } catch {}
   })
 })
