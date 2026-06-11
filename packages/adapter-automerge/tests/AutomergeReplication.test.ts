@@ -26,6 +26,27 @@ interface TestDoc {
   items: string[]
 }
 
+/**
+ * Seedet die kanonische Membership ueber den produktiven Pfad (VE-1/VE-2):
+ * doc.createdBy (Admin-Approximation) + active@0-Events im grow-only
+ * doc.members-Event-Set — die members-Projektion aktualisiert der
+ * Doc-Change-Handler.
+ */
+function seedMembership(adapter: AutomergeReplicationAdapter, spaceId: string, creatorDid: string, memberDids: string[]): void {
+  const internal = adapter as unknown as {
+    spaces: Map<string, { documentId: string }>
+    repo: { handles: Record<string, { change(fn: (d: any) => void): void }> }
+  }
+  const state = internal.spaces.get(spaceId)!
+  internal.repo.handles[state.documentId].change((d: any) => {
+    d.createdBy = creatorDid
+    if (!d.members) d.members = {}
+    for (const did of memberDids) {
+      d.members[`${did}:0:active`] = { did, status: 'active', sinceGeneration: 0 }
+    }
+  })
+}
+
 function createAdapter(identity: PublicIdentitySession, messaging: InMemoryMessagingAdapter) {
   return new AutomergeReplicationAdapter({
     identity,
@@ -485,7 +506,9 @@ describe('AutomergeReplicationAdapter', () => {
       const st = (aliceAdapter as unknown as {
         spaces: Map<string, { info: { members: string[] } }>
       }).spaces.get(space.id)!
-      st.info.members = [admin, alice.getDid(), target] // SPEC-APPROX admin = members[0]
+      // SPEC-APPROX admin = createdBy (VE-2): Seeding ueber den produktiven Pfad —
+      // createdBy + active@0-Events im Doc, die Projektion folgt via Handler.
+      seedMembership(aliceAdapter, space.id, admin, [admin, target])
 
       const decoded = memberUpdateDecoded(admin, { spaceId: space.id, action: 'removed', memberDid: target, effectiveKeyGeneration: 0 })
       const outcome = await (aliceAdapter as unknown as { handleMemberUpdate(d: unknown): Promise<unknown> }).handleMemberUpdate(decoded)
@@ -506,7 +529,8 @@ describe('AutomergeReplicationAdapter', () => {
       const st = (aliceAdapter as unknown as {
         spaces: Map<string, { info: { members: string[] }; pendingAddition?: unknown; pendingRemoval?: unknown }>
       }).spaces.get(space.id)!
-      st.info.members = [admin, local]
+      // SPEC-APPROX admin = createdBy (VE-2): Seeding ueber den produktiven Pfad.
+      seedMembership(aliceAdapter, space.id, admin, [admin])
       const mk = (action: 'added' | 'removed') =>
         memberUpdateDecoded(admin, { spaceId: space.id, action, memberDid: local, effectiveKeyGeneration: 0 })
       const call = (d: unknown) => (aliceAdapter as unknown as { handleMemberUpdate(d: unknown): Promise<unknown> }).handleMemberUpdate(d)

@@ -104,7 +104,21 @@ export class EncryptedMessagingNetworkAdapter extends NetworkAdapter {
         // Get the group key for decryption
         const groupKey = await this.keyManagement.getKeyByGeneration(spaceId, generation)
         if (!groupKey) {
-          // Expected when sync messages arrive before space metadata (race condition)
+          // CHECK-4-BEFUND (1.B.3-sync-recovery, experimentell verifiziert —
+          // Selbstheilungs-These WIDERLEGT): dieser Drop heilt im laufenden
+          // Sync NICHT. Der Sender unterdrueckt das Nachsenden bereits
+          // gesendeter Changes (sentHashes-Optimierung des automerge-Sync-
+          // Protokolls); die Konversation degeneriert in einen endlosen
+          // Heads-Ping-Pong ohne Konvergenz. Auch ein Empfaenger-Neustart
+          // heilt nicht: dieser Adapter hat keinen Peer-Lifecycle
+          // (arrive/welcome, Sync-State-Reset beim Gegenueber) — nur ein
+          // SENDER-Neustart oder die Vault-/CompactStore-Restore-Pfade
+          // liefern den verpassten Stand. Beleg: Befund-Pin-Test in
+          // AutomergeGenerationGapRecovery.test.ts ("CHECK 4").
+          // Behebung (content-Pending-Puffer analog Sync 002 Z.173
+          // blocked-by-key und/oder Peer-Lifecycle) ist ein eigener
+          // Netzwerk-Adapter-Umbau → Stop-6-Scope-Entscheid, bewusst NICHT
+          // still in diesem Slice umgebaut.
           console.debug(`[EncryptedSync] No group key yet for space ${spaceId} gen ${generation} — will sync after metadata arrives`)
           return
         }
@@ -268,6 +282,24 @@ export class EncryptedMessagingNetworkAdapter extends NetworkAdapter {
       this.selfPeerId = `${this.identity.getDid()}#other-device`
     }
     this.registerSpacePeer(spaceId, this.selfPeerId)
+  }
+
+  /**
+   * Deregistriert einen ganzen Space (leaveSpace/Resolution-Cleanup, VE-5):
+   * entfernt das Peer-Set des Space; Peers, die danach in keinem anderen
+   * Space mehr vorkommen, werden getrennt (inkl. Phantom-Self-Peer).
+   */
+  unregisterSpace(spaceId: string): void {
+    const peers = this.spacePeers.get(spaceId)
+    if (!peers) return
+    this.spacePeers.delete(spaceId)
+    for (const did of peers) {
+      let stillPresent = false
+      for (const otherPeers of this.spacePeers.values()) {
+        if (otherPeers.has(did)) { stillPresent = true; break }
+      }
+      if (!stillPresent) this.emit('peer-disconnected', { peerId: did as PeerId })
+    }
   }
 
   /**
