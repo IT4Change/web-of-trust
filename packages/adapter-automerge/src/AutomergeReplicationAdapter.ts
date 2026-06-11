@@ -749,13 +749,26 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
     const spaceId = crypto.randomUUID()
     const myDid = this.identity.getDid()
 
-    // Create doc in automerge-repo
-    const docHandle = this.repo.create<T>(initialDoc)
-    await docHandle.whenReady()
+    // M2 (Review): das Creator-Doc startet auf demselben deterministischen
+    // Bootstrap-Binary wie der Invite-Apply (inviteBootstrapBinary: fester
+    // Actor aus der spaceId, time 0, leerer members-Container). Die
+    // Container-Erzeugung ist damit in ALLEN Pfaden byte-identisch — der
+    // CRDT-Merge dedupliziert sie. Vorher legte createSpace den Container
+    // mit RANDOM Actor an: gemergt mit einem Bootstrap-Doc (Invite mit
+    // leerem docBinary) war das ein Property-Konflikt, die Events der
+    // unterlegenen Seite verschwanden aus der Merge-Sicht.
+    // BREAKING (deklarierter Alt-Space-Bruch): die Initial-Change
+    // bestehender createSpace-Docs aendert sich.
+    const docHandle = this.repo.import<T>(this.inviteBootstrapBinary(spaceId))
+    if (!docHandle.isReady()) {
+      docHandle.doneLoading()
+    }
 
-    // Set shared metadata in the doc's _meta object. appTag included: invited members must
-    // inherit cross-app isolation (the invite carries no plaintext spaceInfo).
+    // Set initial app doc + shared metadata in the doc's _meta object. appTag
+    // included: invited members must inherit cross-app isolation (the invite
+    // carries no plaintext spaceInfo).
     docHandle.change((d: any) => {
+      Object.assign(d, initialDoc)
       d._meta = d._meta ?? {}
       if (meta?.name) d._meta.name = meta.name
       if (meta?.description) d._meta.description = meta.description
@@ -765,9 +778,11 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
       // members[0]-Admin-Approximation (divergierte beim Invitee auf den Inviter).
       d.createdBy = myDid
       // VE-1 (Sync 005 Z.163): kanonische Mitgliederliste als grow-only
-      // Event-Set in doc.members — der Creator ist active@0.
+      // Event-Set in doc.members — der Creator ist active@0. Der Container
+      // selbst stammt aus dem deterministischen Seed (M2), hier wird nur
+      // hineingeschrieben.
       const selfEvent: MembershipEvent = { did: myDid, status: 'active', sinceGeneration: 0 }
-      d.members = { [formatMembershipEventKey(selfEvent)]: selfEvent }
+      d.members[formatMembershipEventKey(selfEvent)] = selfEvent
     })
 
     // Create group key + capability key pair + owner self-capability
@@ -1204,14 +1219,14 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
   }
 
   /**
-   * Deterministischer Doc-Bootstrap fuer Invites OHNE Snapshot-Binary
-   * (Review-Minor): alle Peers, die ab leerem docBinary initialisieren,
+   * Deterministischer Doc-Bootstrap fuer ALLE Doc-Erzeugungspfade
+   * (Review-Minor + M2): createSpace UND Invites ohne Snapshot-Binary
    * erzeugen mit festem Actor (aus der spaceId abgeleitet) und time 0 die
    * byte-identische Initial-Change inklusive members-Container — der
    * CRDT-Merge dedupliziert sie, konkurrierende Container-Erstellung
-   * (Property-Konflikt, Event-Verlust) ist fuer diesen Pfad strukturell
-   * ausgeschlossen. Der Container existiert damit, BEVOR irgendein Peer ein
-   * Membership-Event schreiben kann.
+   * (Property-Konflikt, Event-Verlust) ist strukturell ausgeschlossen. Der
+   * Container existiert damit, BEVOR irgendein Peer ein Membership-Event
+   * schreiben kann.
    */
   private inviteBootstrapBinary(spaceId: string): Uint8Array {
     const actor = Array.from(new TextEncoder().encode(spaceId))
@@ -1235,10 +1250,11 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
    * Container an, kann ein KONKURRIERENDER Erst-Write eines anderen Peers Events
    * per Property-Konflikt verlieren (Automerge haelt konkurrierende Zuweisungen
    * auf denselben Key als Multi-Value; Writes in den unterlegenen Container sind
-   * in der Merge-Sicht unsichtbar). NEUE Flows treffen diese Grenze nicht mehr:
-   * createSpace und der Invite-Apply (inviteBootstrapBinary, deterministischer
-   * Seed) legen den Container vorab an. Erreichbar bleibt sie nur fuer
-   * Alt-Spaces ohne members-Events — dort gilt der akzeptierte Bruch
+   * in der Merge-Sicht unsichtbar). Seit M2 erzeugen ALLE Doc-Pfade
+   * (createSpace UND Invite-Apply) den Container aus demselben
+   * deterministischen inviteBootstrapBinary — byte-identisch, der Merge
+   * dedupliziert statt zu konkurrieren. Erreichbar bleibt der lazy-Init nur
+   * fuer Alt-Spaces ohne members-Container — dort gilt der akzeptierte Bruch
    * (Anton-Entscheid 2026-06-11): Alt-Spaces sind neu zu erstellen.
    */
   private writeMembershipEvent(space: SpaceState, event: MembershipEvent): void {

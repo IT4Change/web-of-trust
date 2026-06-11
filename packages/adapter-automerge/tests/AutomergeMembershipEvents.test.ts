@@ -393,4 +393,49 @@ describe('Review-Minor — members-Container-Seed im Invite-Apply (Invite mit le
       expect(merged.members?.[carolKey]).toMatchObject({ did: carol.identity.getDid(), status: 'active', sinceGeneration: 0 })
     }
   })
+
+  it('M2: Creator-Doc ↔ Bootstrap-Doc Merge verliert keine Events — beide Reihenfolgen, getConflicts leer (deterministischer Seed auch in createSpace)', async () => {
+    // Review-M2: der ce42849-Seed deckte nur Bootstrap↔Bootstrap. Das
+    // Creator-Doc legte den members-Container mit RANDOM Actor an —
+    // gemergt mit einem Bootstrap-Doc (fester Actor, time 0) ist die
+    // Container-Erzeugung ein Property-Konflikt, die Events des
+    // unterlegenen Containers verschwinden aus der Merge-Sicht
+    // (erreichbar ueber handleSpaceInvite mit leerem docBinary).
+    // Fix: createSpace baut auf demselben deterministischen
+    // inviteBootstrapBinary auf — Container-Erzeugung ueberall
+    // byte-identisch, der Merge dedupliziert.
+    const alice = await createPeer('am-seed2-alice')
+    const bob = await createPeer('am-seed2-bob')
+
+    const space = await alice.adapter.createSpace<TestDoc>('shared', { items: {} }, { name: 'S' })
+
+    // Invite mit leerem docBinary fuer DENSELBEN Space (Z.1952-1954
+    // zulaessig): bob initialisiert ab dem deterministischen Bootstrap und
+    // schreibt OFFLINE (ohne Sync) ein eigenes Event.
+    const senderPort = new InMemoryKeyManagementAdapter()
+    await createSpaceKey({ crypto: protocolCrypto, keyPort: senderPort, spaceId: space.id, ownerDid: alice.identity.getDid() })
+    const documentUrl = new Repo({ network: [] }).create({}).url
+    await (bob.adapter as any).handleSpaceInvite(
+      await craftedEmptyInvite(alice.identity.getDid(), bob.identity.getDid(), space.id, senderPort, documentUrl))
+    ;(bob.adapter as any).writeMembershipEvent(
+      spaceState(bob.adapter, space.id), { did: bob.identity.getDid(), status: 'active', sinceGeneration: 0 })
+
+    const creatorBinary = Automerge.save(spaceDoc(alice.adapter, space.id))
+    const bootstrapBinary = Automerge.save(spaceDoc(bob.adapter, space.id))
+    const aliceKey = `${alice.identity.getDid()}:0:active`
+    const bobKey = `${bob.identity.getDid()}:0:active`
+
+    for (const merged of [
+      Automerge.merge(Automerge.load<any>(creatorBinary), Automerge.load<any>(bootstrapBinary)),
+      Automerge.merge(Automerge.load<any>(bootstrapBinary), Automerge.load<any>(creatorBinary)),
+    ]) {
+      // Alle Events BEIDER Seiten ueberleben den Merge.
+      expect(Object.keys(merged.members ?? {}).sort()).toEqual([aliceKey, bobKey].sort())
+      expect(merged.members?.[aliceKey]).toMatchObject({ did: alice.identity.getDid(), status: 'active', sinceGeneration: 0 })
+      expect(merged.members?.[bobKey]).toMatchObject({ did: bob.identity.getDid(), status: 'active', sinceGeneration: 0 })
+      // Kein Property-Konflikt auf dem Container: der byte-identische Seed
+      // wird dedupliziert statt zu konkurrieren.
+      expect(Automerge.getConflicts(merged, 'members')).toBeUndefined()
+    }
+  })
 })
