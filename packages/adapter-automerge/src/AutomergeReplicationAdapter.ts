@@ -1302,11 +1302,13 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
   }
 
   /**
-   * VE-1: space.info.members ist eine read-only Projektion des doc.members-
-   * Event-Sets. EIN Update-Pfad: der Doc-Change-Handler (lokal + remote)
-   * berechnet die Projektion via resolveActiveMembers, reconciliert die
-   * Sync-Peers, persistiert die Metadata und stoesst die VE-4-Resolution an
-   * (Analogon zum _members-Observer im Yjs-Adapter).
+   * VE-1: space.info.members ist eine read-only Projektion des doc._members-
+   * Event-Sets. Zwei Update-Pfade, beide via resolveActiveMembers: der
+   * Doc-Change-Handler hier (lokal + remote; reconciliert Sync-Peers,
+   * persistiert Metadata, stoesst die VE-4-Resolution an) und der Seed beim
+   * Attach/Restore (seedMembershipProjection — bewusst OHNE Resolution,
+   * Restore ist kein Space-Sync i.S.v. Sync 005 Z.194).
+   * Analogon zum _members-Observer im Yjs-Adapter.
    */
   private attachMembershipObserver(space: SpaceState): void {
     if (space.unsubDocChange) return
