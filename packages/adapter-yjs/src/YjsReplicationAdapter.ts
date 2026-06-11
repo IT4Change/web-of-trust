@@ -41,7 +41,7 @@ import {
   SPACE_INVITE_MESSAGE_TYPE, MEMBER_UPDATE_MESSAGE_TYPE, KEY_ROTATION_MESSAGE_TYPE,
   isDidcommMessage, isEncryptedInboxMessageType, INBOX_MESSAGE_TYPE,
   createAckMessage, evaluateInboxAckDisposition, createDidKeyResolver,
-  formatMembershipEventKey, parseMembershipEventKey, resolveActiveMembers, assertMembershipEvent,
+  formatMembershipEventKey, parseMembershipEventKey, resolveActiveMembers, resolveMembershipWinner, assertMembershipEvent,
 } from '@web_of_trust/core/protocol'
 import type { MembershipEvent } from '@web_of_trust/core/protocol'
 import { WebCryptoProtocolCryptoAdapter } from '@web_of_trust/core/protocol-adapters'
@@ -945,6 +945,22 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
   }
 
   /**
+   * Review-MINOR-1 (Security): entfernt alle DIDs mit kanonischem
+   * removed-Gewinner (Z.305-Lese-Regel) aus dem memberEncryptionKeys-Cache.
+   * rotateSpaceKeyAndDistribute verteilt an genau diesen Cache — ohne Pruning
+   * wuerde ein zweites Admin-Geraet, das die Entfernung nur via Doc-Sync
+   * erhielt (kein lokales removeMember), dem Entfernten die NAECHSTE
+   * key-rotation zustellen. Ein Re-Invite setzt den Key in addMember neu.
+   */
+  private pruneRemovedMemberEncryptionKeys(state: YjsSpaceState, events: readonly MembershipEvent[]): void {
+    for (const did of Array.from(state.memberEncryptionKeys.keys())) {
+      if (resolveMembershipWinner(events, did)?.status === 'removed') {
+        state.memberEncryptionKeys.delete(did)
+      }
+    }
+  }
+
+  /**
    * Grow-only Schreiber (VE-1): Events werden ausschliesslich hinzugefuegt, nie
    * ueberschrieben oder geloescht — konkurrierende Schreiber treffen verschiedene
    * Keys, derselbe Key traegt denselben semantischen Inhalt (idempotent).
@@ -1034,8 +1050,17 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
    * werden via resolvePending aus dem Pending-Store entfernt; die UX-Flags
    * werden aus dem verbleibenden Store-Stand re-deriviert (discarded setzt
    * Flags zurueck, loest aber KEIN Cleanup aus).
+   *
+   * Review-M1 (Fix-Runde): die aktiven Members werden IM AUSFUEHRUNGSZEITPUNKT
+   * aus dem Doc re-gelesen statt als Parameter-Snapshot mitgegeben — eine
+   * verzoegerte Chain darf Pendings nicht gegen einen veralteten Members-Stand
+   * aufloesen (im Review-Repro bis zum falschen Cleanup).
    */
-  private async resolvePendingMemberUpdates(state: YjsSpaceState, canonicalActiveMembers: readonly string[]): Promise<void> {
+  private async resolvePendingMemberUpdates(state: YjsSpaceState): Promise<void> {
+    // Reentranz-Guard VOR dem Doc-Zugriff: nach einem Cleanup ist das Doc
+    // destroyed, eine nachlaufende Chain darf es nicht mehr lesen.
+    if (this.spaces.get(state.info.id) !== state) return
+    const canonicalActiveMembers = resolveActiveMembers(this.readMembershipEvents(state.doc))
     const pending = await this.memberUpdateStore.listSeenForSpace(state.info.id)
     await this.applyMemberUpdateResolution(state, canonicalActiveMembers, pending)
   }
@@ -1408,6 +1433,10 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
         ),
         unsubUpdate: null,
       }
+      // Review-MINOR-1: der aus der Metadata restaurierte Enc-Key-Cache kann
+      // kanonisch bereits entfernte Members tragen (Crash vor dem Chain-Save)
+      // — gegen die removed-Gewinner des Docs prunen, wie im Observer-Pfad.
+      this.pruneRemovedMemberEncryptionKeys(state, membershipEvents)
       this.spaces.set(meta.info.id, state)
       this.setupSpaceSync(state)
 
@@ -1500,6 +1529,13 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
       // (Sync 002 Z.158: ein Snapshot rollt bekannte Ops nicht zurueck).
       if (events.length === 0) return
       const members = resolveActiveMembers(events)
+      // Review-MINOR-1 (Security): der Enc-Key-Cache darf keine kanonisch
+      // entfernten Members tragen — sonst verteilt ein Multi-Device-Admin,
+      // der das removed-Event nur via Doc-Sync erhielt (kein lokales
+      // removeMember), dem Entfernten bei der naechsten Rotation den NEUEN
+      // Content-Key. Persistiert wird das Pruning durch den Chain-Save unten
+      // (der Metadata-Fingerprint traegt die encKeys).
+      this.pruneRemovedMemberEncryptionKeys(state, events)
       const changed = JSON.stringify(members) !== JSON.stringify(state.info.members)
       if (changed) state.info = { ...state.info, members }
       if (changed) this.notifySpaceListeners()
@@ -1512,8 +1548,15 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
       // handleMemberUpdate sie VOR savePending abwarten kann (sonst loeste die
       // hier eingeplante Resolution ein NACH ihr gespeichertes Pending gegen
       // den aelteren kanonischen Stand auf — Deadlock-Variante des M1-Befunds).
-      state.membershipResolutionChain = this.saveSpaceMetadata(state)
-        .then(() => this.resolvePendingMemberUpdates(state, members))
+      // Review-M1 (Fix-Runde): VERKETTEN statt ueberschreiben — eine noch
+      // laufende aeltere Chain liefe sonst unbeobachtet weiter und loeste
+      // Pendings gegen ihren veralteten Members-Stand auf (im Review-Repro bis
+      // zum falschen Cleanup). Das catch vor dem then schluckt Fehler der
+      // Vorgaenger-Chain (dort bereits geloggt), sonst risse die Kette ab.
+      state.membershipResolutionChain = (state.membershipResolutionChain ?? Promise.resolve())
+        .catch(() => {})
+        .then(() => this.saveSpaceMetadata(state))
+        .then(() => this.resolvePendingMemberUpdates(state))
         .catch((err) => console.warn('[YjsReplication] member-update resolution failed:', err))
     }
     membersMap.observe(membersHandler)

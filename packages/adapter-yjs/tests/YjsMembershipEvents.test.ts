@@ -10,7 +10,7 @@
  * Schreiber auf VERSCHIEDENE Keys, ist das Event-Set-Design auf Yjs nicht
  * verlustfrei umsetzbar.
  */
-import { describe, it, expect, afterEach } from 'vitest'
+import { describe, it, expect, afterEach, vi } from 'vitest'
 import * as Y from 'yjs'
 import type { PublicIdentitySession } from '../../wot-core/src/application/identity'
 import { createTestIdentity } from '../../wot-core/tests/helpers/identity-session'
@@ -362,5 +362,61 @@ describe('Pflicht-Test 10 — Z.305-Konflikt auf Event-Ebene (Stop-1-Detektor)',
       { did: DID, status: 'active', sinceGeneration: 1 },
     ])
     expect(projection).toEqual([])
+  })
+})
+
+describe('Review-MINOR-1 — Enc-Key-Cache-Pruning gegen kanonische removed-Gewinner (Security)', () => {
+  it('removed-Event kommt via Sync (KEIN lokales removeMember) → naechste Rotation sendet KEINE key-rotation an den Entfernten; der Entfernte erhaelt die neue Generation nicht', async () => {
+    // Modelliert Geraet 2 eines Multi-Device-Admins: es hat carol selbst
+    // eingeladen (Enc-Key im Cache), die ENTFERNUNG erreicht es aber nur als
+    // kanonisches removed-Event via Doc-Sync — der lokale removeMember-Pfad
+    // (der den Cache loescht) laeuft hier nie.
+    const admin2 = await createPeer('minor1-admin-geraet2')
+    const bob = await createPeer('minor1-bob')
+    const carol = await createPeer('minor1-carol')
+    const bobDid = bob.identity.getDid()
+    const carolDid = carol.identity.getDid()
+
+    const space = await admin2.adapter.createSpace<TestDoc>('shared', { items: {} }, { name: 'S' })
+    await admin2.adapter.addMember(space.id, bobDid, await bob.identity.getEncryptionPublicKeyBytes())
+    await admin2.adapter.addMember(space.id, carolDid, await carol.identity.getEncryptionPublicKeyBytes())
+    await waitUntil(async () =>
+      (await bob.keyManagement.getCurrentGeneration(space.id)) === 0 &&
+      (await carol.keyManagement.getCurrentGeneration(space.id)) === 0)
+    expect(await carol.keyManagement.getKeyByGeneration(space.id, 0)).not.toBeNull()
+
+    // Kanonisches removed@1 fuer carol trifft via Doc-Sync ein (origin 'remote').
+    const state = spaceState(admin2.adapter, space.id)
+    const removedEvent: MembershipEvent = { did: carolDid, status: 'removed', sinceGeneration: 1 }
+    const doc: Y.Doc = state.doc
+    doc.transact(() => {
+      doc.getMap<MembershipEvent>('_members').set(formatMembershipEventKey(removedEvent), removedEvent)
+    }, 'remote')
+    await waitUntil(() => state.info.members.includes(carolDid) === false)
+    expect(state.info.members).not.toContain(carolDid)
+
+    // Kern des Fixes: der Projektion-Update-Pfad prunt den Enc-Key-Cache fuer
+    // removed-Gewinner; der Remaining-Member bob bleibt erhalten.
+    expect(state.memberEncryptionKeys.has(carolDid)).toBe(false)
+    expect(state.memberEncryptionKeys.has(bobDid)).toBe(true)
+
+    // Naechste Rotation DIESES Geraets: der Send-Spy beweist, dass KEINE
+    // key-rotation an den Entfernten geht (bob als Positiv-Kontrolle).
+    const sendSpy = vi.spyOn(admin2.messaging, 'send')
+    const newGen = await (admin2.adapter as any).rotateSpaceKeyAndDistribute(state)
+    await waitUntil(async () => (await bob.keyManagement.getCurrentGeneration(space.id)) === newGen)
+
+    const rotationRecipients = sendSpy.mock.calls
+      .map(([envelope]) => envelope as WireMessage)
+      .filter((envelope) => isDidcommMessage(envelope) && envelope.type === KEY_ROTATION_MESSAGE_TYPE)
+      .map((envelope) => (envelope as DidcommPlaintextMessage).to?.[0])
+    expect(rotationRecipients).toContain(bobDid)
+    expect(rotationRecipients).not.toContain(carolDid)
+
+    // Der Entfernte kann die neue Generation nicht entschluesseln: sein
+    // KeyManagement kennt den neuen Key nicht (bob als Positiv-Kontrolle schon).
+    expect(await bob.keyManagement.getKeyByGeneration(space.id, newGen)).not.toBeNull()
+    expect(await carol.keyManagement.getKeyByGeneration(space.id, newGen)).toBeNull()
+    expect(await carol.keyManagement.getCurrentGeneration(space.id)).toBe(0)
   })
 })
