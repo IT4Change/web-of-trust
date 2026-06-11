@@ -1,7 +1,8 @@
 /**
  * VE-1/VE-2/VE-3 (Slice 1.B.3-sync-recovery, Step 5 — Automerge-Mirror):
  * kanonische Mitgliederliste als grow-only Membership-Event-Set in
- * doc.members (Record<string, MembershipEvent>) + doc.createdBy.
+ * doc._members (Record<string, MembershipEvent>) + doc._createdBy
+ * (reservierte Root-Keys, F-6 — App-Daten kollidieren nicht).
  *
  * Sync 005 Z.163: die kanonische Mitgliederliste ist Teil des signierten und
  * synchronisierten Space-Dokuments. Sync 005 Z.305: "Wenn Einladung und
@@ -64,7 +65,7 @@ function spaceDoc(adapter: AutomergeReplicationAdapter, spaceId: string): any {
 
 function membershipEvents(adapter: AutomergeReplicationAdapter, spaceId: string): Map<string, MembershipEvent> {
   const doc = spaceDoc(adapter, spaceId)
-  return new Map(Object.entries((doc?.members ?? {}) as Record<string, MembershipEvent>))
+  return new Map(Object.entries((doc?._members ?? {}) as Record<string, MembershipEvent>))
 }
 
 function inbox(messaging: InMemoryMessagingAdapter): DidcommPlaintextMessage[] {
@@ -112,8 +113,8 @@ afterEach(async () => {
   InMemoryMessagingAdapter.resetAll()
 })
 
-describe('VE-1 — doc.members Event-Set + members-Projektion', () => {
-  it('createSpace schreibt active@0 (self) + doc.createdBy; Projektion = [self]', async () => {
+describe('VE-1 — doc._members Event-Set + members-Projektion', () => {
+  it('createSpace schreibt active@0 (self) + doc._createdBy; Projektion = [self]', async () => {
     const alice = await createPeer('am-me-create')
     const space = await alice.adapter.createSpace<TestDoc>('shared', { items: {} }, { name: 'S' })
 
@@ -122,7 +123,7 @@ describe('VE-1 — doc.members Event-Set + members-Projektion', () => {
     expect(events.size).toBe(1)
     expect(events.get(selfKey)).toMatchObject({ did: alice.identity.getDid(), status: 'active', sinceGeneration: 0 })
 
-    expect(spaceDoc(alice.adapter, space.id).createdBy).toBe(alice.identity.getDid())
+    expect(spaceDoc(alice.adapter, space.id)._createdBy).toBe(alice.identity.getDid())
     expect(space.createdBy).toBe(alice.identity.getDid())
     expect(space.members).toEqual([alice.identity.getDid()])
   })
@@ -169,7 +170,7 @@ describe('Pflicht-Test 8 — Invitee-Bootstrap aus dem Snapshot, ohne Backfill (
       ((await carol.adapter.getSpace(space.id))?.members.length === 3)
       && ((await bob.adapter.getSpace(space.id))?.members.length === 3))
 
-    // Carol bootstrapped die Mitgliederliste aus dem doc.members-Event-Set des
+    // Carol bootstrapped die Mitgliederliste aus dem doc._members-Event-Set des
     // Invite-Snapshots — nicht aus [senderDid, ownDid] + Backfill.
     const carolSpace = await carol.adapter.getSpace(space.id)
     expect(carolSpace).not.toBeNull()
@@ -204,7 +205,7 @@ describe('Pflicht-Test 9 — Admin-Konsistenz via createdBy (VE-2)', () => {
 
     // bob (Nicht-Creator) laedt carol ein — vor VE-2 divergierte carols Admin-
     // Annahme auf den Inviter (members[0] = senderDid), jetzt traegt der
-    // Snapshot doc.createdBy = alice.
+    // Snapshot doc._createdBy = alice.
     await bob.adapter.addMember(space.id, carol.identity.getDid(), await carol.identity.getEncryptionPublicKeyBytes())
     await waitUntil(async () => (await carol.adapter.getSpace(space.id))?.createdBy !== undefined)
 
@@ -246,20 +247,20 @@ describe('Pflicht-Test 9 — Admin-Konsistenz via createdBy (VE-2)', () => {
 describe('Pflicht-Test 10 — Z.305-Konflikt auf Event-Ebene (Stop-1-Detektor fuer Automerge)', () => {
   const DID = 'did:key:z6MkConflictedMember'
 
-  type MembersDoc = { members: Record<string, MembershipEvent> }
+  type MembersDoc = { _members: Record<string, MembershipEvent> }
 
   function fork(base: Automerge.Doc<MembersDoc>, event: MembershipEvent): Automerge.Doc<MembersDoc> {
     return Automerge.change(Automerge.clone(base), (d) => {
-      d.members[`${event.did}:${event.sinceGeneration}:${event.status}`] = { ...event }
+      d._members[`${event.did}:${event.sinceGeneration}:${event.status}`] = { ...event }
     })
   }
 
   function readEvents(doc: Automerge.Doc<MembersDoc>): MembershipEvent[] {
-    return Object.values(doc.members)
+    return Object.values(doc._members)
   }
 
   it('active@2 vs. removed@3 in konkurrierenden change()-Bloecken OFFLINE geschrieben → nach dem Merge existieren BEIDE Events, Projektion = removed (beide Reihenfolgen)', () => {
-    const base = Automerge.from<MembersDoc>({ members: {} })
+    const base = Automerge.from<MembersDoc>({ _members: {} })
     // Offline-Divergenz: zwei Peers schreiben konkurrierend auf VERSCHIEDENE Keys.
     const docA = fork(base, { did: DID, status: 'active', sinceGeneration: 2 })
     const docB = fork(base, { did: DID, status: 'removed', sinceGeneration: 3 })
@@ -269,16 +270,16 @@ describe('Pflicht-Test 10 — Z.305-Konflikt auf Event-Ebene (Stop-1-Detektor fu
 
     for (const doc of [mergedAB, mergedBA]) {
       // Event-Ebene: genau das verlor das v2-Design (ein LWW-Eintrag pro DID).
-      expect(doc.members[`${DID}:2:active`]).toMatchObject({ did: DID, status: 'active', sinceGeneration: 2 })
-      expect(doc.members[`${DID}:3:removed`]).toMatchObject({ did: DID, status: 'removed', sinceGeneration: 3 })
-      expect(Object.keys(doc.members)).toHaveLength(2)
+      expect(doc._members[`${DID}:2:active`]).toMatchObject({ did: DID, status: 'active', sinceGeneration: 2 })
+      expect(doc._members[`${DID}:3:removed`]).toMatchObject({ did: DID, status: 'removed', sinceGeneration: 3 })
+      expect(Object.keys(doc._members)).toHaveLength(2)
       // Projektion: hoehere Generation gewinnt (Sync 005 Z.305) → removed.
       expect(resolveActiveMembers(readEvents(doc))).toEqual([])
     }
   })
 
   it('10b Tie-Break: active@N vs. removed@N konkurrierend → removed gewinnt in beiden Merge-Reihenfolgen', () => {
-    const base = Automerge.from<MembersDoc>({ members: {} })
+    const base = Automerge.from<MembersDoc>({ _members: {} })
     const docA = fork(base, { did: DID, status: 'active', sinceGeneration: 4 })
     const docB = fork(base, { did: DID, status: 'removed', sinceGeneration: 4 })
 
@@ -286,7 +287,7 @@ describe('Pflicht-Test 10 — Z.305-Konflikt auf Event-Ebene (Stop-1-Detektor fu
     const mergedBA = Automerge.merge(Automerge.clone(docB), docA)
 
     for (const doc of [mergedAB, mergedBA]) {
-      expect(Object.keys(doc.members)).toHaveLength(2)
+      expect(Object.keys(doc._members)).toHaveLength(2)
       expect(resolveActiveMembers(readEvents(doc))).toEqual([])
     }
   })
@@ -353,7 +354,7 @@ describe('Review-Minor — members-Container-Seed im Invite-Apply (Invite mit le
 
   it('zwei Peers initialisieren konkurrierend ab demselben Invite, schreiben je ein Event → nach dem Merge existieren BEIDE Events (deterministischer Container-Seed)', async () => {
     // Vor dem Fix: jeder Peer importierte Automerge.init() (random Actor) und
-    // legte d.members im ersten writeMembershipEvent lazy an — konkurrierende
+    // legte d._members im ersten writeMembershipEvent lazy an — konkurrierende
     // Container-Zuweisungen sind in Automerge ein Property-Konflikt, die
     // Events des unterlegenen Containers verschwinden aus der Merge-Sicht.
     // Der deterministische Seed (fester Actor aus der spaceId, time 0) erzeugt
@@ -389,8 +390,8 @@ describe('Review-Minor — members-Container-Seed im Invite-Apply (Invite mit le
       Automerge.merge(Automerge.load<any>(bobBinary), Automerge.load<any>(carolBinary)),
       Automerge.merge(Automerge.load<any>(carolBinary), Automerge.load<any>(bobBinary)),
     ]) {
-      expect(merged.members?.[bobKey]).toMatchObject({ did: bob.identity.getDid(), status: 'active', sinceGeneration: 0 })
-      expect(merged.members?.[carolKey]).toMatchObject({ did: carol.identity.getDid(), status: 'active', sinceGeneration: 0 })
+      expect(merged._members?.[bobKey]).toMatchObject({ did: bob.identity.getDid(), status: 'active', sinceGeneration: 0 })
+      expect(merged._members?.[carolKey]).toMatchObject({ did: carol.identity.getDid(), status: 'active', sinceGeneration: 0 })
     }
   })
 
@@ -430,12 +431,40 @@ describe('Review-Minor — members-Container-Seed im Invite-Apply (Invite mit le
       Automerge.merge(Automerge.load<any>(bootstrapBinary), Automerge.load<any>(creatorBinary)),
     ]) {
       // Alle Events BEIDER Seiten ueberleben den Merge.
-      expect(Object.keys(merged.members ?? {}).sort()).toEqual([aliceKey, bobKey].sort())
-      expect(merged.members?.[aliceKey]).toMatchObject({ did: alice.identity.getDid(), status: 'active', sinceGeneration: 0 })
-      expect(merged.members?.[bobKey]).toMatchObject({ did: bob.identity.getDid(), status: 'active', sinceGeneration: 0 })
+      expect(Object.keys(merged._members ?? {}).sort()).toEqual([aliceKey, bobKey].sort())
+      expect(merged._members?.[aliceKey]).toMatchObject({ did: alice.identity.getDid(), status: 'active', sinceGeneration: 0 })
+      expect(merged._members?.[bobKey]).toMatchObject({ did: bob.identity.getDid(), status: 'active', sinceGeneration: 0 })
       // Kein Property-Konflikt auf dem Container: der byte-identische Seed
       // wird dedupliziert statt zu konkurrieren.
-      expect(Automerge.getConflicts(merged, 'members')).toBeUndefined()
+      expect(Automerge.getConflicts(merged, '_members')).toBeUndefined()
     }
+  })
+})
+
+describe('F-6 — reservierte Root-Keys: App-Daten kollidieren nicht mit dem Event-Set', () => {
+  it('App-Writes auf doc.members/doc.createdBy lassen das kanonische Event-Set und die Projektion unberuehrt', async () => {
+    // Kollisionsschutz (Review-MINOR 4 / wot-spec#99): das Event-Set liegt
+    // unter dem reservierten Unterstrich-Praefix (_members/_createdBy,
+    // Konvention wie _meta; Spiegel der Yjs-Y.Map `_members`) — eine App,
+    // deren Datenmodell selbst `members`/`createdBy` im Doc-Root traegt,
+    // darf die Membership-Autoritaet nicht kippen koennen.
+    const alice = await createPeer('am-f6-alice')
+    const space = await alice.adapter.createSpace<TestDoc>('shared', { items: {} }, { name: 'S' })
+
+    const handle = await alice.adapter.openSpace<any>(space.id)
+    handle.transact((d: any) => {
+      d.members = ['app-defined-member-list']
+      d.createdBy = 'app-defined-author'
+    })
+
+    // Event-Set intakt (kanonischer Container unangetastet) …
+    const events = membershipEvents(alice.adapter, space.id)
+    expect(events.get(`${alice.identity.getDid()}:0:active`)).toMatchObject({
+      did: alice.identity.getDid(), status: 'active', sinceGeneration: 0,
+    })
+    // … und die Projektion folgt weiter dem Event-Set, nicht den App-Daten.
+    expect(spaceState(alice.adapter, space.id).info.members).toEqual([alice.identity.getDid()])
+    expect(spaceState(alice.adapter, space.id).info.createdBy).toBe(alice.identity.getDid())
+    handle.close()
   })
 })

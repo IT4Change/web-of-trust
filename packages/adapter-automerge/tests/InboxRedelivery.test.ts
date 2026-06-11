@@ -63,11 +63,11 @@ describe('AutomergeReplicationAdapter — Message-ID-History erst bei konklusive
     const spaces = (adapter as any).spaces as Map<string, unknown>
     const state = spaces.get(space.id) as { info: { members: string[] }; documentId: string }
     // SPEC-APPROX admin = createdBy (VE-2): Seeding ueber den produktiven Pfad —
-    // createdBy + active@0-Event im Doc, die Projektion folgt via Handler.
+    // _createdBy + active@0-Event im Doc, die Projektion folgt via Handler.
     ;((adapter as any).repo.handles[state.documentId] as { change(fn: (d: any) => void): void }).change((d: any) => {
-      d.createdBy = admin.getDid()
-      if (!d.members) d.members = {}
-      d.members[`${admin.getDid()}:0:active`] = { did: admin.getDid(), status: 'active', sinceGeneration: 0 }
+      d._createdBy = admin.getDid()
+      if (!d._members) d._members = {}
+      d._members[`${admin.getDid()}:0:active`] = { did: admin.getDid(), status: 'active', sinceGeneration: 0 }
     })
 
     const envelope = await deliverInboxMessage({

@@ -774,15 +774,21 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
       if (meta?.description) d._meta.description = meta.description
       if (meta?.modules) d._meta.modules = meta.modules
       if (meta?.appTag) d._meta.appTag = meta.appTag
+      // F-6 Kollisionsschutz: kanonische WoT-Felder liegen unter dem
+      // reservierten Unterstrich-Praefix im Doc-Root (_createdBy/_members,
+      // Konvention wie _meta; Spiegel der Yjs-Y.Map `_members`) — App-Daten
+      // duerfen eigene members-/createdBy-Schluessel tragen, ohne die
+      // Membership-Autoritaet zu kippen. Die Doc-interne Form ist Gegenstand
+      // von wot-spec#99.
       // VE-2: Creator-DID einmalig im synchronisierten Doc — ersetzt die
       // members[0]-Admin-Approximation (divergierte beim Invitee auf den Inviter).
-      d.createdBy = myDid
+      d._createdBy = myDid
       // VE-1 (Sync 005 Z.163): kanonische Mitgliederliste als grow-only
-      // Event-Set in doc.members — der Creator ist active@0. Der Container
+      // Event-Set in doc._members — der Creator ist active@0. Der Container
       // selbst stammt aus dem deterministischen Seed (M2), hier wird nur
       // hineingeschrieben.
       const selfEvent: MembershipEvent = { did: myDid, status: 'active', sinceGeneration: 0 }
-      d.members[formatMembershipEventKey(selfEvent)] = selfEvent
+      d._members[formatMembershipEventKey(selfEvent)] = selfEvent
     })
 
     // Create group key + capability key pair + owner self-capability
@@ -1016,7 +1022,7 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
 
     // VE-3: Die frueheren Backfill-member-updates an den Invitee sind ersatzlos
     // entfallen — der Invite-Snapshot traegt mit VE-1 das kanonische
-    // doc.members-Event-Set, Backfill erzeugte nur widerspruechliche
+    // doc._members-Event-Set, Backfill erzeugte nur widerspruechliche
     // Pending-Signale.
 
     // Notify existing members about the new member (member-update). member-update ist
@@ -1189,14 +1195,15 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
   }
 
   /**
-   * Liest das doc.members-Event-Set (VE-1) defensiv: Eintraege, deren Value
+   * Liest das doc._members-Event-Set (VE-1) defensiv: Eintraege, deren Value
    * nicht als MembershipEvent validiert oder deren Key nicht zum Value passt,
    * werden uebersprungen — ein fehlerhafter Peer darf die Projektion nicht
-   * kippen.
+   * kippen. Reservierter Root-Key `_members` (F-6, wot-spec#99): App-Daten
+   * unter `members` beruehren das Event-Set nicht.
    */
   private readMembershipEvents(doc: unknown): MembershipEvent[] {
     const events: MembershipEvent[] = []
-    const members = (doc as { members?: unknown } | undefined)?.members
+    const members = (doc as { _members?: unknown } | undefined)?._members
     if (members === null || members === undefined || typeof members !== 'object' || Array.isArray(members)) {
       return events
     }
@@ -1233,9 +1240,9 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
       .map((byte) => byte.toString(16).padStart(2, '0'))
       .join('')
     const seeded = Automerge.change(
-      Automerge.init<{ members: Record<string, unknown> }>({ actor }),
+      Automerge.init<{ _members: Record<string, unknown> }>({ actor }),
       { time: 0 },
-      (d) => { d.members = {} },
+      (d) => { d._members = {} },
     )
     return Automerge.save(seeded)
   }
@@ -1259,13 +1266,13 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
    */
   private writeMembershipEvent(space: SpaceState, event: MembershipEvent): void {
     const docHandle = this.repo.handles[space.documentId]
-    const doc = docHandle?.doc() as { members?: Record<string, unknown> } | undefined
+    const doc = docHandle?.doc() as { _members?: Record<string, unknown> } | undefined
     if (!docHandle || !doc) throw new Error(`Cannot access doc for space: ${space.info.id}`)
     const key = formatMembershipEventKey(event)
-    if (doc.members && key in doc.members) return
+    if (doc._members && key in doc._members) return
     docHandle.change((d: any) => {
-      if (!d.members) d.members = {}
-      d.members[key] = { ...event }
+      if (!d._members) d._members = {}
+      d._members[key] = { ...event }
     })
   }
 
@@ -1287,7 +1294,9 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
   }
 
   private computeMembershipProjection(doc: unknown): { digest: string; createdBy?: string; members: string[] | null } {
-    const createdByRaw = (doc as { createdBy?: unknown } | undefined)?.createdBy
+    // F-6: das kanonische Creator-Feld liegt unter dem reservierten Root-Key
+    // `_createdBy` — App-Daten unter `createdBy` kippen die Projektion nicht.
+    const createdByRaw = (doc as { _createdBy?: unknown } | undefined)?._createdBy
     const createdBy = typeof createdByRaw === 'string' ? createdByRaw : undefined
     const events = this.readMembershipEvents(doc)
     const digest = JSON.stringify([createdBy ?? null, events.map((event) => formatMembershipEventKey(event)).sort()])
@@ -1374,7 +1383,7 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
   /**
    * VE-4 (Sync 005 Z.194-198 MUSS): loest Pending-member-updates gegen die
    * kanonische Mitgliederliste auf — aufgerufen bei jeder kanonischen
-   * doc.members-Aenderung (Doc-Change-Handler). confirmed (Z.196-197) und
+   * doc._members-Aenderung (Doc-Change-Handler). confirmed (Z.196-197) und
    * discarded (Z.198, Widerspruch: verwerfen, kanonischen State behalten)
    * werden via resolvePending aus dem Pending-Store entfernt; die UX-Flags
    * werden aus dem verbleibenden Store-Stand re-deriviert (discarded setzt
@@ -1387,7 +1396,7 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
 
   /**
    * Review-M1 (Sync 005 Z.194/Z.253): loest NUR die Pendings auf, deren Antwort
-   * das kanonische doc.members-Event-Set BEREITS traegt (canonicalEventSet-
+   * das kanonische doc._members-Event-Set BEREITS traegt (canonicalEventSet-
    * AnswersPending, generationssicher inkl. removed-Tie-Break). Noetig fuer die
    * canonical-first-Reihenfolge: das Doc-Update reist per Z.231-Design vor der
    * Rotation und ist mit dem alten Key entschluesselbar — der Doc-Change-
@@ -2050,9 +2059,9 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
       // Display metadata travels inside the encrypted doc's _meta — SpaceInviteBody carries
       // no spaceInfo (Sync 005). Invited spaces are 'shared'; appTag rides in _meta so
       // cross-app isolation survives the invite; createdAt has no in-repo consumer.
-      const doc = docHandle.doc() as { createdBy?: unknown; name?: unknown; _meta?: Record<string, unknown> } | undefined
+      const doc = docHandle.doc() as { _createdBy?: unknown; name?: unknown; _meta?: Record<string, unknown> } | undefined
       const docMeta = doc?._meta ?? {}
-      // VE-1/VE-3: die Mitgliederliste kommt aus dem doc.members-Event-Set des
+      // VE-1/VE-3: die Mitgliederliste kommt aus dem doc._members-Event-Set des
       // Invite-Snapshots — nicht mehr aus der [senderDid, ownDid]-Konstruktion
       // plus Backfill. Der Snapshot ist dabei nicht autoritativ (Sync 002
       // Z.158): das Event-Set konvergiert via CRDT-Merge, der Snapshot rollt
@@ -2078,7 +2087,7 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
         appTag: typeof docMeta.appTag === 'string' ? docMeta.appTag : undefined,
         // VE-2: Creator-DID aus dem synchronisierten Doc — beim Invitee ist
         // der Inviter (senderDid) NICHT zwingend der Creator/Admin.
-        createdBy: typeof doc?.createdBy === 'string' ? doc.createdBy : undefined,
+        createdBy: typeof doc?._createdBy === 'string' ? doc._createdBy : undefined,
         members,
         createdAt: new Date().toISOString(),
       }

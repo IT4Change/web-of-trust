@@ -41,9 +41,9 @@ async function waitUntil(condition: () => boolean | Promise<boolean>, timeoutMs 
 
 /**
  * Seedet die kanonische Membership ueber den produktiven Pfad (VE-1/VE-2):
- * doc.createdBy (Admin-Approximation) + active@0-Events im grow-only
- * doc.members-Event-Set — die members-Projektion aktualisiert der
- * Doc-Change-Handler.
+ * doc._createdBy (Admin-Approximation) + active@0-Events im grow-only
+ * doc._members-Event-Set (reservierte Root-Keys, F-6) — die members-
+ * Projektion aktualisiert der Doc-Change-Handler.
  */
 function seedMembership(adapter: AutomergeReplicationAdapter, spaceId: string, creatorDid: string, memberDids: string[]): void {
   const internal = adapter as unknown as {
@@ -52,10 +52,10 @@ function seedMembership(adapter: AutomergeReplicationAdapter, spaceId: string, c
   }
   const state = internal.spaces.get(spaceId)!
   internal.repo.handles[state.documentId].change((d: any) => {
-    d.createdBy = creatorDid
-    if (!d.members) d.members = {}
+    d._createdBy = creatorDid
+    if (!d._members) d._members = {}
     for (const did of memberDids) {
-      d.members[`${did}:0:active`] = { did, status: 'active', sinceGeneration: 0 }
+      d._members[`${did}:0:active`] = { did, status: 'active', sinceGeneration: 0 }
     }
   })
 }

@@ -67,13 +67,13 @@ function memberUpdateDecoded(senderDid: string, body: Record<string, unknown>) {
   }
 }
 
-/** Seedet createdBy (Admin-Approximation, VE-2) + active@0-Events ins doc.members-Event-Set. */
+/** Seedet createdBy (Admin-Approximation, VE-2) + active@0-Events ins doc._members-Event-Set (reservierte Root-Keys, F-6). */
 function seedMembership(adapter: AutomergeReplicationAdapter, spaceId: string, creatorDid: string, memberDids: string[]): void {
   docHandle(adapter, spaceId).change((d: any) => {
-    d.createdBy = creatorDid
-    if (!d.members) d.members = {}
+    d._createdBy = creatorDid
+    if (!d._members) d._members = {}
     for (const did of memberDids) {
-      d.members[`${did}:0:active`] = { did, status: 'active', sinceGeneration: 0 }
+      d._members[`${did}:0:active`] = { did, status: 'active', sinceGeneration: 0 }
     }
   })
 }
@@ -86,8 +86,8 @@ function seedMembership(adapter: AutomergeReplicationAdapter, spaceId: string, c
  */
 function applyCanonicalMembershipEvent(adapter: AutomergeReplicationAdapter, spaceId: string, event: MembershipEvent): void {
   docHandle(adapter, spaceId).change((d: any) => {
-    if (!d.members) d.members = {}
-    d.members[`${event.did}:${event.sinceGeneration}:${event.status}`] = { ...event }
+    if (!d._members) d._members = {}
+    d._members[`${event.did}:${event.sinceGeneration}:${event.status}`] = { ...event }
   })
 }
 
