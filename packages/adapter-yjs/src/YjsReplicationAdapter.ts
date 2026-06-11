@@ -1008,6 +1008,11 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
     const state = this.spaces.get(spaceId)
     if (state) {
       state.unsubUpdate?.()
+      // Offene Handles VOR doc.destroy schliessen (Codex-Re-Review M1, AM-
+      // Spiegel): ein stale Handle darf nach dem Cleanup keine Writes gegen
+      // das zerstoerte Doc mehr ausfuehren oder Compact-/Vault-Persistenz
+      // einplanen — Metadata/GroupKeys/Pendings sind dann bereits geloescht.
+      for (const handle of state.handles) handle.close()
       state.doc.destroy()
       this.spaces.delete(spaceId)
     }

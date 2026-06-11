@@ -483,6 +483,65 @@ describe('Review-Fix M1 — Resolution-Chain verkettet + Members im Ausfuehrungs
   })
 })
 
+describe('Codex-Re-Review M1 — Cleanup schliesst offene SpaceHandles (Sync 005 Z.253 Weg a)', () => {
+  it('kanonische Self-Removal-Bestaetigung: offenes Handle wird geschlossen — transact ist No-op, KEINE Compact-/Vault-Persistenz wird mehr eingeplant', async () => {
+    const h = await setup({ passphrase: 'm1-handle-close-resolution' })
+    const space = await h.adapter.createSpace<TestDoc>('shared', { items: {} }, { name: 'S' })
+    seedMembership(h.adapter, space.id, ADMIN, [ADMIN])
+    await wait()
+
+    const handle = await h.adapter.openSpace<TestDoc>(space.id)
+    const stateRef = spaceState(h.adapter, space.id)
+    expect(stateRef.handles.size).toBe(1)
+
+    // Canonical-first (deterministisch, wie Review-M1 Test 1): die kanonische
+    // Entfernung liegt vor, das member-update loest sofort auf → Cleanup.
+    applyRemoteMembershipEvent(h.adapter, space.id, { did: h.alice.getDid(), status: 'removed', sinceGeneration: 1 })
+    await waitUntil(() => spaceState(h.adapter, space.id)?.info.members.includes(h.alice.getDid()) === false)
+    await (h.adapter as any).handleMemberUpdate(
+      memberUpdateDecoded(ADMIN, { spaceId: space.id, action: 'removed', memberDid: h.alice.getDid(), effectiveKeyGeneration: 1 }))
+    expect(spaceState(h.adapter, space.id)).toBeUndefined()
+
+    // Das Handle MUSS beim Cleanup geschlossen und deregistriert worden sein —
+    // sonst kann App-Code nach dem Loeschen von Metadata/GroupKeys/Pendings
+    // weiter gegen das zerstoerte Doc schreiben.
+    expect(stateRef.handles.size).toBe(0)
+
+    const compactSpy = vi.spyOn(h.adapter as any, '_scheduleCompactImmediate')
+    const vaultSpy = vi.spyOn(h.adapter as any, '_scheduleVaultImmediate')
+    let mutated = false
+    handle.transact((doc) => { mutated = true; doc.items['stale'] = { title: 'stale' } })
+    expect(mutated).toBe(false)
+    expect(compactSpy).not.toHaveBeenCalled()
+    expect(vaultSpy).not.toHaveBeenCalled()
+    // Kein Re-Create des geloeschten CompactStore-Eintrags durch das stale Handle.
+    expect(await h.compactStore.load(space.id)).toBeNull()
+  })
+
+  it('leaveSpace (User-Flow, gleiche Mechanik): offenes Handle wird geschlossen, stale transact plant keine Persistenz mehr ein', async () => {
+    const h = await setup({ passphrase: 'm1-handle-close-leave' })
+    const space = await h.adapter.createSpace<TestDoc>('shared', { items: {} }, { name: 'S' })
+    await wait()
+
+    const handle = await h.adapter.openSpace<TestDoc>(space.id)
+    const stateRef = spaceState(h.adapter, space.id)
+    expect(stateRef.handles.size).toBe(1)
+
+    await h.adapter.leaveSpace(space.id)
+    expect(spaceState(h.adapter, space.id)).toBeUndefined()
+    expect(stateRef.handles.size).toBe(0)
+
+    const compactSpy = vi.spyOn(h.adapter as any, '_scheduleCompactImmediate')
+    const vaultSpy = vi.spyOn(h.adapter as any, '_scheduleVaultImmediate')
+    let mutated = false
+    handle.transact((doc) => { mutated = true; doc.items['stale'] = { title: 'stale' } })
+    expect(mutated).toBe(false)
+    expect(compactSpy).not.toHaveBeenCalled()
+    expect(vaultSpy).not.toHaveBeenCalled()
+    expect(await h.compactStore.load(space.id)).toBeNull()
+  })
+})
+
 describe('Pflicht-Test 11 — VE-7 Re-Derivation der Pending-Flags beim Restore (Sync 005 Z.253 App-Start)', () => {
   it('mit injiziertem durablem Store: Pending-Flag nach Adapter-Neustart re-deriviert + Catch-up getriggert', async () => {
     // Der Test injiziert denselben Store in beide Adapter-Inkarnationen —
