@@ -118,8 +118,12 @@ export function RecoveryFlow({ onComplete, onCancel }: RecoveryFlowProps) {
             finishRecovery(identity, identity.getDid())
             return
           } catch {
-            // Recovery failed after enrollment — roll back the keystore entry.
+            // Failed after enrollment + seed store. unlock(..., true) persists the
+            // seed before it finishes, so roll back BOTH the keystore entry and the
+            // stored seed — else a partial failure strands an identity behind the
+            // unseen random passphrase.
             await BiometricService.unenroll().catch(() => {})
+            await new WotIdentity().deleteStoredIdentity().catch(() => {})
             await refreshBiometricStatus()
           }
         }
@@ -168,7 +172,11 @@ export function RecoveryFlow({ onComplete, onCancel }: RecoveryFlowProps) {
       await refreshBiometricStatus()
       finishRecovery(identity, identity.getDid())
     } catch {
+      // unlock(..., true) persists the seed before it finishes, so roll back BOTH
+      // the keystore entry and the stored seed — else a partial failure strands an
+      // identity behind the unseen random passphrase.
       await BiometricService.unenroll().catch(() => {})
+      await new WotIdentity().deleteStoredIdentity().catch(() => {})
       await refreshBiometricStatus()
       setIsLoading(false)
       setStep('protect')
