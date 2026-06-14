@@ -128,19 +128,23 @@ describe('HttpDiscoveryAdapter resolve', () => {
     vi.restoreAllMocks()
   })
 
-  it('resolveAttestations returns the structured Attestation[] from a signed non-empty list', async () => {
+  // VE-1 breaking migration (Step 3): the old structured `Attestation[]` wire form
+  // is no longer a valid ListResource (items MUST be compact VC-JWS strings,
+  // Sync 004 Z.106-126). Such legacy payloads now fail owner-JWS schema validation
+  // and resolve to [] + a warning — the next publish overwrites them. The positive
+  // wire-roundtrip + split coverage lives in DiscoveryStep3Wire.test.ts.
+  it('resolveAttestations returns [] for the legacy structured wire form (VE-1 breaking)', async () => {
     const did = identity.getDid()
     const updatedAt = '2026-05-18T10:43:25.976Z'
     const attestations = [
       { id: 'att-1', type: 'knows', from: did, to: 'did:key:zPeer1', createdAt: updatedAt },
       { id: 'att-2', type: 'trusts', from: did, to: 'did:key:zPeer2', createdAt: updatedAt },
     ]
-    const jws = await identity.signJws({ did, attestations, updatedAt })
+    const jws = await identity.signJws({ did, version: 1, attestations, updatedAt })
     fetchMock = vi.fn().mockResolvedValue(new Response(jws, { status: 200 }))
     vi.stubGlobal('fetch', fetchMock)
 
-    const result = await adapter.resolveAttestations(did)
-    expect(result).toEqual(attestations)
+    expect(await adapter.resolveAttestations(did)).toEqual([])
   })
 
   it('resolveAttestations returns [] when the payload signature is invalid', async () => {
@@ -151,19 +155,10 @@ describe('HttpDiscoveryAdapter resolve', () => {
 
   it('resolveAttestations returns [] for a signed payload whose attestations field is not an array', async () => {
     const did = identity.getDid()
-    const jws = await identity.signJws({ did, attestations: 'not-an-array', updatedAt: '2026-05-18T10:43:25.976Z' })
+    const jws = await identity.signJws({ did, version: 1, attestations: 'not-an-array', updatedAt: '2026-05-18T10:43:25.976Z' })
     fetchMock = vi.fn().mockResolvedValue(new Response(jws, { status: 200 }))
     vi.stubGlobal('fetch', fetchMock)
     expect(await adapter.resolveAttestations(did)).toEqual([])
-  })
-
-  it('resolveAttestations filters out non-object entries from a signed list', async () => {
-    const did = identity.getDid()
-    const valid = { id: 'att-1', type: 'knows', from: did, to: 'did:key:zPeer1', createdAt: '2026-05-18T10:43:25.976Z' }
-    const jws = await identity.signJws({ did, attestations: [valid, 'garbage', null, 42], updatedAt: '2026-05-18T10:43:25.976Z' })
-    fetchMock = vi.fn().mockResolvedValue(new Response(jws, { status: 200 }))
-    vi.stubGlobal('fetch', fetchMock)
-    expect(await adapter.resolveAttestations(did)).toEqual([valid])
   })
 
   it('resolveProfile returns { profile: null } when verification fails', async () => {

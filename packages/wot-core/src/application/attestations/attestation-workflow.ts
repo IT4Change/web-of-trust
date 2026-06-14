@@ -7,6 +7,7 @@ import {
   verifyAttestationVcJws,
   wholeSecondRfc3339,
 } from '../../protocol'
+import { importAttestationFromVcJws } from './import-attestation'
 
 export interface AttestationWorkflowOptions {
   crypto: ProtocolCryptoAdapter
@@ -84,15 +85,7 @@ export class AttestationWorkflow {
   }
 
   async importAttestation(encoded: string): Promise<Attestation> {
-    const trimmed = encoded.trim()
-    if (!isJwsCompact(trimmed)) throw new Error('Invalid attestation format')
-
-    try {
-      const payload = await this.verifyAttestationVcJws(trimmed)
-      return this.attestationFromVcPayload(payload, trimmed)
-    } catch {
-      throw new Error('Invalid attestation signature')
-    }
+    return importAttestationFromVcJws(encoded, { crypto: this.crypto })
   }
 
   private createVcPayload(input: {
@@ -125,28 +118,6 @@ export class AttestationWorkflow {
     }
   }
 
-  private attestationFromVcPayload(payload: AttestationVcPayload, vcJws: string): Attestation {
-    const tags = payload.credentialSubject.tags
-    const context = payload.credentialSubject.context
-    const id = typeof payload.jti === 'string'
-      ? payload.jti
-      : typeof payload.id === 'string'
-        ? payload.id
-        : `wot:attestation:${payload.iss}:${payload.sub}:${payload.nbf}`
-
-    return {
-      id,
-      from: payload.issuer,
-      to: payload.credentialSubject.id,
-      claim: payload.credentialSubject.claim,
-      ...(typeof payload.inResponseTo === 'string' ? { inResponseTo: payload.inResponseTo } : {}),
-      ...(Array.isArray(tags) && tags.every(tag => typeof tag === 'string') ? { tags } : {}),
-      ...(typeof context === 'string' ? { context } : {}),
-      createdAt: payload.validFrom,
-      vcJws,
-    }
-  }
-
   private payloadMatchesAttestation(payload: AttestationVcPayload, attestation: Attestation): boolean {
     return payload.issuer === attestation.from &&
       payload.iss === attestation.from &&
@@ -164,8 +135,4 @@ export class AttestationWorkflow {
       throw new Error('Incomplete attestation')
     }
   }
-}
-
-function isJwsCompact(value: string): boolean {
-  return /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(value)
 }

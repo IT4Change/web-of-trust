@@ -58,6 +58,75 @@ export interface ProfileVersionCache {
   setLastSeenVersion(did: string, resource: ProfileServiceResourceKind, version: number): Promise<void>
 }
 
+/**
+ * Resource-dimensional, persistent monotonic publish-version source (VE-6).
+ *
+ * Sync 004 Z.106-126 require each published resource (`/p`, `/v`, `/a`) to carry
+ * its OWN strictly-increasing `version`. The publisher owns that counter locally
+ * (NOT `Date.now()` — a wall clock can go backwards and is not monotonic across
+ * resources). `next(did, resource)` returns the version to publish and advances
+ * the stored value; `reconcile(did, resource, serverVersion)` bumps the local
+ * floor when the server reports a higher current version (Sync 004 Z.162 409
+ * retry path) so the single follow-up publish uses `serverVersion + 1`.
+ */
+export interface ProfilePublishVersionStore {
+  next(did: string, resource: ProfileServiceResourceKind): Promise<number>
+  reconcile(did: string, resource: ProfileServiceResourceKind, serverVersion: number): Promise<number>
+  peek(did: string, resource: ProfileServiceResourceKind): Promise<number | undefined>
+}
+
+export class LocalProfilePublishVersionStore implements ProfilePublishVersionStore {
+  private readonly fallback = new Map<string, number>()
+
+  constructor(private readonly keyPrefix = 'wot:profile-publish-version:') {}
+
+  async peek(did: string, resource: ProfileServiceResourceKind): Promise<number | undefined> {
+    const key = this.keyFor(did, resource)
+    const raw = this.storage?.getItem(key) ?? undefined
+    const value = raw === undefined ? this.fallback.get(key) : Number(raw)
+    if (value === undefined) return undefined
+    return Number.isSafeInteger(value) && value >= 0 ? value : undefined
+  }
+
+  async next(did: string, resource: ProfileServiceResourceKind): Promise<number> {
+    const current = (await this.peek(did, resource)) ?? 0
+    const nextVersion = current + 1
+    await this.write(did, resource, nextVersion)
+    return nextVersion
+  }
+
+  async reconcile(did: string, resource: ProfileServiceResourceKind, serverVersion: number): Promise<number> {
+    if (!Number.isSafeInteger(serverVersion) || serverVersion < 0) {
+      throw new Error('Invalid server version')
+    }
+    const current = (await this.peek(did, resource)) ?? 0
+    // The 409 body reports the server's current version; the retry must publish
+    // strictly above it. Persist max(local, server)+1 so monotonicity holds even
+    // after a fresh re-install whose local counter started behind the server.
+    const reconciled = Math.max(current, serverVersion) + 1
+    await this.write(did, resource, reconciled)
+    return reconciled
+  }
+
+  private async write(did: string, resource: ProfileServiceResourceKind, version: number): Promise<void> {
+    const key = this.keyFor(did, resource)
+    this.fallback.set(key, version)
+    this.storage?.setItem(key, String(version))
+  }
+
+  private keyFor(did: string, resource: ProfileServiceResourceKind): string {
+    return `${this.keyPrefix}${did}:${resource}`
+  }
+
+  private get storage(): Storage | undefined {
+    try {
+      return globalThis.localStorage
+    } catch {
+      return undefined
+    }
+  }
+}
+
 export class ProfileResourceRollbackError extends Error {
   constructor(
     readonly did: string,
