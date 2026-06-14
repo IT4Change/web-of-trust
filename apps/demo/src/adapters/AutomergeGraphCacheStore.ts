@@ -6,16 +6,17 @@
  */
 import type {
   GraphCacheStore,
+  GraphCacheSnapshot,
   CachedGraphEntry,
 } from '@web_of_trust/core/ports'
 import type {
-  PublicProfile,
   Attestation,
 } from '@web_of_trust/core/types'
 import type { LocalCacheStore } from './LocalCacheStore'
 
 const ENTRIES_KEY = 'graph:entries'
 const ATTESTATIONS_KEY = 'graph:attestations'
+const VERIFICATIONS_KEY = 'graph:verifications'
 
 interface EntryDoc {
   did: string
@@ -44,6 +45,9 @@ export class AutomergeGraphCacheStore implements GraphCacheStore {
   // In-memory cache — loaded once, then kept in sync
   private entries: Record<string, EntryDoc> = {}
   private attestations: Record<string, AttestationDoc> = {}
+  // Derived Attestation[] verification list per subject (Sync 004 `/v`), keyed
+  // like attestations; NOT the legacy structured Verification type.
+  private verifications: Record<string, AttestationDoc> = {}
 
   constructor(store: LocalCacheStore) {
     this.store = store
@@ -53,13 +57,11 @@ export class AutomergeGraphCacheStore implements GraphCacheStore {
   async load(): Promise<void> {
     this.entries = await this.store.get<Record<string, EntryDoc>>(ENTRIES_KEY) ?? {}
     this.attestations = await this.store.get<Record<string, AttestationDoc>>(ATTESTATIONS_KEY) ?? {}
+    this.verifications = await this.store.get<Record<string, AttestationDoc>>(VERIFICATIONS_KEY) ?? {}
   }
 
-  async cacheEntry(
-    did: string,
-    profile: PublicProfile | null,
-    attestations: Attestation[],
-  ): Promise<void> {
+  async cacheEntry(did: string, snapshot: GraphCacheSnapshot): Promise<void> {
+    const { profile, attestations, verifications } = snapshot
     const now = new Date().toISOString()
 
     this.entries[did] = {
@@ -67,18 +69,28 @@ export class AutomergeGraphCacheStore implements GraphCacheStore {
       name: profile?.name ?? null,
       bio: profile?.bio ?? null,
       avatar: profile?.avatar ?? null,
-      verificationCount: 0,
+      verificationCount: verifications.length,
       attestationCount: attestations.length,
       fetchedAt: now,
     }
 
-    for (const key of Object.keys(this.attestations)) {
-      if (this.attestations[key].subjectDid === did) delete this.attestations[key]
-    }
+    this.replaceSubjectDocs(this.attestations, did, attestations)
+    this.replaceSubjectDocs(this.verifications, did, verifications)
 
-    for (const a of attestations) {
-      const key = `${did}-${a.id}`
-      this.attestations[key] = {
+    // Persist (fire-and-forget — cache loss is acceptable)
+    this.persistAll()
+  }
+
+  private replaceSubjectDocs(
+    target: Record<string, AttestationDoc>,
+    did: string,
+    items: Attestation[],
+  ): void {
+    for (const key of Object.keys(target)) {
+      if (target[key].subjectDid === did) delete target[key]
+    }
+    for (const a of items) {
+      target[`${did}-${a.id}`] = {
         subjectDid: did,
         attestationId: a.id,
         fromDid: a.from,
@@ -90,9 +102,6 @@ export class AutomergeGraphCacheStore implements GraphCacheStore {
         vcJws: a.vcJws,
       }
     }
-
-    // Persist (fire-and-forget — cache loss is acceptable)
-    this.persistAll()
   }
 
   async getEntry(did: string): Promise<CachedGraphEntry | null> {
@@ -112,20 +121,26 @@ export class AutomergeGraphCacheStore implements GraphCacheStore {
   }
 
   async getCachedAttestations(did: string): Promise<Attestation[]> {
-    return Object.values(this.attestations)
+    return this.mapSubjectDocs(this.attestations, did)
+  }
+
+  async getCachedVerifications(did: string): Promise<Attestation[]> {
+    return this.mapSubjectDocs(this.verifications, did)
+  }
+
+  private mapSubjectDocs(target: Record<string, AttestationDoc>, did: string): Attestation[] {
+    return Object.values(target)
       .filter(a => a.subjectDid === did)
-      .map(a => {
-        return {
-          id: a.attestationId,
-          from: a.fromDid,
-          to: a.toDid,
-          claim: a.claim,
-          ...(a.tagsJson != null ? { tags: JSON.parse(a.tagsJson) } : {}),
-          ...(a.context != null ? { context: a.context } : {}),
-          createdAt: a.attestationCreatedAt,
-          vcJws: a.vcJws,
-        }
-      })
+      .map(a => ({
+        id: a.attestationId,
+        from: a.fromDid,
+        to: a.toDid,
+        claim: a.claim,
+        ...(a.tagsJson != null ? { tags: JSON.parse(a.tagsJson) } : {}),
+        ...(a.context != null ? { context: a.context } : {}),
+        createdAt: a.attestationCreatedAt,
+        vcJws: a.vcJws,
+      }))
   }
 
   async resolveName(did: string): Promise<string | null> {
@@ -192,12 +207,16 @@ export class AutomergeGraphCacheStore implements GraphCacheStore {
     for (const key of Object.keys(this.attestations)) {
       if (this.attestations[key].subjectDid === did) delete this.attestations[key]
     }
+    for (const key of Object.keys(this.verifications)) {
+      if (this.verifications[key].subjectDid === did) delete this.verifications[key]
+    }
     this.persistAll()
   }
 
   async clear(): Promise<void> {
     this.entries = {}
     this.attestations = {}
+    this.verifications = {}
     this.persistAll()
   }
 
@@ -217,5 +236,6 @@ export class AutomergeGraphCacheStore implements GraphCacheStore {
     // Fire-and-forget — cache loss is acceptable, will be re-fetched
     this.store.set(ENTRIES_KEY, this.entries).catch(() => {})
     this.store.set(ATTESTATIONS_KEY, this.attestations).catch(() => {})
+    this.store.set(VERIFICATIONS_KEY, this.verifications).catch(() => {})
   }
 }

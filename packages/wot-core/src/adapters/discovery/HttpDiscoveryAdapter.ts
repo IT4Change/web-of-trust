@@ -10,6 +10,7 @@ import type {
   ProfileResolveResult,
   ProfileVersionCache,
   PublicAttestationsData,
+  PublicVerificationsData,
   ProfileSummary,
 } from '../../ports/DiscoveryAdapter'
 import {
@@ -83,6 +84,26 @@ export class HttpDiscoveryAdapter implements DiscoveryAdapter {
     }
   }
 
+  // Step 2: minimal `/v` wiring that mirrors `/a` so the port contract is met.
+  // Step 3 migrates both `/a` and `/v` to the compact-JWS ListResource form with
+  // per-resource version monotonicity and the importAttestation derivation path.
+  async publishVerifications(data: PublicVerificationsData, identity: IdentitySession): Promise<void> {
+    const trace = getTraceLog()
+    const start = performance.now()
+    try {
+      const jws = await identity.signJws(data)
+      const res = await this.fetchWithTimeout(
+        `${this.baseUrl}/p/${encodeURIComponent(data.did)}/v`,
+        { method: 'PUT', body: jws, headers: { 'Content-Type': 'application/jws' } },
+      )
+      if (!res.ok) throw new Error(`Verifications upload failed: ${res.status}`)
+      trace.log({ store: 'profiles', operation: 'write', label: `publishVerifications ${data.did.slice(0, 24)}…`, durationMs: Math.round(performance.now() - start), success: true, meta: { did: data.did, count: data.verifications?.length ?? 0 } })
+    } catch (err) {
+      trace.log({ store: 'profiles', operation: 'write', label: `publishVerifications ${data.did.slice(0, 24)}…`, durationMs: Math.round(performance.now() - start), success: false, error: err instanceof Error ? err.message : String(err), meta: { did: data.did } })
+      throw err
+    }
+  }
+
   async resolveProfile(did: string): Promise<ProfileResolveResult> {
     const trace = getTraceLog()
     const start = performance.now()
@@ -114,11 +135,11 @@ export class HttpDiscoveryAdapter implements DiscoveryAdapter {
         return { profile: null, fromCache: false }
       }
       const profile = flattenProfilePublicationPayload(payload)
-      const lastSeenVersion = await this.versionCache.getLastSeenProfileVersion(did)
-      if (detectProfileResourceRollback({ fetchedVersion: payload.version, lastSeenVersion })) {
-        throw new ProfileResourceRollbackError(did, payload.version, lastSeenVersion!)
+      const lastSeenVersion = await this.versionCache.getLastSeenVersion(did, 'profile')
+      if (detectProfileResourceRollback({ fetchedVersion: payload.version, lastSeenVersion, resource: 'profile' })) {
+        throw new ProfileResourceRollbackError(did, payload.version, lastSeenVersion!, 'profile')
       }
-      await this.versionCache.setLastSeenProfileVersion(did, payload.version)
+      await this.versionCache.setLastSeenVersion(did, 'profile', payload.version)
       trace.log({ store: 'profiles', operation: 'read', label: `resolveProfile ${did.slice(0, 24)}…`, durationMs: Math.round(performance.now() - start), success: true, meta: { did, found: true, name: profile.name } })
       return { profile, didDocument: payload.didDocument, version: payload.version, fromCache: false }
     } catch (err) {
@@ -169,6 +190,44 @@ export class HttpDiscoveryAdapter implements DiscoveryAdapter {
       return attestations
     } catch (err) {
       trace.log({ store: 'profiles', operation: 'read', label: `resolveAttestations ${did.slice(0, 24)}…`, durationMs: Math.round(performance.now() - start), success: false, error: err instanceof Error ? err.message : String(err), meta: { did } })
+      throw err
+    }
+  }
+
+  async resolveVerifications(did: string): Promise<Attestation[]> {
+    const trace = getTraceLog()
+    const start = performance.now()
+    try {
+      const res = await this.fetchWithTimeout(`${this.baseUrl}/p/${encodeURIComponent(did)}/v`)
+      if (res.status === 404) {
+        trace.log({ store: 'profiles', operation: 'read', label: `resolveVerifications ${did.slice(0, 24)}… (not found)`, durationMs: Math.round(performance.now() - start), success: true, meta: { did, count: 0 } })
+        return []
+      }
+      if (!res.ok) throw new Error(`Verifications fetch failed: ${res.status}`)
+      const jws = await res.text()
+      let payload: Record<string, unknown> | null = null
+      try {
+        const verified = await verifyJwsByDidResolver(jws, {
+          expectedDid: did,
+          didResolver: this.didResolver,
+          crypto: this.crypto,
+        })
+        payload = verified.payload
+      } catch {
+        // Graceful degradation: an unverifiable verifications resource is treated as
+        // empty, mirroring resolveAttestations. Step 3 replaces this with the
+        // ListResource compact-JWS + per-item derivation path.
+        payload = null
+      }
+      if (!payload) return []
+      const data = payload as unknown as PublicVerificationsData
+      const verifications = (Array.isArray(data.verifications) ? data.verifications : []).filter(
+        (entry): entry is Attestation => typeof entry === 'object' && entry !== null,
+      )
+      trace.log({ store: 'profiles', operation: 'read', label: `resolveVerifications ${did.slice(0, 24)}…`, durationMs: Math.round(performance.now() - start), success: true, meta: { did, count: verifications.length } })
+      return verifications
+    } catch (err) {
+      trace.log({ store: 'profiles', operation: 'read', label: `resolveVerifications ${did.slice(0, 24)}…`, durationMs: Math.round(performance.now() - start), success: false, error: err instanceof Error ? err.message : String(err), meta: { did } })
       throw err
     }
   }

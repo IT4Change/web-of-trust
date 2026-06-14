@@ -47,9 +47,15 @@ function makeVcJws(input: {
   const from = input.from ?? BOB_DID
   const to = input.to ?? ALICE_DID
   const id = input.id ?? `urn:uuid:${CHALLENGE_NONCE}`
+  const claim = input.claim ?? VERIFICATION_CLAIM
+  // VE-7: verification-attestations carry the WotVerification type marker
+  // (Trust 002 / wot-spec #101); the listener discriminates on it, not the claim.
+  const type = claim === VERIFICATION_CLAIM
+    ? ['VerifiableCredential', 'WotAttestation', 'WotVerification']
+    : ['VerifiableCredential', 'WotAttestation']
   return `header.${Buffer.from(JSON.stringify({
     id,
-    type: ['VerifiableCredential', 'WotAttestation'],
+    type,
     issuer: from,
     validFrom: '2026-05-22T10:00:00Z',
     iss: from,
@@ -58,7 +64,7 @@ function makeVcJws(input: {
     ...(input.inResponseTo ? { inResponseTo: input.inResponseTo } : {}),
     credentialSubject: {
       id: to,
-      claim: input.claim ?? VERIFICATION_CLAIM,
+      claim,
     },
   })).toString('base64url')}.signature`
 }

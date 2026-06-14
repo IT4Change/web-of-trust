@@ -1,6 +1,6 @@
 import type { PublicProfile } from '../../types/identity'
 import type { Attestation } from '../../types/attestation'
-import type { GraphCacheStore, CachedGraphEntry } from '../../ports/GraphCacheStore'
+import type { GraphCacheStore, CachedGraphEntry, GraphCacheSnapshot } from '../../ports/GraphCacheStore'
 
 /**
  * In-memory implementation of GraphCacheStore.
@@ -10,22 +10,21 @@ import type { GraphCacheStore, CachedGraphEntry } from '../../ports/GraphCacheSt
 export class InMemoryGraphCacheStore implements GraphCacheStore {
   private profiles = new Map<string, PublicProfile>()
   private attestationsBySubject = new Map<string, Attestation[]>()
+  // Derived Attestation[] verification list per DID (Sync 004 `/v`), NOT legacy Verification[].
+  private verificationsBySubject = new Map<string, Attestation[]>()
   private fetchedAt = new Map<string, string>()
   private summaryCounts = new Map<string, { verificationCount: number; attestationCount: number }>()
 
-  async cacheEntry(
-    did: string,
-    profile: PublicProfile | null,
-    attestations: Attestation[],
-  ): Promise<void> {
-    const existingSummary = this.summaryCounts.get(did)
+  async cacheEntry(did: string, snapshot: GraphCacheSnapshot): Promise<void> {
+    const { profile, attestations, verifications } = snapshot
     if (profile) {
       this.profiles.set(did, profile)
     }
     this.attestationsBySubject.set(did, attestations)
+    this.verificationsBySubject.set(did, verifications)
     this.fetchedAt.set(did, new Date().toISOString())
     this.summaryCounts.set(did, {
-      verificationCount: existingSummary?.verificationCount ?? 0,
+      verificationCount: verifications.length,
       attestationCount: attestations.length,
     })
   }
@@ -60,6 +59,10 @@ export class InMemoryGraphCacheStore implements GraphCacheStore {
 
   async getCachedAttestations(did: string): Promise<Attestation[]> {
     return this.attestationsBySubject.get(did) ?? []
+  }
+
+  async getCachedVerifications(did: string): Promise<Attestation[]> {
+    return this.verificationsBySubject.get(did) ?? []
   }
 
   async resolveName(did: string): Promise<string | null> {
@@ -117,6 +120,7 @@ export class InMemoryGraphCacheStore implements GraphCacheStore {
   async evict(did: string): Promise<void> {
     this.profiles.delete(did)
     this.attestationsBySubject.delete(did)
+    this.verificationsBySubject.delete(did)
     this.fetchedAt.delete(did)
     this.summaryCounts.delete(did)
   }
@@ -124,6 +128,7 @@ export class InMemoryGraphCacheStore implements GraphCacheStore {
   async clear(): Promise<void> {
     this.profiles.clear()
     this.attestationsBySubject.clear()
+    this.verificationsBySubject.clear()
     this.fetchedAt.clear()
     this.summaryCounts.clear()
   }

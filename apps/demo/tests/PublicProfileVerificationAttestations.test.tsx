@@ -320,8 +320,10 @@ describe('PublicProfile fallback display state', () => {
     await waitFor(() => {
       expect(mocks.graphCacheStore.cacheEntry).toHaveBeenCalledWith(
         profileDid,
-        expect.objectContaining({ did: profileDid }),
-        publicAttestations,
+        expect.objectContaining({
+          profile: expect.objectContaining({ did: profileDid }),
+          attestations: publicAttestations,
+        }),
       )
     })
     expect(Object.keys(mocks.graphCacheStore).sort()).toEqual(['cacheEntry', 'resolveNames'])

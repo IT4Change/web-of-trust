@@ -40,8 +40,10 @@ function createMockDiscovery(overrides: Partial<DiscoveryAdapter> = {}): Discove
   return {
     publishProfile: vi.fn().mockResolvedValue(undefined),
     publishAttestations: vi.fn().mockResolvedValue(undefined),
+    publishVerifications: vi.fn().mockResolvedValue(undefined),
     resolveProfile: vi.fn().mockResolvedValue({ profile: null, fromCache: false }),
     resolveAttestations: vi.fn().mockResolvedValue([]),
+    resolveVerifications: vi.fn().mockResolvedValue([]),
     ...overrides,
   }
 }
@@ -76,7 +78,7 @@ describe('GraphCacheService', () => {
 
     it('should return cached data on network failure', async () => {
       // Pre-populate cache
-      await store.cacheEntry(ALICE_DID, ALICE_PROFILE, [])
+      await store.cacheEntry(ALICE_DID, { profile: ALICE_PROFILE, attestations: [], verifications: [] })
 
       discovery = createMockDiscovery({
         resolveProfile: vi.fn().mockRejectedValue(new Error('Offline')),
@@ -132,7 +134,7 @@ describe('GraphCacheService', () => {
 
   describe('ensureCached', () => {
     it('should return cached data without fetching when fresh', async () => {
-      await store.cacheEntry(ALICE_DID, ALICE_PROFILE, [])
+      await store.cacheEntry(ALICE_DID, { profile: ALICE_PROFILE, attestations: [], verifications: [] })
 
       const entry = await service.ensureCached(ALICE_DID)
 
@@ -159,7 +161,7 @@ describe('GraphCacheService', () => {
     })
 
     it('should return stale data and trigger refresh', async () => {
-      await store.cacheEntry(ALICE_DID, ALICE_PROFILE, [])
+      await store.cacheEntry(ALICE_DID, { profile: ALICE_PROFILE, attestations: [], verifications: [] })
 
       const updatedProfile = { ...ALICE_PROFILE, name: 'Alice Updated' }
       discovery = createMockDiscovery({
@@ -185,7 +187,7 @@ describe('GraphCacheService', () => {
   describe('refreshContacts', () => {
     it('should refresh only stale or missing contacts', async () => {
       // Alice is fresh in cache
-      await store.cacheEntry(ALICE_DID, ALICE_PROFILE, [])
+      await store.cacheEntry(ALICE_DID, { profile: ALICE_PROFILE, attestations: [], verifications: [] })
 
       // Bob is not cached
       discovery = createMockDiscovery({
@@ -225,8 +227,8 @@ describe('GraphCacheService', () => {
     })
 
     it('should do nothing when all contacts are fresh', async () => {
-      await store.cacheEntry(ALICE_DID, ALICE_PROFILE, [])
-      await store.cacheEntry(BOB_DID, BOB_PROFILE, [])
+      await store.cacheEntry(ALICE_DID, { profile: ALICE_PROFILE, attestations: [], verifications: [] })
+      await store.cacheEntry(BOB_DID, { profile: BOB_PROFILE, attestations: [], verifications: [] })
 
       await service.refreshContacts([ALICE_DID, BOB_DID])
 
@@ -313,7 +315,7 @@ describe('GraphCacheService', () => {
 
   describe('resolveName', () => {
     it('should return name from cache', async () => {
-      await store.cacheEntry(ALICE_DID, ALICE_PROFILE, [])
+      await store.cacheEntry(ALICE_DID, { profile: ALICE_PROFILE, attestations: [], verifications: [] })
 
       const name = await service.resolveName(ALICE_DID)
 
@@ -329,8 +331,8 @@ describe('GraphCacheService', () => {
 
   describe('resolveNames', () => {
     it('should batch resolve names from cache', async () => {
-      await store.cacheEntry(ALICE_DID, ALICE_PROFILE, [])
-      await store.cacheEntry(BOB_DID, BOB_PROFILE, [])
+      await store.cacheEntry(ALICE_DID, { profile: ALICE_PROFILE, attestations: [], verifications: [] })
+      await store.cacheEntry(BOB_DID, { profile: BOB_PROFILE, attestations: [], verifications: [] })
 
       const names = await service.resolveNames([ALICE_DID, BOB_DID, CARLA_DID])
 
@@ -353,7 +355,7 @@ describe('InMemoryGraphCacheStore', () => {
     it('should store and retrieve a complete entry', async () => {
       const attestations = [makeAttestation(BOB_DID, ALICE_DID, 'Hilfsbereit')]
 
-      await store.cacheEntry(ALICE_DID, ALICE_PROFILE, attestations)
+      await store.cacheEntry(ALICE_DID, { profile: ALICE_PROFILE, attestations: attestations, verifications: [] })
       const entry = await store.getEntry(ALICE_DID)
 
       expect(entry).not.toBeNull()
@@ -366,7 +368,7 @@ describe('InMemoryGraphCacheStore', () => {
     })
 
     it('should handle null profile', async () => {
-      await store.cacheEntry(ALICE_DID, null, [])
+      await store.cacheEntry(ALICE_DID, { profile: null, attestations: [], verifications: [] })
       const entry = await store.getEntry(ALICE_DID)
 
       expect(entry).not.toBeNull()
@@ -382,8 +384,8 @@ describe('InMemoryGraphCacheStore', () => {
 
   describe('getEntries', () => {
     it('should batch retrieve entries', async () => {
-      await store.cacheEntry(ALICE_DID, ALICE_PROFILE, [])
-      await store.cacheEntry(BOB_DID, BOB_PROFILE, [])
+      await store.cacheEntry(ALICE_DID, { profile: ALICE_PROFILE, attestations: [], verifications: [] })
+      await store.cacheEntry(BOB_DID, { profile: BOB_PROFILE, attestations: [], verifications: [] })
 
       const entries = await store.getEntries([ALICE_DID, BOB_DID, CARLA_DID])
 
@@ -397,7 +399,7 @@ describe('InMemoryGraphCacheStore', () => {
   describe('getCachedAttestations', () => {
     it('should return cached attestations', async () => {
       const attestations = [makeAttestation(BOB_DID, ALICE_DID, 'Zuverlässig')]
-      await store.cacheEntry(ALICE_DID, ALICE_PROFILE, attestations)
+      await store.cacheEntry(ALICE_DID, { profile: ALICE_PROFILE, attestations: attestations, verifications: [] })
 
       const result = await store.getCachedAttestations(ALICE_DID)
       expect(result).toHaveLength(1)
@@ -411,7 +413,7 @@ describe('InMemoryGraphCacheStore', () => {
 
   describe('resolveName and resolveNames', () => {
     it('should resolve single name', async () => {
-      await store.cacheEntry(ALICE_DID, ALICE_PROFILE, [])
+      await store.cacheEntry(ALICE_DID, { profile: ALICE_PROFILE, attestations: [], verifications: [] })
       expect(await store.resolveName(ALICE_DID)).toBe('Alice')
     })
 
@@ -420,8 +422,8 @@ describe('InMemoryGraphCacheStore', () => {
     })
 
     it('should batch resolve names', async () => {
-      await store.cacheEntry(ALICE_DID, ALICE_PROFILE, [])
-      await store.cacheEntry(BOB_DID, BOB_PROFILE, [])
+      await store.cacheEntry(ALICE_DID, { profile: ALICE_PROFILE, attestations: [], verifications: [] })
+      await store.cacheEntry(BOB_DID, { profile: BOB_PROFILE, attestations: [], verifications: [] })
 
       const names = await store.resolveNames([ALICE_DID, BOB_DID, CARLA_DID])
 
@@ -433,8 +435,8 @@ describe('InMemoryGraphCacheStore', () => {
 
   describe('search', () => {
     it('should search by profile name', async () => {
-      await store.cacheEntry(ALICE_DID, ALICE_PROFILE, [])
-      await store.cacheEntry(BOB_DID, BOB_PROFILE, [])
+      await store.cacheEntry(ALICE_DID, { profile: ALICE_PROFILE, attestations: [], verifications: [] })
+      await store.cacheEntry(BOB_DID, { profile: BOB_PROFILE, attestations: [], verifications: [] })
 
       const results = await store.search('alice')
 
@@ -443,7 +445,7 @@ describe('InMemoryGraphCacheStore', () => {
     })
 
     it('should search by bio', async () => {
-      await store.cacheEntry(ALICE_DID, ALICE_PROFILE, [])
+      await store.cacheEntry(ALICE_DID, { profile: ALICE_PROFILE, attestations: [], verifications: [] })
 
       const results = await store.search('gärtnerin')
 
@@ -453,7 +455,7 @@ describe('InMemoryGraphCacheStore', () => {
 
     it('should search by attestation claim', async () => {
       const attestations = [makeAttestation(BOB_DID, ALICE_DID, 'Kann gut kochen')]
-      await store.cacheEntry(ALICE_DID, ALICE_PROFILE, attestations)
+      await store.cacheEntry(ALICE_DID, { profile: ALICE_PROFILE, attestations: attestations, verifications: [] })
 
       const results = await store.search('kochen')
 
@@ -462,7 +464,7 @@ describe('InMemoryGraphCacheStore', () => {
     })
 
     it('should return empty for no matches', async () => {
-      await store.cacheEntry(ALICE_DID, ALICE_PROFILE, [])
+      await store.cacheEntry(ALICE_DID, { profile: ALICE_PROFILE, attestations: [], verifications: [] })
 
       const results = await store.search('xyz123')
 
@@ -483,7 +485,7 @@ describe('InMemoryGraphCacheStore', () => {
 
     it('should update counts without overwriting attestation detail data', async () => {
       const attestations = [makeAttestation(BOB_DID, ALICE_DID, 'Zuverlässig')]
-      await store.cacheEntry(ALICE_DID, ALICE_PROFILE, attestations)
+      await store.cacheEntry(ALICE_DID, { profile: ALICE_PROFILE, attestations: attestations, verifications: [] })
 
       await store.updateSummary(ALICE_DID, 'Alice Updated', 5, 3)
 
@@ -506,22 +508,25 @@ describe('InMemoryGraphCacheStore', () => {
       expect(entry!.verificationCount).toBe(0)
     })
 
-    it('should preserve verification summary count when cacheEntry refreshes details', async () => {
+    it('cacheEntry now sets the verification count authoritatively from the verifications list (VE-2)', async () => {
+      // VE-2: cacheEntry carries the verifications resource, so a detail refresh
+      // overwrites the lightweight summary count instead of preserving it.
       await store.updateSummary(ALICE_DID, 'Alice', 10, 5)
 
       const attestations = [makeAttestation(BOB_DID, ALICE_DID, 'Zuverlässig')]
-      await store.cacheEntry(ALICE_DID, ALICE_PROFILE, attestations)
+      const verifications = [makeAttestation(CARLA_DID, ALICE_DID, 'in-person verifiziert')]
+      await store.cacheEntry(ALICE_DID, { profile: ALICE_PROFILE, attestations, verifications })
 
       const entry = await store.getEntry(ALICE_DID)
-      expect(entry!.verificationCount).toBe(10)
+      expect(entry!.verificationCount).toBe(1)
       expect(entry!.attestationCount).toBe(1)
     })
   })
 
   describe('evict and clear', () => {
     it('should evict a single DID', async () => {
-      await store.cacheEntry(ALICE_DID, ALICE_PROFILE, [])
-      await store.cacheEntry(BOB_DID, BOB_PROFILE, [])
+      await store.cacheEntry(ALICE_DID, { profile: ALICE_PROFILE, attestations: [], verifications: [] })
+      await store.cacheEntry(BOB_DID, { profile: BOB_PROFILE, attestations: [], verifications: [] })
 
       await store.evict(ALICE_DID)
 
@@ -530,8 +535,8 @@ describe('InMemoryGraphCacheStore', () => {
     })
 
     it('should clear all entries', async () => {
-      await store.cacheEntry(ALICE_DID, ALICE_PROFILE, [])
-      await store.cacheEntry(BOB_DID, BOB_PROFILE, [])
+      await store.cacheEntry(ALICE_DID, { profile: ALICE_PROFILE, attestations: [], verifications: [] })
+      await store.cacheEntry(BOB_DID, { profile: BOB_PROFILE, attestations: [], verifications: [] })
 
       await store.clear()
 
@@ -542,7 +547,14 @@ describe('InMemoryGraphCacheStore', () => {
 })
 
 describe('Trust 002 graph cache port source guard', () => {
-  it('removes legacy Verification detail surface from the core graph cache port', () => {
+  // VE-2 inversion (1.B.3 Step 2): the May refactor (9117c82) BANNED
+  // getCachedVerifications / resolveVerifications / verifications-in-cacheEntry
+  // because it removed the unspecified legacy `/v` publication. This slice
+  // RESTORES `/v` spec-driven as a compact-JWS ListResource, so those symbols
+  // MUST now exist. The remaining ban stays: the new path carries the DERIVED
+  // `Attestation[]` form — never the legacy structured `Verification[]` type and
+  // never a `types/verification` import.
+  it('exposes the spec-form verification surface while keeping the legacy Verification type banned', () => {
     const files = {
       port: 'packages/wot-core/src/ports/GraphCacheStore.ts',
       inMemory: 'packages/wot-core/src/adapters/discovery/InMemoryGraphCacheStore.ts',
@@ -573,40 +585,34 @@ describe('Trust 002 graph cache port source guard', () => {
 
     const hits: string[] = []
 
-    for (const key of ['port', 'inMemory', 'automerge'] as const) {
+    // STILL BANNED: legacy structured Verification type anywhere on the cache surface.
+    for (const key of ['port', 'inMemory', 'service', 'offline', 'automerge'] as const) {
       if (/types\/verification/.test(text[key])) {
         hits.push(`${files[key]} still imports legacy Verification type`)
       }
-      if (/getCachedVerifications\s*\(/.test(text[key])) {
-        hits.push(`${files[key]} still exposes getCachedVerifications`)
-      }
     }
-
     if (
       /verifications\s*:\s*Verification\[\]/.test(text.port) ||
       /verifications\s*:\s*Verification\[\]/.test(text.inMemory) ||
       /_verifications\s*:\s*Verification\[\]/.test(text.automerge)
     ) {
-      hits.push('graph cache cacheEntry still accepts Verification[] detail data')
+      hits.push('graph cache still accepts the legacy Verification[] detail form')
     }
 
-    if (
-      /private\s+verifications\s*=/.test(text.inMemory) ||
-      /this\.verifications/.test(text.inMemory)
-    ) {
-      hits.push('InMemoryGraphCacheStore still stores legacy Verification details')
+    // NOW REQUIRED (VE-2): the spec-form Attestation[]-derived verification surface.
+    for (const key of ['port', 'inMemory', 'automerge'] as const) {
+      if (!/getCachedVerifications\s*\(/.test(text[key])) {
+        hits.push(`${files[key]} must expose getCachedVerifications (Attestation[] form)`)
+      }
     }
-
-    if (/resolveVerifications\s*\(/.test(text.service)) {
-      hits.push('GraphCacheService.refresh still fetches legacy verifications for graph cache')
+    if (!/resolveVerifications\s*\(/.test(text.service)) {
+      hits.push('GraphCacheService.refresh must fetch verifications for the graph cache')
     }
-
-    if (/graphCache\.getCachedVerifications/.test(text.offline)) {
-      hits.push('OfflineFirstDiscoveryAdapter still falls back to graph-cache legacy verifications')
+    if (!/graphCache\.getCachedVerifications/.test(text.offline)) {
+      hits.push('OfflineFirstDiscoveryAdapter must fall back to graph-cache verifications')
     }
-
-    if (/resolveVerifications/.test(text.offline)) {
-      hits.push('OfflineFirstDiscoveryAdapter should no longer expose resolveVerifications')
+    if (!/resolveVerifications/.test(text.offline)) {
+      hits.push('OfflineFirstDiscoveryAdapter must expose resolveVerifications')
     }
 
     expect(hits).toEqual([])

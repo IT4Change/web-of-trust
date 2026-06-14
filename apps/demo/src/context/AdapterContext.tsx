@@ -42,14 +42,10 @@ import { LocalCacheStore } from '../adapters/LocalCacheStore'
 import { LocalOutboxStore } from '../adapters/LocalOutboxStore'
 import { appRuntimeConfig, createHttpDiscoveryAdapter, getOrCreateBrowserDeviceId, protocolCrypto } from '../runtime/appRuntime'
 import { useIdentity } from './IdentityContext'
+import { isVerificationAttestation } from '../lib/verification-attestation'
 // Yjs and Automerge adapters are dynamically imported to keep WASM out of the default bundle
 
 const USE_YJS = import.meta.env.VITE_CRDT !== 'automerge'
-const VERIFICATION_ATTESTATION_CLAIM = 'in-person verifiziert'
-
-function isVerificationAttestation(attestation: Attestation): boolean {
-  return attestation.claim === VERIFICATION_ATTESTATION_CLAIM && Boolean(attestation.vcJws)
-}
 
 interface DemoStoragePort {
   createIdentity(did: string, profile: Profile): Promise<Identity>

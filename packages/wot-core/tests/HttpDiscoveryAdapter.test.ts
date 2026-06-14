@@ -18,12 +18,13 @@ function contentTypeOf(init: RequestInit | undefined): string | undefined {
 
 function createVersionCache(): ProfileVersionCache {
   const versions = new Map<string, number>()
+  const key = (did: string, resource: string) => `${did}:${resource}`
   return {
-    async getLastSeenProfileVersion(did: string) {
-      return versions.get(did)
+    async getLastSeenVersion(did: string, resource) {
+      return versions.get(key(did, resource))
     },
-    async setLastSeenProfileVersion(did: string, version: number) {
-      versions.set(did, version)
+    async setLastSeenVersion(did: string, resource, version: number) {
+      versions.set(key(did, resource), version)
     },
   }
 }

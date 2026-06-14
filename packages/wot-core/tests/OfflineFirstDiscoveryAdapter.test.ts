@@ -7,7 +7,6 @@ import { InMemoryGraphCacheStore } from '../src/adapters/discovery/InMemoryGraph
 import {
   ProfileResourceRollbackError,
   type DiscoveryAdapter,
-  type ProfileVersionCache,
   type PublicAttestationsData,
 } from '../src/ports/DiscoveryAdapter'
 import type { PublicProfile } from '../src/types/identity'
@@ -33,21 +32,11 @@ function createMockInner(overrides: Partial<DiscoveryAdapter> = {}): DiscoveryAd
   return {
     publishProfile: vi.fn().mockResolvedValue(undefined),
     publishAttestations: vi.fn().mockResolvedValue(undefined),
+    publishVerifications: vi.fn().mockResolvedValue(undefined),
     resolveProfile: vi.fn().mockResolvedValue({ profile: null, fromCache: false }),
     resolveAttestations: vi.fn().mockResolvedValue([]),
+    resolveVerifications: vi.fn().mockResolvedValue([]),
     ...overrides,
-  }
-}
-
-function createVersionCache(): ProfileVersionCache {
-  const versions = new Map<string, number>()
-  return {
-    async getLastSeenProfileVersion(did: string) {
-      return versions.get(did)
-    },
-    async setLastSeenProfileVersion(did: string, version: number) {
-      versions.set(did, version)
-    },
   }
 }
 
@@ -123,7 +112,7 @@ describe('OfflineFirstDiscoveryAdapter', () => {
 
     it('should return cached profile with fromCache=true when inner fails', async () => {
       // Pre-populate graph cache
-      await graphCache.cacheEntry(ALICE_DID, TEST_PROFILE, [])
+      await graphCache.cacheEntry(ALICE_DID, { profile: TEST_PROFILE, attestations: [], verifications: [] })
 
       inner = createMockInner({
         resolveProfile: vi.fn().mockRejectedValue(new Error('Offline')),
@@ -165,19 +154,18 @@ describe('OfflineFirstDiscoveryAdapter', () => {
       expect(cached).toBeNull()
     })
 
-    it('should reject rollback instead of falling back to cached profile', async () => {
-      await graphCache.cacheEntry(ALICE_DID, TEST_PROFILE, [])
+    it('should re-throw an inner rollback instead of falling back to cached profile', async () => {
+      // VE-3: version monotonicity + rollback detection now live exclusively in
+      // the inner HTTP adapter. The decorator must surface the inner
+      // ProfileResourceRollbackError, never mask it with the offline cache.
+      await graphCache.cacheEntry(ALICE_DID, { profile: TEST_PROFILE, attestations: [], verifications: [] })
 
       inner = createMockInner({
         resolveProfile: vi.fn()
           .mockResolvedValueOnce({ profile: TEST_PROFILE, version: 7, fromCache: false })
-          .mockResolvedValueOnce({
-            profile: { ...TEST_PROFILE, name: 'Alice stale' },
-            version: 6,
-            fromCache: false,
-          }),
+          .mockRejectedValueOnce(new ProfileResourceRollbackError(ALICE_DID, 6, 7, 'profile')),
       })
-      adapter = new OfflineFirstDiscoveryAdapter(inner, publishState, graphCache, createVersionCache())
+      adapter = new OfflineFirstDiscoveryAdapter(inner, publishState, graphCache)
 
       await expect(adapter.resolveProfile(ALICE_DID)).resolves.toMatchObject({
         profile: TEST_PROFILE,
@@ -204,7 +192,7 @@ describe('OfflineFirstDiscoveryAdapter', () => {
 
     it('should return cached attestations when inner fails', async () => {
       const attestations = [{ id: 'a1', from: 'did:key:bob', to: ALICE_DID, claim: 'Test', createdAt: '2026-01-01', proof: {} }] as any
-      await graphCache.cacheEntry(ALICE_DID, TEST_PROFILE, attestations)
+      await graphCache.cacheEntry(ALICE_DID, { profile: TEST_PROFILE, attestations, verifications: [] })
 
       inner = createMockInner({
         resolveAttestations: vi.fn().mockRejectedValue(new Error('Offline')),
@@ -358,11 +346,12 @@ describe('OfflineFirstDiscoveryAdapter', () => {
   })
 })
 
-describe('Discovery 094 legacy verification publication source guard', () => {
-  // Sync 004 profile-service `/p/{did}/v` protocol/server compatibility and Trust
-  // 002 verification types/workflows stay. This guard only removes the broad
-  // DiscoveryAdapter publication/resolve surface and PublishStateField slot for
-  // legacy `Verification[]` publication via the discovery port.
+describe('Discovery 1.B.3 spec-form verification publication surface', () => {
+  // VE-1/VE-2 inversion (1.B.3 Step 2): the May refactor (#094 / 9117c82) removed
+  // the UNSPECIFIED legacy `/v` publication surface. This slice RESTORES `/v`
+  // spec-driven (Sync 004 §004, wot-spec #101/#102), so PublicVerificationsData /
+  // publishVerifications / resolveVerifications MUST exist on the discovery surface.
+  // STILL BANNED: the legacy structured Verification type module import.
   const read = (file: string): string => {
     const candidates = [file, path.join('..', '..', file), path.join('..', file)]
     for (const candidate of candidates) {
@@ -371,27 +360,22 @@ describe('Discovery 094 legacy verification publication source guard', () => {
     throw new Error(`source guard cannot locate ${file}`)
   }
 
-  it('removes PublicVerificationsData/publishVerifications/resolveVerifications from the broad DiscoveryAdapter surface', () => {
-    const files = {
-      port: 'packages/wot-core/src/ports/DiscoveryAdapter.ts',
-      http: 'packages/wot-core/src/adapters/discovery/HttpDiscoveryAdapter.ts',
-      offline: 'packages/wot-core/src/adapters/discovery/OfflineFirstDiscoveryAdapter.ts',
-      index: 'packages/wot-core/src/index.ts',
-    } as const
+  it('exposes PublicVerificationsData/publishVerifications/resolveVerifications on the DiscoveryAdapter surface', () => {
+    const port = read('packages/wot-core/src/ports/DiscoveryAdapter.ts')
+    const http = read('packages/wot-core/src/adapters/discovery/HttpDiscoveryAdapter.ts')
+    const offline = read('packages/wot-core/src/adapters/discovery/OfflineFirstDiscoveryAdapter.ts')
 
     const hits: string[] = []
-    const legacyNeedles = ['PublicVerificationsData', 'publishVerifications', 'resolveVerifications'] as const
 
-    for (const [, file] of Object.entries(files)) {
-      const text = read(file)
-      for (const needle of legacyNeedles) {
-        if (text.includes(needle)) hits.push(`${file} still contains ${needle}`)
-      }
+    if (!port.includes('PublicVerificationsData')) hits.push('DiscoveryAdapter port must define PublicVerificationsData')
+    for (const [file, text] of [['DiscoveryAdapter.ts', port], ['HttpDiscoveryAdapter.ts', http], ['OfflineFirstDiscoveryAdapter.ts', offline]] as const) {
+      if (!text.includes('publishVerifications')) hits.push(`${file} must expose publishVerifications`)
+      if (!text.includes('resolveVerifications')) hits.push(`${file} must expose resolveVerifications`)
     }
 
-    const httpText = read(files.http)
-    if (/from\s+['"][^'"]*types\/verification['"]/.test(httpText)) {
-      hits.push(`${files.http} still imports the legacy Verification type`)
+    // STILL BANNED: legacy structured Verification type import in the HTTP adapter.
+    if (/from\s+['"][^'"]*types\/verification['"]/.test(http)) {
+      hits.push('HttpDiscoveryAdapter.ts still imports the legacy Verification type')
     }
 
     expect(hits).toEqual([])

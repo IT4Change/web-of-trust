@@ -327,7 +327,12 @@ describe('Trust 002 verification status source guard', () => {
     expect(hits).toEqual([])
   })
 
-  it('drops legacy Verification detail storage and migration from the demo graph cache while keeping attestations', () => {
+  it('carries the spec-form verification cache (Attestation[]) while keeping the legacy structured Verification storage banned', () => {
+    // VE-2 inversion (1.B.3 Step 2): the May refactor removed the unspecified
+    // graph-cache verification surface. This slice RESTORES it as the derived
+    // Attestation[] form (Sync 004 `/v`), so VERIFICATIONS_KEY / graph:verifications
+    // / this.verifications / getCachedVerifications MUST exist. STILL BANNED: the
+    // legacy STRUCTURED Verification document fields.
     const graphFile = 'apps/demo/src/adapters/AutomergeGraphCacheStore.ts'
     const graphPath = fs.existsSync(graphFile) ? graphFile : path.join('..', '..', graphFile)
     const graphText = fs.readFileSync(graphPath, 'utf8')
@@ -338,23 +343,34 @@ describe('Trust 002 verification status source guard', () => {
 
     const hits: string[] = []
 
+    // STILL BANNED: legacy structured Verification document shape.
     for (const needle of [
-      'VERIFICATIONS_KEY',
-      'graph:verifications',
       'VerificationDoc',
-      'private verifications',
-      'this.verifications',
       'proofJson',
       'locationJson',
       'verificationId',
     ]) {
       if (graphText.includes(needle)) {
-        hits.push(`AutomergeGraphCacheStore.ts still contains ${needle}`)
+        hits.push(`AutomergeGraphCacheStore.ts still contains legacy ${needle}`)
       }
     }
 
-    if (contextText.includes('graph:verifications') || contextText.includes('cachedGraph.verifications')) {
+    if (contextText.includes('cachedGraph.verifications')) {
       hits.push('AdapterContext.tsx still migrates cachedGraph verifications')
+    }
+
+    // NOW REQUIRED: spec-form Attestation[]-derived verification cache surface.
+    for (const needle of [
+      'VERIFICATIONS_KEY',
+      'graph:verifications',
+      'this.verifications',
+    ]) {
+      if (!graphText.includes(needle)) {
+        hits.push(`AutomergeGraphCacheStore.ts must carry ${needle}`)
+      }
+    }
+    if (!/getCachedVerifications/.test(graphText)) {
+      hits.push('AutomergeGraphCacheStore must expose getCachedVerifications (Attestation[] form)')
     }
 
     if (!graphText.includes('getCachedAttestations')) {
@@ -362,10 +378,6 @@ describe('Trust 002 verification status source guard', () => {
     }
     if (!graphText.includes('ATTESTATIONS_KEY')) {
       hits.push('AutomergeGraphCacheStore.ts lost attestation persistence')
-    }
-
-    if (/getCachedVerifications/.test(graphText)) {
-      hits.push('AutomergeGraphCacheStore should no longer expose getCachedVerifications')
     }
 
     expect(hits).toEqual([])

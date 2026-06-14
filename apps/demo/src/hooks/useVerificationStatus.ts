@@ -3,14 +3,13 @@ import type { Attestation } from '@web_of_trust/core/types'
 import { useAdapters } from '../context'
 import { useIdentity } from '../context'
 import { useSubscribable } from './useSubscribable'
+import { isVerificationAttestation } from '../lib/verification-attestation'
 
 export type VerificationDirection = 'mutual' | 'incoming' | 'outgoing' | 'none'
 
-const VERIFICATION_ATTESTATION_CLAIM = 'in-person verifiziert'
-
-export function isVerificationAttestation(attestation: Attestation): boolean {
-  return attestation.claim === VERIFICATION_ATTESTATION_CLAIM && Boolean(attestation.vcJws)
-}
+// VE-7: the derived-form predicate + display label live in one dependency-free
+// module; re-exported here to keep the existing hook import surface stable.
+export { VERIFICATION_ATTESTATION_CLAIM, isVerificationAttestation } from '../lib/verification-attestation'
 
 /**
  * Compute verification status for a specific contact.

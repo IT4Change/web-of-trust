@@ -3,11 +3,10 @@ import type {
   AttestationVcPayload,
   VerificationAttestationAcceptanceDecision,
 } from '@web_of_trust/core/protocol'
+import { isVerificationAttestation } from '@web_of_trust/core/protocol'
 import type { CounterVerificationAcceptanceDecision } from '@web_of_trust/core/application'
 import { DuplicateAttestationError } from './AttestationService'
 import type { AttestationDeliveryListener } from './InboxReceptionHost'
-
-const VERIFICATION_ATTESTATION_CLAIM = 'in-person verifiziert'
 
 export interface IncomingAttestationDialogInfo {
   attestationId: string
@@ -145,9 +144,6 @@ async function saveUnlessDuplicate(
 }
 
 function isVerificationAttestationPayload(payload: AttestationVcPayload): boolean {
-  return (
-    payload.type.includes('VerifiableCredential') &&
-    payload.type.includes('WotAttestation') &&
-    payload.credentialSubject.claim === VERIFICATION_ATTESTATION_CLAIM
-  )
+  // VE-7: discriminate on the central WotVerification `type` marker.
+  return isVerificationAttestation(payload)
 }

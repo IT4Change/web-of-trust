@@ -148,9 +148,10 @@ export function PublicProfile() {
         setPublicAttestations(aData)
         setState(profileResult.fromCache ? 'loaded-offline' : 'loaded')
 
-        // Cache fresh data for offline use
+        // Cache fresh data for offline use. The `/v` union resolve is wired in
+        // Step 6; for now verifications stay empty here.
         if (!profileResult.fromCache && adapters?.graphCacheStore) {
-          adapters.graphCacheStore.cacheEntry(decodedDid, profileResult.profile, aData).catch(() => {})
+          adapters.graphCacheStore.cacheEntry(decodedDid, { profile: profileResult.profile, attestations: aData, verifications: [] }).catch(() => {})
         }
       } catch {
         if (tryLocalFallbackRef.current()) return
