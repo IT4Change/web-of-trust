@@ -12,6 +12,7 @@ import type {
 import type {
   Attestation,
 } from '@web_of_trust/core/types'
+import { isVerificationVcJws } from '@web_of_trust/core/protocol'
 import type { LocalCacheStore } from './LocalCacheStore'
 
 const ENTRIES_KEY = 'graph:entries'
@@ -140,6 +141,12 @@ export class AutomergeGraphCacheStore implements GraphCacheStore {
         ...(a.context != null ? { context: a.context } : {}),
         createdAt: a.attestationCreatedAt,
         vcJws: a.vcJws,
+        // Re-derive the type-borne verification marker from the cached vcJws
+        // (review BLOCKER fix, extended to the /v cache fallback per Codex
+        // review #198): OfflineFirstDiscoveryAdapter.resolveVerifications() can
+        // return this fallback, and consumers classify via isVerification —
+        // absent would misclassify a genuine /v verification as a generic one.
+        ...(isVerificationVcJws(a.vcJws) ? { isVerification: true } : {}),
       }))
   }
 

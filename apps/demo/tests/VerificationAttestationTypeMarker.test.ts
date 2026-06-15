@@ -5,6 +5,8 @@ import type { IdentitySession, Attestation } from '@web_of_trust/core/types'
 import { isVerificationAttestation } from '../src/lib/verification-attestation'
 import { attestationFromDoc } from '../src/adapters/AutomergeStorageAdapter'
 import type { AttestationDoc } from '@web_of_trust/adapter-automerge'
+import { AutomergeGraphCacheStore } from '../src/adapters/AutomergeGraphCacheStore'
+import type { LocalCacheStore } from '../src/adapters/LocalCacheStore'
 
 /**
  * Review MAJOR 2: the demo must classify verifications by the WotVerification
@@ -91,6 +93,41 @@ describe('demo isVerificationAttestation — type-borne classification (review M
     it('does not promote a stored spoof to a verification after reload', () => {
       const reloaded = attestationFromDoc(toDoc(spoof))
       expect(isVerificationAttestation(reloaded)).toBe(false)
+    })
+  })
+
+  /**
+   * Codex review #198: the GraphCache /v fallback (offline) reconstructs cached
+   * verification attestations WITHOUT a persisted isVerification field.
+   * `mapSubjectDocs` must re-derive it from the cached vcJws — otherwise
+   * OfflineFirstDiscoveryAdapter.resolveVerifications() would hand consumers /v
+   * data that classifies as non-verification (lost trust badge offline).
+   */
+  describe('GraphCache /v fallback keeps the verification marker (Codex review #198)', () => {
+    // Minimal in-memory LocalCacheStore stand-in — cacheEntry only fire-and-forget
+    // persists via set(); getCached* read from the in-memory maps.
+    const fakeStore = { set: () => Promise.resolve() } as unknown as LocalCacheStore
+
+    it('classifies a cached /v verification as a verification', async () => {
+      const cache = new AutomergeGraphCacheStore(fakeStore)
+      await cache.cacheEntry(realVerification.to, {
+        attestations: [],
+        verifications: [realVerification],
+      })
+      const cachedV = await cache.getCachedVerifications(realVerification.to)
+      expect(cachedV).toHaveLength(1)
+      expect(isVerificationAttestation(cachedV[0])).toBe(true)
+    })
+
+    it('does not promote a cached /a spoof to a verification', async () => {
+      const cache = new AutomergeGraphCacheStore(fakeStore)
+      await cache.cacheEntry(spoof.to, {
+        attestations: [spoof],
+        verifications: [],
+      })
+      const cachedA = await cache.getCachedAttestations(spoof.to)
+      expect(cachedA).toHaveLength(1)
+      expect(isVerificationAttestation(cachedA[0])).toBe(false)
     })
   })
 })

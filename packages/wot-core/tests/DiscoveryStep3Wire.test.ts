@@ -303,6 +303,29 @@ describe('HttpDiscoveryAdapter per-resource client rollback (/v, /a)', () => {
     await expect(adapter.resolveAttestations(did)).rejects.toBeInstanceOf(ProfileResourceRollbackError)
   })
 
+  it('idempotency fast-path still detects rollback when a shared baseline advanced (Codex review #198)', async () => {
+    const did = holder.getDid()
+    const att = await makePlainAttestation(issuer, did)
+    // The broker re-serves the SAME exact v5 JWS bytes both times.
+    const jws5 = await holder.signJws({ did, version: 5, attestations: [att.vcJws], updatedAt: '2026-05-18T10:43:25.976Z' })
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(jws5, { status: 200 }))
+      .mockResolvedValueOnce(new Response(jws5, { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+    const cache = createVersionCache()
+    const adapter = new HttpDiscoveryAdapter('https://profiles.example', cache, undefined, crypto)
+
+    // First resolve caches the verified JWS + version 5 and sets last-seen = 5.
+    await expect(adapter.resolveAttestations(did)).resolves.toHaveLength(1)
+
+    // Another tab/adapter sharing the (localStorage) baseline advances it to 6.
+    await cache.setLastSeenVersion(did, 'attestations', 6)
+
+    // The broker re-serves the SAME v5 JWS. The byte-identical fast-path matches,
+    // but must NOT return the cached result — v5 < last-seen 6 is a rollback.
+    await expect(adapter.resolveAttestations(did)).rejects.toBeInstanceOf(ProfileResourceRollbackError)
+  })
+
   it('rejects an older /v version with resource="verifications", independent of /a', async () => {
     const did = holder.getDid()
     const ver = await makeVerificationAttestation(issuer, did)

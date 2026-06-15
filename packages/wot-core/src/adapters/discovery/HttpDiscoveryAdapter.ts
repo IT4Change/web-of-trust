@@ -42,7 +42,7 @@ export class HttpDiscoveryAdapter implements DiscoveryAdapter {
   private readonly TIMEOUT_MS = 3_000
   private readonly publicationWorkflow = createProfilePublicationWorkflow()
   /** Z.183 idempotency guard: last verified JWS + derived result per `{did}:{resource}`. */
-  private readonly lastVerified = new Map<string, { jws: string; attestations: Attestation[] }>()
+  private readonly lastVerified = new Map<string, { jws: string; attestations: Attestation[]; version: number }>()
 
   constructor(
     private baseUrl: string,
@@ -261,11 +261,21 @@ export class HttpDiscoveryAdapter implements DiscoveryAdapter {
       const jws = await res.text()
 
       // Z.183 SHOULD: if the exact same JWS bytes were already verified+derived,
-      // skip the re-verification/re-derivation and return the cached result. The
-      // version is identical, so the rollback baseline is unaffected.
+      // skip the re-verification/re-derivation and return the cached result.
+      // The idempotency fast-path may skip the crypto work, but it MUST NOT skip
+      // the rollback check: the last-seen baseline lives in versionCache
+      // (LocalProfileVersionCache = shared localStorage), so another tab/adapter
+      // instance can have advanced it past this instance's cached version. If the
+      // broker then re-serves the same older JWS, returning it as "idempotent"
+      // would silently bypass rollback detection. Re-check against the current
+      // baseline before trusting the cached result. (Codex review #198)
       const guardKey = `${did}:${kind}`
       const guarded = this.lastVerified.get(guardKey)
       if (guarded && guarded.jws === jws) {
+        const lastSeenVersion = await this.versionCache.getLastSeenVersion(did, kind)
+        if (detectProfileResourceRollback({ fetchedVersion: guarded.version, lastSeenVersion, resource: kind })) {
+          throw new ProfileResourceRollbackError(did, guarded.version, lastSeenVersion!, kind)
+        }
         trace.log({ store: 'profiles', operation: 'read', label: `${label} ${did.slice(0, 24)}… (idempotent)`, durationMs: Math.round(performance.now() - start), success: true, meta: { did, count: guarded.attestations.length } })
         return guarded.attestations
       }
@@ -323,7 +333,7 @@ export class HttpDiscoveryAdapter implements DiscoveryAdapter {
         attestations.push(derived.attestation)
       }
 
-      this.lastVerified.set(guardKey, { jws, attestations })
+      this.lastVerified.set(guardKey, { jws, attestations, version: payload.version })
       trace.log({ store: 'profiles', operation: 'read', label: `${label} ${did.slice(0, 24)}…`, durationMs: Math.round(performance.now() - start), success: true, meta: { did, count: attestations.length, version: payload.version } })
       return attestations
     } catch (err) {
