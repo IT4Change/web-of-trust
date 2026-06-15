@@ -61,4 +61,16 @@ describe('AdapterContext Sync 004 recovery-workflow + disjoint publish split', (
     expect(text).toContain('getAttestationMetadata')
     expect(text).toMatch(/getReceivedAttestations\(\)[\s\S]*getAttestationMetadata\(att\.id\)[\s\S]*if \(meta\?\.accepted\) accepted\.push\(att\)/)
   })
+
+  it('publishes empty /v and /a lists on offline-retry (consent revocation, Codex review #198)', () => {
+    const text = readRepoFile('apps/demo/src/context/AdapterContext.tsx')
+
+    // Regression guard: the offline-retry publish-callback must NOT gate the
+    // resource assignment on a non-empty list. An empty list is the valid new
+    // public state after consent for the last item was revoked; gating on
+    // length would leave the revoked content stale on the server. syncPending
+    // itself gates on the dirty set, so unconditional assignment is safe.
+    expect(text).not.toMatch(/if\s*\(\s*attestations\.length\s*>\s*0\s*\)/)
+    expect(text).not.toMatch(/if\s*\(\s*verifications\.length\s*>\s*0\s*\)/)
+  })
 })

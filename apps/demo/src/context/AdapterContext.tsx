@@ -453,12 +453,16 @@ export function AdapterProvider({ children, identity }: AdapterProviderProps) {
                   updatedAt,
                 }
               }
-              if (attestations.length > 0) {
-                result.attestations = { did, attestations, updatedAt }
-              }
-              if (verifications.length > 0) {
-                result.verifications = { did, verifications, updatedAt }
-              }
+              // Always include both lists — an EMPTY list is the valid new
+              // public state after consent for the last verification/attestation
+              // was revoked. syncPending only publishes the resources that are
+              // actually dirty, so unconditionally providing the data never
+              // causes spurious writes; it just lets a dirty /v or /a be
+              // published with its (possibly empty) current contents. This
+              // matches the primary uploadAttestations path, which also
+              // publishes both lists unconditionally. (Codex review #198.)
+              result.attestations = { did, attestations, updatedAt }
+              result.verifications = { did, verifications, updatedAt }
               return result
             })
           } catch (error) {
