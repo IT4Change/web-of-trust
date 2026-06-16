@@ -65,6 +65,12 @@ export type ProfileResourcePutAcceptance =
 export interface ProfileResourceRollbackOptions {
   fetchedVersion: number
   lastSeenVersion?: number
+  /**
+   * Resource the version belongs to (VE-3). Threaded through so callers can
+   * attribute a rollback to `/p`, `/v` or `/a`; the boolean decision itself is
+   * resource-independent (each resource is compared against its own baseline).
+   */
+  resource?: ProfileServiceResourceKind
 }
 
 // Sync 004 `/p/{did}` profile-resource invariants mirrored here: DID/path

@@ -14,7 +14,9 @@ function loadSpecVector(relativePath: string): any {
 function verificationAttestationPayload(jti: string): AttestationVcPayload {
   return {
     '@context': ['https://www.w3.org/ns/credentials/v2', 'https://web-of-trust.de/vocab/v1'],
-    type: ['VerifiableCredential', 'WotAttestation'],
+    // VE-7: verification-attestations carry the WotVerification type marker
+    // (Trust 002 / wot-spec #101); the acceptance discriminator is type-based.
+    type: ['VerifiableCredential', 'WotAttestation', 'WotVerification'],
     issuer: 'did:key:z6Mko3ZEjKJWQAM5nDXKoZ9jErvvxbWbYgS8KJXYpC5Hbu8a',
     credentialSubject: {
       id: LOCAL_DID,

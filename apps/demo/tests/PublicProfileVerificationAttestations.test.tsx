@@ -24,6 +24,7 @@ const mocks = vi.hoisted(() => {
     discovery: {
       resolveProfile: vi.fn(),
       resolveAttestations: vi.fn(),
+      resolveVerifications: vi.fn(),
     },
     graphCacheStore: {
       cacheEntry: vi.fn(),
@@ -118,14 +119,20 @@ describe('PublicProfile Trust 002 verification-attestation source guard', () => 
     const text = readRepoFile('apps/demo/src/pages/PublicProfile.tsx')
 
     expect(text).not.toContain('import type { PublicProfile as PublicProfileType, Verification')
-    expect(text).not.toContain('resolveVerifications')
     expect(text).not.toContain('watchReceivedVerifications')
     expect(text).not.toContain('Verification[]')
     expect(text).not.toContain('v.timestamp')
 
+    // Step 6 / review MAJOR 2: PublicProfile resolves BOTH lists and keeps them
+    // SEPARATE (no merge + claim-based re-split). The type-correct /v ÷ /a split
+    // from the resolve adapter is preserved; classification never keys off the
+    // claim text, so PublicProfile no longer calls the derived-form predicate.
     expect(text).toContain('resolveAttestations')
-    expect(text).toContain('isVerificationAttestation')
+    expect(text).toContain('resolveVerifications')
     expect(text).toContain('getVerificationStatus')
+    // The merge + claim re-split is gone.
+    expect(text).not.toContain('[...vData, ...aData]')
+    expect(text).not.toContain('isVerificationAttestation')
   })
 })
 
@@ -137,6 +144,9 @@ function makeVerificationAttestation(from: string, to: string): Attestation {
     claim: 'in-person verifiziert',
     createdAt: '2026-05-22T12:00:00.000Z',
     vcJws: 'header.payload.signature',
+    // Type-borne live-verification marker (review MAJOR 2): a real verification
+    // carries it. It belongs in the /v resource (resolveVerifications).
+    isVerification: true,
   }
 }
 
@@ -148,6 +158,7 @@ function makeGenericAttestation(from: string, to: string, claim = 'helped with s
     claim,
     createdAt: '2026-05-22T12:00:00.000Z',
     vcJws: 'header.payload.signature',
+    isVerification: false,
   }
 }
 
@@ -178,6 +189,9 @@ describe('PublicProfile fallback display state', () => {
     mocks.localAttestations = []
     mocks.discovery.resolveProfile.mockReset()
     mocks.discovery.resolveAttestations.mockReset()
+    mocks.discovery.resolveAttestations.mockResolvedValue([])
+    mocks.discovery.resolveVerifications.mockReset()
+    mocks.discovery.resolveVerifications.mockResolvedValue([])
     mocks.graphCacheStore.cacheEntry.mockReset()
     mocks.graphCacheStore.resolveNames.mockReset()
     mocks.graphCacheStore.cacheEntry.mockResolvedValue(undefined)
@@ -212,7 +226,9 @@ describe('PublicProfile fallback display state', () => {
 
       return { profile: null, fromCache: true }
     })
-    mocks.discovery.resolveAttestations.mockImplementation(async (targetDid: string) =>
+    // Verifications come from the /v resource (resolveVerifications), kept
+    // separate from /a (review MAJOR 2).
+    mocks.discovery.resolveVerifications.mockImplementation(async (targetDid: string) =>
       targetDid === firstDid ? [makeVerificationAttestation(verifierDid, firstDid)] : [],
     )
 
@@ -320,10 +336,40 @@ describe('PublicProfile fallback display state', () => {
     await waitFor(() => {
       expect(mocks.graphCacheStore.cacheEntry).toHaveBeenCalledWith(
         profileDid,
-        expect.objectContaining({ did: profileDid }),
-        publicAttestations,
+        expect.objectContaining({
+          profile: expect.objectContaining({ did: profileDid }),
+          attestations: publicAttestations,
+        }),
       )
     })
     expect(Object.keys(mocks.graphCacheStore).sort()).toEqual(['cacheEntry', 'resolveNames'])
+  })
+
+  it('shows the UNION of the disjoint /v and /a resources (Step 6, UX-inhaltsgleich)', async () => {
+    const profileDid = 'did:key:profile'
+    const verifierDid = 'did:key:verifier'
+    const attesterDid = 'did:key:attester'
+
+    mocks.discovery.resolveProfile.mockResolvedValue({
+      profile: { did: profileDid, name: 'Target Profile', updatedAt: '2026-05-22T11:00:00.000Z' },
+      fromCache: false,
+    })
+    // /v carries the verification, /a the generic attestation — disjoint.
+    mocks.discovery.resolveVerifications.mockResolvedValue([
+      makeVerificationAttestation(verifierDid, profileDid),
+    ])
+    mocks.discovery.resolveAttestations.mockResolvedValue([
+      makeGenericAttestation(attesterDid, profileDid, 'great gardener'),
+    ])
+
+    renderPublicProfile(profileDid)
+
+    expect(await screen.findByText('Target Profile')).toBeInTheDocument()
+    // Verification from /v renders in the verification section.
+    expect(await screen.findByText('Verbunden mit 1 Person')).toBeInTheDocument()
+    // Generic from /a renders in the attestation section — both visible (union).
+    // The claim is wrapped in typographic quotes by the UI, so match on substring.
+    expect(await screen.findByText((content) => content.includes('great gardener'))).toBeInTheDocument()
+    expect(screen.getByText('1 Bestätigung')).toBeInTheDocument()
   })
 })

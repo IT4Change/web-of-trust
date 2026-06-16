@@ -15,7 +15,6 @@ import {
 import type {
   CryptoAdapter,
   MessagingAdapter,
-  PublicAttestationsData,
   Subscribable,
 } from '@web_of_trust/core/ports'
 import type {
@@ -36,20 +35,17 @@ import {
   InboxReceptionHost,
 } from '../services'
 import { x25519MultibaseToPublicKeyBytes } from '@web_of_trust/core/protocol'
+import { createProfileRecoveryWorkflow } from '@web_of_trust/core/application'
 import { AutomergePublishStateStore } from '../adapters/AutomergePublishStateStore'
 import { AutomergeGraphCacheStore } from '../adapters/AutomergeGraphCacheStore'
 import { LocalCacheStore } from '../adapters/LocalCacheStore'
 import { LocalOutboxStore } from '../adapters/LocalOutboxStore'
 import { appRuntimeConfig, createHttpDiscoveryAdapter, getOrCreateBrowserDeviceId, protocolCrypto } from '../runtime/appRuntime'
 import { useIdentity } from './IdentityContext'
+import { splitAcceptedAttestations } from '../lib/publish-split'
 // Yjs and Automerge adapters are dynamically imported to keep WASM out of the default bundle
 
 const USE_YJS = import.meta.env.VITE_CRDT !== 'automerge'
-const VERIFICATION_ATTESTATION_CLAIM = 'in-person verifiziert'
-
-function isVerificationAttestation(attestation: Attestation): boolean {
-  return attestation.claim === VERIFICATION_ATTESTATION_CLAIM && Boolean(attestation.vcJws)
-}
 
 interface DemoStoragePort {
   createIdentity(did: string, profile: Profile): Promise<Identity>
@@ -324,16 +320,25 @@ export function AdapterProvider({ children, identity }: AdapterProviderProps) {
               needsInitialSync = true
             }
           } else {
-            // Recovery/Import — try to restore data from wot-profiles server
-            console.log('[restore] Attempting restore from wot-profiles server...')
+            // Recovery after Mnemonic-Import (Sync 004 Z.207-220): reconstruct
+            // ONLY the public profile/discovery state via the application
+            // workflow — the same `ProfileVersionCache` instance the resolve path
+            // wrote (VE-5, else `version` reads back `undefined`). The classify
+            // guard inside the workflow structurally forbids any private artifact.
+            console.log('[restore] Attempting public-state recovery from wot-profiles server...')
             try {
-              const serverResult = await httpDiscovery.resolveProfile(did)
-              console.log('[restore] Server profile result:', serverResult.profile ? `name="${serverResult.profile.name}"` : 'no profile')
-              const restoredProfile = serverResult.profile
+              const recovery = createProfileRecoveryWorkflow({
+                discovery: httpDiscovery,
+                versionCache: httpDiscovery.getVersionCache(),
+              })
+              const result = await recovery.recoverPublicState(did)
+              console.log('[restore] Recovered profile:', result.profile ? `name="${result.profile.value.name}"` : 'no profile')
+
+              const restoredProfile = result.profile
                 ? {
-                    name: serverResult.profile.name ?? '',
-                    ...(serverResult.profile.bio ? { bio: serverResult.profile.bio } : {}),
-                    ...(serverResult.profile.avatar ? { avatar: serverResult.profile.avatar } : {}),
+                    name: result.profile.value.name ?? '',
+                    ...(result.profile.value.bio ? { bio: result.profile.value.bio } : {}),
+                    ...(result.profile.value.avatar ? { avatar: result.profile.value.avatar } : {}),
                   }
                 : { name: '' }
 
@@ -343,14 +348,16 @@ export function AdapterProvider({ children, identity }: AdapterProviderProps) {
                 await storage.createIdentity(did, restoredProfile)
               }
 
-              const attestations = await httpDiscovery.resolveAttestations(did)
-              console.log('[restore] Attestations:', attestations.length)
+              const recoveredVerifications = result.verifications.value
+              const recoveredAttestations = result.attestations.value
+              console.log('[restore] Recovered /v:', recoveredVerifications.length, '/a:', recoveredAttestations.length)
 
               const contactTimestamps = new Map<string, string>()
+              // The /v resource is disjointly filtered to verification-attestations
+              // already (VE-2), so every item here is a verification by construction
+              // — no claim-based discrimination needed.
               const recordVerificationPartner = (attestation: Attestation) => {
-                if (!isVerificationAttestation(attestation)) return
                 if (attestation.from !== did && attestation.to !== did) return
-
                 const contactDid = attestation.from === did ? attestation.to : attestation.from
                 const current = contactTimestamps.get(contactDid)
                 if (!current || attestation.createdAt < current) {
@@ -358,19 +365,27 @@ export function AdapterProvider({ children, identity }: AdapterProviderProps) {
                 }
               }
 
-              for (const attestation of attestations) {
+              // Re-import recovered public artifacts with accepted:true (verhaltens-
+              // gleich zum alten Restore — re-publish-fähig). /v + /a both imported.
+              for (const attestation of [...recoveredVerifications, ...recoveredAttestations]) {
                 await storage.saveAttestation(attestation)
                 await storage.setAttestationAccepted(attestation.id, true)
+              }
+              for (const attestation of recoveredVerifications) {
                 recordVerificationPartner(attestation)
               }
 
+              // Demo runtime (PRIVATE state, NOT part of the workflow): peer-hop to
+              // recover MY OWN outgoing verifications stored at the partner's /v, and
+              // reconstruct the contact list. Verifications now live in /v, so the
+              // peer-hop queries resolveVerifications (verhaltensgleich + /v).
               await Promise.all(Array.from(contactTimestamps.keys()).map(async (contactDid) => {
-                const contactAttestations = await httpDiscovery.resolveAttestations(contactDid).catch((error) => {
-                  console.warn('[restore] Failed to resolve peer attestations for contact:', contactDid, error)
+                const peerVerifications = await httpDiscovery.resolveVerifications(contactDid).catch((error) => {
+                  console.warn('[restore] Failed to resolve peer verifications for contact:', contactDid, error)
                   return []
                 })
-                for (const attestation of contactAttestations) {
-                  if (attestation.from === did && attestation.to === contactDid && isVerificationAttestation(attestation)) {
+                for (const attestation of peerVerifications) {
+                  if (attestation.from === did && attestation.to === contactDid) {
                     const existingAtt = await storage.getAttestation(attestation.id)
                     if (!existingAtt) {
                       await storage.saveAttestation(attestation)
@@ -394,10 +409,10 @@ export function AdapterProvider({ children, identity }: AdapterProviderProps) {
                 }
               }
 
-              console.log('[restore] Restored data from wot-profiles server:', restoredProfile.name || '(no name)')
+              console.log('[restore] Recovered public state:', restoredProfile.name || '(no name)')
               getMetrics().logLoad('wot-profiles', 0, 0)
             } catch (err) {
-              console.warn('[restore] Could not restore from server (offline?):', err)
+              console.warn('[restore] Could not recover from server (offline?):', err)
               // Fallback: create empty identity only if none exists
               if (!existing) {
                 await storage.createIdentity(did, { name: '' })
@@ -406,7 +421,10 @@ export function AdapterProvider({ children, identity }: AdapterProviderProps) {
           }
         }
 
-        // syncDiscovery: retries all pending publish operations
+        // syncDiscovery: retries all pending publish operations. The accepted set
+        // is split disjointly by the WotVerification type marker (VE-2/VE-7), so
+        // the dirty `/v` and `/a` resources are published with matching data —
+        // identical split to the live uploadAttestations path.
         const syncDiscovery = async () => {
           try {
             await discovery.syncPending(did, identity, async () => {
@@ -417,9 +435,14 @@ export function AdapterProvider({ children, identity }: AdapterProviderProps) {
                 const meta = await storage.getAttestationMetadata(att.id)
                 if (meta?.accepted) accepted.push(att)
               }
+              const { verifications, attestations } = await splitAcceptedAttestations(accepted, {
+                crypto: protocolCrypto,
+              })
+              const updatedAt = new Date().toISOString()
               const result: {
                 profile?: PublicProfile
-                attestations?: PublicAttestationsData
+                attestations?: { did: string; attestations: Attestation[]; updatedAt: string }
+                verifications?: { did: string; verifications: Attestation[]; updatedAt: string }
               } = {}
               if (localIdentity) {
                 result.profile = {
@@ -427,12 +450,19 @@ export function AdapterProvider({ children, identity }: AdapterProviderProps) {
                   name: localIdentity.profile.name,
                   ...(localIdentity.profile.bio ? { bio: localIdentity.profile.bio } : {}),
                   ...(localIdentity.profile.avatar ? { avatar: localIdentity.profile.avatar } : {}),
-                  updatedAt: new Date().toISOString(),
+                  updatedAt,
                 }
               }
-              if (accepted.length > 0) {
-                result.attestations = { did, attestations: accepted, updatedAt: new Date().toISOString() }
-              }
+              // Always include both lists — an EMPTY list is the valid new
+              // public state after consent for the last verification/attestation
+              // was revoked. syncPending only publishes the resources that are
+              // actually dirty, so unconditionally providing the data never
+              // causes spurious writes; it just lets a dirty /v or /a be
+              // published with its (possibly empty) current contents. This
+              // matches the primary uploadAttestations path, which also
+              // publishes both lists unconditionally. (Codex review #198.)
+              result.attestations = { did, attestations, updatedAt }
+              result.verifications = { did, verifications, updatedAt }
               return result
             })
           } catch (error) {

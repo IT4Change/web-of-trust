@@ -327,7 +327,12 @@ describe('Trust 002 verification status source guard', () => {
     expect(hits).toEqual([])
   })
 
-  it('drops legacy Verification detail storage and migration from the demo graph cache while keeping attestations', () => {
+  it('carries the spec-form verification cache (Attestation[]) while keeping the legacy structured Verification storage banned', () => {
+    // VE-2 inversion (1.B.3 Step 2): the May refactor removed the unspecified
+    // graph-cache verification surface. This slice RESTORES it as the derived
+    // Attestation[] form (Sync 004 `/v`), so VERIFICATIONS_KEY / graph:verifications
+    // / this.verifications / getCachedVerifications MUST exist. STILL BANNED: the
+    // legacy STRUCTURED Verification document fields.
     const graphFile = 'apps/demo/src/adapters/AutomergeGraphCacheStore.ts'
     const graphPath = fs.existsSync(graphFile) ? graphFile : path.join('..', '..', graphFile)
     const graphText = fs.readFileSync(graphPath, 'utf8')
@@ -338,23 +343,34 @@ describe('Trust 002 verification status source guard', () => {
 
     const hits: string[] = []
 
+    // STILL BANNED: legacy structured Verification document shape.
     for (const needle of [
-      'VERIFICATIONS_KEY',
-      'graph:verifications',
       'VerificationDoc',
-      'private verifications',
-      'this.verifications',
       'proofJson',
       'locationJson',
       'verificationId',
     ]) {
       if (graphText.includes(needle)) {
-        hits.push(`AutomergeGraphCacheStore.ts still contains ${needle}`)
+        hits.push(`AutomergeGraphCacheStore.ts still contains legacy ${needle}`)
       }
     }
 
-    if (contextText.includes('graph:verifications') || contextText.includes('cachedGraph.verifications')) {
+    if (contextText.includes('cachedGraph.verifications')) {
       hits.push('AdapterContext.tsx still migrates cachedGraph verifications')
+    }
+
+    // NOW REQUIRED: spec-form Attestation[]-derived verification cache surface.
+    for (const needle of [
+      'VERIFICATIONS_KEY',
+      'graph:verifications',
+      'this.verifications',
+    ]) {
+      if (!graphText.includes(needle)) {
+        hits.push(`AutomergeGraphCacheStore.ts must carry ${needle}`)
+      }
+    }
+    if (!/getCachedVerifications/.test(graphText)) {
+      hits.push('AutomergeGraphCacheStore must expose getCachedVerifications (Attestation[] form)')
     }
 
     if (!graphText.includes('getCachedAttestations')) {
@@ -362,10 +378,6 @@ describe('Trust 002 verification status source guard', () => {
     }
     if (!graphText.includes('ATTESTATIONS_KEY')) {
       hits.push('AutomergeGraphCacheStore.ts lost attestation persistence')
-    }
-
-    if (/getCachedVerifications/.test(graphText)) {
-      hits.push('AutomergeGraphCacheStore should no longer expose getCachedVerifications')
     }
 
     expect(hits).toEqual([])
@@ -436,11 +448,12 @@ describe('Trust 002 verification status source guard', () => {
   })
 })
 
-describe('Discovery 094 demo publish-state source guard', () => {
-  // The broad DiscoveryAdapter publication of legacy `Verification[]` goes away.
-  // The demo publish-state store and sync-status hook must drop `verificationsDirty`
-  // and `dirtyState.verifications`, but must still track profile and attestations.
-  it('removes verificationsDirty from AutomergePublishStateStore and useSyncStatus while keeping profile/attestations', () => {
+describe('Discovery 1.B.3 demo publish-state source guard (Step 4)', () => {
+  // Inverted from the Step-2/094 guard: Step 4 introduces independent
+  // verifications dirty-tracking (`/p/{did}/v`, Sync 004 Z.24-32). The demo
+  // publish-state store and sync-status hook must now TRACK `verificationsDirty`
+  // / `dirtyState.verifications` alongside profile and attestations.
+  it('tracks verificationsDirty in AutomergePublishStateStore and useSyncStatus alongside profile/attestations', () => {
     const files = {
       store: 'apps/demo/src/adapters/AutomergePublishStateStore.ts',
       hook: 'apps/demo/src/hooks/useSyncStatus.ts',
@@ -458,22 +471,20 @@ describe('Discovery 094 demo publish-state source guard', () => {
     const hookText = read(files.hook)
     const hits: string[] = []
 
-    for (const text of [storeText, hookText]) {
-      if (text.includes('verificationsDirty')) {
-        hits.push(`source still contains verificationsDirty`)
-      }
+    if (!storeText.includes('verificationsDirty')) {
+      hits.push('AutomergePublishStateStore must track verificationsDirty')
+    }
+    if (!/\bdirtyState\.verifications\b/.test(hookText)) {
+      hits.push('useSyncStatus must consume dirtyState.verifications')
+    }
+    if (!/verifications\s*:\s*boolean/.test(storeText)) {
+      hits.push('DirtyState in AutomergePublishStateStore must have a verifications boolean')
+    }
+    if (!(/case\s+'verifications'/.test(storeText) || /===\s*'verifications'/.test(storeText) || /field\s*===\s*'verifications'/.test(storeText))) {
+      hits.push('AutomergePublishStateStore must branch on the verifications publish field')
     }
 
-    if (/\bdirtyState\.verifications\b/.test(hookText) || /\bdirtyState\.verifications\b/.test(storeText)) {
-      hits.push('useSyncStatus / publish-state store still references dirtyState.verifications')
-    }
-    if (/verifications\s*:\s*boolean/.test(storeText)) {
-      hits.push('DirtyState in AutomergePublishStateStore still has a verifications boolean')
-    }
-    if (/case\s+'verifications'/.test(storeText) || /===\s*'verifications'/.test(storeText) || /field\s*===\s*'verifications'/.test(storeText)) {
-      hits.push('AutomergePublishStateStore still branches on the verifications publish field')
-    }
-
+    // Still keep profile + attestations tracking.
     for (const needle of ['profileDirty', 'attestationsDirty', 'profile:', 'attestations:']) {
       if (!storeText.includes(needle)) {
         hits.push(`AutomergePublishStateStore lost required token ${needle}`)

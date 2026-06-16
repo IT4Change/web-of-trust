@@ -1,5 +1,6 @@
 import { decodeBase64Url } from '../crypto/encoding'
 import type { AttestationVcPayload } from './attestation-vc-jws'
+import { isVerificationAttestation } from './attestation-vc-jws'
 
 const QR_CHALLENGE_FIELDS = new Set(['did', 'name', 'enc', 'nonce', 'ts', 'broker'])
 const DID_PATTERN = /^did:[a-z0-9]+:.+/
@@ -10,7 +11,6 @@ const DATE_TIME_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+
 const DATE_TIME_PARTS_PATTERN = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|[+-](\d{2}):(\d{2}))$/
 const BROKER_PROTOCOLS = new Set(['ws:', 'wss:', 'http:', 'https:'])
 const ACTIVE_CHALLENGE_MAX_AGE_MS = 5 * 60 * 1000
-const VERIFICATION_ATTESTATION_CLAIM = 'in-person verifiziert'
 
 export interface QrChallenge {
   did: string
@@ -170,11 +170,9 @@ function isValidDateTime(value: string): boolean {
 }
 
 function isVerificationAttestationPayload(payload: AttestationVcPayload): boolean {
-  return (
-    payload.type.includes('VerifiableCredential') &&
-    payload.type.includes('WotAttestation') &&
-    payload.credentialSubject.claim === VERIFICATION_ATTESTATION_CLAIM
-  )
+  // VE-7: discriminate on the central WotVerification `type` marker, not the
+  // display-only claim label.
+  return isVerificationAttestation(payload)
 }
 
 function assertValidBroker(value: string): void {

@@ -30,15 +30,21 @@ function makeAttestation(overrides: Partial<Attestation> = {}): Attestation {
     claim: 'in-person verifiziert',
     createdAt: '2026-05-22T12:00:00.000Z',
     vcJws: 'header.payload.signature',
+    isVerification: true,
     ...overrides,
   }
 }
 
 describe('Identity Trust 002 verification-attestation source guard', () => {
-  it('classifies only signed Trust 002 verification-attestations as local verification entries', () => {
+  it('classifies verification-attestations by the WotVerification type marker, not the claim (review MAJOR 2)', () => {
+    // Genuine verification: type-borne marker set.
     expect(isVerificationAttestation(makeAttestation())).toBe(true)
-    expect(isVerificationAttestation(makeAttestation({ claim: 'helped with setup' }))).toBe(false)
-    expect(isVerificationAttestation(makeAttestation({ vcJws: '' }))).toBe(false)
+    // A generic attestation is not a verification regardless of claim.
+    expect(isVerificationAttestation(makeAttestation({ claim: 'helped with setup', isVerification: false }))).toBe(false)
+    // Backward-compatible shape: an ABSENT marker must default to non-verification.
+    expect(isVerificationAttestation(makeAttestation({ isVerification: undefined }))).toBe(false)
+    // SPOOF: the exact magic claim but NO WotVerification type → not a verification.
+    expect(isVerificationAttestation(makeAttestation({ claim: 'in-person verifiziert', isVerification: false }))).toBe(false)
   })
 
   it('renders local verifications from received verification-attestations with holder-controlled publish metadata', () => {
@@ -53,15 +59,18 @@ describe('Identity Trust 002 verification-attestation source guard', () => {
     expect(text).toContain('aria-pressed={isPublic}')
   })
 
-  it('publishes accepted received attestations without legacy verification publication', () => {
+  it('splits accepted received attestations disjointly into /v and /a (Step 6)', () => {
     const text = readRepoFile('apps/demo/src/hooks/useProfileSync.ts')
 
+    // No legacy Verification record types — the split runs on Trust 002 attestations.
     expect(text).not.toContain('getReceivedVerifications')
-    expect(text).not.toContain('publishVerifications')
     expect(text).not.toContain('watchReceivedVerifications')
 
     expect(text).toContain('getReceivedAttestations')
     expect(text).toContain('getAttestationMetadata')
+    // Disjoint publish split (Sync 004 Z.24-32): both resources are published.
+    expect(text).toContain('splitAcceptedAttestations')
+    expect(text).toContain('publishVerifications')
     expect(text).toContain('publishAttestations')
     expect(text).toContain('uploadAttestationsSafely')
   })

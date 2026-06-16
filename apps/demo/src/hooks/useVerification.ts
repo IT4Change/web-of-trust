@@ -7,9 +7,8 @@ import { useConfetti } from '../context/PendingVerificationContext'
 import { useContacts } from './useContacts'
 import { useMessaging } from './useMessaging'
 import { useProfileSync } from './useProfileSync'
+import { isVerificationAttestation } from '../lib/verification-attestation'
 import { verificationWorkflow } from '../services/verificationWorkflow'
-
-const VERIFICATION_ATTESTATION_CLAIM = 'in-person verifiziert'
 
 type VerificationStep =
   | 'idle'
@@ -229,7 +228,7 @@ export function useVerification() {
         .filter(attestation =>
           attestation.from === targetDid &&
           attestation.to === did &&
-          attestation.claim === VERIFICATION_ATTESTATION_CLAIM &&
+          isVerificationAttestation(attestation) &&
           !attestation.inResponseTo
         )
         .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))[0]

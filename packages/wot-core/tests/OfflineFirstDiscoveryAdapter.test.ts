@@ -7,8 +7,8 @@ import { InMemoryGraphCacheStore } from '../src/adapters/discovery/InMemoryGraph
 import {
   ProfileResourceRollbackError,
   type DiscoveryAdapter,
-  type ProfileVersionCache,
   type PublicAttestationsData,
+  type PublicVerificationsData,
 } from '../src/ports/DiscoveryAdapter'
 import type { PublicProfile } from '../src/types/identity'
 import type { PublicIdentitySession } from '../src/application/identity'
@@ -27,27 +27,23 @@ const TEST_ATTESTATIONS: PublicAttestationsData = {
   updatedAt: new Date().toISOString(),
 }
 
+const TEST_VERIFICATIONS: PublicVerificationsData = {
+  did: ALICE_DID,
+  verifications: [],
+  updatedAt: new Date().toISOString(),
+}
+
 const MOCK_IDENTITY = {} as PublicIdentitySession
 
 function createMockInner(overrides: Partial<DiscoveryAdapter> = {}): DiscoveryAdapter {
   return {
     publishProfile: vi.fn().mockResolvedValue(undefined),
     publishAttestations: vi.fn().mockResolvedValue(undefined),
+    publishVerifications: vi.fn().mockResolvedValue(undefined),
     resolveProfile: vi.fn().mockResolvedValue({ profile: null, fromCache: false }),
     resolveAttestations: vi.fn().mockResolvedValue([]),
+    resolveVerifications: vi.fn().mockResolvedValue([]),
     ...overrides,
-  }
-}
-
-function createVersionCache(): ProfileVersionCache {
-  const versions = new Map<string, number>()
-  return {
-    async getLastSeenProfileVersion(did: string) {
-      return versions.get(did)
-    },
-    async setLastSeenProfileVersion(did: string, version: number) {
-      versions.set(did, version)
-    },
   }
 }
 
@@ -123,7 +119,7 @@ describe('OfflineFirstDiscoveryAdapter', () => {
 
     it('should return cached profile with fromCache=true when inner fails', async () => {
       // Pre-populate graph cache
-      await graphCache.cacheEntry(ALICE_DID, TEST_PROFILE, [])
+      await graphCache.cacheEntry(ALICE_DID, { profile: TEST_PROFILE, attestations: [], verifications: [] })
 
       inner = createMockInner({
         resolveProfile: vi.fn().mockRejectedValue(new Error('Offline')),
@@ -165,19 +161,18 @@ describe('OfflineFirstDiscoveryAdapter', () => {
       expect(cached).toBeNull()
     })
 
-    it('should reject rollback instead of falling back to cached profile', async () => {
-      await graphCache.cacheEntry(ALICE_DID, TEST_PROFILE, [])
+    it('should re-throw an inner rollback instead of falling back to cached profile', async () => {
+      // VE-3: version monotonicity + rollback detection now live exclusively in
+      // the inner HTTP adapter. The decorator must surface the inner
+      // ProfileResourceRollbackError, never mask it with the offline cache.
+      await graphCache.cacheEntry(ALICE_DID, { profile: TEST_PROFILE, attestations: [], verifications: [] })
 
       inner = createMockInner({
         resolveProfile: vi.fn()
           .mockResolvedValueOnce({ profile: TEST_PROFILE, version: 7, fromCache: false })
-          .mockResolvedValueOnce({
-            profile: { ...TEST_PROFILE, name: 'Alice stale' },
-            version: 6,
-            fromCache: false,
-          }),
+          .mockRejectedValueOnce(new ProfileResourceRollbackError(ALICE_DID, 6, 7, 'profile')),
       })
-      adapter = new OfflineFirstDiscoveryAdapter(inner, publishState, graphCache, createVersionCache())
+      adapter = new OfflineFirstDiscoveryAdapter(inner, publishState, graphCache)
 
       await expect(adapter.resolveProfile(ALICE_DID)).resolves.toMatchObject({
         profile: TEST_PROFILE,
@@ -204,7 +199,7 @@ describe('OfflineFirstDiscoveryAdapter', () => {
 
     it('should return cached attestations when inner fails', async () => {
       const attestations = [{ id: 'a1', from: 'did:key:bob', to: ALICE_DID, claim: 'Test', createdAt: '2026-01-01', proof: {} }] as any
-      await graphCache.cacheEntry(ALICE_DID, TEST_PROFILE, attestations)
+      await graphCache.cacheEntry(ALICE_DID, { profile: TEST_PROFILE, attestations, verifications: [] })
 
       inner = createMockInner({
         resolveAttestations: vi.fn().mockRejectedValue(new Error('Offline')),
@@ -226,6 +221,102 @@ describe('OfflineFirstDiscoveryAdapter', () => {
       const result = await adapter.resolveAttestations(ALICE_DID)
 
       expect(result).toEqual([])
+    })
+  })
+
+  describe('publishVerifications (Step 4)', () => {
+    it('should mark verifications dirty and clear on success', async () => {
+      await adapter.publishVerifications(TEST_VERIFICATIONS, MOCK_IDENTITY)
+
+      expect(inner.publishVerifications).toHaveBeenCalledWith(TEST_VERIFICATIONS, MOCK_IDENTITY)
+      const dirty = await publishState.getDirtyFields(ALICE_DID)
+      expect(dirty.size).toBe(0)
+    })
+
+    it('should keep verifications dirty flag on failure', async () => {
+      inner = createMockInner({
+        publishVerifications: vi.fn().mockRejectedValue(new Error('Network error')),
+      })
+      adapter = new OfflineFirstDiscoveryAdapter(inner, publishState, graphCache)
+
+      await adapter.publishVerifications(TEST_VERIFICATIONS, MOCK_IDENTITY)
+
+      const dirty = await publishState.getDirtyFields(ALICE_DID)
+      expect(dirty.has('verifications')).toBe(true)
+    })
+  })
+
+  describe('resolveVerifications (Step 4)', () => {
+    it('should return verifications from inner on success', async () => {
+      const verifications = [{ id: 'v1' }] as any
+      inner = createMockInner({
+        resolveVerifications: vi.fn().mockResolvedValue(verifications),
+      })
+      adapter = new OfflineFirstDiscoveryAdapter(inner, publishState, graphCache)
+
+      const result = await adapter.resolveVerifications(ALICE_DID)
+
+      expect(result).toEqual(verifications)
+    })
+
+    it('should fall back to getCachedVerifications when inner fails', async () => {
+      const verifications = [{ id: 'v1', from: 'did:key:bob', to: ALICE_DID, claim: 'live verified', createdAt: '2026-01-01', proof: {} }] as any
+      await graphCache.cacheEntry(ALICE_DID, { profile: TEST_PROFILE, attestations: [], verifications })
+
+      inner = createMockInner({
+        resolveVerifications: vi.fn().mockRejectedValue(new Error('Offline')),
+      })
+      adapter = new OfflineFirstDiscoveryAdapter(inner, publishState, graphCache)
+
+      const result = await adapter.resolveVerifications(ALICE_DID)
+
+      expect(result).toHaveLength(1)
+      expect(result[0].id).toBe('v1')
+    })
+
+    it('should re-throw an inner rollback instead of masking it with the verifications cache', async () => {
+      // VE-3: a ProfileResourceRollbackError must surface even for /v — the cache
+      // fallback must never hide a rollback.
+      await graphCache.cacheEntry(ALICE_DID, {
+        profile: TEST_PROFILE,
+        attestations: [],
+        verifications: [{ id: 'v1', from: 'did:key:bob', to: ALICE_DID, claim: 'x', createdAt: '2026-01-01', proof: {} }] as any,
+      })
+
+      inner = createMockInner({
+        resolveVerifications: vi.fn().mockRejectedValue(new ProfileResourceRollbackError(ALICE_DID, 6, 7, 'verifications')),
+      })
+      adapter = new OfflineFirstDiscoveryAdapter(inner, publishState, graphCache)
+
+      await expect(adapter.resolveVerifications(ALICE_DID)).rejects.toBeInstanceOf(ProfileResourceRollbackError)
+    })
+  })
+
+  describe('syncPending — verifications (Step 4)', () => {
+    it('should retry a dirty verifications publish on reconnect', async () => {
+      const failingInner = createMockInner({
+        publishVerifications: vi.fn().mockRejectedValue(new Error('Offline')),
+      })
+      const failingAdapter = new OfflineFirstDiscoveryAdapter(failingInner, publishState, graphCache)
+
+      await failingAdapter.publishVerifications(TEST_VERIFICATIONS, MOCK_IDENTITY)
+      expect((await publishState.getDirtyFields(ALICE_DID)).has('verifications')).toBe(true)
+
+      const getPublishData = vi.fn().mockResolvedValue({ verifications: TEST_VERIFICATIONS })
+      await adapter.syncPending(ALICE_DID, MOCK_IDENTITY, getPublishData)
+
+      expect(inner.publishVerifications).toHaveBeenCalledWith(TEST_VERIFICATIONS, MOCK_IDENTITY)
+      expect((await publishState.getDirtyFields(ALICE_DID)).has('verifications')).toBe(false)
+    })
+
+    it('should keep verifications dirty when no verifications data is provided', async () => {
+      await publishState.markDirty(ALICE_DID, 'verifications')
+
+      const getPublishData = vi.fn().mockResolvedValue({ profile: TEST_PROFILE })
+      await adapter.syncPending(ALICE_DID, MOCK_IDENTITY, getPublishData)
+
+      expect(inner.publishVerifications).not.toHaveBeenCalled()
+      expect((await publishState.getDirtyFields(ALICE_DID)).has('verifications')).toBe(true)
     })
   })
 
@@ -358,11 +449,12 @@ describe('OfflineFirstDiscoveryAdapter', () => {
   })
 })
 
-describe('Discovery 094 legacy verification publication source guard', () => {
-  // Sync 004 profile-service `/p/{did}/v` protocol/server compatibility and Trust
-  // 002 verification types/workflows stay. This guard only removes the broad
-  // DiscoveryAdapter publication/resolve surface and PublishStateField slot for
-  // legacy `Verification[]` publication via the discovery port.
+describe('Discovery 1.B.3 spec-form verification publication surface', () => {
+  // VE-1/VE-2 inversion (1.B.3 Step 2): the May refactor (#094 / 9117c82) removed
+  // the UNSPECIFIED legacy `/v` publication surface. This slice RESTORES `/v`
+  // spec-driven (Sync 004 §004, wot-spec #101/#102), so PublicVerificationsData /
+  // publishVerifications / resolveVerifications MUST exist on the discovery surface.
+  // STILL BANNED: the legacy structured Verification type module import.
   const read = (file: string): string => {
     const candidates = [file, path.join('..', '..', file), path.join('..', file)]
     for (const candidate of candidates) {
@@ -371,63 +463,53 @@ describe('Discovery 094 legacy verification publication source guard', () => {
     throw new Error(`source guard cannot locate ${file}`)
   }
 
-  it('removes PublicVerificationsData/publishVerifications/resolveVerifications from the broad DiscoveryAdapter surface', () => {
-    const files = {
-      port: 'packages/wot-core/src/ports/DiscoveryAdapter.ts',
-      http: 'packages/wot-core/src/adapters/discovery/HttpDiscoveryAdapter.ts',
-      offline: 'packages/wot-core/src/adapters/discovery/OfflineFirstDiscoveryAdapter.ts',
-      index: 'packages/wot-core/src/index.ts',
-    } as const
+  it('exposes PublicVerificationsData/publishVerifications/resolveVerifications on the DiscoveryAdapter surface', () => {
+    const port = read('packages/wot-core/src/ports/DiscoveryAdapter.ts')
+    const http = read('packages/wot-core/src/adapters/discovery/HttpDiscoveryAdapter.ts')
+    const offline = read('packages/wot-core/src/adapters/discovery/OfflineFirstDiscoveryAdapter.ts')
 
     const hits: string[] = []
-    const legacyNeedles = ['PublicVerificationsData', 'publishVerifications', 'resolveVerifications'] as const
 
-    for (const [, file] of Object.entries(files)) {
-      const text = read(file)
-      for (const needle of legacyNeedles) {
-        if (text.includes(needle)) hits.push(`${file} still contains ${needle}`)
-      }
+    if (!port.includes('PublicVerificationsData')) hits.push('DiscoveryAdapter port must define PublicVerificationsData')
+    for (const [file, text] of [['DiscoveryAdapter.ts', port], ['HttpDiscoveryAdapter.ts', http], ['OfflineFirstDiscoveryAdapter.ts', offline]] as const) {
+      if (!text.includes('publishVerifications')) hits.push(`${file} must expose publishVerifications`)
+      if (!text.includes('resolveVerifications')) hits.push(`${file} must expose resolveVerifications`)
     }
 
-    const httpText = read(files.http)
-    if (/from\s+['"][^'"]*types\/verification['"]/.test(httpText)) {
-      hits.push(`${files.http} still imports the legacy Verification type`)
+    // STILL BANNED: legacy structured Verification type import in the HTTP adapter.
+    if (/from\s+['"][^'"]*types\/verification['"]/.test(http)) {
+      hits.push('HttpDiscoveryAdapter.ts still imports the legacy Verification type')
     }
 
     expect(hits).toEqual([])
   })
 
-  it('narrows PublishStateField to profile | attestations and drops verifications from in-memory store', () => {
+  it('widens PublishStateField to include verifications (Step 4: dirty-tracking of /v)', () => {
+    // Inverted from Step 2's narrowing guard: Step 4 introduces independent
+    // verifications dirty-tracking, so 'verifications' MUST now be a publish-state
+    // field alongside profile and attestations.
     const portFile = 'packages/wot-core/src/ports/PublishStateStore.ts'
-    const inMemoryFile = 'packages/wot-core/src/adapters/discovery/InMemoryPublishStateStore.ts'
-
     const portText = read(portFile)
-    const inMemoryText = read(inMemoryFile)
 
     const hits: string[] = []
 
-    if (portText.includes("'verifications'")) {
-      hits.push(`${portFile} still includes 'verifications' in PublishStateField`)
-    }
-    if (!/PublishStateField\s*=\s*'profile'\s*\|\s*'attestations'/.test(portText)) {
-      hits.push(`${portFile} PublishStateField should narrow to 'profile' | 'attestations'`)
-    }
-    if (inMemoryText.includes("'verifications'") || /case\s+'verifications'/.test(inMemoryText)) {
-      hits.push(`${inMemoryFile} still tracks 'verifications' as a publish state field`)
+    if (!/PublishStateField\s*=\s*'profile'\s*\|\s*'attestations'\s*\|\s*'verifications'/.test(portText)) {
+      hits.push(`${portFile} PublishStateField must widen to 'profile' | 'attestations' | 'verifications'`)
     }
 
     expect(hits).toEqual([])
   })
 
-  it('drops verifications from OfflineFirstDiscoveryAdapter.syncPending getPublishData callback', () => {
+  it('tracks verifications in OfflineFirstDiscoveryAdapter.syncPending getPublishData callback (Step 4)', () => {
+    // Inverted from Step 2's drop-guard: Step 4 retries verifications on reconnect.
     const offlineText = read('packages/wot-core/src/adapters/discovery/OfflineFirstDiscoveryAdapter.ts')
     const hits: string[] = []
 
-    if (/verifications\??\s*:\s*PublicVerificationsData/.test(offlineText)) {
-      hits.push('OfflineFirstDiscoveryAdapter.syncPending still accepts verifications in getPublishData')
+    if (!/verifications\??\s*:\s*PublicVerificationsData/.test(offlineText)) {
+      hits.push('OfflineFirstDiscoveryAdapter.syncPending must accept verifications in getPublishData')
     }
-    if (/dirty\.has\(\s*['"]verifications['"]\s*\)/.test(offlineText)) {
-      hits.push('OfflineFirstDiscoveryAdapter.syncPending still retries verifications dirty field')
+    if (!/dirty\.has\(\s*['"]verifications['"]\s*\)/.test(offlineText)) {
+      hits.push('OfflineFirstDiscoveryAdapter.syncPending must retry the verifications dirty field')
     }
 
     expect(hits).toEqual([])

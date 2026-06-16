@@ -25,15 +25,25 @@ export interface CachedGraphEntry {
  * - InMemoryGraphCacheStore (for tests)
  * - AutomergeGraphCacheStore (for Demo App, backed by LocalCacheStore)
  */
+/**
+ * Complete graph snapshot for a DID, carrying both resource lists.
+ *
+ * `verifications` is the DERIVED `Attestation[]` form (Sync 004 `/v` resolves
+ * to verified verification-attestations), NOT the legacy structured
+ * `Verification` type — this port deliberately never imports the legacy
+ * verification type module.
+ */
+export interface GraphCacheSnapshot {
+  profile: PublicProfile | null
+  attestations: Attestation[]
+  verifications: Attestation[]
+}
+
 export interface GraphCacheStore {
   // --- Write (called by GraphCacheService after fetching) ---
 
-  /** Cache a complete graph snapshot for a DID */
-  cacheEntry(
-    did: string,
-    profile: PublicProfile | null,
-    attestations: Attestation[],
-  ): Promise<void>
+  /** Cache a complete graph snapshot for a DID (profile + attestations + verifications) */
+  cacheEntry(did: string, snapshot: GraphCacheSnapshot): Promise<void>
 
   // --- Read: Summary (for contact list, badges) ---
 
@@ -47,6 +57,9 @@ export interface GraphCacheStore {
 
   /** Get cached attestations for a DID */
   getCachedAttestations(did: string): Promise<Attestation[]>
+
+  /** Get cached verifications for a DID (derived Attestation[] form) */
+  getCachedVerifications(did: string): Promise<Attestation[]>
 
   // --- Read: Graph queries ---
 

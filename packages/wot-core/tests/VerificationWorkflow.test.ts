@@ -82,7 +82,9 @@ async function createTestIdentity(passphrase: string) {
 function verificationAttestationPayload(localDid: string, nonce: string, overrides: Partial<AttestationVcPayload> = {}): AttestationVcPayload {
   return {
     '@context': ['https://www.w3.org/ns/credentials/v2', 'https://web-of-trust.de/vocab/v1'],
-    type: ['VerifiableCredential', 'WotAttestation'],
+    // VE-7: verification-attestations carry the WotVerification type marker
+    // (Trust 002 / wot-spec #101); the acceptance discriminator is type-based.
+    type: ['VerifiableCredential', 'WotAttestation', 'WotVerification'],
     issuer: 'did:key:z6MkpTHR8VNsBxYAAWHut2Geadd9jSwuBV8xRoAnwWsdvktH',
     credentialSubject: {
       id: localDid,

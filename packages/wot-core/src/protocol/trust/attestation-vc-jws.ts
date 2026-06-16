@@ -9,6 +9,15 @@ const VC_CONTEXT = 'https://www.w3.org/ns/credentials/v2'
 const WOT_CONTEXT = 'https://web-of-trust.de/vocab/v1'
 const VERIFIABLE_CREDENTIAL_TYPE = 'VerifiableCredential'
 const WOT_ATTESTATION_TYPE = 'WotAttestation'
+
+/**
+ * Type marker (Trust 002 / wot-spec #101) that distinguishes a live
+ * verification-attestation (`/v`) from an ordinary attestation (`/a`).
+ *
+ * Disjoint split is driven by THIS `type` entry — never by the human-readable
+ * `credentialSubject.claim` label (which stays purely for display).
+ */
+export const WOT_VERIFICATION_TYPE = 'WotVerification'
 const RFC3339_WHOLE_SECOND_DATE_TIME_WITH_ZONE = /^(\d{4})-(\d{2})-(\d{2})[Tt](\d{2}):(\d{2}):(\d{2})([Zz]|([+-])(\d{2}):(\d{2}))$/
 
 export interface AttestationVcPayload {
@@ -27,6 +36,39 @@ export interface AttestationVcPayload {
   iat?: number
   exp?: number
   [key: string]: unknown
+}
+
+/**
+ * Central, type-based predicate for verification-attestations (VE-7).
+ *
+ * The single source of truth for the `/v` ÷ `/a` split: a payload is a
+ * verification-attestation iff its `type` array carries `WotVerification`
+ * (Trust 002 / wot-spec #101). Callers MUST NOT discriminate on the German
+ * `credentialSubject.claim` label any more — it is display-only.
+ */
+export function isVerificationAttestation(payload: AttestationVcPayload): boolean {
+  return Array.isArray(payload.type) && payload.type.includes(WOT_VERIFICATION_TYPE)
+}
+
+/**
+ * Re-derive the type-borne verification marker from a stored compact VC-JWS.
+ *
+ * Decodes (does NOT re-verify — the stored vcJws is already trusted) the
+ * payload and reports whether its `type` array carries `WotVerification`.
+ * Returns false on any malformed input.
+ *
+ * Use this when only the persisted `vcJws` is available — e.g. reconstructing
+ * a derived `Attestation` from storage — so the verification classification is
+ * a pure function of the signed VC and never depends on a separately persisted
+ * (and thus loseable) flag.
+ */
+export function isVerificationVcJws(vcJws: string): boolean {
+  try {
+    const { payload } = decodeJws<Record<string, unknown>, AttestationVcPayload>(vcJws)
+    return isVerificationAttestation(payload)
+  } catch {
+    return false
+  }
 }
 
 export interface CreateAttestationVcJwsOptions {

@@ -1,20 +1,16 @@
 import type { PublicProfile } from '../../types/identity'
 import type { Attestation } from '../../types/attestation'
 import type { IdentitySession } from '../../types/identity-session'
-import {
-  LocalProfileVersionCache,
-  ProfileResourceRollbackError,
-} from '../../ports/DiscoveryAdapter'
+import { ProfileResourceRollbackError } from '../../ports/DiscoveryAdapter'
 import type {
   DiscoveryAdapter,
   ProfileResolveResult,
-  ProfileVersionCache,
   PublicAttestationsData,
+  PublicVerificationsData,
   ProfileSummary,
 } from '../../ports/DiscoveryAdapter'
 import type { PublishStateStore } from '../../ports/PublishStateStore'
 import type { GraphCacheStore } from '../../ports/GraphCacheStore'
-import { detectProfileResourceRollback } from '../../protocol/sync/profile-service-resource'
 
 /**
  * Offline-first wrapper for any DiscoveryAdapter.
@@ -41,7 +37,6 @@ export class OfflineFirstDiscoveryAdapter implements DiscoveryAdapter {
     private inner: DiscoveryAdapter,
     private publishState: PublishStateStore,
     private graphCache: GraphCacheStore,
-    private versionCache: ProfileVersionCache = new LocalProfileVersionCache(),
   ) {}
 
   /** Last publish error message (null if last attempt succeeded) */
@@ -88,17 +83,23 @@ export class OfflineFirstDiscoveryAdapter implements DiscoveryAdapter {
     }
   }
 
+  async publishVerifications(data: PublicVerificationsData, identity: IdentitySession): Promise<void> {
+    await this.publishState.markDirty(data.did, 'verifications')
+    try {
+      await this.inner.publishVerifications(data, identity)
+      await this.publishState.clearDirty(data.did, 'verifications')
+      this.clearError()
+    } catch (e) {
+      this.setError(e)
+    }
+  }
+
   async resolveProfile(did: string): Promise<ProfileResolveResult> {
     try {
-      const result = await this.inner.resolveProfile(did)
-      if (result.profile && result.version !== undefined) {
-        const lastSeenVersion = await this.versionCache.getLastSeenProfileVersion(did)
-        if (detectProfileResourceRollback({ fetchedVersion: result.version, lastSeenVersion })) {
-          throw new ProfileResourceRollbackError(did, result.version, lastSeenVersion!)
-        }
-        await this.versionCache.setLastSeenProfileVersion(did, result.version)
-      }
-      return result
+      // VE-3: version monotonicity + rollback caching live exclusively in the
+      // inner HTTP adapter (single cache owner). The decorator only re-throws a
+      // rollback so it is never masked by the offline cache fallback.
+      return await this.inner.resolveProfile(did)
     } catch (error) {
       if (error instanceof ProfileResourceRollbackError) throw error
       // Fallback to cached profile
@@ -123,8 +124,20 @@ export class OfflineFirstDiscoveryAdapter implements DiscoveryAdapter {
   async resolveAttestations(did: string): Promise<Attestation[]> {
     try {
       return await this.inner.resolveAttestations(did)
-    } catch {
+    } catch (error) {
+      // VE-3: a rollback must surface — the offline cache fallback must never
+      // mask a ProfileResourceRollbackError.
+      if (error instanceof ProfileResourceRollbackError) throw error
       return await this.graphCache.getCachedAttestations(did)
+    }
+  }
+
+  async resolveVerifications(did: string): Promise<Attestation[]> {
+    try {
+      return await this.inner.resolveVerifications(did)
+    } catch (error) {
+      if (error instanceof ProfileResourceRollbackError) throw error
+      return await this.graphCache.getCachedVerifications(did)
     }
   }
 
@@ -152,6 +165,7 @@ export class OfflineFirstDiscoveryAdapter implements DiscoveryAdapter {
     getPublishData: () => Promise<{
       profile?: PublicProfile
       attestations?: PublicAttestationsData
+      verifications?: PublicVerificationsData
     }>,
   ): Promise<void> {
     const dirty = await this.publishState.getDirtyFields(did)
@@ -173,6 +187,16 @@ export class OfflineFirstDiscoveryAdapter implements DiscoveryAdapter {
       try {
         await this.inner.publishAttestations(data.attestations, identity)
         await this.publishState.clearDirty(did, 'attestations')
+        this.clearError()
+      } catch (e) {
+        this.setError(e)
+      }
+    }
+
+    if (dirty.has('verifications') && data.verifications) {
+      try {
+        await this.inner.publishVerifications(data.verifications, identity)
+        await this.publishState.clearDirty(did, 'verifications')
         this.clearError()
       } catch (e) {
         this.setError(e)

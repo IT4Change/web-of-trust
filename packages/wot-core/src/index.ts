@@ -63,11 +63,12 @@ export type {
   DiscoveryAdapter,
   ProfileResolveResult,
   PublicAttestationsData,
+  PublicVerificationsData,
   ProfileSummary,
 } from './ports/DiscoveryAdapter'
 export type { ReplicationAdapter, SpaceHandle, TransactOptions } from './ports/ReplicationAdapter'
 export type { PublishStateStore, PublishStateField } from './ports/PublishStateStore'
-export type { GraphCacheStore, CachedGraphEntry } from './ports/GraphCacheStore'
+export type { GraphCacheStore, GraphCacheSnapshot, CachedGraphEntry } from './ports/GraphCacheStore'
 export type { OutboxStore, OutboxEntry } from './ports/OutboxStore'
 export type { AuthorizationAdapter } from './application/authorization/AuthorizationAdapter'
 

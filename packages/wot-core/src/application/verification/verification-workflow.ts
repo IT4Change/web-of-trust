@@ -15,6 +15,7 @@ import {
   didKeyToPublicKeyBytes,
   ed25519MultibaseToPublicKeyBytes,
   encodeBase64Url,
+  isVerificationAttestation,
   parseVerificationJtiNonce,
   parseQrChallenge,
   wholeSecondRfc3339,
@@ -408,6 +409,9 @@ export class VerificationWorkflow {
       ...(input.inResponseTo ? { inResponseTo: input.inResponseTo } : {}),
       createdAt,
       vcJws,
+      // Type-borne marker (review MAJOR 2): by construction this VC's `type`
+      // array carries WotVerification, so the derived form is a verification.
+      isVerification: isVerificationAttestation(payload),
     }
   }
 
@@ -532,7 +536,7 @@ function createVerificationAttestationVcPayload(input: {
   return {
     '@context': ['https://www.w3.org/ns/credentials/v2', 'https://web-of-trust.de/vocab/v1'],
     id: input.id,
-    type: ['VerifiableCredential', 'WotAttestation'],
+    type: ['VerifiableCredential', 'WotAttestation', 'WotVerification'],
     issuer: input.from,
     credentialSubject: {
       id: input.to,
@@ -549,11 +553,9 @@ function createVerificationAttestationVcPayload(input: {
 }
 
 function isVerificationAttestationPayload(payload: AttestationVcPayload): boolean {
-  return (
-    payload.type.includes('VerifiableCredential') &&
-    payload.type.includes('WotAttestation') &&
-    payload.credentialSubject.claim === VERIFICATION_ATTESTATION_CLAIM
-  )
+  // VE-7: discriminate on the central WotVerification `type` marker, not the
+  // display-only claim label.
+  return isVerificationAttestation(payload)
 }
 
 function encodeJson(value: unknown): string {

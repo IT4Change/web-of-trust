@@ -111,7 +111,9 @@ const trust002Challenge = {
 function verificationAttestationPayload(overrides: Partial<AttestationVcPayload> = {}): AttestationVcPayload {
   return {
     '@context': ['https://www.w3.org/ns/credentials/v2', 'https://web-of-trust.de/vocab/v1'],
-    type: ['VerifiableCredential', 'WotAttestation'],
+    // VE-7: verification-attestations carry the WotVerification type marker
+    // (Trust 002 / wot-spec #101); the acceptance discriminator is type-based.
+    type: ['VerifiableCredential', 'WotAttestation', 'WotVerification'],
     issuer: 'did:key:z6MkpTHR8VNsBxYAAWHut2Geadd9jSwuBV8xRoAnwWsdvktH',
     credentialSubject: {
       id: trust002Challenge.did,
@@ -2014,9 +2016,13 @@ describe('WoT protocol interop vectors', () => {
         }),
       ).toEqual({ decision: 'remote-unbound', reason: 'no-active-matching-nonce' })
 
+      // VE-7: the discriminator is the WotVerification `type` marker, not the
+      // claim. A payload WITHOUT the marker is rejected even if the claim text
+      // looks attestation-like; the claim itself is display-only.
       expect(
         decideVerificationAttestationAcceptance({
           payload: verificationAttestationPayload({
+            type: ['VerifiableCredential', 'WotAttestation'],
             credentialSubject: { id: trust002Challenge.did, claim: 'kann gut programmieren' },
           }),
           localDid: trust002Challenge.did,
@@ -2046,9 +2052,12 @@ describe('WoT protocol interop vectors', () => {
         }),
       ).toEqual({ decision: 'reject', reason: 'not-verification-attestation' })
 
+      // VE-7: without the WotVerification marker the payload is rejected up front,
+      // independent of jti/claim (claim is display-only).
       expect(
         decideVerificationAttestationAcceptance({
           payload: verificationAttestationPayload({
+            type: ['VerifiableCredential', 'WotAttestation'],
             credentialSubject: { id: trust002Challenge.did, claim: 'kann gut programmieren' },
             jti: undefined,
           }),
