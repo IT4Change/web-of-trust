@@ -111,6 +111,7 @@ describe('demo isVerificationAttestation — type-borne classification (review M
     it('classifies a cached /v verification as a verification', async () => {
       const cache = new AutomergeGraphCacheStore(fakeStore)
       await cache.cacheEntry(realVerification.to, {
+        profile: null,
         attestations: [],
         verifications: [realVerification],
       })
@@ -122,6 +123,7 @@ describe('demo isVerificationAttestation — type-borne classification (review M
     it('does not promote a cached /a spoof to a verification', async () => {
       const cache = new AutomergeGraphCacheStore(fakeStore)
       await cache.cacheEntry(spoof.to, {
+        profile: null,
         attestations: [spoof],
         verifications: [],
       })

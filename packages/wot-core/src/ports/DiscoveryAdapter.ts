@@ -90,6 +90,12 @@ export class LocalProfilePublishVersionStore implements ProfilePublishVersionSto
 
   async next(did: string, resource: ProfileServiceResourceKind): Promise<number> {
     const current = (await this.peek(did, resource)) ?? 0
+    // Guard the upper bound: at MAX_SAFE_INTEGER, +1 is no longer a safe integer
+    // and peek() would later reject it, silently resetting the counter to 1 and
+    // breaking monotonicity. (CodeRabbit #198)
+    if (current >= Number.MAX_SAFE_INTEGER) {
+      throw new Error('Profile publish version overflow')
+    }
     const nextVersion = current + 1
     await this.write(did, resource, nextVersion)
     return nextVersion
@@ -103,7 +109,11 @@ export class LocalProfilePublishVersionStore implements ProfilePublishVersionSto
     // The 409 body reports the server's current version; the retry must publish
     // strictly above it. Persist max(local, server)+1 so monotonicity holds even
     // after a fresh re-install whose local counter started behind the server.
-    const reconciled = Math.max(current, serverVersion) + 1
+    const floor = Math.max(current, serverVersion)
+    if (floor >= Number.MAX_SAFE_INTEGER) {
+      throw new Error('Profile publish version overflow')
+    }
+    const reconciled = floor + 1
     await this.write(did, resource, reconciled)
     return reconciled
   }

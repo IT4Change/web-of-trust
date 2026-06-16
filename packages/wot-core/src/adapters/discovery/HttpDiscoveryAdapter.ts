@@ -277,7 +277,9 @@ export class HttpDiscoveryAdapter implements DiscoveryAdapter {
           throw new ProfileResourceRollbackError(did, guarded.version, lastSeenVersion!, kind)
         }
         trace.log({ store: 'profiles', operation: 'read', label: `${label} ${did.slice(0, 24)}… (idempotent)`, durationMs: Math.round(performance.now() - start), success: true, meta: { did, count: guarded.attestations.length } })
-        return guarded.attestations
+        // Return a copy so a consumer mutating the array can't tamper with the
+        // cached idempotency result served to later resolves. (CodeRabbit #198)
+        return [...guarded.attestations]
       }
 
       let payload: ProfileServiceListResourcePayload | null = null
@@ -333,7 +335,9 @@ export class HttpDiscoveryAdapter implements DiscoveryAdapter {
         attestations.push(derived.attestation)
       }
 
-      this.lastVerified.set(guardKey, { jws, attestations, version: payload.version })
+      // Store a copy so the returned `attestations` array (handed to the caller
+      // below) and the cached idempotency entry don't alias. (CodeRabbit #198)
+      this.lastVerified.set(guardKey, { jws, attestations: [...attestations], version: payload.version })
       trace.log({ store: 'profiles', operation: 'read', label: `${label} ${did.slice(0, 24)}…`, durationMs: Math.round(performance.now() - start), success: true, meta: { did, count: attestations.length, version: payload.version } })
       return attestations
     } catch (err) {

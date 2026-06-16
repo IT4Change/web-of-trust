@@ -76,6 +76,24 @@ describe('GraphCacheService', () => {
       expect(entry!.attestationCount).toBe(1)
     })
 
+    it('should fetch and cache the /v verification list (Sync 004) — CodeRabbit #198', async () => {
+      const verifications = [makeAttestation(BOB_DID, ALICE_DID, 'in-person verifiziert')]
+
+      discovery = createMockDiscovery({
+        resolveProfile: vi.fn().mockResolvedValue({ profile: ALICE_PROFILE, fromCache: false }),
+        resolveAttestations: vi.fn().mockResolvedValue([]),
+        resolveVerifications: vi.fn().mockResolvedValue(verifications),
+      })
+      service = new GraphCacheService(discovery, store)
+
+      const entry = await service.refresh(ALICE_DID)
+
+      expect(discovery.resolveVerifications).toHaveBeenCalledWith(ALICE_DID)
+      expect(entry).not.toBeNull()
+      expect(entry!.verificationCount).toBe(1)
+      expect(entry!.attestationCount).toBe(0)
+    })
+
     it('should return cached data on network failure', async () => {
       // Pre-populate cache
       await store.cacheEntry(ALICE_DID, { profile: ALICE_PROFILE, attestations: [], verifications: [] })

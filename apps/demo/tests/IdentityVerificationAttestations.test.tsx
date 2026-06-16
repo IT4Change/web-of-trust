@@ -41,6 +41,8 @@ describe('Identity Trust 002 verification-attestation source guard', () => {
     expect(isVerificationAttestation(makeAttestation())).toBe(true)
     // A generic attestation is not a verification regardless of claim.
     expect(isVerificationAttestation(makeAttestation({ claim: 'helped with setup', isVerification: false }))).toBe(false)
+    // Backward-compatible shape: an ABSENT marker must default to non-verification.
+    expect(isVerificationAttestation(makeAttestation({ isVerification: undefined }))).toBe(false)
     // SPOOF: the exact magic claim but NO WotVerification type → not a verification.
     expect(isVerificationAttestation(makeAttestation({ claim: 'in-person verifiziert', isVerification: false }))).toBe(false)
   })

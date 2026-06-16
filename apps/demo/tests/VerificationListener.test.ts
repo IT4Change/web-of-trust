@@ -43,6 +43,10 @@ function makeVcJws(input: {
   id?: string
   claim?: string
   inResponseTo?: string
+  /** Explicit WotVerification marker override, decoupled from the claim text so
+   *  divergence cases (matching claim, NO marker) can be represented. Defaults
+   *  to claim-derived. (CodeRabbit #198) */
+  isVerification?: boolean
 } = {}): string {
   const from = input.from ?? BOB_DID
   const to = input.to ?? ALICE_DID
@@ -50,7 +54,8 @@ function makeVcJws(input: {
   const claim = input.claim ?? VERIFICATION_CLAIM
   // VE-7: verification-attestations carry the WotVerification type marker
   // (Trust 002 / wot-spec #101); the listener discriminates on it, not the claim.
-  const type = claim === VERIFICATION_CLAIM
+  const isVerification = input.isVerification ?? (claim === VERIFICATION_CLAIM)
+  const type = isVerification
     ? ['VerifiableCredential', 'WotAttestation', 'WotVerification']
     : ['VerifiableCredential', 'WotAttestation']
   return `header.${Buffer.from(JSON.stringify({

@@ -40,12 +40,19 @@ describe('wot-profiles real-server roundtrip for /a and /v (Pflicht-Test 1/2)', 
   let holder: PublicIdentitySession
   let issuer: PublicIdentitySession
   let adapter: HttpDiscoveryAdapter
+  // ONE shared publish-version store for the suite. The server + holder DID
+  // persist across tests (in-memory DB in beforeAll), so the local monotonic
+  // counter must persist too — a per-test reset would start the counter behind
+  // the server's stored version and trigger incidental, order-dependent 409
+  // retries. (Copilot #198)
+  let publishVersions: LocalProfilePublishVersionStore
 
   beforeAll(async () => {
     server = new ProfileServer({ port: PORT, dbPath: ':memory:' })
     await server.start()
     holder = await createIdentity('roundtrip-holder')
     issuer = await createIdentity('roundtrip-issuer')
+    publishVersions = new LocalProfilePublishVersionStore(`wot:rt-${Math.random()}:`)
   })
 
   afterAll(async () => {
@@ -53,13 +60,14 @@ describe('wot-profiles real-server roundtrip for /a and /v (Pflicht-Test 1/2)', 
   })
 
   beforeEach(() => {
-    // Fresh adapter per test: independent publish-version counter + resolve cache.
+    // Fresh adapter per test (fresh resolve cache) but the SHARED publish-version
+    // store, so the local counter stays in lock-step with the persisted server.
     adapter = new HttpDiscoveryAdapter(
       BASE_URL,
       createVersionCache(),
       undefined,
       crypto,
-      new LocalProfilePublishVersionStore(`wot:rt-${Math.random()}:`),
+      publishVersions,
     )
   })
 
