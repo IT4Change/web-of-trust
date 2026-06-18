@@ -15,7 +15,10 @@ import type { DocHandle, DocumentId, AutomergeUrl, BinaryDocumentId } from '@aut
 import * as Automerge from '@automerge/automerge'
 import type { IdentitySession } from '@web_of_trust/core/types'
 import type { MessagingAdapter } from '@web_of_trust/core/ports'
-import { CompactStorageManager, getMetrics, registerDebugApi } from '@web_of_trust/core'
+// Deep subpath (not the package root) so this module resolves under vitest's
+// runtime resolver too — the `@web_of_trust/core` "." entry isn't resolved there,
+// while subpaths (`/storage`, `/ports`, `/protocol`, …) are. Same symbols.
+import { CompactStorageManager, getMetrics, registerDebugApi } from '@web_of_trust/core/storage'
 import type { ProtocolCryptoAdapter } from '@web_of_trust/core/protocol'
 import { decryptOneShot, encryptOneShot } from '@web_of_trust/core/protocol'
 import { WebCryptoProtocolCryptoAdapter } from '@web_of_trust/core/protocol-adapters'
