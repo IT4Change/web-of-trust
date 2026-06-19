@@ -18,6 +18,7 @@ import type {
   Attestation,
   AttestationMetadata,
 } from '@web_of_trust/core/types'
+import { isVerificationVcJws } from '@web_of_trust/core/protocol'
 import {
   getYjsPersonalDoc as getPersonalDoc,
   changeYjsPersonalDoc as changePersonalDoc,
@@ -56,6 +57,13 @@ function attestationFromDoc(doc: AttestationDoc): Attestation {
     ...(doc.context != null ? { context: doc.context } : {}),
     createdAt: doc.createdAt,
     vcJws: doc.vcJws,
+    // Re-derive the type-borne verification marker from the stored vcJws on
+    // read (VE-7 BLOCKER fix): the flag is not separately persisted, so
+    // classification stays a pure function of the signed VC and survives the
+    // storage round-trip / reload. MUST stay in lockstep with the Automerge
+    // adapter's attestationFromDoc — without it getVerificationStatus never
+    // sees a verification and mutual recognition silently breaks.
+    ...(doc.vcJws && isVerificationVcJws(doc.vcJws) ? { isVerification: true } : {}),
   }
 }
 
