@@ -1,4 +1,5 @@
 import { resetLocalAppData } from './resetLocalAppData'
+import { createIdentityWorkflow } from './identityWorkflow'
 
 /**
  * Local storage schema version (stamped into `wot-storage-schema-version`).
@@ -56,6 +57,17 @@ async function hasExistingWotData(): Promise<boolean> {
   return false
 }
 
+// Whether a stored identity seed is still unlockable after a reset attempt.
+// Used to verify the wipe actually succeeded before committing the one-shot marker.
+async function storedSeedRemains(): Promise<boolean> {
+  try {
+    return await createIdentityWorkflow().hasStoredIdentity()
+  } catch {
+    // Can't confirm the seed is gone → treat as remaining (don't commit the marker).
+    return true
+  }
+}
+
 /**
  * One-time legacy identity break gate. MUST run before any identity/adapter code
  * opens the WoT IndexedDB databases.
@@ -64,8 +76,10 @@ async function hasExistingWotData(): Promise<boolean> {
  *   (Future migrations plug in here, based on the stored version — without reset
  *   or notice.)
  * - marker absent AND existing WoT data → pre-vnext legacy install → wipe all
- *   local app data (reliable logout), stamp the version, and return true so the
- *   caller can inform the user about this one-time identity break.
+ *   local app data (reliable logout) and return true so the caller can inform
+ *   the user. The version is stamped ONLY after the wipe is verified (the seed
+ *   is actually gone) — otherwise the marker stays unset so the next launch
+ *   retries the break instead of leaving a stuck, incompatible identity.
  * - marker absent AND no data → fresh install → just stamp the version.
  *
  * @returns whether a legacy dataset was reset (→ show the one-time break notice).
@@ -82,11 +96,21 @@ export async function runLocalStorageSchemaMigration(): Promise<boolean> {
   // this is never again a break.
   if (marker !== null) return false
 
-  let didReset = false
-  if (await hasExistingWotData()) {
-    await resetLocalAppData().catch(() => {})
-    didReset = true
+  if (!(await hasExistingWotData())) {
+    // Fresh install — nothing to reset, just record the current schema version.
+    writeCurrentVersion()
+    return false
   }
-  writeCurrentVersion()
-  return didReset
+
+  // Legacy install → wipe local app data (reliable logout).
+  await resetLocalAppData().catch(() => {})
+
+  // Commit the one-shot marker ONLY if the identity seed is verifiably gone.
+  // resetLocalAppData() swallows internal failures, so a failed seed-delete must
+  // not silently mark the break as done — leave the marker unset to retry next
+  // launch (and still inform the user this launch).
+  if (!(await storedSeedRemains())) {
+    writeCurrentVersion()
+  }
+  return true
 }

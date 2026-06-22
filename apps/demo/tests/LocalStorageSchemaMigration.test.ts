@@ -5,6 +5,13 @@ vi.mock('../src/services/resetLocalAppData', () => ({
   resetLocalAppData: () => resetMock(),
 }))
 
+// Controls the post-reset seed verification (storedSeedRemains).
+// false = seed verifiably gone (reset succeeded); true = seed still present.
+const hasStoredMock = vi.fn(async () => false)
+vi.mock('../src/services/identityWorkflow', () => ({
+  createIdentityWorkflow: () => ({ hasStoredIdentity: () => hasStoredMock() }),
+}))
+
 import {
   runLocalStorageSchemaMigration,
   LOCAL_STORAGE_SCHEMA_VERSION,
@@ -16,6 +23,8 @@ describe('runLocalStorageSchemaMigration', () => {
   beforeEach(() => {
     localStorage.clear()
     resetMock.mockClear()
+    hasStoredMock.mockReset()
+    hasStoredMock.mockResolvedValue(false)
   })
 
   it('fresh install (no version, no data): records version, no reset', async () => {
@@ -25,12 +34,23 @@ describe('runLocalStorageSchemaMigration', () => {
     expect(localStorage.getItem(VERSION_KEY)).toBe(String(LOCAL_STORAGE_SCHEMA_VERSION))
   })
 
-  it('legacy data without version: resets, flags, records version', async () => {
+  it('legacy data, reset succeeds: resets, flags, stamps version', async () => {
     localStorage.setItem('wot-active-did', 'did:key:zLegacy')
     const didReset = await runLocalStorageSchemaMigration()
     expect(didReset).toBe(true)
     expect(resetMock).toHaveBeenCalledTimes(1)
     expect(localStorage.getItem(VERSION_KEY)).toBe(String(LOCAL_STORAGE_SCHEMA_VERSION))
+  })
+
+  it('legacy data, reset leaves seed behind: flags but does NOT stamp (retry next launch)', async () => {
+    // Simulates resetLocalAppData swallowing a failed seed-delete: the seed is
+    // still unlockable afterwards, so the one-shot marker must stay unset.
+    localStorage.setItem('wot-active-did', 'did:key:zStuck')
+    hasStoredMock.mockResolvedValue(true)
+    const didReset = await runLocalStorageSchemaMigration()
+    expect(didReset).toBe(true)
+    expect(resetMock).toHaveBeenCalledTimes(1)
+    expect(localStorage.getItem(VERSION_KEY)).toBeNull()
   })
 
   it('already at current version: no-op even with data present', async () => {
@@ -53,7 +73,7 @@ describe('runLocalStorageSchemaMigration', () => {
     expect(localStorage.getItem(VERSION_KEY)).toBe('2')
   })
 
-  it('is idempotent: second run after migration does nothing', async () => {
+  it('is idempotent: second run after a successful migration does nothing', async () => {
     localStorage.setItem('wot-active-did', 'did:key:zLegacy')
     await runLocalStorageSchemaMigration()
     resetMock.mockClear()
