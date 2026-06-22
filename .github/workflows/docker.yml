@@ -20,14 +20,25 @@ jobs:
       contents: read
       packages: write
     strategy:
+      # Unabhaengige Service-Builds: ein fehlschlagender Service darf die anderen
+      # nicht abbrechen (relay-first-Deploy braucht relay/profiles auch wenn vault hakt).
+      fail-fast: false
       matrix:
         include:
+          # relay/profiles sind self-contained (Context = Package-Dir)
           - package: wot-relay
             image: relay
-          - package: wot-vault
-            image: vault
+            context: packages/wot-relay
+            file: packages/wot-relay/Dockerfile
           - package: wot-profiles
             image: profiles
+            context: packages/wot-profiles
+            file: packages/wot-profiles/Dockerfile
+          # vault baut @web_of_trust/core aus dem Workspace → Context = Repo-Root
+          - package: wot-vault
+            image: vault
+            context: .
+            file: packages/wot-vault/Dockerfile
     steps:
       - uses: actions/checkout@v4
 
@@ -41,7 +52,8 @@ jobs:
       - name: Build and push ${{ matrix.image }}
         uses: docker/build-push-action@v6
         with:
-          context: packages/${{ matrix.package }}
+          context: ${{ matrix.context }}
+          file: ${{ matrix.file }}
           push: true
           tags: |
             ${{ env.IMAGE_PREFIX }}/${{ matrix.image }}:latest
