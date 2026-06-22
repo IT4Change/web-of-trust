@@ -9,9 +9,19 @@ import { createIdentityWorkflow } from '../../services/identityWorkflow'
 
 function generateRandomPassphrase(): string {
   const chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*'
-  const array = new Uint8Array(32)
-  crypto.getRandomValues(array)
-  return Array.from(array, b => chars[b % chars.length]).join('')
+  // Rejection sampling: discard byte values in the final, partial block so every
+  // character is equally likely (a plain `b % chars.length` biases the first
+  // 256 % chars.length characters).
+  const limit = 256 - (256 % chars.length)
+  const out: string[] = []
+  while (out.length < 32) {
+    const buf = new Uint8Array(32 - out.length)
+    crypto.getRandomValues(buf)
+    for (const b of buf) {
+      if (b < limit) out.push(chars[b % chars.length])
+    }
+  }
+  return out.join('')
 }
 
 type RecoveryStep = 'import' | 'validate' | 'protect' | 'complete'
@@ -101,23 +111,39 @@ export function RecoveryFlow({ onComplete, onCancel }: RecoveryFlowProps) {
       setMnemonic(cleanMnemonic)
 
       if (biometricAvailable) {
-        // Skip password step — go directly to biometric enrollment
+        // Skip password step — protect directly with biometrics. Enroll FIRST so
+        // a cancelled/failed prompt leaves no stored identity behind a random
+        // passphrase the user never saw; fall through to the password step.
         setIsLoading(false)
         const randomPassphrase = generateRandomPassphrase()
-        const workflow = createIdentityWorkflow()
-        await workflow.deleteStoredIdentity()
-        const { identity } = await workflow.recoverIdentity({
-          mnemonic: cleanMnemonic,
-          passphrase: randomPassphrase,
-          storeSeed: true,
-        })
+        let enrolled = false
         try {
           await BiometricService.enroll(randomPassphrase)
-          await refreshBiometricStatus()
-          finishRecovery(identity, identity.getDid())
-          return
+          enrolled = true
         } catch {
-          // Biometric failed — fall through to password step
+          // Prompt cancelled / enrollment failed — fall through to password step.
+        }
+        if (enrolled) {
+          try {
+            const workflow = createIdentityWorkflow()
+            await workflow.deleteStoredIdentity()
+            const { identity } = await workflow.recoverIdentity({
+              mnemonic: cleanMnemonic,
+              passphrase: randomPassphrase,
+              storeSeed: true,
+            })
+            await refreshBiometricStatus()
+            finishRecovery(identity, identity.getDid())
+            return
+          } catch {
+            // Failed after enrollment + seed store. recoverIdentity persists the
+            // seed before it finishes, so roll back BOTH the keystore entry and the
+            // stored seed — else a partial failure strands an identity behind the
+            // unseen random passphrase.
+            await BiometricService.unenroll().catch(() => {})
+            await createIdentityWorkflow().deleteStoredIdentity().catch(() => {})
+            await refreshBiometricStatus()
+          }
         }
       }
       setStep('protect')
@@ -141,21 +167,39 @@ export function RecoveryFlow({ onComplete, onCancel }: RecoveryFlowProps) {
   }
 
   const handleBiometricProtect = async () => {
-    try {
-      setIsLoading(true)
-      setError(null)
+    setError(null)
+    setIsLoading(true)
 
-      const randomPassphrase = generateRandomPassphrase()
+    // Enroll FIRST so a cancelled/failed biometric prompt leaves no stored
+    // identity behind a random passphrase the user never saw.
+    const randomPassphrase = generateRandomPassphrase()
+    try {
+      await BiometricService.enroll(randomPassphrase)
+    } catch {
+      setIsLoading(false)
+      setStep('protect')
+      return
+    }
+
+    // Keystore holds the passphrase — now recover + store the identity with it.
+    // Roll back the keystore entry + stored seed if that fails.
+    try {
       const workflow = createIdentityWorkflow()
       await workflow.deleteStoredIdentity()
-      const { identity } = await workflow.recoverIdentity({ mnemonic, passphrase: randomPassphrase, storeSeed: true })
-
-      await BiometricService.enroll(randomPassphrase)
+      const { identity } = await workflow.recoverIdentity({
+        mnemonic,
+        passphrase: randomPassphrase,
+        storeSeed: true,
+      })
       await refreshBiometricStatus()
-
       finishRecovery(identity, identity.getDid())
     } catch {
-      setError(null)
+      // recoverIdentity persists the seed before it finishes, so roll back BOTH
+      // the keystore entry and the stored seed — else a partial failure strands an
+      // identity behind the unseen random passphrase.
+      await BiometricService.unenroll().catch(() => {})
+      await createIdentityWorkflow().deleteStoredIdentity().catch(() => {})
+      await refreshBiometricStatus()
       setIsLoading(false)
       setStep('protect')
     }

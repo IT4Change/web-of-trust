@@ -206,7 +206,7 @@ export default function ArchitecturePage() {
         </section>
 
         {/* Local-First */}
-        <section className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 mb-20">
+        <section id="local-first" className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 mb-20 scroll-mt-24">
           <h2 className="text-2xl font-bold text-foreground mb-4">{arch.localFirst.title}</h2>
           <p className="text-lg text-muted-foreground mb-8">{arch.localFirst.intro}</p>
 
@@ -276,7 +276,7 @@ export default function ArchitecturePage() {
         )}
 
         {/* Server Protection */}
-        <section className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 mb-20">
+        <section id="server-protection" className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 mb-20 scroll-mt-24">
           <h2 className="text-2xl font-bold text-foreground mb-4">{arch.serverProtection.title}</h2>
           <p className="text-lg text-muted-foreground italic mb-2">{arch.serverProtection.question}</p>
           <p className="text-lg text-foreground font-medium mb-8">{arch.serverProtection.answer}</p>

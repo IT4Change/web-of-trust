@@ -16,9 +16,19 @@ interface OnboardingFlowProps {
 
 function generateRandomPassphrase(): string {
   const chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*'
-  const array = new Uint8Array(32)
-  crypto.getRandomValues(array)
-  return Array.from(array, b => chars[b % chars.length]).join('')
+  // Rejection sampling: discard byte values in the final, partial block so every
+  // character is equally likely (a plain `b % chars.length` biases the first
+  // 256 % chars.length characters).
+  const limit = 256 - (256 % chars.length)
+  const out: string[] = []
+  while (out.length < 32) {
+    const buf = new Uint8Array(32 - out.length)
+    crypto.getRandomValues(buf)
+    for (const b of buf) {
+      if (b < limit) out.push(chars[b % chars.length])
+    }
+  }
+  return out.join('')
 }
 
 export function OnboardingFlow({ onComplete, onRecover }: OnboardingFlowProps) {
@@ -164,24 +174,38 @@ export function OnboardingFlow({ onComplete, onRecover }: OnboardingFlowProps) {
   }
 
   const handleBiometricProtect = async () => {
-    try {
-      setIsLoading(true)
-      setError(null)
+    setError(null)
+    setIsLoading(true)
 
-      const randomPassphrase = generateRandomPassphrase()
+    // Enroll FIRST: a cancelled/failed biometric prompt must not leave a stored
+    // identity behind a random passphrase the user never saw. Nothing is
+    // persisted until the keystore actually holds the passphrase.
+    const randomPassphrase = generateRandomPassphrase()
+    try {
+      await BiometricService.enroll(randomPassphrase)
+    } catch {
+      setIsLoading(false)
+      goToStep('protect')
+      return
+    }
+
+    // Keystore holds the passphrase — now create + store the identity with it.
+    // If that fails, roll back the keystore entry + stored seed so no orphan key
+    // is stranded behind the unseen random passphrase.
+    try {
       const { identity } = await createIdentityWorkflow().recoverIdentity({
         mnemonic,
         passphrase: randomPassphrase,
         storeSeed: true,
       })
-
-      await BiometricService.enroll(randomPassphrase)
       await refreshBiometricStatus()
-
       finishOnboarding(identity)
     } catch (e) {
-      // Biometric enrollment failed — fall back to password step
-      setError(null)
+      // recoverIdentity persists the seed before it finishes, so roll back BOTH
+      // the keystore entry and the stored seed.
+      await BiometricService.unenroll().catch(() => {})
+      await createIdentityWorkflow().deleteStoredIdentity().catch(() => {})
+      await refreshBiometricStatus()
       setIsLoading(false)
       goToStep('protect')
     }

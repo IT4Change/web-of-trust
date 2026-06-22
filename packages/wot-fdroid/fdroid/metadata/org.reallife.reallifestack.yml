@@ -1,8 +1,8 @@
 AuthorName: Anton Tranelis
 Categories:
   - Internet
-CurrentVersion: 0.1.0
-CurrentVersionCode: 1
+CurrentVersion: 0.2.0
+CurrentVersionCode: 2
 Description: |
   Real Life Stack is a modular, backend-agnostic toolkit for community apps.
 
@@ -19,9 +19,9 @@ Description: |
   * Web of Trust (decentralized, encrypted)
 
   Real Life Stack is free and open-source software (MIT license).
-IssueTracker: https://github.com/IT4Change/real-life-stack/issues
+IssueTracker: https://github.com/real-life-org/real-life-stack/issues
 License: MIT
 Name: Real Life Stack
-SourceCode: https://github.com/IT4Change/real-life-stack
+SourceCode: https://github.com/real-life-org/real-life-stack
 Summary: Modular toolkit for community apps
 WebSite: https://web-of-trust.de
