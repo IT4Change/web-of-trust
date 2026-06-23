@@ -105,6 +105,42 @@ export class AuthorMismatchError extends Error {
   }
 }
 
+/**
+ * A write-path reject the relay routed back as `{ type:'error', thid, code }`
+ * after a SENT log-entry (P2-NIT-1, VE-4/VE-5). The coordinator classifies the
+ * code and, for the actions whose *mechanism* is an adapter/runtime concern
+ * (mint a new deviceId + device-revoke the old one + re-register), delegates to
+ * {@link WriteRejectHandler}. Engine-neutral so Phase 4 (Automerge) reuses it.
+ */
+export interface WriteReject {
+  /** The structured broker error code (matched on code, never free-text). */
+  code: BrokerErrorCode
+  /** The VE-4 disposition the code maps to. */
+  disposition: RejectDisposition
+  /** The docId the rejected write targeted. */
+  docId: string
+  /** The deviceId under which the rejected write was authored. */
+  deviceId: string
+}
+
+/**
+ * Adapter/runtime hook the coordinator calls on a write-path reject whose
+ * resolution it cannot perform engine-internally (P2-NIT-1):
+ *  - `restore-clone` (SEQ_COLLISION_DETECTED / DEVICE_REVOKED): mint a NEW
+ *    deviceId, device-revoke the old one, restart the (deviceId,docId) log at
+ *    seq=0, and re-write pending under the new deviceId. NEVER re-use the
+ *    colliding seq with divergent plaintext.
+ *  - `device-re-register` (DEVICE_NOT_REGISTERED / DEVICE_ID_CONFLICT): register
+ *    a deviceId (challenge-response) before the next log-entry.
+ * The coordinator handles `capability-re-present` itself and HARD-STOPS
+ * `hard-stop` (AUTHOR_MISMATCH) before this hook is ever called.
+ *
+ * The handler returns the deviceId the coordinator MUST use for subsequent
+ * writes (a NEW one for restore-clone; the same one for a pure re-register).
+ * Returning a value re-binds the coordinator's seq namespace atomically.
+ */
+export type WriteRejectHandler = (reject: WriteReject) => Promise<{ deviceId: string } | void>
+
 /** A control frame the coordinator sends and awaits a receipt for. */
 export interface ControlFrameTransport {
   sendControlFrame(frame: ControlFrame): Promise<ControlFrameReceipt>
@@ -173,6 +209,26 @@ export interface LogSyncCoordinatorConfig {
    * present-capability.
    */
   sendSpaceRegister?: () => Promise<ControlFrameReceipt | undefined>
+  /**
+   * Write-path reject handler (P2-NIT-1, VE-4/VE-5). Called when the relay
+   * rejects a SENT log-entry with a restore-clone / device-re-register
+   * disposition; the handler performs the deviceId-minting / device-revoke /
+   * re-register mechanism (an adapter/runtime concern) and returns the deviceId
+   * the coordinator must use next. Omitted ⇒ the reject is surfaced via the
+   * return of {@link LogSyncCoordinator.handleWriteReject} but no restore is
+   * performed (the coordinator never mints a deviceId itself).
+   */
+  onWriteRejected?: WriteRejectHandler
+  /**
+   * Called after a restore-clone has re-bound the active deviceId (VE-4/VE-5),
+   * with the NEW deviceId. The adapter re-writes the current CRDT state under the
+   * new deviceId from seq=0 (e.g. one fresh log-entry carrying the full Yjs state)
+   * — this is the "pending neu schreiben unter neuer deviceId" step. The colliding
+   * seq under the OLD deviceId is abandoned (never re-used with divergent
+   * plaintext). When omitted, the coordinator falls back to {@link resendPending}
+   * (only safe when the store's pending entries were already re-keyed externally).
+   */
+  onAfterRestoreClone?: (newDeviceId: string) => Promise<void> | void
   /** Clock (testable). */
   now?: () => Date
 }
@@ -188,6 +244,15 @@ export type ReceiveLogEntryResult =
 export class LogSyncCoordinator {
   private readonly config: LogSyncCoordinatorConfig
   private readonly now: () => Date
+
+  /**
+   * The ACTIVE local deviceId for the seq namespace. Starts at `config.deviceId`
+   * and is re-bound by a restore-clone (VE-4/VE-5): a SEQ_COLLISION /
+   * DEVICE_REVOKED reject mints a NEW deviceId (via {@link WriteRejectHandler}),
+   * and every subsequent write reserves seq from 0 under that new id. The
+   * colliding seq is NEVER re-used with divergent plaintext.
+   */
+  private deviceId: string
 
   /**
    * Per-(socket,docId) control-frame serialization (VE-9). Because this
@@ -215,9 +280,44 @@ export class LogSyncCoordinator {
     (response: SyncResponseMessage) => void
   >()
 
+  /**
+   * VE-5 blocked-by-key buffer: incoming log-entry envelopes whose keyGeneration
+   * is not yet available locally. Keyed by `${deviceId} ${seq}` (the
+   * authoring device's, NOT ours) so a re-buffer is idempotent and a re-applied
+   * entry is dropped from the buffer. Replayed (origin='remote') after a key
+   * import — NEVER through the local write path (LOOP-GUARD).
+   */
+  private readonly blockedByKey = new Map<string, LogEntryMessage>()
+
+  /**
+   * Sent log-entry messageId → the (deviceId, seq) it carried, so a routed
+   * write-path reject (`{ type:'error', thid }`) correlates to the exact write
+   * (P2-NIT-1). Bounded; entries are dropped on correlate or when the ring caps.
+   */
+  private readonly inFlightWrites = new Map<string, { deviceId: string; seq: number }>()
+
+  /** Re-entrancy guard so a single reject triggers exactly one restore-clone. */
+  private restoreCloneInFlight = false
+
   constructor(config: LogSyncCoordinatorConfig) {
     this.config = config
     this.now = config.now ?? (() => new Date())
+    this.deviceId = config.deviceId
+  }
+
+  /** The current active local deviceId (re-bound by a restore-clone). */
+  getDeviceId(): string {
+    return this.deviceId
+  }
+
+  /**
+   * Whether this coordinator has a SENT log-entry awaiting a receipt under the
+   * given messageId. A multi-doc adapter uses this to route a routed write-path
+   * `error` frame (`thid == messageId`) to the OWNING coordinator only, so an
+   * error for doc A never triggers a (false) restore-clone on doc B's coordinator.
+   */
+  hasInFlightWrite(messageId: string): boolean {
+    return this.inFlightWrites.has(messageId)
   }
 
   /** Reset connection-scoped state on (re)connect — a new socket = empty scope cache (VE-4/VE-9). */
@@ -237,6 +337,15 @@ export class LogSyncCoordinator {
     const type = (message as { type?: unknown })?.type
     if (type === 'https://web-of-trust.de/protocols/log-entry/1.0') {
       await this.receiveLogEntry(message)
+      return
+    }
+    // P2-NIT-1: a routed write-path reject for a SENT log-entry. The relay
+    // answers an ingest-gate failure with `{ type:'error', thid, code }` (NOT a
+    // control-frame ControlFrameRejectedError, which only the control channel
+    // throws). Correlate thid → the rejected (deviceId, seq) and drive the
+    // reject-disposition action (VE-4/VE-5).
+    if (type === 'error') {
+      await this.onWritePathErrorFrame(message)
       return
     }
     if (type === 'https://web-of-trust.de/protocols/sync-response/1.0') {
@@ -369,7 +478,12 @@ export class LogSyncCoordinator {
     await this.ensurePublished()
 
     const encoded = this.config.hooks.encodeUpdate(update)
-    const { docId, deviceId, authorKid } = this.config
+    const { docId } = this.config
+    // The active deviceId is mutable (a restore-clone re-binds it). authorKid is
+    // the Identity-Key DID#vm — it does NOT change on a restore-clone (only the
+    // per-device seq namespace is reset under the new deviceId).
+    const deviceId = this.deviceId
+    const authorKid = this.config.authorKid
 
     const entry = await this.config.logStore.appendLocalEntry({
       deviceId,
@@ -398,7 +512,7 @@ export class LogSyncCoordinator {
       },
     })
 
-    await this.sendLogEntryEnvelope(entry.entryJws)
+    await this.sendLogEntryEnvelope(entry.entryJws, entry.deviceId, entry.seq)
     return entry
   }
 
@@ -407,20 +521,38 @@ export class LogSyncCoordinator {
     const pending = await this.config.logStore.getPending()
     for (const entry of pending) {
       if (entry.docId !== this.config.docId) continue
-      await this.sendLogEntryEnvelope(entry.entryJws)
+      await this.sendLogEntryEnvelope(entry.entryJws, entry.deviceId, entry.seq)
     }
   }
 
-  private async sendLogEntryEnvelope(entryJws: string): Promise<void> {
+  /**
+   * Send a log-entry envelope and remember its messageId → (deviceId, seq) so a
+   * routed write-path reject (`{ type:'error', thid }`, P2-NIT-1) correlates back
+   * to the exact rejected write. The map is bounded (cleared on ack/reject and
+   * size-capped) so it cannot grow unbounded.
+   */
+  private async sendLogEntryEnvelope(entryJws: string, deviceId: string, seq: number): Promise<void> {
     const recipients = await this.resolveRecipients()
+    const messageId = cryptoRandomUuid()
+    this.rememberInFlight(messageId, deviceId, seq)
     const message = createLogEntryMessage({
-      id: cryptoRandomUuid(),
+      id: messageId,
       from: this.config.ownDid,
       to: recipients,
       createdTime: Math.floor(this.now().getTime() / 1000),
       entry: entryJws,
     })
     await this.config.envelopes.send(message)
+  }
+
+  private rememberInFlight(messageId: string, deviceId: string, seq: number): void {
+    // Bound the map: a write-path reject is rare, so a small ring is enough to
+    // correlate the latest sends without leaking memory on the happy path.
+    if (this.inFlightWrites.size > 256) {
+      const oldest = this.inFlightWrites.keys().next().value
+      if (oldest !== undefined) this.inFlightWrites.delete(oldest)
+    }
+    this.inFlightWrites.set(messageId, { deviceId, seq })
   }
 
   private async resolveRecipients(): Promise<string[]> {
@@ -484,13 +616,19 @@ export class LogSyncCoordinator {
     // generic; an adapter may wrap the plaintext with an engine tag. Here we rely
     // on the engine's applyRemoteUpdate throwing for foreign bytes and treat a
     // decode/apply failure as a skip rather than a crash.
+    // VE-5: an entry under a not-yet-available keyGeneration is BUFFERED (no drop,
+    // no mis-decrypt), and replayed after the key is imported. Buffering keys by
+    // the AUTHORING (deviceId,seq) so a re-delivery is idempotent. The replay runs
+    // through THIS read path again (origin='remote') — never the write path.
     const blocked = await this.classifyBlockedByKey(payload.keyGeneration)
     if (blocked) {
+      this.bufferBlockedByKey(payload.deviceId, payload.seq, parsed)
       return { disposition: 'blocked-by-key', keyGeneration: payload.keyGeneration }
     }
 
     const contentKey = await this.config.getContentKeyByGeneration(payload.keyGeneration)
     if (!contentKey) {
+      this.bufferBlockedByKey(payload.deviceId, payload.seq, parsed)
       return { disposition: 'blocked-by-key', keyGeneration: payload.keyGeneration }
     }
 
@@ -500,6 +638,7 @@ export class LogSyncCoordinator {
       plaintext = await decryptLogPayload({ crypto: this.config.crypto, spaceContentKey: contentKey, blob })
     } catch {
       // Cannot decrypt with the available key — treat as blocked-by-key, never crash.
+      this.bufferBlockedByKey(payload.deviceId, payload.seq, parsed)
       return { disposition: 'blocked-by-key', keyGeneration: payload.keyGeneration }
     }
 
@@ -521,12 +660,56 @@ export class LogSyncCoordinator {
       entryJws: parsed.body.entry,
     })
     this.applied.add(key)
+    // Drop from the blocked-by-key buffer if it was parked there earlier.
+    this.blockedByKey.delete(blockedKey(payload.deviceId, payload.seq))
     return { disposition: 'applied', deviceId: payload.deviceId, seq: payload.seq }
   }
 
   private async classifyBlockedByKey(keyGeneration: number): Promise<boolean> {
     const available = await this.config.getAvailableKeyGenerations()
     return classifyLogEntryKeyDisposition({ keyGeneration, availableKeyGenerations: available }) === 'blocked-by-key'
+  }
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // VE-5: blocked-by-key buffer + LOOP-GUARDed replay
+  // ──────────────────────────────────────────────────────────────────────────
+
+  /** Park a not-yet-decryptable entry (idempotent on the authoring (deviceId,seq)). */
+  private bufferBlockedByKey(deviceId: string, seq: number, message: LogEntryMessage): void {
+    this.blockedByKey.set(blockedKey(deviceId, seq), message)
+  }
+
+  /**
+   * VE-5 replay (MUST be LOOP-GUARDed): after a content key is imported (e.g. a
+   * key-rotation applied), re-feed every buffered entry through the READ path
+   * ({@link receiveLogEntry}, origin='remote'). A replayed FOREIGN entry produces
+   * NO new log-entry under our own deviceId — it never touches the write path —
+   * so a key import can never trigger a (delayed) outbox loop. Entries that
+   * decrypt + apply leave the buffer; entries still blocked stay parked.
+   *
+   * Returns the number of entries that converged (applied or idempotently
+   * skipped) on this pass — tests assert the OUTGOING send count is unchanged.
+   */
+  async replayBlockedByKey(): Promise<number> {
+    if (this.blockedByKey.size === 0) return 0
+    // Snapshot: receiveLogEntry mutates the buffer (delete on apply / re-buffer if
+    // still blocked), so iterate a copy to avoid concurrent-modification surprises.
+    const pending = [...this.blockedByKey.entries()]
+    let converged = 0
+    for (const [bufKey, message] of pending) {
+      const result = await this.receiveLogEntry(message)
+      if (result.disposition === 'applied' || result.disposition === 'idempotent-skip') {
+        converged += 1
+        this.blockedByKey.delete(bufKey)
+      }
+      // 'blocked-by-key' again ⇒ receiveLogEntry re-buffered it (still no key) — keep.
+    }
+    return converged
+  }
+
+  /** Count of currently buffered blocked-by-key entries (test/inspection). */
+  blockedByKeyCount(): number {
+    return this.blockedByKey.size
   }
 
   // ──────────────────────────────────────────────────────────────────────────
@@ -608,12 +791,15 @@ export class LogSyncCoordinator {
 
     // VE-4 broker head-abgleich: deviceId absent in heads => broker_seq=-1 => no
     // restore (normal first-write/creator). broker_seq>local_seq => restore-clone.
-    const brokerSeq = Object.prototype.hasOwnProperty.call(response.body.heads, this.config.deviceId)
-      ? response.body.heads[this.config.deviceId]
+    // Uses the ACTIVE deviceId (a restore-clone re-bound it) so a fresh post-clone
+    // namespace is never falsely flagged against the old device's broker head.
+    const deviceId = this.deviceId
+    const brokerSeq = Object.prototype.hasOwnProperty.call(response.body.heads, deviceId)
+      ? response.body.heads[deviceId]
       : -1
     const localHeads = await this.config.logStore.getKnownHeads(this.config.docId)
-    const localSeq = Object.prototype.hasOwnProperty.call(localHeads, this.config.deviceId)
-      ? localHeads[this.config.deviceId]
+    const localSeq = Object.prototype.hasOwnProperty.call(localHeads, deviceId)
+      ? localHeads[deviceId]
       : -1
 
     if (brokerSeq < 0) return { restoreCloneRequired: false }
@@ -624,7 +810,7 @@ export class LogSyncCoordinator {
     }
     const disposition = classifyLocalBrokerSeqConsistency({
       docId: this.config.docId,
-      deviceId: this.config.deviceId,
+      deviceId,
       localSeq,
       brokerSeq,
     })
@@ -645,9 +831,156 @@ export class LogSyncCoordinator {
     if (!code) return 'unknown'
     const disposition = classifyRejectDisposition(code)
     if (disposition === 'hard-stop') {
-      throw new AuthorMismatchError(this.config.docId, this.config.deviceId, this.config.authorKid)
+      throw new AuthorMismatchError(this.config.docId, this.deviceId, this.config.authorKid)
     }
     return disposition
+  }
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // Write-path reject (P2-NIT-1, VE-4/VE-5): routed `{ type:'error', thid }`
+  // ──────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Parse a routed write-path `error` frame, correlate its `thid` to the rejected
+   * (deviceId, seq), and drive the reject action. Unknown / uncorrelated codes are
+   * ignored (the relay may route errors for frames we did not send).
+   */
+  private async onWritePathErrorFrame(message: unknown): Promise<void> {
+    const frame = message as { type?: unknown; thid?: unknown; code?: unknown }
+    if (!isKnownBrokerErrorCode(frame.code)) return
+    const thid = typeof frame.thid === 'string' ? frame.thid : undefined
+    // Only act on an error correlated to a log-entry WE sent. An uncorrelated thid
+    // (a frame we did not send / already resolved) is ignored — never a false
+    // restore-clone on a stray error.
+    const correlated = thid ? this.inFlightWrites.get(thid) : undefined
+    if (!correlated) return
+    if (thid) this.inFlightWrites.delete(thid)
+    await this.handleWriteReject(frame.code, correlated.deviceId, correlated.seq)
+  }
+
+  /**
+   * Drive the VE-4/VE-5 action for a write-path reject code (P2-NIT-1). The
+   * disposition table:
+   *  - AUTHOR_MISMATCH → HARD STOP: throw {@link AuthorMismatchError}, NO retry.
+   *  - SEQ_COLLISION_DETECTED / DEVICE_REVOKED → restore-clone (mint new deviceId
+   *    via {@link WriteRejectHandler}, restart at seq=0, re-write pending).
+   *  - DEVICE_NOT_REGISTERED / DEVICE_ID_CONFLICT → device-re-register.
+   *  - CAPABILITY_* → re-present capability + resend pending.
+   *  - retry/unknown → no structural action (the reconnect path resends pending).
+   *
+   * Exposed for adapter wiring + tests. Returns the disposition it acted on.
+   */
+  async handleWriteReject(
+    code: BrokerErrorCode,
+    rejectedDeviceId?: string,
+    rejectedSeq?: number,
+  ): Promise<RejectDisposition> {
+    const disposition = classifyRejectDisposition(code)
+    switch (disposition) {
+      case 'hard-stop':
+        // AUTHOR_MISMATCH: authorKid<->deviceId binding bug. Hard stop, never retry.
+        throw new AuthorMismatchError(this.config.docId, rejectedDeviceId ?? this.deviceId, this.config.authorKid)
+      case 'restore-clone':
+        await this.restoreClone({ code, rejectedDeviceId, rejectedSeq })
+        return disposition
+      case 'device-re-register':
+        await this.deviceReRegister(code, rejectedDeviceId)
+        return disposition
+      case 'capability-re-present':
+        // A new socket / stale scope: re-present then resend pending (idempotent).
+        await this.presentCapabilityWithRetry()
+        await this.resendPending()
+        return disposition
+      case 'retry':
+      case 'unknown':
+      default:
+        return disposition
+    }
+  }
+
+  /**
+   * Restore/Clone (VE-4/VE-5): a SEQ_COLLISION_DETECTED (matched on CODE, never on
+   * a clientHint) or a mid-session DEVICE_REVOKED for our own deviceId. The
+   * MECHANISM (mint deviceId + device-revoke old + re-register) lives in the
+   * adapter's {@link WriteRejectHandler}; the coordinator re-binds its seq
+   * namespace to the returned new deviceId, re-publishes on the new connection
+   * scope, and re-writes pending entries UNDER THE NEW deviceId from seq=0. The
+   * colliding seq is NEVER re-used with divergent plaintext (the new deviceId is a
+   * fresh nonce namespace).
+   */
+  private async restoreClone(reject: {
+    code: BrokerErrorCode
+    rejectedDeviceId?: string
+    rejectedSeq?: number
+  }): Promise<void> {
+    if (this.restoreCloneInFlight) return
+    this.restoreCloneInFlight = true
+    try {
+      const handler = this.config.onWriteRejected
+      if (!handler) {
+        // No mechanism wired: surface nothing further (the coordinator never mints
+        // a deviceId itself). The caller/audit sees the disposition via the return.
+        return
+      }
+      const oldDeviceId = this.deviceId
+      const outcome = await handler({
+        code: reject.code,
+        disposition: classifyRejectDisposition(reject.code),
+        docId: this.config.docId,
+        deviceId: reject.rejectedDeviceId ?? oldDeviceId,
+      })
+      // Re-bind to the NEW deviceId (a restore-clone MUST return one). A handler
+      // that returns void leaves the deviceId unchanged (degenerate; treated as a
+      // no-op restore so we never silently re-use the colliding seq).
+      const newDeviceId = outcome?.deviceId
+      if (!newDeviceId || newDeviceId === oldDeviceId) return
+      this.deviceId = newDeviceId
+      // A new deviceId = a fresh per-(deviceId,docId) seq namespace; clear the
+      // in-memory applied-set guard for our OWN device is unnecessary (it keys by
+      // the authoring device), but the in-flight correlation for the old device is
+      // stale — drop it.
+      this.inFlightWrites.clear()
+      // The clone re-publishes on this connection (present-capability + space
+      // register idempotent) and re-writes the still-pending entries (which the
+      // adapter re-built under the new deviceId from seq=0).
+      this.published = false
+      this.publishing = null
+      await this.ensurePublished()
+      // Re-write the current CRDT state under the NEW deviceId from seq=0. The
+      // colliding seq under the OLD deviceId is abandoned (never re-used with
+      // divergent plaintext — a new deviceId is a fresh nonce namespace). When the
+      // adapter supplies no re-write hook, fall back to resending the stored
+      // pending (only correct if those were already re-keyed to the new deviceId).
+      if (this.config.onAfterRestoreClone) {
+        await this.config.onAfterRestoreClone(newDeviceId)
+      } else {
+        await this.resendPending()
+      }
+    } finally {
+      this.restoreCloneInFlight = false
+    }
+  }
+
+  /**
+   * DEVICE_NOT_REGISTERED / DEVICE_ID_CONFLICT (VE-4): register the deviceId
+   * (challenge-response) BEFORE the next log-entry. The registration MECHANISM is
+   * the adapter's {@link WriteRejectHandler}; a DEVICE_ID_CONFLICT may return a
+   * fresh deviceId (re-bound here), a plain DEVICE_NOT_REGISTERED keeps the id.
+   */
+  private async deviceReRegister(code: BrokerErrorCode, rejectedDeviceId?: string): Promise<void> {
+    const handler = this.config.onWriteRejected
+    if (!handler) return
+    const outcome = await handler({
+      code,
+      disposition: 'device-re-register',
+      docId: this.config.docId,
+      deviceId: rejectedDeviceId ?? this.deviceId,
+    })
+    if (outcome?.deviceId && outcome.deviceId !== this.deviceId) {
+      this.deviceId = outcome.deviceId
+      this.inFlightWrites.clear()
+    }
+    await this.resendPending()
   }
 }
 
@@ -655,6 +988,11 @@ export class LogSyncCoordinator {
 
 function appliedKey(deviceId: string, seq: number): string {
   return `${deviceId}\u0000${seq}`
+}
+
+/** Buffer key for a blocked-by-key entry, by the AUTHORING (deviceId, seq). */
+function blockedKey(deviceId: string, seq: number): string {
+  return appliedKey(deviceId, seq)
 }
 
 function brokerErrorCodeOf(err: unknown): BrokerErrorCode | null {

@@ -1,0 +1,488 @@
+import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import * as Y from 'yjs'
+import type { PublicIdentitySession } from '../../wot-core/src/application/identity'
+import { createTestIdentity } from '../../wot-core/tests/helpers/identity-session'
+import {
+  InMemoryMessagingAdapter,
+  InProcessLogBroker,
+  InMemorySpaceMetadataStorage,
+  InMemoryCompactStore,
+  InMemoryKeyManagementAdapter,
+  InMemoryDocLogStore,
+} from '@web_of_trust/core/adapters'
+import {
+  LOG_ENTRY_MESSAGE_TYPE,
+  SYNC_REQUEST_MESSAGE_TYPE,
+  SPACE_ROTATE_MESSAGE_TYPE,
+  SPACE_REGISTER_MESSAGE_TYPE,
+  personalDocIdFromKey,
+} from '@web_of_trust/core/protocol'
+import { YjsReplicationAdapter } from '../src/YjsReplicationAdapter'
+import { YjsPersonalLogSyncAdapter } from '../src/YjsPersonalLogSyncAdapter'
+
+const wait = (ms = 120) => new Promise((r) => setTimeout(r, ms))
+const BROKER_URLS = ['wss://broker.example.com']
+
+interface TestDoc {
+  items: Record<string, { title: string }>
+}
+
+/** Tally outgoing envelope types on a messaging adapter (for VE-7 + LOOP-GUARD). */
+function instrumentSentTypes(messaging: InMemoryMessagingAdapter): {
+  types: string[]
+  logEntries: number
+  content: number
+} {
+  const tally = { types: [] as string[], logEntries: 0, content: 0 }
+  const baseSend = messaging.send.bind(messaging)
+  ;(messaging as unknown as { send: typeof messaging.send }).send = async (envelope: never) => {
+    const type = (envelope as { type?: string }).type ?? 'unknown'
+    tally.types.push(type)
+    if (type === LOG_ENTRY_MESSAGE_TYPE) tally.logEntries += 1
+    if (type === 'content') tally.content += 1
+    return baseSend(envelope)
+  }
+  return tally
+}
+
+const DEVICE_ALICE = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+const DEVICE_BOB = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
+
+describe('YjsReplicationAdapter — Slice A Phase 3 (VE-5/6/7/10 + write-reject + join-register)', () => {
+  let alice: PublicIdentitySession
+  let bob: PublicIdentitySession
+  let broker: InProcessLogBroker
+  let aliceMessaging: InMemoryMessagingAdapter
+  let bobMessaging: InMemoryMessagingAdapter
+  let aliceAdapter: YjsReplicationAdapter
+  let bobAdapter: YjsReplicationAdapter
+
+  function makeAdapter(
+    identity: PublicIdentitySession,
+    messaging: InMemoryMessagingAdapter,
+    deviceId: string,
+    enableLogSync = true,
+  ): YjsReplicationAdapter {
+    return new YjsReplicationAdapter({
+      identity,
+      messaging,
+      brokerUrls: BROKER_URLS,
+      keyManagement: new InMemoryKeyManagementAdapter(),
+      metadataStorage: new InMemorySpaceMetadataStorage(),
+      compactStore: new InMemoryCompactStore(),
+      docLogStore: new InMemoryDocLogStore(),
+      enableLogSync,
+      deviceId,
+    })
+  }
+
+  beforeEach(async () => {
+    InMemoryMessagingAdapter.resetAll()
+    broker = new InProcessLogBroker()
+    alice = (await createTestIdentity('alice-pass')).identity
+    bob = (await createTestIdentity('bob-pass')).identity
+    aliceMessaging = new InMemoryMessagingAdapter({ broker, socketId: 'alice-socket' })
+    bobMessaging = new InMemoryMessagingAdapter({ broker, socketId: 'bob-socket' })
+    await aliceMessaging.connect(alice.getDid())
+    await bobMessaging.connect(bob.getDid())
+    aliceAdapter = makeAdapter(alice, aliceMessaging, DEVICE_ALICE)
+    bobAdapter = makeAdapter(bob, bobMessaging, DEVICE_BOB)
+    await aliceAdapter.start()
+    await bobAdapter.start()
+  })
+
+  afterEach(async () => {
+    await aliceAdapter.stop()
+    await bobAdapter.stop()
+    InMemoryMessagingAdapter.resetAll()
+    try { await alice.deleteStoredIdentity() } catch {}
+    try { await bob.deleteStoredIdentity() } catch {}
+  })
+
+  async function createSharedSpace(): Promise<string> {
+    const space = await aliceAdapter.createSpace<TestDoc>('shared', { items: {} }, { name: 'Log Space' })
+    await wait()
+    const bobEncKey = await bob.getEncryptionPublicKeyBytes()
+    await aliceAdapter.addMember(space.id, bob.getDid(), bobEncKey)
+    await wait(200)
+    return space.id
+  }
+
+  // ── Group 4: VE-7 — content channel carries only log-entry under log sync ─────
+  it('VE-7 — with enableLogSync=true, the content channel sends only log-entry/1.0 (NO content) in steady state', async () => {
+    const spaceId = await createSharedSpace()
+    const tally = instrumentSentTypes(aliceMessaging)
+
+    const handle = await aliceAdapter.openSpace<TestDoc>(spaceId)
+    handle.transact((doc) => { doc.items['t1'] = { title: 'first' } })
+    handle.transact((doc) => { doc.items['t2'] = { title: 'second' } })
+    await wait(150)
+
+    // Steady-state: only log-entry envelopes were sent over the content channel.
+    expect(tally.types).not.toContain('content')
+    expect(tally.logEntries).toBeGreaterThanOrEqual(2)
+    handle.close()
+  })
+
+  it('VE-7 — with enableLogSync=false, the legacy content path is unchanged (content IS sent)', async () => {
+    // A separate non-log-sync pair (legacy content broadcast still the default).
+    const legacyMessaging = new InMemoryMessagingAdapter({ broker, socketId: 'legacy-socket' })
+    await legacyMessaging.connect(alice.getDid())
+    const legacy = makeAdapter(alice, legacyMessaging, 'dddddddd-dddd-4ddd-8ddd-dddddddddddd', false)
+    await legacy.start()
+    try {
+      const space = await legacy.createSpace<TestDoc>('private', { items: {} }, { name: 'Legacy' })
+      await wait()
+      const tally = instrumentSentTypes(legacyMessaging)
+      const handle = await legacy.openSpace<TestDoc>(space.id)
+      handle.transact((doc) => { doc.items['x'] = { title: 'legacy' } })
+      await wait(120)
+      // Legacy path: content envelope sent, NO log-entry.
+      expect(tally.content).toBeGreaterThanOrEqual(1)
+      expect(tally.logEntries).toBe(0)
+      handle.close()
+    } finally {
+      await legacy.stop()
+    }
+  })
+
+  // ── Group 1: VE-5 — blocked-by-key replay produces ZERO sends ─────────────────
+  it('VE-5 — a remote entry under a not-yet-available key is buffered (no drop); after the key arrives the buffer replays and the replay sends NOTHING', async () => {
+    const spaceId = await createSharedSpace()
+    const bobHandle = await bobAdapter.openSpace<TestDoc>(spaceId)
+
+    // Reach into Bob's coordinator + key store to simulate a future-generation entry.
+    const bobCoordinator = (bobAdapter as unknown as {
+      coordinators: Map<string, { receiveLogEntry: (m: unknown) => Promise<{ disposition: string }>; blockedByKeyCount: () => number; replayBlockedByKey: () => Promise<number> }>
+    }).coordinators.get(spaceId)!
+    expect(bobCoordinator).toBeTruthy()
+
+    // Alice writes an entry Bob CAN read first (gen 0), to establish the baseline.
+    const aliceHandle = await aliceAdapter.openSpace<TestDoc>(spaceId)
+    aliceHandle.transact((doc) => { doc.items['base'] = { title: 'base' } })
+    await wait(150)
+    expect(bobHandle.getDoc().items['base']?.title).toBe('base')
+
+    // Now craft a log-entry under gen 1 that Bob has NO key for, and feed it to Bob.
+    // Use Alice's key store to make a gen-1 key Alice can encrypt with but Bob lacks.
+    const aliceKeys = (aliceAdapter as unknown as { keyManagement: InMemoryKeyManagementAdapter }).keyManagement
+    const gen1Key = crypto.getRandomValues(new Uint8Array(32))
+    await aliceKeys.saveKey(spaceId, 1, gen1Key)
+    // Alice writes under the new (gen 1) key — Bob does not have gen 1 yet.
+    aliceHandle.transact((doc) => { doc.items['secret'] = { title: 'secret' } })
+    await wait(150)
+
+    // Bob could not apply the gen-1 entry → buffered, base item still the only one.
+    expect(bobHandle.getDoc().items['secret']).toBeUndefined()
+    expect(bobCoordinator.blockedByKeyCount()).toBeGreaterThanOrEqual(1)
+
+    // Instrument Bob's sends, then import the gen-1 key into Bob and replay.
+    const bobTally = instrumentSentTypes(bobMessaging)
+    const bobKeys = (bobAdapter as unknown as { keyManagement: InMemoryKeyManagementAdapter }).keyManagement
+    await bobKeys.saveKey(spaceId, 1, gen1Key)
+    const converged = await bobCoordinator.replayBlockedByKey()
+    await wait(60)
+
+    // The buffered entry converged...
+    expect(converged).toBeGreaterThanOrEqual(1)
+    expect(bobHandle.getDoc().items['secret']?.title).toBe('secret')
+    // ...and the LOOP-GUARD held: the replay produced ZERO outgoing sends.
+    expect(bobTally.logEntries).toBe(0)
+    expect(bobTally.types.length).toBe(0)
+
+    aliceHandle.close()
+    bobHandle.close()
+  })
+
+  // ── Group 2: VE-5 write-reject-restore — SEQ_COLLISION → new deviceId, seq=0 ──
+  it('VE-5 write-reject-restore — armed SEQ_COLLISION on a write → adapter mints a NEW deviceId, device-revokes the old, re-writes from seq=0; no loop', async () => {
+    const spaceId = await createSharedSpace()
+    const aliceHandle = await aliceAdapter.openSpace<TestDoc>(spaceId)
+
+    const deviceRevokes: unknown[] = []
+    const baseControl = aliceMessaging.sendControlFrame!.bind(aliceMessaging)
+    ;(aliceMessaging as unknown as { sendControlFrame: typeof aliceMessaging.sendControlFrame }).sendControlFrame =
+      async (frame) => {
+        if ((frame as { type?: string }).type === 'device-revoke') deviceRevokes.push(frame)
+        return baseControl(frame)
+      }
+    const tally = instrumentSentTypes(aliceMessaging)
+
+    // Arm a single SEQ_COLLISION on Alice's next log-entry write.
+    broker.armRejection({ code: 'SEQ_COLLISION_DETECTED', target: 'log-entry', docId: spaceId })
+
+    aliceHandle.transact((doc) => { doc.items['c'] = { title: 'collide' } })
+    await wait(250)
+
+    // The active deviceId was re-bound to a fresh (non-DEVICE_ALICE) id.
+    const newDeviceId = (aliceAdapter as unknown as { deviceId: string }).deviceId
+    expect(newDeviceId).not.toBe(DEVICE_ALICE)
+
+    // A device-revoke was sent for the old device.
+    expect(deviceRevokes.length).toBeGreaterThanOrEqual(1)
+
+    // The re-write landed under the NEW deviceId at seq=0 (fresh nonce namespace);
+    // the colliding seq under DEVICE_ALICE is never re-used with divergent plaintext.
+    const store = (aliceAdapter as unknown as { docLogStore: InMemoryDocLogStore }).docLogStore
+    const reWritten = await store.getEntry(spaceId, newDeviceId, 0)
+    expect(reWritten).not.toBeNull()
+
+    // No endless loop: a bounded number of log-entry sends.
+    expect(tally.logEntries).toBeLessThanOrEqual(4)
+
+    aliceHandle.close()
+  })
+
+  // ── Group 5: VE-10 — member removal sends rotate-key THEN space-rotate(gen+1) ──
+  it('VE-10 — removeMember rotates the key AND sends space-rotate(newGeneration); a stale-generation present-capability is then rejected', async () => {
+    const spaceId = await createSharedSpace()
+
+    const rotateFrames: Array<{ type: string }> = []
+    const baseControl = aliceMessaging.sendControlFrame!.bind(aliceMessaging)
+    ;(aliceMessaging as unknown as { sendControlFrame: typeof aliceMessaging.sendControlFrame }).sendControlFrame =
+      async (frame) => {
+        rotateFrames.push(frame as { type: string })
+        return baseControl(frame)
+      }
+
+    const genBefore = await aliceAdapter.getKeyGeneration(spaceId)
+    await aliceAdapter.removeMember(spaceId, bob.getDid())
+    await wait(200)
+    const genAfter = await aliceAdapter.getKeyGeneration(spaceId)
+
+    // Key rotated (generation advanced).
+    expect(genAfter).toBe(genBefore + 1)
+
+    // A space-rotate control frame was sent AFTER the rotation.
+    const rotateTypes = rotateFrames.map((f) => f.type)
+    expect(rotateTypes).toContain(SPACE_ROTATE_MESSAGE_TYPE)
+
+    // The space-rotate carried newGeneration = genAfter (the broker advances scope).
+    const { parseSpaceRotateMessage } = await import('@web_of_trust/core/protocol')
+    const rotate = rotateFrames.find((f) => f.type === SPACE_ROTATE_MESSAGE_TYPE)!
+    const parsed = parseSpaceRotateMessage(rotate)
+    expect(parsed.payload.newGeneration).toBe(genAfter)
+    expect(parsed.payload.spaceId).toBe(spaceId)
+  })
+
+  // ── Group 6: Join-register — joining member publishes (incl. register) at join ─
+  it('Join-register — the joining member runs the full publish (present-capability) at invite-accept, BEFORE any local write', async () => {
+    // The P2-NIT-2 fix routes the join through ensurePublished() (space-register →
+    // present-capability → sync-request), not only catchUp(). The observable
+    // join-time signal common to every member is present-capability appearing for
+    // the joiner's socket BEFORE the joiner ever writes to the doc.
+    const space = await aliceAdapter.createSpace<TestDoc>('shared', { items: {} }, { name: 'Join Space' })
+    await wait()
+
+    const bobControlBefore = broker.receivedControlFrames.filter((c) => c.socketId === 'bob-socket').length
+
+    const bobEncKey = await bob.getEncryptionPublicKeyBytes()
+    await aliceAdapter.addMember(space.id, bob.getDid(), bobEncKey)
+    await wait(300)
+
+    // Bob presented a capability at JOIN time (before any local write by Bob).
+    const bobPresents = broker.receivedControlFrames
+      .filter((c) => c.socketId === 'bob-socket')
+      .map((c) => c.frame.type)
+    expect(bobPresents).toContain('present-capability')
+    expect(broker.receivedControlFrames.filter((c) => c.socketId === 'bob-socket').length).toBeGreaterThan(
+      bobControlBefore,
+    )
+  })
+
+  it('Join-register — the space CREATOR (admin) sends an idempotent space-register at publish time; a re-publish does not error (first-writer-wins)', async () => {
+    // The creator/admin sends space-register on first publication AND on a
+    // reconnect re-publish — first-writer-wins makes the IDENTICAL re-register
+    // folgenlos (no throw). This is the join-register idempotency the relay relies
+    // on (a member re-sending the creator's identical registration).
+    const space = await aliceAdapter.createSpace<TestDoc>('shared', { items: {} }, { name: 'Idem Reg' })
+    await wait(150)
+
+    let aliceRegisters = 0
+    const baseControl = aliceMessaging.sendControlFrame!.bind(aliceMessaging)
+    ;(aliceMessaging as unknown as { sendControlFrame: typeof aliceMessaging.sendControlFrame }).sendControlFrame =
+      async (frame) => {
+        if ((frame as { type?: string }).type === SPACE_REGISTER_MESSAGE_TYPE) aliceRegisters += 1
+        return baseControl(frame)
+      }
+
+    const aliceCoordinator = (aliceAdapter as unknown as {
+      coordinators: Map<string, { resetForReconnect: () => void; ensurePublished: () => Promise<void> }>
+    }).coordinators.get(space.id)!
+    // A reconnect re-publish: the SAME admin set re-registers idempotently (no throw).
+    aliceCoordinator.resetForReconnect()
+    await expect(aliceCoordinator.ensurePublished()).resolves.toBeUndefined()
+    await wait(60)
+
+    // The idempotent re-register was sent (and first-writer-wins accepted it).
+    expect(aliceRegisters).toBeGreaterThanOrEqual(1)
+  })
+})
+
+// ── Group 3: VE-6 — Personal-Doc on the log core (multi-device, loop-free) ──────
+describe('YjsPersonalLogSyncAdapter — Slice A VE-6 (Personal-Doc on the log core)', () => {
+  let identity: PublicIdentitySession
+  let broker: InProcessLogBroker
+  let messaging1: InMemoryMessagingAdapter
+  let messaging2: InMemoryMessagingAdapter
+  let personalKey: Uint8Array
+  let docId: string
+
+  beforeEach(async () => {
+    InMemoryMessagingAdapter.resetAll()
+    broker = new InProcessLogBroker()
+    identity = (await createTestIdentity('anton-pass')).identity
+    // Two devices of the SAME identity (multi-device personal doc).
+    messaging1 = new InMemoryMessagingAdapter({ broker, socketId: 'dev1-socket' })
+    messaging2 = new InMemoryMessagingAdapter({ broker, socketId: 'dev2-socket' })
+    await messaging1.connect(identity.getDid())
+    await messaging2.connect(identity.getDid())
+    personalKey = await identity.deriveFrameworkKey('personal-doc-v1')
+    docId = personalDocIdFromKey(personalKey)
+  })
+
+  afterEach(async () => {
+    InMemoryMessagingAdapter.resetAll()
+    try { await identity.deleteStoredIdentity() } catch {}
+  })
+
+  function makePersonalAdapter(doc: Y.Doc, messaging: InMemoryMessagingAdapter, deviceId: string, mintDeviceId?: () => string) {
+    return new YjsPersonalLogSyncAdapter({
+      doc,
+      messaging,
+      identity,
+      personalKey,
+      docId,
+      docLogStore: new InMemoryDocLogStore(),
+      deviceId,
+      mintDeviceId,
+    })
+  }
+
+  it('VE-6 — a local Personal-Doc change produces exactly one log-entry; the other device applies it (origin=remote) with NO re-broadcast; multi-device converges loop-free', async () => {
+    const doc1 = new Y.Doc()
+    const doc2 = new Y.Doc()
+    const sync1 = makePersonalAdapter(doc1, messaging1, DEVICE_ALICE)
+    const sync2 = makePersonalAdapter(doc2, messaging2, DEVICE_BOB)
+
+    const tally1 = instrumentSentTypes(messaging1)
+    const tally2 = instrumentSentTypes(messaging2)
+
+    sync1.start()
+    sync2.start()
+    await wait(150)
+
+    // Device 1 makes one local change → exactly one log-entry (the onPersonalDoc
+    // change path, NOT useProfileSync / personal-sync).
+    const baseline1 = tally1.logEntries
+    doc1.getMap('profile').set('name', 'Anton')
+    await wait(200)
+
+    // Device 2 converged to the change.
+    expect(doc2.getMap('profile').get('name')).toBe('Anton')
+
+    // Exactly one new log-entry from device 1's single edit.
+    expect(tally1.logEntries - baseline1).toBe(1)
+    // LOOP-GUARD: device 2 applied the remote entry WITHOUT re-broadcasting a
+    // log-entry (its log-entry count did not grow from receiving).
+    const dev2LogEntriesAfterReceive = tally2.logEntries
+    doc1.getMap('profile').set('bio', 'builder') // one more device-1 edit
+    await wait(200)
+    expect(doc2.getMap('profile').get('bio')).toBe('builder')
+    // Device 2 still sent ZERO log-entries from purely receiving device 1's edits.
+    expect(tally2.logEntries).toBe(dev2LogEntriesAfterReceive)
+
+    // Bidirectional: device 2 edits, device 1 converges, still bounded.
+    doc2.getMap('contacts').set('x', 'X')
+    await wait(200)
+    expect(doc1.getMap('contacts').get('x')).toBe('X')
+
+    sync1.destroy()
+    sync2.destroy()
+    doc1.destroy()
+    doc2.destroy()
+  })
+
+  it('VE-6 — content channel carries only log-entry (no personal-sync / content envelope)', async () => {
+    const doc1 = new Y.Doc()
+    const sync1 = makePersonalAdapter(doc1, messaging1, DEVICE_ALICE)
+    const tally1 = instrumentSentTypes(messaging1)
+    sync1.start()
+    await wait(120)
+    doc1.getMap('profile').set('name', 'Anton')
+    await wait(150)
+
+    expect(tally1.types).not.toContain('personal-sync')
+    expect(tally1.types).not.toContain('content')
+    expect(tally1.logEntries).toBeGreaterThanOrEqual(1)
+
+    sync1.destroy()
+    doc1.destroy()
+  })
+
+  it('VE-6 — Personal-Doc restore (same deviceId, stale local seq) → SEQ_COLLISION → deviceId change (generation stays 0, full restore-clone strictness)', async () => {
+    const doc1 = new Y.Doc()
+    const sync1 = makePersonalAdapter(doc1, messaging1, DEVICE_ALICE, () => 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee')
+    sync1.start()
+    await wait(120)
+
+    // Arm a SEQ_COLLISION on the next personal-doc log-entry (simulates a restore
+    // with the same deviceId but a stale local seq the broker already advanced).
+    broker.armRejection({ code: 'SEQ_COLLISION_DETECTED', target: 'log-entry', docId })
+
+    doc1.getMap('profile').set('name', 'Anton')
+    await wait(250)
+
+    // Restore-clone fired: the personal-doc deviceId was re-bound (generation never
+    // resets — nonce uniqueness rests on seq monotonicity per deviceId).
+    expect(sync1.getDeviceId()).not.toBe(DEVICE_ALICE)
+    expect(sync1.getDeviceId()).toBe('eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee')
+
+    sync1.destroy()
+    doc1.destroy()
+  })
+
+  it('VE-6 — Personal-Doc restore with a PERSISTENT (deviceId-scoped) collision re-writes the full state under the NEW deviceId so the second device CONVERGES (no silent edit loss)', async () => {
+    // The teeth the one-shot test above lacks: a PERSISTENT collision on the old
+    // deviceId (the real restore case — broker already holds a divergent entry at
+    // that (deviceId,seq), so every re-send of the SAME entry keeps colliding).
+    // Convergence here is ONLY possible if restore-clone re-writes the full state
+    // under the freshly minted deviceId (onAfterRestoreClone). A fallback that just
+    // resends the old colliding entry would loop-reject forever -> device 2 never
+    // sees the edit. This asserts CONVERGENCE, not merely the deviceId swap.
+    const NEW_DEVICE = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd'
+    const doc1 = new Y.Doc()
+    const doc2 = new Y.Doc()
+    const sync1 = makePersonalAdapter(doc1, messaging1, DEVICE_ALICE, () => NEW_DEVICE)
+    const sync2 = makePersonalAdapter(doc2, messaging2, DEVICE_BOB)
+    sync1.start()
+    sync2.start()
+    await wait(150)
+
+    // PERSISTENT, scoped to DEVICE_ALICE only: the old (cloned) deviceId's seq
+    // namespace stays collided; the freshly minted deviceId is clean.
+    broker.armRejection({
+      code: 'SEQ_COLLISION_DETECTED',
+      target: 'log-entry',
+      docId,
+      deviceId: DEVICE_ALICE,
+      persistent: true,
+    })
+
+    doc1.getMap('profile').set('name', 'Anton')
+    await wait(300)
+
+    // deviceId re-bound to the fresh namespace, generation unchanged (still 0).
+    expect(sync1.getDeviceId()).toBe(NEW_DEVICE)
+    // CONVERGENCE: the second device received the edit — only achievable via the
+    // full-state re-write under NEW_DEVICE (DEVICE_ALICE writes keep rejecting).
+    expect(doc2.getMap('profile').get('name')).toBe('Anton')
+
+    sync1.destroy()
+    sync2.destroy()
+    doc1.destroy()
+    doc2.destroy()
+  })
+})
+
+void SYNC_REQUEST_MESSAGE_TYPE

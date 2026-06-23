@@ -45,9 +45,11 @@ import {
   formatMembershipEventKey, parseMembershipEventKey, resolveActiveMembers, resolveMembershipWinner, assertMembershipEvent,
   resolveActiveAdmins, assertAdminEntry,
   LogSyncCoordinator, AuthorMismatchError, createSpaceCapabilityJws, createSpaceRegisterMessage,
+  createSpaceRotateMessage,
   LOG_ENTRY_MESSAGE_TYPE, SYNC_RESPONSE_MESSAGE_TYPE,
 } from '@web_of_trust/core/protocol'
-import type { LogSyncEngineHooks, CapabilitySource, ControlFrameReceipt } from '@web_of_trust/core/protocol'
+import type { LogSyncEngineHooks, CapabilitySource, ControlFrameReceipt, WriteRejectHandler } from '@web_of_trust/core/protocol'
+import { createRestoreCloneHandler } from './logRestoreClone'
 import type { MembershipEvent, AdminEntry } from '@web_of_trust/core/protocol'
 import { WebCryptoProtocolCryptoAdapter } from '@web_of_trust/core/protocol-adapters'
 import {
@@ -423,7 +425,8 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
   // Slice A / VE-2..9: log-path infrastructure.
   private readonly docLogStore?: DocLogStore
   private readonly logSyncEnabled: boolean
-  private readonly deviceId: string
+  /** Active per-device UUID (re-bound process-wide by a restore-clone, VE-4/VE-5). */
+  private deviceId: string
   /** Per-space LogSyncCoordinator (engine-neutral orchestration). */
   private coordinators = new Map<string, LogSyncCoordinator>()
   private docLogStoreInitialized = false
@@ -477,6 +480,15 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
       // strictly LOOP-GUARDed (no write, no re-broadcast).
       if (this.logSyncEnabled && isLogPathMessage(message)) {
         await this.routeLogPathMessage(message)
+        return
+      }
+
+      // P2-NIT-1 (VE-4/VE-5): a routed write-path reject `{ type:'error', thid }`
+      // for a SENT log-entry. Route it to the coordinator that owns the correlated
+      // thid (so an error for doc A never restore-clones doc B). The coordinator
+      // drives the reject-disposition action (restore-clone / re-register / hard stop).
+      if (this.logSyncEnabled && isErrorFrame(message)) {
+        await this.routeWritePathError(message)
         return
       }
 
@@ -902,6 +914,19 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
     // key-rotation — it only receives a member-update below (Sync 005 Z.238).
     await this.rotateSpaceKeyAndDistribute(state)
 
+    // VE-10 (Sync 003 capability-revoke-über-rotation): rotateSpaceKeyAndDistribute
+    // rotates the CONTENT key + distributes key-rotation/1.0 inbox messages, but it
+    // does NOT touch the BROKER. Without a space-rotate the broker keeps the OLD
+    // generation, so the removed member's scope is never invalidated at the relay.
+    // The admin MUST therefore send space-rotate(newGeneration = current+1) AFTER
+    // the key rotation (order: rotate-key THEN space-rotate). Only the log-sync
+    // configuration has a broker registration to rotate.
+    if (this.logSyncEnabled) {
+      await this.sendSpaceRotate(state).catch((err) =>
+        console.warn('[YjsReplication] space-rotate send failed (broker scope not invalidated):', err),
+      )
+    }
+
     // Notify remaining members AND the removed member (Sync 005 Z.238). member-update
     // ist eine Inbox-Nachricht: ECIES für den jeweiligen Empfänger (Sync 003 Z.500 MUSS) —
     // der Group-Key-OneShot-Pfad (Pre-Rotation-Key) ist tot.
@@ -1148,6 +1173,35 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
   }
 
   /**
+   * VE-10: after a member-removal rotation, the admin sends a `space-rotate`
+   * control frame { type:'space-rotate', rotationJws } whose payload is
+   * { type, spaceId, newSpaceCapabilityVerificationKey, newGeneration } so the
+   * broker advances its registered generation and INVALIDATES the removed
+   * member's capability scope (Sync 003 capability-revoke-über-rotation). MUST run
+   * AFTER rotateSpaceKeyAndDistribute (so getCurrentGeneration is already the new
+   * generation and the new verification key exists). Only an admin may sign it.
+   */
+  private async sendSpaceRotate(state: YjsSpaceState): Promise<void> {
+    const messaging = this.messaging as MessagingAdapter
+    if (typeof messaging.sendControlFrame !== 'function') return
+    const spaceId = state.info.id
+    const myDid = this.identity.getDid()
+    if (!this.spaceAdminDids(state).includes(myDid)) return
+    // After rotateSpaceKeyAndDistribute, the current generation IS the new one.
+    const newGeneration = await this.keyManagement.getCurrentGeneration(spaceId)
+    const verificationKey = await this.keyManagement.getCapabilityVerificationKey(spaceId, newGeneration)
+    if (!verificationKey) return
+    const rotate = await createSpaceRotateMessage({
+      spaceId,
+      newSpaceCapabilityVerificationKey: encodeBase64Url(verificationKey),
+      newGeneration,
+      kid: this.authorKid(),
+      signingSeed: await this.adminRegisterSigningSeed(),
+    })
+    await messaging.sendControlFrame(rotate)
+  }
+
+  /**
    * The log-entry author kid (`<did>#sig-0`, the Identity-Key verification method).
    * `verifyLogEntryJws` resolves the key from the DID part (the fragment is not
    * used for key resolution) and signing is via {@link IdentitySession.signEd25519},
@@ -1202,9 +1256,54 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
         return gens
       },
       sendSpaceRegister: this.makeSendSpaceRegister(state),
+      // P2-NIT-1 (VE-4/VE-5): the restore-clone / device-re-register MECHANISM
+      // (mint deviceId + device-revoke old + re-register) — shared with the
+      // Personal-Doc path and reusable by Phase 4 (Automerge).
+      onWriteRejected: this.makeWriteRejectHandler(),
+      // After a restore-clone re-binds the deviceId, re-write the full current Yjs
+      // state under the NEW deviceId from seq=0 (the colliding seq is abandoned).
+      onAfterRestoreClone: async () => {
+        await this.writeFullStateViaLog(state)
+      },
     })
     this.coordinators.set(spaceId, coordinator)
     return coordinator
+  }
+
+  /**
+   * Build the {@link WriteRejectHandler} for a space coordinator (P2-NIT-1). The
+   * deviceId minted here is process-wide (one device = one id across all docs);
+   * onDeviceIdChanged updates the adapter's active deviceId so subsequent space
+   * coordinators created lazily inherit the new id.
+   */
+  private makeWriteRejectHandler(): WriteRejectHandler {
+    return createRestoreCloneHandler({
+      identity: this.identity,
+      messaging: this.messaging,
+      onDeviceIdChanged: (_docId, newDeviceId) => {
+        this.deviceId = newDeviceId
+      },
+    })
+  }
+
+  /**
+   * Re-write the full current Yjs state of a space as ONE fresh log-entry (used by
+   * the restore-clone re-write hook): after the deviceId was re-bound, the new
+   * (deviceId,docId) namespace starts at seq=0, so a single full-state entry
+   * re-publishes everything under the new device without re-using the colliding seq.
+   */
+  private async writeFullStateViaLog(state: YjsSpaceState): Promise<void> {
+    const coordinator = this.coordinators.get(state.info.id)
+    if (!coordinator) return
+    const fullState = Y.encodeStateAsUpdate(state.doc)
+    if (fullState.length <= 2) return
+    await coordinator.writeLocalUpdate(fullState).catch((err) => {
+      if (err instanceof AuthorMismatchError) {
+        console.error('[YjsReplication] AUTHOR_MISMATCH during restore-clone re-write:', err.message)
+        return
+      }
+      console.debug('[YjsReplication] restore-clone re-write failed (retry on reconnect):', err)
+    })
   }
 
   /**
@@ -1679,6 +1778,12 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
    * Analogous to YjsPersonalSyncAdapter.sendFullState().
    */
   private async _sendFullStateAllSpaces(): Promise<void> {
+    // VE-7 (gated on enableLogSync): when the log path is the primary steady-state
+    // path, the content/full-state broadcast is a NO-OP — convergence rides the
+    // log-entry path + sync-request catch-up, and a content full-state send would
+    // be a redundant second channel (Slice D removes the content receiver too).
+    if (this.logSyncEnabled) return
+
     const myDid = this.identity.getDid()
 
     for (const [spaceId, state] of this.spaces) {
@@ -2040,7 +2145,29 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
     await coordinator.handleIncoming(message)
   }
 
+  /**
+   * P2-NIT-1 (VE-4/VE-5): route a routed write-path `error` frame to the
+   * coordinator that has the correlated thid in-flight. A multi-space adapter must
+   * NOT broadcast the error to all coordinators (that would false-trigger a
+   * restore-clone on an unrelated doc). If no coordinator owns the thid, the error
+   * is dropped (it was for a frame we did not send / already resolved).
+   */
+  private async routeWritePathError(message: WireMessage): Promise<void> {
+    const thid = (message as { thid?: unknown }).thid
+    if (typeof thid !== 'string') return
+    for (const coordinator of this.coordinators.values()) {
+      if (coordinator.hasInFlightWrite(thid)) {
+        await coordinator.handleIncoming(message)
+        return
+      }
+    }
+  }
+
   private async sendEncryptedUpdate(spaceId: string, update: Uint8Array): Promise<void> {
+    // VE-7 (gated on enableLogSync): with the log path primary, NO content envelope
+    // is sent (the log-entry JWS carries the update). This is also the structural
+    // guarantee behind the `expect(sentTypes).not.toContain('content')` assertion.
+    if (this.logSyncEnabled) return
     // Generation und Key als konsistentes Paar lesen: das removed-Event reist
     // VOR der Rotation (Sync 005 Z.231) — laeuft die Rotation nebenlaeufig an,
     // darf hier kein gen-N-Key mit gen-N+1-Label gemischt werden.
@@ -2221,18 +2348,22 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
     switch (decoded.type) {
       case SPACE_INVITE_MESSAGE_TYPE: {
         const outcome = await this.handleSpaceInvite(decoded)
-        // VE-8/VE-9 (join): once the invited space is known locally, the member
-        // sends an idempotent space-register (first-writer-wins) + present-capability
-        // and catches up via sync-request. Fire-and-forget so the inbox ACK path is
-        // not blocked on the relay round-trip.
+        // P2-NIT-2 / VE-8/VE-9 (join): once the invited space is known locally, the
+        // joining member runs the FULL first-publication on join — ensurePublished()
+        // sends an IDEMPOTENT space-register (first-writer-wins makes an identical
+        // re-register folgenlos; a non-admin invitee's makeSendSpaceRegister is a
+        // no-op and relies on the admin's registration) → present-capability →
+        // sync-request catch-up, NOT only catchUp() (which skipped the register at
+        // join time). Fire-and-forget so the inbox ACK path is not blocked on the
+        // relay round-trip.
         if (this.logSyncEnabled && outcome.kind === 'applied') {
           const state = this.spaces.get((decoded.body as { spaceId?: string }).spaceId ?? '')
           if (state) {
             void this.getOrCreateCoordinator(state).then((coordinator) => {
               if (!coordinator) return
               return coordinator
-                .catchUp()
-                .catch((err) => console.debug('[YjsReplication] join catch-up deferred:', err))
+                .ensurePublished()
+                .catch((err) => console.debug('[YjsReplication] join publish deferred:', err))
             })
           }
         }
@@ -2645,6 +2776,18 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
     }
     await this.deletePendingSpaceMessage(body.spaceId, decoded.outerId)
     await this.processPendingForSpace(body.spaceId)
+    // VE-5: a content key for the new generation is now available — replay the
+    // coordinator's blocked-by-key buffer through the READ path (origin='remote').
+    // LOOP-GUARD: the replay never goes through the write path, so a key import
+    // produces ZERO new log-entry sends (no delayed outbox loop).
+    if (this.logSyncEnabled) {
+      const coordinator = this.coordinators.get(body.spaceId)
+      if (coordinator) {
+        await coordinator.replayBlockedByKey().catch((err) =>
+          console.debug('[YjsReplication] blocked-by-key replay failed:', err),
+        )
+      }
+    }
     // VE-6c: future-gepufferte member-updates, deren Generation jetzt erreicht
     // ist, re-verarbeiten (aufsteigend, Sync 002 Z.235).
     await this.replayFutureMemberUpdates(body.spaceId)
@@ -3038,6 +3181,11 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
 function isLogPathMessage(message: WireMessage): boolean {
   const type = (message as { type?: unknown }).type
   return type === LOG_ENTRY_MESSAGE_TYPE || type === SYNC_RESPONSE_MESSAGE_TYPE
+}
+
+/** True for a routed write-path reject frame (`{ type:'error', thid, code }`). */
+function isErrorFrame(message: WireMessage): boolean {
+  return (message as { type?: unknown }).type === 'error'
 }
 
 /**

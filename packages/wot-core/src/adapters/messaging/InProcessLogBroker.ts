@@ -83,6 +83,20 @@ export interface ArmedRejection {
    * space-register frame that shares the same docId.
    */
   frameType?: string
+  /**
+   * Only reject log-entry frames authored under this deviceId (optional). Models
+   * a per-deviceId persistent collision: the OLD (cloned/restored) deviceId's seq
+   * namespace stays collided while a freshly minted deviceId is clean — exactly
+   * the restore-clone invariant (VE-4/VE-6).
+   */
+  deviceId?: string
+  /**
+   * Re-fire on every matching frame instead of one-shot. With `deviceId` set this
+   * gives a PERSISTENT, deviceId-scoped collision (the real restore case) rather
+   * than a transient one — so a client that merely re-sends the SAME colliding
+   * entry never converges; only a re-write under a NEW deviceId does.
+   */
+  persistent?: boolean
 }
 
 export interface InProcessLogBrokerControls {
@@ -231,7 +245,7 @@ export class InProcessLogBroker implements InProcessLogBrokerControls {
 
     const docId = payload.docId
 
-    const armed = this.takeArmed('log-entry', docId)
+    const armed = this.takeArmed('log-entry', docId, undefined, payload.deviceId)
     if (armed) {
       this.emitError(socket, message.id, armed.code, armed.message ?? armed.code)
       return
@@ -341,14 +355,18 @@ export class InProcessLogBroker implements InProcessLogBrokerControls {
     target: ArmedRejection['target'],
     docId: string | undefined,
     frameType?: string,
+    deviceId?: string,
   ): ArmedRejection | null {
     const idx = this.armed.findIndex(
       (a) =>
         a.target === target &&
         (a.docId === undefined || a.docId === docId) &&
-        (a.frameType === undefined || a.frameType === frameType),
+        (a.frameType === undefined || a.frameType === frameType) &&
+        (a.deviceId === undefined || a.deviceId === deviceId),
     )
     if (idx < 0) return null
+    // Persistent rejections re-fire on every matching frame (peek, do not consume).
+    if (this.armed[idx].persistent) return this.armed[idx]
     return this.armed.splice(idx, 1)[0]
   }
 
