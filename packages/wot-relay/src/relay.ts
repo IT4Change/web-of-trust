@@ -23,6 +23,8 @@ const {
   verifyBrokerChallengeResponseControlFrame,
   parseBrokerDeviceRevokeControlFrame,
   verifyBrokerDeviceRevokeControlFrame,
+  parseSpaceRegisterMessage,
+  verifySpaceRegisterMessage,
   parseLogEntryMessage,
   verifyLogEntryJws,
   parseSyncRequestMessage,
@@ -30,6 +32,7 @@ const {
 } = protocol
 
 const BROKER_DEVICE_REVOKE_CONTROL_FRAME_TYPE = protocol.BROKER_DEVICE_REVOKE_CONTROL_FRAME_TYPE
+const SPACE_REGISTER_MESSAGE_TYPE = protocol.SPACE_REGISTER_MESSAGE_TYPE
 
 const DIDCOMM_PLAINTEXT_TYP = protocol.DIDCOMM_PLAINTEXT_TYP
 const ACK_MESSAGE_TYPE = protocol.ACK_MESSAGE_TYPE
@@ -248,6 +251,9 @@ export class RelayServer {
           break
         case BROKER_DEVICE_REVOKE_CONTROL_FRAME_TYPE:
           void this.handleDeviceRevoke(ws, record)
+          break
+        case SPACE_REGISTER_MESSAGE_TYPE:
+          void this.handleSpaceRegister(ws, record)
           break
         case 'ping':
           this.sendTo(ws, { type: 'pong' })
@@ -578,6 +584,97 @@ export class RelayServer {
       type: 'receipt',
       receipt: {
         messageId: deviceId,
+        status: 'delivered',
+        timestamp: new Date().toISOString(),
+      },
+    })
+  }
+
+  /**
+   * Sync 003 §Space-Registrierung: `space-register` Broker Control-Frame.
+   *
+   * Outer wire shape `{ type: 'space-register', registrationJws }` (closed
+   * top-level keys). The inner JWS payload
+   * `{ type, spaceId, spaceCapabilityVerificationKey, adminDids }` is verified
+   * TOFU/self-asserting (Sync 003 MUSS): the inner JWS `kid`-DID MUST be one of
+   * the payload's `adminDids`, and the signature MUST verify against that kid-DID's
+   * Ed25519 key (derived from the `did:key`). Verification is delegated to the core
+   * primitive: malformed → MALFORMED_MESSAGE, non-listed kid / bad signature →
+   * AUTH_INVALID. relay.ts stays crypto-free (source guard) — it only calls the
+   * protocol helpers and the durable registry.
+   *
+   * On a verified frame the broker binds (spaceId → verificationKey, adminDids)
+   * first-writer-wins in the durable space registry:
+   *  - 'registered' / 'idempotent' (identical re-register, idempotent recovery) →
+   *    delivered receipt.
+   *  - 'conflict' (divergent verificationKey or admin set for an already-registered
+   *    spaceId) → SPACE_ALREADY_REGISTERED. Changes go via the signed frames
+   *    space-rotate / admin-add / admin-remove (Phase 5), not a re-register.
+   *
+   * This phase does NOT yet gate log-entry/sync-request on the registry — that is
+   * the capability gate (Phase 4). It only records the binding.
+   */
+  private async handleSpaceRegister(ws: WebSocket, raw: Record<string, unknown>): Promise<void> {
+    // Outer/inner structural gate first (MALFORMED_MESSAGE on any defect), mirroring
+    // device-revoke. Management frames are CLOSED control-frames — a malformed shape
+    // is rejected here, never falls through to inbox routing.
+    try {
+      parseSpaceRegisterMessage(raw)
+    } catch (err) {
+      this.sendTo(ws, {
+        type: 'error',
+        code: 'MALFORMED_MESSAGE',
+        message: err instanceof Error ? err.message : 'Malformed space-register control-frame',
+      })
+      return
+    }
+
+    // TOFU verification (self-asserting kid-DID ∈ adminDids + Ed25519 signature).
+    // The core helper derives the signer key from the kid-DID; no inline crypto here.
+    let result
+    try {
+      result = await verifySpaceRegisterMessage({ frame: raw, crypto: protocolCrypto })
+    } catch (err) {
+      this.sendInternalError(ws, err, 'space-register verification failed')
+      return
+    }
+
+    if (result.disposition === 'rejected') {
+      this.sendTo(ws, {
+        type: 'error',
+        code: result.errorCode,
+        message:
+          result.errorCode === 'AUTH_INVALID'
+            ? 'space-register inner JWS is not signed by one of the self-asserted adminDids.'
+            : 'Malformed space-register control-frame.',
+      })
+      return
+    }
+
+    // First-writer-wins binding against the DURABLE registry (atomic). The frame is
+    // verified; only a divergent prior binding is a conflict.
+    const { spaceId, spaceCapabilityVerificationKey, adminDids } = result.payload
+    const disposition = this.docLog.registerSpace({
+      spaceId,
+      verificationKey: spaceCapabilityVerificationKey,
+      adminDids,
+    })
+
+    if (disposition.disposition === 'conflict') {
+      this.sendTo(ws, {
+        type: 'error',
+        code: 'SPACE_ALREADY_REGISTERED',
+        message:
+          'spaceId is already registered with a different verification key or admin set (first-writer-wins).',
+      })
+      return
+    }
+
+    // 'registered' or 'idempotent' (identical recovery re-register) → delivered.
+    this.sendTo(ws, {
+      type: 'receipt',
+      receipt: {
+        messageId: spaceId,
         status: 'delivered',
         timestamp: new Date().toISOString(),
       },

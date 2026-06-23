@@ -32,6 +32,26 @@ export type DeviceRegistrationDisposition =
   | { disposition: 'device-id-conflict' }
   | { disposition: 'device-revoked' }
 
+/**
+ * Durable space-registry disposition (Sync 003 §Space-Registrierung). Returned by
+ * registerSpace under TOFU first-writer-wins:
+ *  - 'registered' → no prior entry for this spaceId; bound (generation 0) + admins.
+ *  - 'idempotent' → a prior entry exists with the IDENTICAL verificationKey AND the
+ *    identical adminDids set (order-independent) → idempotent recovery/re-register.
+ *  - 'conflict'   → a prior entry exists but the verificationKey or admin set
+ *    diverges → SPACE_ALREADY_REGISTERED (changes go via space-rotate/admin-*).
+ */
+export type SpaceRegistrationDisposition =
+  | { disposition: 'registered' }
+  | { disposition: 'idempotent' }
+  | { disposition: 'conflict' }
+
+/** A durable space record (Sync 003 §Space-Registrierung). */
+export interface SpaceRecord {
+  verificationKey: string
+  generation: number
+}
+
 /** A durable device record (Sync 003 §Device-Liste im Broker). */
 export interface DeviceRecord {
   deviceId: string
@@ -71,6 +91,15 @@ const logStoreCrypto = new WebCryptoProtocolCryptoAdapter()
  *   + index on (doc_id, device_id, seq)
  *   devices(did, device_id, first_seen_at, last_seen_at, status, revoked_at,
  *           PRIMARY KEY(device_id))   -- deviceId GLOBALLY unique
+ *
+ * It ALSO owns the DURABLE space registry (Sync 003 §Space-Registrierung): one row
+ * per spaceId established TOFU first-writer-wins, plus its admin set. The relay's
+ * space-register handler consults this; the capability gate (Phase 4) will use it
+ * to decide whether a docId is a registered space (Space-Pfad) vs a Personal-Doc.
+ *
+ *   spaces(space_id, verification_key, generation, created_at,
+ *           PRIMARY KEY(space_id))
+ *   space_admins(space_id, admin_did, PRIMARY KEY(space_id, admin_did))
  */
 export class DocLog {
   private db: Database.Database
@@ -130,6 +159,30 @@ export class DocLog {
     `)
     this.db.exec(`
       CREATE INDEX IF NOT EXISTS idx_devices_did ON devices (did)
+    `)
+    // Durable space registry (Sync 003 §Space-Registrierung). `space_id` is the
+    // PRIMARY KEY: one binding per space, established TOFU first-writer-wins. The
+    // `verification_key` is the registered `spaceCapabilityVerificationKey`;
+    // `generation` starts at 0 at register-time (space-rotate bumps it in Phase 5).
+    // The admin set lives in a separate `space_admins` table (one row per admin
+    // DID) so membership comparison is a set, not a packed string. Both tables are
+    // written in ONE transaction by registerSpace so a half-registered space can
+    // never be observed.
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS spaces (
+        space_id TEXT NOT NULL,
+        verification_key TEXT NOT NULL,
+        generation INTEGER NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (space_id)
+      )
+    `)
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS space_admins (
+        space_id TEXT NOT NULL,
+        admin_did TEXT NOT NULL,
+        PRIMARY KEY (space_id, admin_did)
+      )
     `)
   }
 
@@ -355,6 +408,97 @@ export class DocLog {
     return row !== undefined && row.did === did && row.status === 'active'
   }
 
+  // --- durable space registry (Sync 003 §Space-Registrierung) ---------------
+
+  /**
+   * Bind (spaceId → verificationKey, adminDids) TOFU first-writer-wins (Sync 003
+   * §Space-Registrierung). The lookup, the divergence check, and the insert run in
+   * ONE synchronous SQLite transaction so a concurrent second register of the same
+   * spaceId cannot race the first-writer binding:
+   *  - no prior entry → INSERT the space (generation 0) + INSERT every adminDid →
+   *    'registered'.
+   *  - prior entry with the IDENTICAL verificationKey AND the identical adminDids
+   *    SET (order-independent, deduped) → 'idempotent' (idempotent recovery; no
+   *    write).
+   *  - prior entry whose verificationKey OR admin set diverges → 'conflict'
+   *    (→ SPACE_ALREADY_REGISTERED). The frame already passed TOFU JWS verification
+   *    in the relay; binding conflicts are decided here against durable state.
+   *
+   * The admin set is compared as a SET: the spec rule is "identical adminDids set",
+   * and the inner-JWS payload parser already rejects duplicates, so dedup here is a
+   * defensive backstop only.
+   */
+  registerSpace(params: {
+    spaceId: string
+    verificationKey: string
+    adminDids: string[]
+  }): SpaceRegistrationDisposition {
+    const incomingAdmins = new Set(params.adminDids)
+    const tx = this.db.transaction((): SpaceRegistrationDisposition => {
+      const existing = this.db
+        .prepare('SELECT verification_key FROM spaces WHERE space_id = ?')
+        .get(params.spaceId) as { verification_key: string } | undefined
+
+      if (existing) {
+        // First-writer-wins: any divergence in the verification key or the admin
+        // set is a conflict; only a byte-identical re-register is idempotent.
+        if (existing.verification_key !== params.verificationKey) {
+          return { disposition: 'conflict' }
+        }
+        const existingAdmins = new Set(
+          (
+            this.db
+              .prepare('SELECT admin_did FROM space_admins WHERE space_id = ?')
+              .all(params.spaceId) as Array<{ admin_did: string }>
+          ).map((row) => row.admin_did),
+        )
+        if (!sameStringSet(existingAdmins, incomingAdmins)) {
+          return { disposition: 'conflict' }
+        }
+        return { disposition: 'idempotent' }
+      }
+
+      // First writer: bind the space at generation 0 plus its admin set.
+      const now = new Date().toISOString()
+      this.db
+        .prepare(
+          'INSERT INTO spaces (space_id, verification_key, generation, created_at) VALUES (?, ?, ?, ?)',
+        )
+        .run(params.spaceId, params.verificationKey, 0, now)
+      const insertAdmin = this.db.prepare(
+        'INSERT INTO space_admins (space_id, admin_did) VALUES (?, ?)',
+      )
+      for (const adminDid of incomingAdmins) insertAdmin.run(params.spaceId, adminDid)
+      return { disposition: 'registered' }
+    })
+    return tx()
+  }
+
+  /** True if a spaceId has a durable registry entry (TOFU binding exists). */
+  isSpaceRegistered(spaceId: string): boolean {
+    const row = this.db
+      .prepare('SELECT 1 FROM spaces WHERE space_id = ?')
+      .get(spaceId) as { 1: number } | undefined
+    return row !== undefined
+  }
+
+  /** The durable space record (verificationKey + generation) for a spaceId, or null. */
+  getSpace(spaceId: string): SpaceRecord | null {
+    const row = this.db
+      .prepare('SELECT verification_key, generation FROM spaces WHERE space_id = ?')
+      .get(spaceId) as { verification_key: string; generation: number } | undefined
+    if (!row) return null
+    return { verificationKey: row.verification_key, generation: row.generation }
+  }
+
+  /** The registered admin DIDs for a spaceId (ascending, deterministic); [] if none. */
+  getSpaceAdmins(spaceId: string): string[] {
+    const rows = this.db
+      .prepare('SELECT admin_did FROM space_admins WHERE space_id = ? ORDER BY admin_did ASC')
+      .all(spaceId) as Array<{ admin_did: string }>
+    return rows.map((row) => row.admin_did)
+  }
+
   /** content_hash recorded at (docId,deviceId,seq), or null if none. */
   getContentHash(docId: string, deviceId: string, seq: number): string | null {
     const row = this.db
@@ -464,4 +608,13 @@ export class DocLog {
   close(): void {
     if (this.ownsDb) this.db.close()
   }
+}
+
+/** True iff two string sets contain exactly the same members (order-independent). */
+function sameStringSet(a: Set<string>, b: Set<string>): boolean {
+  if (a.size !== b.size) return false
+  for (const value of a) {
+    if (!b.has(value)) return false
+  }
+  return true
 }

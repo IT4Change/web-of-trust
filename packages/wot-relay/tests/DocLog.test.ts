@@ -372,6 +372,95 @@ describe('DocLog (durable append-only log store)', () => {
     expect(log.isActive(otherDid, deviceId)).toBe(false) // wrong DID
   })
 
+  // --- durable space registry (Sync 003 §Space-Registrierung) ---------------
+
+  it('registerSpace binds a new space at generation 0 with its admin set (TOFU first-writer-wins)', () => {
+    const spaceId = randomUUID()
+    const verificationKey = 'base64url-vk-aaa'
+    const adminA = `did:key:z6Mk${'a'.repeat(40)}`
+    const adminB = `did:key:z6Mk${'b'.repeat(40)}`
+
+    expect(log.isSpaceRegistered(spaceId)).toBe(false)
+    expect(log.getSpace(spaceId)).toBeNull()
+    expect(log.getSpaceAdmins(spaceId)).toEqual([])
+
+    const result = log.registerSpace({ spaceId, verificationKey, adminDids: [adminB, adminA] })
+    expect(result).toEqual({ disposition: 'registered' })
+    expect(log.isSpaceRegistered(spaceId)).toBe(true)
+    expect(log.getSpace(spaceId)).toEqual({ verificationKey, generation: 0 })
+    // getSpaceAdmins is deterministic (ascending), independent of insert order.
+    expect(log.getSpaceAdmins(spaceId)).toEqual([adminA, adminB])
+  })
+
+  it('registerSpace is idempotent on an IDENTICAL re-register (same key + same admin set, any order)', () => {
+    const spaceId = randomUUID()
+    const verificationKey = 'base64url-vk-bbb'
+    const adminA = `did:key:z6Mk${'c'.repeat(40)}`
+    const adminB = `did:key:z6Mk${'d'.repeat(40)}`
+
+    expect(log.registerSpace({ spaceId, verificationKey, adminDids: [adminA, adminB] })).toEqual({
+      disposition: 'registered',
+    })
+    // Same verificationKey, same admin SET but reversed order → idempotent recovery.
+    expect(log.registerSpace({ spaceId, verificationKey, adminDids: [adminB, adminA] })).toEqual({
+      disposition: 'idempotent',
+    })
+    // No mutation: still generation 0, same admins.
+    expect(log.getSpace(spaceId)).toEqual({ verificationKey, generation: 0 })
+    expect(log.getSpaceAdmins(spaceId)).toEqual([adminA, adminB])
+  })
+
+  it('registerSpace rejects a divergent verificationKey for an already-registered spaceId with conflict', () => {
+    const spaceId = randomUUID()
+    const adminA = `did:key:z6Mk${'e'.repeat(40)}`
+
+    expect(
+      log.registerSpace({ spaceId, verificationKey: 'vk-original', adminDids: [adminA] }),
+    ).toEqual({ disposition: 'registered' })
+    // Same admins, DIFFERENT key → conflict (first-writer-wins).
+    expect(
+      log.registerSpace({ spaceId, verificationKey: 'vk-DIFFERENT', adminDids: [adminA] }),
+    ).toEqual({ disposition: 'conflict' })
+    // Binding unchanged.
+    expect(log.getSpace(spaceId)).toEqual({ verificationKey: 'vk-original', generation: 0 })
+    expect(log.getSpaceAdmins(spaceId)).toEqual([adminA])
+  })
+
+  it('registerSpace rejects a divergent admin SET for an already-registered spaceId with conflict', () => {
+    const spaceId = randomUUID()
+    const verificationKey = 'vk-shared'
+    const adminA = `did:key:z6Mk${'a'.repeat(40)}`
+    const adminB = `did:key:z6Mk${'b'.repeat(40)}`
+    const adminC = `did:key:z6Mk${'c'.repeat(40)}`
+
+    expect(
+      log.registerSpace({ spaceId, verificationKey, adminDids: [adminA, adminB] }),
+    ).toEqual({ disposition: 'registered' })
+    // Same key, DIFFERENT admin set (adminC added, adminB dropped) → conflict.
+    expect(
+      log.registerSpace({ spaceId, verificationKey, adminDids: [adminA, adminC] }),
+    ).toEqual({ disposition: 'conflict' })
+    // A subset is also a divergent set → conflict.
+    expect(
+      log.registerSpace({ spaceId, verificationKey, adminDids: [adminA] }),
+    ).toEqual({ disposition: 'conflict' })
+    // Original admin set untouched.
+    expect(log.getSpaceAdmins(spaceId)).toEqual([adminA, adminB])
+  })
+
+  it('registerSpace keeps distinct spaceIds independent', () => {
+    const spaceA = randomUUID()
+    const spaceB = randomUUID()
+    const admin = `did:key:z6Mk${'f'.repeat(40)}`
+
+    log.registerSpace({ spaceId: spaceA, verificationKey: 'vk-a', adminDids: [admin] })
+    log.registerSpace({ spaceId: spaceB, verificationKey: 'vk-b', adminDids: [admin] })
+
+    expect(log.getSpace(spaceA)).toEqual({ verificationKey: 'vk-a', generation: 0 })
+    expect(log.getSpace(spaceB)).toEqual({ verificationKey: 'vk-b', generation: 0 })
+    expect(log.isSpaceRegistered(randomUUID())).toBe(false)
+  })
+
   it('shares one Database handle and does not close a borrowed connection', async () => {
     // The relay shares ONE better-sqlite3 connection between OfflineQueue and
     // DocLog; a borrowed handle must stay open after DocLog.close().
