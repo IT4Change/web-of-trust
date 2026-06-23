@@ -1112,4 +1112,129 @@ describe('Durable log sync over the real relay (Slice R / Sync 002)', () => {
     expect(body.truncated).toBe(true)
     await freshClient.disconnect()
   })
+
+  it("BLOCKER 1 — a device-revoke whose payload.did != the deviceId's registered owner is AUTH_INVALID and leaves the victim device active", async () => {
+    // Authorization boundary (Sync 003 §Device-Deaktivierung): a device-revoke may
+    // only revoke a device OWNED by the signing DID. The inner JWS is signed by
+    // payload.did, but payload.did is attacker-chosen. Here Mallory signs a perfectly
+    // valid revoke for {did: mallory.did, deviceId: VICTIM's deviceId}. Without the
+    // owner check the broker would flip the victim's ACTIVE device to revoked
+    // (cross-DID revocation). The fix: the durable row for the deviceId is owned by
+    // the victim, not Mallory → 'did-mismatch' → AUTH_INVALID, no state change.
+    const docId = randomUUID()
+    const victim = await makeRawIdentity('b1-victim')
+    const mallory = await makeRawIdentity('b1-mallory')
+    const fresh = await makeRawIdentity('b1-fresh')
+
+    const keypair = await makeSpaceCapabilityKeypair()
+    const victimClient = new TestClient(victim)
+    const malloryClient = new TestClient(mallory)
+    await victimClient.connect() // registers (victim.did, victim.deviceId) as active
+    await malloryClient.connect()
+
+    // SPACE setup so the victim can write (read+write) — proves the device stays
+    // usable after the rejected cross-DID revoke (not just that the row is unchanged).
+    await setupSpace({
+      spaceId: docId,
+      keypair,
+      admin: { client: victimClient, identity: victim },
+      participants: [{ client: victimClient, identity: victim, permissions: ['read', 'write'] }],
+    })
+
+    // The victim writes seq 0 while active (baseline).
+    const v0 = await buildLogEntryJws({ identity: victim, docId, seq: 0, plaintext: 'victim-before' })
+    expect(((await victimClient.send(logEntryEnvelope(victim.did, [fresh.did], v0))) as Record<string, unknown>).status).toBe('delivered')
+
+    // Mallory signs a VALID revoke for her OWN did but the VICTIM's deviceId.
+    // The JWS verifies (signed by mallory's key, kid-DID == payload.did == mallory),
+    // so this is NOT a signature failure — it is the cross-DID authorization breach.
+    const crossDidRevoke = await buildDeviceRevokeFrame(mallory, victim.deviceId, '2026-06-23T10:00:00Z')
+    expect(await malloryClient.sendControlFrame(crossDidRevoke)).toMatchObject({ error: 'AUTH_INVALID' })
+
+    // The victim's device is STILL active: her next write on the SAME open socket
+    // succeeds (NOT DEVICE_REVOKED). The cross-DID revoke had no effect.
+    const v1 = await buildLogEntryJws({ identity: victim, docId, seq: 1, plaintext: 'victim-after' })
+    expect(((await victimClient.send(logEntryEnvelope(victim.did, [fresh.did], v1))) as Record<string, unknown>).status).toBe('delivered')
+
+    // And the durable device row is unchanged (still owned by victim, still active).
+    const docLog = (server as unknown as {
+      docLog: { getDevice: (id: string) => { did: string; status: string } | null }
+    }).docLog
+    expect(docLog.getDevice(victim.deviceId)).toMatchObject({ did: victim.did, status: 'active' })
+
+    await victimClient.disconnect()
+    await malloryClient.disconnect()
+  })
+
+  it('SHOULD-FIX 2 — a socket revoked mid-session sending a log-entry WITHOUT a presented scope is DEVICE_REVOKED, not CAPABILITY_REQUIRED', async () => {
+    // The live revoked check MUST run on every log-entry BEFORE the capability gate
+    // (Sync 003 — sync-request already does this). A revoked socket with no cached
+    // scope must report DEVICE_REVOKED (the higher-priority signal), not the generic
+    // CAPABILITY_REQUIRED. Alice NEVER presents a capability here, so before the
+    // reorder she would have hit CAPABILITY_REQUIRED.
+    const docId = randomUUID()
+    const alice = await makeRawIdentity('sf2-alice')
+    const fresh = await makeRawIdentity('sf2-fresh')
+
+    const aliceClient = new TestClient(alice)
+    await aliceClient.connect() // active, NO present-capability
+
+    // Revoke alice's own device mid-session (signed by alice's Identity Key — a
+    // self-revoke, which is authorized; cross-DID is covered by BLOCKER 1).
+    const revoke = await buildDeviceRevokeFrame(alice, alice.deviceId, '2026-06-23T10:00:00Z')
+    const admin = await makeRawIdentity('sf2-admin')
+    const adminClient = new TestClient(admin)
+    await adminClient.connect()
+    expect((await adminClient.sendControlFrame(revoke) as Record<string, unknown>).status).toBe('delivered')
+    await adminClient.disconnect()
+
+    // Alice's next log-entry on the SAME open socket, with NO scope presented →
+    // DEVICE_REVOKED (device-active runs before the gate), NOT CAPABILITY_REQUIRED.
+    const a0 = await buildLogEntryJws({ identity: alice, docId, seq: 0, plaintext: 'after-revoke-no-scope' })
+    expect(await aliceClient.send(logEntryEnvelope(alice.did, [fresh.did], a0))).toMatchObject({ error: 'DEVICE_REVOKED' })
+
+    await aliceClient.disconnect()
+  })
+
+  it('SHOULD-FIX 1 — an async control-frame handler that throws yields INTERNAL_ERROR to the sender and does not crash the relay', async () => {
+    // device-revoke / space-register / space-rotate / admin-* / present-capability are
+    // dispatched as `this.handleX(...).catch(sendInternalError)` (NOT bare `void`), so
+    // a later promise rejection on an unexpected SQLite/crypto error surfaces as an
+    // INTERNAL_ERROR frame rather than an unhandled rejection (process crash on Node
+    // 22 / vitest run failure). Force handleSpaceRegister's durable write to throw.
+    const docId = randomUUID()
+    const admin = await makeRawIdentity('sf1-admin')
+    const adminClient = new TestClient(admin)
+    await adminClient.connect()
+
+    const keypair = await makeSpaceCapabilityKeypair()
+    const docLog = (server as unknown as { docLog: { registerSpace: (...a: unknown[]) => unknown } }).docLog
+    const realRegisterSpace = docLog.registerSpace.bind(docLog)
+    docLog.registerSpace = () => {
+      throw new Error('SQLITE_IOERR: simulated registry write failure')
+    }
+
+    // The throw happens in the async tail of handleSpaceRegister; the `.catch()` at
+    // the dispatch site reports INTERNAL_ERROR instead of crashing.
+    const outcome = await adminClient.sendSpaceRegister({
+      signer: admin,
+      spaceId: docId,
+      spaceCapabilityVerificationKey: keypair.verificationKey,
+      adminDids: [admin.did],
+    })
+    expect(outcome).toMatchObject({ error: 'INTERNAL_ERROR' })
+
+    // The relay is still alive and serving: restore the store, and a real
+    // space-register now succeeds.
+    docLog.registerSpace = realRegisterSpace
+    const ok = await adminClient.sendSpaceRegister({
+      signer: admin,
+      spaceId: docId,
+      spaceCapabilityVerificationKey: keypair.verificationKey,
+      adminDids: [admin.did],
+    })
+    expect((ok as Record<string, unknown>).status).toBe('delivered')
+
+    await adminClient.disconnect()
+  })
 })

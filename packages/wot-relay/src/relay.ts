@@ -68,6 +68,14 @@ const protocolCrypto = new WebCryptoProtocolCryptoAdapter()
 export interface RelayServerOptions {
   port: number
   dbPath?: string // SQLite path, defaults to ':memory:' for tests
+  /**
+   * Injectable clock (epoch ms), defaults to `Date.now`. A test seam for the
+   * capability-expiry gate (Sync 003 §Capability-Prüfung, `validUntil`): a test
+   * advances this past a short-lived capability's `validUntil` to prove a
+   * still-cached-but-expired scope no longer authorizes. Production leaves it
+   * unset and reads wall-clock time.
+   */
+  now?: () => number
 }
 
 /** Pending challenge awaiting response from client, bound to the connection. */
@@ -91,6 +99,16 @@ interface CachedScope {
   permissions: Set<'read' | 'write'>
   generation: number
   path: 'space' | 'personal'
+  /**
+   * The capability's `validUntil` as epoch ms (parsed from the verified payload;
+   * Sync 003 §Capability-Prüfung — "validUntil begrenzt Zugriffsrechte"). At every
+   * gate check the relay drops the scope and rejects once `now >= validUntil`, so a
+   * presented capability does NOT authorize until WS close after it expires. A
+   * non-parseable/absent validUntil yields NaN, which makes the `now >= validUntil`
+   * comparison false; the verifier already enforces a well-formed validUntil before
+   * a scope is ever cached, so that case is unreachable in practice.
+   */
+  validUntil: number
 }
 
 const CHALLENGE_TIMEOUT_MS = 30_000 // 30 seconds to respond
@@ -112,8 +130,11 @@ export class RelayServer {
   private queue: OfflineQueue
   private docLog: DocLog
   private startedAt = Date.now()
+  /** Injectable clock (epoch ms) for the capability-expiry gate; see options.now. */
+  private now: () => number
 
   constructor(private options: RelayServerOptions) {
+    this.now = options.now ?? (() => Date.now())
     // ONE SQLite connection shared by the offline inbox queue and the durable
     // log store. Sharing matters for tests: two separate ':memory:' handles are
     // distinct databases, and prod runs on a single file anyway. The RelayServer
@@ -283,7 +304,9 @@ export class RelayServer {
           this.handleRegister(ws, record)
           break
         case 'challenge-response':
-          void this.handleChallengeResponse(ws, record)
+          this.handleChallengeResponse(ws, record).catch((err) =>
+            this.sendInternalError(ws, err, 'challenge-response handling failed'),
+          )
           break
         case 'send':
           this.handleSend(ws, (record.envelope ?? {}) as Record<string, unknown>)
@@ -291,23 +314,41 @@ export class RelayServer {
         case 'ack':
           this.handleAck(ws, String(record.messageId ?? ''))
           break
+        // Async control-frame handlers: dispatched with a `.catch()` (NOT bare
+        // `void`) so a later promise rejection from an unexpected SQLite/crypto/parse
+        // error surfaces as an INTERNAL_ERROR frame to the sender instead of an
+        // unhandled rejection (process crash on Node 22). The synchronous try/catch
+        // below only guards the dispatch itself, not the async tail — mirrors the
+        // handleLogEntry hardening (Slice R).
         case BROKER_DEVICE_REVOKE_CONTROL_FRAME_TYPE:
-          void this.handleDeviceRevoke(ws, record)
+          this.handleDeviceRevoke(ws, record).catch((err) =>
+            this.sendInternalError(ws, err, 'device-revoke handling failed'),
+          )
           break
         case SPACE_REGISTER_MESSAGE_TYPE:
-          void this.handleSpaceRegister(ws, record)
+          this.handleSpaceRegister(ws, record).catch((err) =>
+            this.sendInternalError(ws, err, 'space-register handling failed'),
+          )
           break
         case SPACE_ROTATE_MESSAGE_TYPE:
-          void this.handleSpaceRotate(ws, record)
+          this.handleSpaceRotate(ws, record).catch((err) =>
+            this.sendInternalError(ws, err, 'space-rotate handling failed'),
+          )
           break
         case ADMIN_ADD_MESSAGE_TYPE:
-          void this.handleAdminAdd(ws, record)
+          this.handleAdminAdd(ws, record).catch((err) =>
+            this.sendInternalError(ws, err, 'admin-add handling failed'),
+          )
           break
         case ADMIN_REMOVE_MESSAGE_TYPE:
-          void this.handleAdminRemove(ws, record)
+          this.handleAdminRemove(ws, record).catch((err) =>
+            this.sendInternalError(ws, err, 'admin-remove handling failed'),
+          )
           break
         case PRESENT_CAPABILITY_CONTROL_FRAME_TYPE:
-          void this.handlePresentCapability(ws, record)
+          this.handlePresentCapability(ws, record).catch((err) =>
+            this.sendInternalError(ws, err, 'present-capability handling failed'),
+          )
           break
         case 'ping':
           this.sendTo(ws, { type: 'pong' })
@@ -327,6 +368,21 @@ export class RelayServer {
    * register-frame helper.
    */
   private handleRegister(ws: WebSocket, raw: Record<string, unknown>): void {
+    // One WS = one session (Sync 003 §Authentisierung — "Alle weiteren Nachrichten
+    // auf dieser Verbindung gelten als von dieser DID + deviceId kommend"). A WS that
+    // is already authenticated MUST NOT be re-bound to a new DID/deviceId: rebinding
+    // would leak the old DID's still-cached capability scopes and keep routing the
+    // old DID's live messages to this socket. Reject re-registration outright; the
+    // client opens a fresh socket to authenticate as a different identity.
+    if (this.socketToDid.has(ws)) {
+      this.sendTo(ws, {
+        type: 'error',
+        code: 'AUTH_INVALID',
+        message: 'This connection is already registered; open a new connection to authenticate again.',
+      })
+      return
+    }
+
     let frame
     try {
       frame = parseBrokerRegisterControlFrame(raw)
@@ -511,6 +567,19 @@ export class RelayServer {
    * newly authenticated client.
    */
   private completeRegistration(ws: WebSocket, did: string, deviceId: string): void {
+    // Defense-in-depth for the one-WS-one-session rule (handleRegister already
+    // rejects a `register` on an authenticated socket): if this socket is somehow
+    // already bound (e.g. an in-flight challenge-response racing a prior auth), do
+    // NOT rebind it — that would leak the old DID's cached scopes + live routing.
+    if (this.socketToDid.has(ws)) {
+      this.sendTo(ws, {
+        type: 'error',
+        code: 'AUTH_INVALID',
+        message: 'This connection is already registered; open a new connection to authenticate again.',
+      })
+      return
+    }
+
     // Durable Erstregistrierung conflict checks (atomic in the device table).
     const disposition = this.docLog.registerDevice(did, deviceId)
     if (disposition.disposition === 'device-id-conflict') {
@@ -632,7 +701,22 @@ export class RelayServer {
     // (per-device inbox is spec-deferred), so there is nothing device-scoped to
     // delete here yet; the durable tombstone + the live status==active checks on
     // ingest/sync-request are what enforce the revocation going forward.
-    this.docLog.revokeDevice(did, deviceId, revokedAt)
+    //
+    // Authorization boundary (Sync 003 §Device-Deaktivierung): a revocation may
+    // only revoke a device of the SIGNING DID. The inner JWS is signed by `did`,
+    // but `did` is attacker-chosen — without the owner check in revokeDevice an
+    // attacker could sign {did: attackerDid, deviceId: victimDeviceId} and flip a
+    // victim's ACTIVE device. A 'did-mismatch' (deviceId owned by another DID) is
+    // NOT the signer's device → AUTH_INVALID, no state change.
+    const revocation = this.docLog.revokeDevice(did, deviceId, revokedAt)
+    if (revocation.disposition === 'did-mismatch') {
+      this.sendTo(ws, {
+        type: 'error',
+        code: 'AUTH_INVALID',
+        message: 'device-revoke may only revoke a device owned by the signing DID.',
+      })
+      return
+    }
 
     this.sendTo(ws, {
       type: 'receipt',
@@ -1186,7 +1270,7 @@ export class RelayServer {
         expectedSpaceId: docId,
         expectedAudience: socketDid,
         expectedGeneration: space.generation,
-        now: new Date(),
+        now: new Date(this.now()),
       })
     } catch (err) {
       this.sendCapabilityVerifyError(ws, err)
@@ -1197,6 +1281,7 @@ export class RelayServer {
       permissions: new Set(payload.permissions),
       generation: space.generation,
       path: 'space',
+      validUntil: Date.parse(payload.validUntil),
     })
     this.sendCapabilityReceipt(ws, docId)
   }
@@ -1229,7 +1314,7 @@ export class RelayServer {
         publicKey,
         expectedSpaceId: docId,
         expectedAudience: socketDid,
-        now: new Date(),
+        now: new Date(this.now()),
       })
     } catch (err) {
       this.sendCapabilityVerifyError(ws, err)
@@ -1240,6 +1325,7 @@ export class RelayServer {
       permissions: new Set(payload.permissions),
       generation: 0, // Personal docs are not rotated in wot-sync@0.1.
       path: 'personal',
+      validUntil: Date.parse(payload.validUntil),
     })
     this.sendCapabilityReceipt(ws, docId)
   }
@@ -1305,9 +1391,32 @@ export class RelayServer {
     return this.socketToScopes.get(ws)?.get(docId) ?? null
   }
 
-  /** True if (socket, docId) holds a cached scope including `permission`. */
-  private hasScopePermission(ws: WebSocket, docId: string, permission: 'read' | 'write'): boolean {
-    return this.getScope(ws, docId)?.permissions.has(permission) ?? false
+  /**
+   * Evaluate the cached capability scope for (socket, docId, permission) at the
+   * current clock (Sync 003 §Capability-Prüfung):
+   *  - 'granted'  → a cached scope exists, is NOT expired, and carries `permission`.
+   *  - 'expired'  → a cached scope exists but `now >= validUntil`. The expired scope
+   *    is DELETED here so a still-cached-but-expired capability never authorizes; the
+   *    caller rejects with CAPABILITY_EXPIRED, forcing a re-`present-capability`.
+   *  - 'missing'  → no cached scope, or one without `permission` (→ CAPABILITY_REQUIRED).
+   *
+   * Expiry is checked BEFORE the permission bit so an expired scope reports EXPIRED
+   * rather than a confusing REQUIRED, even when the permission would otherwise match.
+   * Applied uniformly to log-entry (write) and sync-request (read), SPACE + PERSONAL.
+   */
+  private checkScope(
+    ws: WebSocket,
+    docId: string,
+    permission: 'read' | 'write',
+  ): 'granted' | 'expired' | 'missing' {
+    const scope = this.getScope(ws, docId)
+    if (!scope) return 'missing'
+    if (this.now() >= scope.validUntil) {
+      // A still-cached-but-expired scope MUST NOT authorize. Drop it now.
+      this.socketToScopes.get(ws)?.delete(docId)
+      return 'expired'
+    }
+    return scope.permissions.has(permission) ? 'granted' : 'missing'
   }
 
   /**
@@ -1491,22 +1600,26 @@ export class RelayServer {
    * authorKid and that authorKid === header.kid; Sync 002 Z.126 — authority via
    * authorKid, not envelope.from). The broker NEVER decrypts `data`.
    *
-   * Ingest verification ORDER (Sync 003 MUSS):
+   * Ingest verification ORDER (Sync 003 MUSS — device-active BEFORE the gate so a
+   * revoked socket reports DEVICE_REVOKED even without a cached scope, SHOULD-FIX 2):
    *   1. verify JWS (verifyLogEntryJws — alg/signature/kid==authorKid/schema);
    *      failure → AUTH_INVALID.
    *   2. device-active check → the AUTHENTICATED socket's (did, deviceId) MUST
    *      currently be status==active in the durable device list. A device revoked
    *      DURING the open session is rejected with DEVICE_REVOKED (live status, not
-   *      just DID equality).
-   *   3. author-binding (Sync 003 §Log-Eintrag-Autor-Bindung) → the DID extracted
+   *      just DID equality). Runs BEFORE the capability gate (mirrors sync-request).
+   *   3. capability gate (VE-5 / BLOCKER 2) → a cached WRITE scope for docId that is
+   *      NOT expired (now < validUntil). Expired → CAPABILITY_EXPIRED (scope dropped);
+   *      absent/insufficient → CAPABILITY_REQUIRED. NOT stored, NOT relayed.
+   *   4. author-binding (Sync 003 §Log-Eintrag-Autor-Bindung) → the DID extracted
    *      from payload.authorKid (part before '#') MUST equal the DID that owns
    *      payload.deviceId in the durable device list. Unregistered deviceId →
    *      DEVICE_NOT_REGISTERED; mismatch → AUTHOR_MISMATCH. Replaces the Slice-R
    *      VE-3a first-writer-wins heuristic. Entry NOT stored, NOT relayed.
-   *   4. seq-collision (VE-3, deterministic-nonce reuse) → divergent content at an
+   *   5. seq-collision (VE-3, deterministic-nonce reuse) → divergent content at an
    *      existing (docId,deviceId,seq); → SEQ_COLLISION_DETECTED + restore-clone
    *      hint; NOT stored, NOT relayed. (Idempotent re-send → no re-store.)
-   *   5. store + live-relay to currently connected recipient devices (no inbox
+   *   6. store + live-relay to currently connected recipient devices (no inbox
    *      queue, no delete-on-ACK).
    */
   private async handleLogEntry(
@@ -1531,24 +1644,11 @@ export class RelayServer {
     const { docId, deviceId, seq, authorKid } = payload
     const messageId = (envelope.id as string) ?? 'unknown'
 
-    // (Capability gate, VE-5 — Sync 003 §Gate, Log-Sync channel only): a cached
-    // WRITE scope for `docId` is REQUIRED on THIS socket before any durable side
-    // effect. Established session-scoped via present-capability; missing →
-    // CAPABILITY_REQUIRED (NOT stored, NOT relayed). The docId is read from the
-    // VERIFIED payload (authority via authorKid, never envelope fields), so the
-    // gate trusts a cryptographically-anchored docId. The Phase-2 device-active /
-    // author-binding / seq checks follow.
-    if (!this.hasScopePermission(ws, docId, 'write')) {
-      this.sendTo(ws, {
-        type: 'error',
-        code: 'CAPABILITY_REQUIRED',
-        message: 'No cached write capability for this docId. Present a capability first.',
-      })
-      return
-    }
-
-    // (2) Live device-active check: the AUTHENTICATED socket's (did, deviceId)
-    // MUST currently be active. A mid-session revocation must be rejected here —
+    // (2) Live device-active check FIRST (before the capability gate, SHOULD-FIX 2):
+    // the AUTHENTICATED socket's (did, deviceId) MUST currently be active. A device
+    // revoked DURING the open session is rejected DEVICE_REVOKED on EVERY log-entry,
+    // even when no scope is cached — the live revoked check is the higher-priority
+    // signal (mirrors sync-request, which already checks device-active first).
     // author-binding DID-equality alone would still pass for a revoked device.
     const socketDid = this.socketToDid.get(ws)
     const socketDeviceId = this.socketToDeviceId.get(ws)
@@ -1561,6 +1661,28 @@ export class RelayServer {
         type: 'error',
         code: 'DEVICE_REVOKED',
         message: 'This device is not active (revoked or not registered).',
+      })
+      return
+    }
+
+    // (Capability gate, VE-5 — Sync 003 §Gate, Log-Sync channel only): a cached
+    // WRITE scope for `docId` is REQUIRED on THIS socket before any durable side
+    // effect. Established session-scoped via present-capability. The docId is read
+    // from the VERIFIED payload (authority via authorKid, never envelope fields), so
+    // the gate trusts a cryptographically-anchored docId. An EXPIRED cached scope
+    // (now >= validUntil, Sync 003 §Capability-Prüfung) is dropped and rejected
+    // CAPABILITY_EXPIRED — a presented capability MUST NOT authorize past validUntil;
+    // an absent/insufficient scope → CAPABILITY_REQUIRED. Nothing is stored/relayed
+    // in either case. Author-binding / seq checks follow.
+    const writeScope = this.checkScope(ws, docId, 'write')
+    if (writeScope !== 'granted') {
+      this.sendTo(ws, {
+        type: 'error',
+        code: writeScope === 'expired' ? 'CAPABILITY_EXPIRED' : 'CAPABILITY_REQUIRED',
+        message:
+          writeScope === 'expired'
+            ? 'Cached write capability for this docId has expired. Present a renewed capability first.'
+            : 'No cached write capability for this docId. Present a capability first.',
       })
       return
     }
@@ -1695,13 +1817,20 @@ export class RelayServer {
 
     // (Capability gate, VE-5 — Sync 003 §Gate, Log-Sync channel only): a cached
     // READ scope for `docId` is REQUIRED on THIS socket before serving any
-    // catch-up. Established session-scoped via present-capability; missing →
-    // CAPABILITY_REQUIRED (nothing served).
-    if (!this.hasScopePermission(ws, docId, 'read')) {
+    // catch-up. Established session-scoped via present-capability. An EXPIRED cached
+    // scope (now >= validUntil, Sync 003 §Capability-Prüfung) is dropped and rejected
+    // CAPABILITY_EXPIRED — a presented capability MUST NOT serve reads past
+    // validUntil; an absent/insufficient scope → CAPABILITY_REQUIRED. Nothing served
+    // in either case.
+    const readScope = this.checkScope(ws, docId, 'read')
+    if (readScope !== 'granted') {
       this.sendTo(ws, {
         type: 'error',
-        code: 'CAPABILITY_REQUIRED',
-        message: 'No cached read capability for this docId. Present a capability first.',
+        code: readScope === 'expired' ? 'CAPABILITY_EXPIRED' : 'CAPABILITY_REQUIRED',
+        message:
+          readScope === 'expired'
+            ? 'Cached read capability for this docId has expired. Present a renewed capability first.'
+            : 'No cached read capability for this docId. Present a capability first.',
       })
       return
     }

@@ -365,14 +365,23 @@ export class DocLog {
    * a revoked TOMBSTONE (still globally reserved). The PRIMARY KEY on device_id
    * means a tombstone for one DID blocks any other DID re-registering it.
    * Returns the disposition for logging/observability.
+   *
+   * Authorization boundary (Sync 003 §Device-Deaktivierung — "Jede gültig mit dem
+   * Identity Key der DID signierte device-revoke Nachricht DARF jedes Device
+   * DERSELBEN DID deaktivieren"): a revocation may only revoke a device OWNED by
+   * the signing `did`. If the deviceId already belongs to ANOTHER DID (active OR a
+   * revoked tombstone), this is NOT the signer's device — NO state change, return
+   * 'did-mismatch'. The relay maps that to AUTH_INVALID. Without this guard an
+   * attacker could sign {did: attackerDid, deviceId: victimDeviceId} validly and
+   * flip a victim's ACTIVE device to revoked (cross-DID revocation).
    */
   revokeDevice(
     did: string,
     deviceId: string,
     revokedAt: string,
-  ): { disposition: 'revoked' | 'already-revoked' | 'tombstoned' } {
+  ): { disposition: 'revoked' | 'already-revoked' | 'tombstoned' | 'did-mismatch' } {
     const tx = this.db.transaction(
-      (): { disposition: 'revoked' | 'already-revoked' | 'tombstoned' } => {
+      (): { disposition: 'revoked' | 'already-revoked' | 'tombstoned' | 'did-mismatch' } => {
         const existing = this.db
           .prepare('SELECT did, status FROM devices WHERE device_id = ?')
           .get(deviceId) as { did: string; status: string } | undefined
@@ -386,6 +395,11 @@ export class DocLog {
             )
             .run(did, deviceId, now, now, 'revoked', revokedAt)
           return { disposition: 'tombstoned' }
+        }
+        if (existing.did !== did) {
+          // The deviceId is owned by ANOTHER DID — a revocation signed by `did`
+          // MUST NOT mutate it. No state change; the relay rejects AUTH_INVALID.
+          return { disposition: 'did-mismatch' }
         }
         if (existing.status === 'revoked') {
           // Already revoked: first metadata is authoritative, do not overwrite.

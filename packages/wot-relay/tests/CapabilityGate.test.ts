@@ -85,6 +85,7 @@ async function mintSpaceCapability(params: {
   audience: string
   permissions: Array<'read' | 'write'>
   generation?: number
+  validUntil?: string
 }): Promise<string> {
   return protocol.createSpaceCapabilityJws({
     payload: {
@@ -94,7 +95,7 @@ async function mintSpaceCapability(params: {
       permissions: params.permissions,
       generation: params.generation ?? 0,
       issuedAt: CAP_ISSUED_AT,
-      validUntil: CAP_VALID_UNTIL,
+      validUntil: params.validUntil ?? CAP_VALID_UNTIL,
     },
     signingSeed: params.keypair.signingSeed,
   })
@@ -104,6 +105,7 @@ async function mintPersonalDocCapability(params: {
   owner: RawIdentity
   docId: string
   permissions: Array<'read' | 'write'>
+  validUntil?: string
 }): Promise<string> {
   return protocol.createPersonalDocCapabilityJws({
     payload: {
@@ -113,7 +115,7 @@ async function mintPersonalDocCapability(params: {
       permissions: params.permissions,
       generation: 0,
       issuedAt: CAP_ISSUED_AT,
-      validUntil: CAP_VALID_UNTIL,
+      validUntil: params.validUntil ?? CAP_VALID_UNTIL,
     },
     kid: params.owner.authorKid,
     signingSeed: params.owner.seed,
@@ -683,5 +685,219 @@ describe('Broker capability gate over the real relay (Slice CG / VE-4 + VE-5 + V
 
     await senderClient.disconnect()
     await recipientClient.disconnect()
+  })
+
+  it('BLOCKER 2 (SPACE + PERSONAL) — a presented capability stops authorizing once now >= validUntil; log-entry AND sync-request are rejected CAPABILITY_EXPIRED and nothing is stored/served', async () => {
+    // Sync 003 §Capability-Prüfung: `validUntil` bounds access. A cached scope MUST
+    // NOT keep authorizing after it expires (until WS close). We present a short-lived
+    // capability while the injected clock is BEFORE validUntil (so present succeeds),
+    // then advance the clock PAST validUntil; the cached-but-expired scope is dropped +
+    // rejected CAPABILITY_EXPIRED on the WRITE gate (log-entry) AND, with a freshly
+    // re-presented scope, on the READ gate (sync-request). Covered for BOTH the Space
+    // and Personal paths. (The gate DELETES an expired scope on first detection, so
+    // each gate assertion uses its own freshly-presented-then-expired scope — that is
+    // the spec behavior: the first hit reports EXPIRED, then the client must re-present.)
+    const validUntil = '2026-06-23T12:00:00Z'
+    const expiryMs = Date.parse(validUntil)
+    const beforeExpiry = expiryMs - 60_000
+    const afterExpiry = expiryMs + 1_000
+    let clock = beforeExpiry
+
+    // Replace the beforeEach server with a clock-injected one on the SAME port (the
+    // module afterEach stops whatever `server` points at). The TestClient targets
+    // RELAY_URL (= this port), so no wiring change is needed.
+    await server.stop()
+    server = new RelayServer({ port: PORT, now: () => clock })
+    await server.start()
+
+    // ============================ SPACE path ============================
+    const spaceDoc = randomUUID()
+    const admin = await makeRawIdentity('b2-space-admin')
+    const keypair = await makeSpaceCapabilityKeypair()
+    const spaceClient = new TestClient(admin)
+    await spaceClient.connect()
+    expect(
+      ((await spaceClient.sendSpaceRegister({
+        signer: admin,
+        spaceId: spaceDoc,
+        spaceCapabilityVerificationKey: keypair.verificationKey,
+        adminDids: [admin.did],
+      })) as Record<string, unknown>).status,
+    ).toBe('delivered')
+    const mintSpaceRw = () => mintSpaceCapability({ keypair, spaceId: spaceDoc, audience: admin.did, permissions: ['read', 'write'], validUntil })
+
+    // Present (clock < validUntil) and write ONE baseline entry while valid.
+    expect(((await spaceClient.presentCapability(await mintSpaceRw())) as Record<string, unknown>).status).toBe('delivered')
+    const baseJws = await buildLogEntryJws({ identity: admin, docId: spaceDoc, seq: 0, plaintext: 'space-before-expiry' })
+    expect(((await spaceClient.send(logEntryEnvelope(admin.did, [admin.did], baseJws))) as Record<string, unknown>).status).toBe('delivered')
+
+    // WRITE gate: advance past validUntil → the cached scope is expired → log-entry
+    // rejected CAPABILITY_EXPIRED (and the post-expiry entry is NOT stored, asserted later).
+    clock = afterExpiry
+    const spaceAfterJws = await buildLogEntryJws({ identity: admin, docId: spaceDoc, seq: 1, plaintext: 'space-after-expiry' })
+    expect(await spaceClient.send(logEntryEnvelope(admin.did, [admin.did], spaceAfterJws))).toMatchObject({ error: 'CAPABILITY_EXPIRED' })
+
+    // READ gate: rewind, re-present a fresh scope, advance past validUntil again →
+    // sync-request rejected CAPABILITY_EXPIRED (nothing served).
+    clock = beforeExpiry
+    expect(((await spaceClient.presentCapability(await mintSpaceRw())) as Record<string, unknown>).status).toBe('delivered')
+    clock = afterExpiry
+    expect(await spaceClient.send(syncRequestEnvelope(admin.did, spaceDoc, {}))).toMatchObject({ error: 'CAPABILITY_EXPIRED' })
+
+    // =========================== PERSONAL path ===========================
+    const personalDoc = randomUUID() // no space-register → personal path
+    const owner = await makeRawIdentity('b2-personal-owner')
+    const personalClient = new TestClient(owner)
+    await personalClient.connect()
+    const mintPersonalRw = () => mintPersonalDocCapability({ owner, docId: personalDoc, permissions: ['read', 'write'], validUntil })
+
+    // WRITE gate.
+    clock = beforeExpiry
+    expect(((await personalClient.presentCapability(await mintPersonalRw())) as Record<string, unknown>).status).toBe('delivered')
+    clock = afterExpiry
+    const personalAfter = await buildLogEntryJws({ identity: owner, docId: personalDoc, seq: 0, plaintext: 'personal-after-expiry' })
+    expect(await personalClient.send(logEntryEnvelope(owner.did, [owner.did], personalAfter))).toMatchObject({ error: 'CAPABILITY_EXPIRED' })
+
+    // READ gate.
+    clock = beforeExpiry
+    expect(((await personalClient.presentCapability(await mintPersonalRw())) as Record<string, unknown>).status).toBe('delivered')
+    clock = afterExpiry
+    expect(await personalClient.send(syncRequestEnvelope(owner.did, personalDoc, {}))).toMatchObject({ error: 'CAPABILITY_EXPIRED' })
+
+    // ===================== nothing stored after expiry =====================
+    // Rewind so a freshly-presented cap is valid, re-present, and read: the Space doc
+    // holds ONLY the single pre-expiry baseline entry (the post-expiry write never
+    // reached the log), and the never-written Personal doc holds ZERO entries.
+    clock = beforeExpiry
+    expect(((await spaceClient.presentCapability(await mintSpaceRw())) as Record<string, unknown>).status).toBe('delivered')
+    const spaceResp = await spaceClient.syncRequest(syncRequestEnvelope(admin.did, spaceDoc, {}))
+    expect((spaceResp.body as { entries: string[] }).entries).toHaveLength(1)
+
+    expect(((await personalClient.presentCapability(await mintPersonalRw())) as Record<string, unknown>).status).toBe('delivered')
+    const personalResp = await personalClient.syncRequest(syncRequestEnvelope(owner.did, personalDoc, {}))
+    expect((personalResp.body as { entries: string[] }).entries).toHaveLength(0)
+
+    await spaceClient.disconnect()
+    await personalClient.disconnect()
+  })
+
+  it('BLOCKER 3 — re-registering an authenticated WS as a different DID is rejected; Alice keeps her scope (write still works) + live routing on that socket', async () => {
+    // One WS = one session (Sync 003 §Authentisierung). A socket authenticated as
+    // Alice that presents an Alice write scope MUST NOT be re-bound to Bob: rebinding
+    // would leak Alice's cached scope and keep routing Alice's live messages to the
+    // socket. We reject the re-registration outright (AUTH_INVALID). Then we prove on
+    // the SAME socket that (a) the rebind was rejected, (b) Alice's cached write scope
+    // still authorizes a log-entry, and (c) a live message addressed to Alice still
+    // arrives on that socket (routing target intact, NOT moved to Bob).
+    const docId = randomUUID()
+    const alice = await makeRawIdentity('b3-alice')
+    const bob = await makeRawIdentity('b3-bob')
+    const aliceSibling = await makeRawIdentity('b3-alice-sibling') // a second device of Alice's DID
+
+    // A tiny request/response driver over ONE raw Alice socket. Resolves outcomes
+    // (receipt|error) in order and buffers inbound `message` envelopes.
+    const ws = new WebSocket(RELAY_URL)
+    const outcomeWaiters: Array<(o: Record<string, unknown> | { error: string }) => void> = []
+    const messageBuffer: Record<string, unknown>[] = []
+    const messageWaiters: Array<(env: Record<string, unknown>) => void> = []
+    const nextOutcome = () =>
+      new Promise<Record<string, unknown> | { error: string }>((resolve, reject) => {
+        const t = setTimeout(() => reject(new Error('Timeout waiting for outcome')), 2000)
+        outcomeWaiters.push((o) => {
+          clearTimeout(t)
+          resolve(o)
+        })
+      })
+    const nextMessage = () =>
+      new Promise<Record<string, unknown>>((resolve, reject) => {
+        const buffered = messageBuffer.shift()
+        if (buffered) return resolve(buffered)
+        const t = setTimeout(() => reject(new Error('Timeout waiting for message')), 2000)
+        messageWaiters.push((env) => {
+          clearTimeout(t)
+          resolve(env)
+        })
+      })
+
+    const aliceAuthed = new Promise<void>((resolve, reject) => {
+      const t = setTimeout(() => reject(new Error('Timeout authenticating Alice')), 2000)
+      ws.on('open', () => ws.send(JSON.stringify({ type: 'register', did: alice.did, deviceId: alice.deviceId })))
+      ws.on('message', (data) => {
+        const msg = JSON.parse(data.toString()) as RelayMessage
+        if (msg.type === 'challenge') {
+          const transcript = buildBrokerAuthTranscript({ did: alice.did, deviceId: alice.deviceId, nonce: msg.nonce })
+          const signingBytes = createBrokerAuthTranscriptSigningBytes(transcript)
+          alice
+            .signTranscriptBytes(signingBytes)
+            .then((sig) =>
+              ws.send(JSON.stringify({
+                type: 'challenge-response',
+                did: alice.did,
+                deviceId: alice.deviceId,
+                nonce: msg.nonce,
+                signature: formatBrokerChallengeResponseSignature(sig),
+              })),
+            )
+            .catch(reject)
+        } else if (msg.type === 'registered') {
+          clearTimeout(t)
+          resolve()
+        } else if (msg.type === 'receipt') {
+          outcomeWaiters.shift()?.(msg.receipt as unknown as Record<string, unknown>)
+        } else if (msg.type === 'error') {
+          outcomeWaiters.shift()?.({ error: msg.code })
+        } else if (msg.type === 'message') {
+          const w = messageWaiters.shift()
+          if (w) w(msg.envelope)
+          else messageBuffer.push(msg.envelope)
+        }
+      })
+      ws.on('error', reject)
+    })
+    await aliceAuthed
+
+    // Alice presents a personal write scope (cached for this socket).
+    const cap = await mintPersonalDocCapability({ owner: alice, docId, permissions: ['read', 'write'] })
+    ws.send(JSON.stringify({ type: 'present-capability', capabilityJws: cap }))
+    expect((await nextOutcome() as Record<string, unknown>).status).toBe('delivered')
+
+    // Attempt to re-register the SAME socket as Bob → rejected outright (AUTH_INVALID).
+    ws.send(JSON.stringify({ type: 'register', did: bob.did, deviceId: bob.deviceId }))
+    expect(await nextOutcome()).toMatchObject({ error: 'AUTH_INVALID' })
+
+    // The relay never bound the socket to Bob: Alice is connected, Bob is not.
+    expect(server.connectedDids).toContain(alice.did)
+    expect(server.connectedDids).not.toContain(bob.did)
+
+    // (b) Alice's cached write scope STILL authorizes a log-entry on this socket (the
+    // rejected rebind did not clear socketToScopes).
+    const jws = await buildLogEntryJws({ identity: alice, docId, seq: 0, plaintext: 'alice-still-writes' })
+    ws.send(JSON.stringify({ type: 'send', envelope: logEntryEnvelope(alice.did, [bob.did], jws) }))
+    expect((await nextOutcome() as Record<string, unknown>).status).toBe('delivered')
+
+    // (c) A live message addressed to ALICE still arrives on this socket: a sibling
+    // device of Alice's DID sends Alice an inbox message; the relay fans it out to
+    // Alice's connected sockets (this one) — proving routing stayed with Alice, not Bob.
+    const siblingClient = new TestClient(aliceSibling)
+    await siblingClient.connect()
+    const liveId = randomUUID()
+    const inbox: Record<string, unknown> = {
+      typ: DIDCOMM_PLAINTEXT_TYP,
+      type: SPACE_INVITE_MESSAGE_TYPE,
+      id: liveId,
+      from: aliceSibling.did,
+      to: [alice.did],
+      created_time: Math.floor(Date.now() / 1000),
+      body: { epk: 'e', nonce: 'n', ciphertext: 'c' },
+    }
+    await siblingClient.send(inbox)
+    const delivered = await nextMessage()
+    expect(delivered.id).toBe(liveId)
+
+    await siblingClient.disconnect()
+    await new Promise<void>((resolve) => {
+      ws.on('close', () => resolve())
+      ws.close()
+    })
   })
 })
