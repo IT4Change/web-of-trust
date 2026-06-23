@@ -152,6 +152,22 @@ class TestClient {
     })
   }
 
+  /**
+   * Send a RAW top-level control frame (not wrapped in `{type:'send',envelope}`)
+   * and resolve on the matching receipt OR error. Used for the device-revoke
+   * control-frame, which is a top-level frame in handleMessage.
+   */
+  sendControlFrame(frame: Record<string, unknown>): Promise<SendOutcome> {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('Timeout waiting for control-frame outcome')), 2000)
+      this.outcomeWaiters.push((outcome) => {
+        clearTimeout(timer)
+        resolve(outcome)
+      })
+      this.ws!.send(JSON.stringify(frame))
+    })
+  }
+
   /** Send a sync-request and wait for the sync-response message envelope. */
   syncRequest(envelope: Record<string, unknown>): Promise<Record<string, unknown>> {
     return new Promise((resolve, reject) => {
@@ -231,6 +247,79 @@ function syncRequestEnvelope(
     createdTime: Math.floor(Date.now() / 1000),
     body: limit === undefined ? { docId, heads } : { docId, heads, limit },
   }) as unknown as Record<string, unknown>
+}
+
+/**
+ * Build a Sync 003 `device-revoke` control-frame: the inner JWS payload
+ * `{ type, did, deviceId, revokedAt }` is signed by the DID's Identity Key (raw
+ * seed). The header `kid` MUST resolve to `did` (the core verifier checks
+ * didOrKidToDid(kid) === payload.did), so we use the identity's authorKid.
+ */
+async function buildDeviceRevokeFrame(
+  identity: RawIdentity,
+  deviceId: string,
+  revokedAt: string,
+): Promise<Record<string, unknown>> {
+  const payload = { type: 'device-revoke', did: identity.did, deviceId, revokedAt }
+  const revocationJws = await protocol.createJcsEd25519Jws(
+    { alg: 'EdDSA', kid: identity.authorKid },
+    payload as unknown as protocol.JsonValue,
+    identity.seed,
+  )
+  return { type: 'device-revoke', revocationJws }
+}
+
+/**
+ * Drive the register → challenge-response handshake manually and resolve with the
+ * relay's `error` frame instead of a `registered` frame. Used for registration
+ * rejections (DEVICE_ID_CONFLICT / DEVICE_REVOKED) where connect() would never
+ * resolve because no `registered` frame is sent.
+ */
+function connectExpectingError(identity: RawIdentity): Promise<{ code: string }> {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(RELAY_URL)
+    const timer = setTimeout(() => {
+      ws.close()
+      reject(new Error('Timeout waiting for registration error'))
+    }, 2000)
+    ws.on('open', () => {
+      ws.send(JSON.stringify({ type: 'register', did: identity.did, deviceId: identity.deviceId }))
+    })
+    ws.on('message', (data) => {
+      const msg = JSON.parse(data.toString()) as RelayMessage
+      if (msg.type === 'challenge') {
+        const transcript = buildBrokerAuthTranscript({
+          did: identity.did,
+          deviceId: identity.deviceId,
+          nonce: msg.nonce,
+        })
+        const signingBytes = createBrokerAuthTranscriptSigningBytes(transcript)
+        identity
+          .signTranscriptBytes(signingBytes)
+          .then((sig) => {
+            ws.send(
+              JSON.stringify({
+                type: 'challenge-response',
+                did: identity.did,
+                deviceId: identity.deviceId,
+                nonce: msg.nonce,
+                signature: formatBrokerChallengeResponseSignature(sig),
+              }),
+            )
+          })
+          .catch(reject)
+      } else if (msg.type === 'registered') {
+        clearTimeout(timer)
+        ws.close()
+        reject(new Error('Expected a registration error, got `registered`'))
+      } else if (msg.type === 'error') {
+        clearTimeout(timer)
+        ws.close()
+        resolve({ code: msg.code })
+      }
+    })
+    ws.on('error', reject)
+  })
 }
 
 /** Decrypt + collect plaintexts from a list of log-entry JWS (verifies signatures). */
@@ -459,7 +548,12 @@ describe('Durable log sync over the real relay (Slice R / Sync 002)', () => {
     await freshClient.disconnect()
   })
 
-  it("VE-3a: a foreign author cannot squat another device's (docId,deviceId); cold reconstruction holds only the owner", async () => {
+  it("device author-binding: a registered device cannot write a log-entry claiming another DID's registered deviceId; cold reconstruction holds only the owner", async () => {
+    // Sync 003 §Log-Eintrag-Autor-Bindung against the DURABLE device list: the DID
+    // owning payload.deviceId MUST equal the DID in payload.authorKid. Bob is a
+    // legitimately registered device (his own deviceId), but he forges a validly
+    // BOB-signed entry claiming ALICE's registered deviceId → AUTHOR_MISMATCH. This
+    // replaces the Slice-R VE-3a first-writer-wins heuristic.
     const docId = randomUUID()
     const alice = await makeRawIdentity('alice-bind')
     const bob = await makeRawIdentity('bob-bind')
@@ -467,18 +561,19 @@ describe('Durable log sync over the real relay (Slice R / Sync 002)', () => {
 
     const aliceClient = new TestClient(alice)
     const bobClient = new TestClient(bob)
-    await aliceClient.connect()
-    await bobClient.connect()
+    await aliceClient.connect() // registers (alice.did, alice.deviceId)
+    await bobClient.connect() // registers (bob.did, bob.deviceId)
 
-    // Alice owns (docId, alice.deviceId) by writing seq 0.
+    // Alice writes seq 0 under her own registered deviceId → accepted.
     const a0 = await buildLogEntryJws({ identity: alice, docId, seq: 0, plaintext: 'alice-0' })
     expect(
       ((await aliceClient.send(logEntryEnvelope(alice.did, [fresh.did], a0))) as Record<string, unknown>).status,
     ).toBe('delivered')
 
-    // Bob signs with his OWN authorKid but claims Alice's deviceId — a forged
-    // squat. verifyLogEntryJws passes (valid Bob signature), but the relay's
-    // author-binding rejects both a new seq and Alice's existing seq 0.
+    // Bob signs with his OWN authorKid but claims Alice's REGISTERED deviceId.
+    // verifyLogEntryJws passes (valid Bob signature), Bob's socket is active, but
+    // didForDevice(alice.deviceId) === alice.did !== bob.did → AUTHOR_MISMATCH for
+    // both a new seq and Alice's existing seq 0.
     const bobAtAliceSeq1 = await buildLogEntryJws({ identity: bob, docId, seq: 1, plaintext: 'bob-1', deviceId: alice.deviceId })
     expect(await bobClient.send(logEntryEnvelope(bob.did, [fresh.did], bobAtAliceSeq1))).toMatchObject({ error: 'AUTHOR_MISMATCH' })
 
@@ -496,6 +591,146 @@ describe('Durable log sync over the real relay (Slice R / Sync 002)', () => {
     expect(body.entries).toHaveLength(1)
     expect(await reconstruct(body.entries, docId)).toEqual(['alice-0'])
     await freshClient.disconnect()
+  })
+
+  it('author-binding: a log-entry claiming an UNREGISTERED deviceId is rejected with DEVICE_NOT_REGISTERED', async () => {
+    // If payload.deviceId is not in the broker device list at all, author-binding
+    // cannot anchor → DEVICE_NOT_REGISTERED; the entry is not stored, not relayed.
+    const docId = randomUUID()
+    const alice = await makeRawIdentity('alice-unreg')
+    const fresh = await makeRawIdentity('fresh-unreg')
+
+    const aliceClient = new TestClient(alice)
+    await aliceClient.connect()
+
+    // Alice is registered, but she writes a payload whose deviceId is a brand-new
+    // random UUID that was never registered.
+    const unregisteredDeviceId = randomUUID()
+    const jws = await buildLogEntryJws({ identity: alice, docId, seq: 0, plaintext: 'x', deviceId: unregisteredDeviceId })
+    expect(await aliceClient.send(logEntryEnvelope(alice.did, [fresh.did], jws))).toMatchObject({
+      error: 'DEVICE_NOT_REGISTERED',
+    })
+    await aliceClient.disconnect()
+
+    // Nothing was stored.
+    const freshClient = new TestClient(fresh)
+    await freshClient.connect()
+    const response = await freshClient.syncRequest(syncRequestEnvelope(fresh.did, docId, {}))
+    expect((response.body as { entries: string[] }).entries).toEqual([])
+    await freshClient.disconnect()
+  })
+
+  it('VE-1: two DIFFERENT DIDs cannot register the SAME deviceId — the second gets DEVICE_ID_CONFLICT (globally unique)', async () => {
+    // Sync 003 §Erstregistrierung: deviceId is globally unique. Bob authenticates
+    // successfully but reuses Alice's already-registered deviceId → registration is
+    // refused with DEVICE_ID_CONFLICT and Bob's connection is NOT registered (no
+    // `registered` frame).
+    const alice = await makeRawIdentity('alice-conflict')
+    const bobBase = await makeRawIdentity('bob-conflict')
+    // Bob shares Alice's deviceId but has his own DID/seed.
+    const bob: RawIdentity = { ...bobBase, deviceId: alice.deviceId }
+
+    const aliceClient = new TestClient(alice)
+    await aliceClient.connect()
+
+    // Bob's connect() awaits a `registered` frame; with a conflict the relay sends
+    // an `error` instead, so connect() never resolves. Drive the handshake manually
+    // and assert the error frame.
+    const outcome = await connectExpectingError(bob)
+    expect(outcome.code).toBe('DEVICE_ID_CONFLICT')
+
+    await aliceClient.disconnect()
+  })
+
+  it('VE-2: a device revoked DURING an open session is rejected on the next log-entry AND sync-request with DEVICE_REVOKED', async () => {
+    // Live status check (not just authorKid DID-equality): Alice is connected and
+    // active, then a signed device-revoke for (alice.did, alice.deviceId) arrives.
+    // The durable device row flips to revoked; Alice's still-open socket must now be
+    // rejected on both ingest paths even though her authorKid DID still matches.
+    const docId = randomUUID()
+    const alice = await makeRawIdentity('alice-revoke')
+    const fresh = await makeRawIdentity('fresh-revoke')
+
+    const aliceClient = new TestClient(alice)
+    await aliceClient.connect()
+
+    // A first write succeeds while active.
+    const a0 = await buildLogEntryJws({ identity: alice, docId, seq: 0, plaintext: 'before-revoke' })
+    expect(((await aliceClient.send(logEntryEnvelope(alice.did, [fresh.did], a0))) as Record<string, unknown>).status).toBe('delivered')
+
+    // Revoke alice's device via a signed device-revoke control-frame (inner JWS
+    // signed by alice's Identity Key). Sent over a SEPARATE admin socket — any
+    // valid signature by the DID's key may revoke (Shared-Seed model).
+    const revoke = await buildDeviceRevokeFrame(alice, alice.deviceId, '2026-06-22T10:00:00Z')
+    const admin = await makeRawIdentity('admin-revoke')
+    const adminClient = new TestClient(admin)
+    await adminClient.connect()
+    const revokeOutcome = await adminClient.sendControlFrame(revoke)
+    expect((revokeOutcome as Record<string, unknown>).status).toBe('delivered')
+    await adminClient.disconnect()
+
+    // Alice's SAME open socket: next log-entry → DEVICE_REVOKED.
+    const a1 = await buildLogEntryJws({ identity: alice, docId, seq: 1, plaintext: 'after-revoke' })
+    expect(await aliceClient.send(logEntryEnvelope(alice.did, [fresh.did], a1))).toMatchObject({ error: 'DEVICE_REVOKED' })
+
+    // Alice's SAME open socket: sync-request → DEVICE_REVOKED.
+    expect(await aliceClient.send(syncRequestEnvelope(alice.did, docId, {}))).toMatchObject({ error: 'DEVICE_REVOKED' })
+    await aliceClient.disconnect()
+
+    // The post-revoke entry was never stored: cold reconstruction holds only seq 0.
+    const freshClient = new TestClient(fresh)
+    await freshClient.connect()
+    const response = await freshClient.syncRequest(syncRequestEnvelope(fresh.did, docId, {}))
+    const body = response.body as { entries: string[] }
+    expect(body.entries).toHaveLength(1)
+    expect(await reconstruct(body.entries, docId)).toEqual(['before-revoke'])
+    await freshClient.disconnect()
+  })
+
+  it('device-revoke: a malformed control-frame (extra top-level field) is rejected with MALFORMED_MESSAGE', async () => {
+    const alice = await makeRawIdentity('alice-revoke-malformed')
+    const peer = await makeRawIdentity('peer-revoke-malformed')
+    const aliceClient = new TestClient(alice)
+    await aliceClient.connect()
+
+    const valid = await buildDeviceRevokeFrame(alice, alice.deviceId, '2026-06-22T10:00:00Z')
+    // Add a forbidden top-level field — the outer frame MUST carry exactly
+    // {type, revocationJws} (Sync 003 §Device-Deaktivierung).
+    const malformed = { ...valid, thid: randomUUID() }
+    expect(await aliceClient.sendControlFrame(malformed)).toMatchObject({ error: 'MALFORMED_MESSAGE' })
+
+    // The device is still active (the malformed frame had no effect).
+    const docId = randomUUID()
+    const jws = await buildLogEntryJws({ identity: alice, docId, seq: 0, plaintext: 'still-active' })
+    expect(((await aliceClient.send(logEntryEnvelope(alice.did, [peer.did], jws))) as Record<string, unknown>).status).toBe('delivered')
+    await aliceClient.disconnect()
+  })
+
+  it('device-revoke: a frame whose inner JWS is signed by a DIFFERENT key is rejected with AUTH_INVALID', async () => {
+    const alice = await makeRawIdentity('alice-revoke-badsig')
+    const mallory = await makeRawIdentity('mallory-revoke-badsig')
+    const peer = await makeRawIdentity('peer-revoke-badsig')
+    const aliceClient = new TestClient(alice)
+    await aliceClient.connect()
+
+    // Inner payload claims alice's DID, but the JWS is signed with mallory's seed
+    // while the header kid still says alice (so didOrKidToDid(kid) === payload.did
+    // passes the header check, but the Ed25519 verification against alice's key
+    // fails) → AUTH_INVALID.
+    const payload = { type: 'device-revoke', did: alice.did, deviceId: alice.deviceId, revokedAt: '2026-06-22T10:00:00Z' }
+    const forgedJws = await protocol.createJcsEd25519Jws(
+      { alg: 'EdDSA', kid: alice.authorKid },
+      payload as unknown as protocol.JsonValue,
+      mallory.seed,
+    )
+    const frame = { type: 'device-revoke', revocationJws: forgedJws }
+    expect(await aliceClient.sendControlFrame(frame)).toMatchObject({ error: 'AUTH_INVALID' })
+
+    // alice's device is untouched: still active.
+    const docId = randomUUID()
+    const jws = await buildLogEntryJws({ identity: alice, docId, seq: 0, plaintext: 'untouched' })
+    expect(((await aliceClient.send(logEntryEnvelope(alice.did, [peer.did], jws))) as Record<string, unknown>).status).toBe('delivered')
+    await aliceClient.disconnect()
   })
 
   it('Sync 003: the same payload re-encoded into a DIFFERENT JWS envelope dedups (content-hash over payload, not JWS)', async () => {
@@ -582,7 +817,6 @@ describe('Durable log sync over the real relay (Slice R / Sync 002)', () => {
         docId,
         deviceId: alice.deviceId,
         seq,
-        authorKid: alice.authorKid,
         contentHash: await docLog.hashPayload(payload),
         entryJws: jws,
       })

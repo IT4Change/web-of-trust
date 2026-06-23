@@ -10,6 +10,7 @@ import { getDashboardHtml } from './dashboard-html.js'
 
 const {
   didKeyToPublicKeyBytes,
+  didOrKidToDid,
   createBrokerChallengeControlFrame,
   createBrokerRegisteredControlFrame,
   decideBrokerChallengeNonceConsumption,
@@ -20,11 +21,15 @@ const {
   parseBrokerChallengeResponseControlFrame,
   parseBrokerRegisterControlFrame,
   verifyBrokerChallengeResponseControlFrame,
+  parseBrokerDeviceRevokeControlFrame,
+  verifyBrokerDeviceRevokeControlFrame,
   parseLogEntryMessage,
   verifyLogEntryJws,
   parseSyncRequestMessage,
   createSyncResponseMessage,
 } = protocol
+
+const BROKER_DEVICE_REVOKE_CONTROL_FRAME_TYPE = protocol.BROKER_DEVICE_REVOKE_CONTROL_FRAME_TYPE
 
 const DIDCOMM_PLAINTEXT_TYP = protocol.DIDCOMM_PLAINTEXT_TYP
 const ACK_MESSAGE_TYPE = protocol.ACK_MESSAGE_TYPE
@@ -60,7 +65,6 @@ export class RelayServer {
   private connections = new Map<string, Set<WebSocket>>() // DID → Set of WebSockets (multi-device)
   private socketToDid = new Map<WebSocket, string>() // WebSocket → DID (reverse lookup)
   private socketToDeviceId = new Map<WebSocket, string>() // WebSocket → deviceId
-  private knownDevices = new Map<string, Set<string>>() // DID → Set of known deviceIds
   private pendingChallenges = new Map<WebSocket, PendingChallenge>()
   private consumedChallengeNonces = new Map<string, number>() // canonical nonce → expiresAt epoch ms
   private db: Database.Database
@@ -241,6 +245,9 @@ export class RelayServer {
           break
         case 'ack':
           this.handleAck(ws, String(record.messageId ?? ''))
+          break
+        case BROKER_DEVICE_REVOKE_CONTROL_FRAME_TYPE:
+          void this.handleDeviceRevoke(ws, record)
           break
         case 'ping':
           this.sendTo(ws, { type: 'pong' })
@@ -434,9 +441,35 @@ export class RelayServer {
 
   /**
    * Complete the registration after successful auth.
-   * Delivers queued messages to the newly authenticated client.
+   *
+   * Consults the DURABLE device list (Sync 003 §Erstregistrierung): the deviceId
+   * is registered globally-uniquely, so a deviceId already owned by ANOTHER DID
+   * (active OR revoked tombstone) is rejected with DEVICE_ID_CONFLICT, and a
+   * revoked tombstone for THIS DID is rejected with DEVICE_REVOKED. On rejection
+   * the connection is NOT registered (no socket bookkeeping, no `registered`
+   * frame, no inbox delivery). On success it delivers queued messages to the
+   * newly authenticated client.
    */
   private completeRegistration(ws: WebSocket, did: string, deviceId: string): void {
+    // Durable Erstregistrierung conflict checks (atomic in the device table).
+    const disposition = this.docLog.registerDevice(did, deviceId)
+    if (disposition.disposition === 'device-id-conflict') {
+      this.sendTo(ws, {
+        type: 'error',
+        code: 'DEVICE_ID_CONFLICT',
+        message: 'deviceId is already registered for another DID (device IDs must be globally unique).',
+      })
+      return
+    }
+    if (disposition.disposition === 'device-revoked') {
+      this.sendTo(ws, {
+        type: 'error',
+        code: 'DEVICE_REVOKED',
+        message: 'This device has been revoked.',
+      })
+      return
+    }
+
     // Support multiple devices per DID
     let sockets = this.connections.get(did)
     if (!sockets) {
@@ -447,15 +480,11 @@ export class RelayServer {
     this.socketToDid.set(ws, did)
     this.socketToDeviceId.set(ws, deviceId)
 
-    let knownForDid = this.knownDevices.get(did)
-    if (!knownForDid) {
-      knownForDid = new Set()
-      this.knownDevices.set(did, knownForDid)
-    }
-    const isNewDevice = !knownForDid.has(deviceId)
-    knownForDid.add(deviceId)
-
-    const registeredFrame = createBrokerRegisteredControlFrame({ did, deviceId, isNewDevice })
+    const registeredFrame = createBrokerRegisteredControlFrame({
+      did,
+      deviceId,
+      isNewDevice: disposition.isNewDevice,
+    })
     this.sendTo(ws, { ...registeredFrame, peers: sockets.size - 1 })
 
     // First: get previously delivered but unACKed messages (redelivery)
@@ -469,6 +498,90 @@ export class RelayServer {
     for (const envelope of queued) {
       this.sendTo(ws, { type: 'message', envelope })
     }
+  }
+
+  /**
+   * Sync 003 §Device-Deaktivierung: `device-revoke` Broker Control-Frame.
+   *
+   * Outer wire shape `{ type: 'device-revoke', revocationJws }` (closed top-level
+   * keys). The inner JWS payload `{ type, did, deviceId, revokedAt }` MUST be
+   * signed by the Identity Key of `did`. Verification is delegated to the core
+   * primitive (parse → decode inner JWS → verify Ed25519 against the key derived
+   * from the payload `did`): malformed → MALFORMED_MESSAGE, bad/foreign signature
+   * → AUTH_INVALID. On success the broker marks (did, deviceId) revoked in the
+   * DURABLE device list (idempotent re-revoke ok; first metadata authoritative)
+   * and deletes pending inbox messages for that device. A revocation does NOT
+   * require the socket to be authenticated as that DID — any valid signature by
+   * the DID's Identity Key may revoke any of its devices (Shared-Seed model).
+   */
+  private async handleDeviceRevoke(ws: WebSocket, raw: Record<string, unknown>): Promise<void> {
+    // Parse the closed outer frame + inner JWS payload first (MALFORMED_MESSAGE on
+    // any structural defect) so we can derive the signer key from the payload DID.
+    let parsed
+    try {
+      parsed = parseBrokerDeviceRevokeControlFrame(raw)
+    } catch (err) {
+      this.sendTo(ws, {
+        type: 'error',
+        code: 'MALFORMED_MESSAGE',
+        message: err instanceof Error ? err.message : 'Malformed device-revoke control-frame',
+      })
+      return
+    }
+
+    // Public key bytes via the shared DID helper — no inline crypto in this file.
+    let publicKey: Uint8Array
+    try {
+      publicKey = didKeyToPublicKeyBytes(parsed.payload.did)
+    } catch {
+      this.sendTo(ws, {
+        type: 'error',
+        code: 'AUTH_INVALID',
+        message: 'device-revoke did is not a resolvable did:key',
+      })
+      return
+    }
+
+    let result
+    try {
+      result = await verifyBrokerDeviceRevokeControlFrame({
+        frame: raw,
+        publicKey,
+        crypto: protocolCrypto,
+      })
+    } catch (err) {
+      this.sendInternalError(ws, err, 'device-revoke verification failed')
+      return
+    }
+
+    if (result.disposition === 'rejected') {
+      this.sendTo(ws, {
+        type: 'error',
+        code: result.errorCode,
+        message:
+          result.errorCode === 'AUTH_INVALID'
+            ? 'device-revoke signature invalid or not signed by the claimed DID.'
+            : 'Malformed device-revoke control-frame.',
+      })
+      return
+    }
+
+    const { did, deviceId, revokedAt } = result.payload
+    // Durable revoke (idempotent; first metadata authoritative). Then drop pending
+    // inbox messages for the revoked device. The inbox queue is per-DID
+    // (per-device inbox is spec-deferred), so there is nothing device-scoped to
+    // delete here yet; the durable tombstone + the live status==active checks on
+    // ingest/sync-request are what enforce the revocation going forward.
+    this.docLog.revokeDevice(did, deviceId, revokedAt)
+
+    this.sendTo(ws, {
+      type: 'receipt',
+      receipt: {
+        messageId: deviceId,
+        status: 'delivered',
+        timestamp: new Date().toISOString(),
+      },
+    })
   }
 
   private handleSend(ws: WebSocket, envelope: Record<string, unknown>): void {
@@ -609,21 +722,31 @@ export class RelayServer {
    * authorKid and that authorKid === header.kid; Sync 002 Z.126 — authority via
    * authorKid, not envelope.from). The broker NEVER decrypts `data`.
    *
-   * Boundary checks run ATOMICALLY inside docLog.appendEntry (one transaction):
-   *   - reject-author-mismatch (VE-3a) → a different authorKid already owns this
-   *     (docId,deviceId) namespace; do NOT store, do NOT relay; reply AUTHOR_MISMATCH.
-   *   - reject-seq-collision (VE-3, Sync 002 Z.81 deterministic-nonce reuse) →
-   *     divergent content at an existing (docId,deviceId,seq); do NOT store, do NOT
-   *     relay; reply SEQ_COLLISION_DETECTED + clientHint restore-clone-required.
-   *   - idempotent-retransmission → no re-store, no re-broadcast.
-   *   - accept-new-entry → bind owner on first write + append + live-relay to
-   *     currently connected recipient devices (no inbox queue, no delete-on-ACK).
+   * Ingest verification ORDER (Sync 003 MUSS):
+   *   1. verify JWS (verifyLogEntryJws — alg/signature/kid==authorKid/schema);
+   *      failure → AUTH_INVALID.
+   *   2. device-active check → the AUTHENTICATED socket's (did, deviceId) MUST
+   *      currently be status==active in the durable device list. A device revoked
+   *      DURING the open session is rejected with DEVICE_REVOKED (live status, not
+   *      just DID equality).
+   *   3. author-binding (Sync 003 §Log-Eintrag-Autor-Bindung) → the DID extracted
+   *      from payload.authorKid (part before '#') MUST equal the DID that owns
+   *      payload.deviceId in the durable device list. Unregistered deviceId →
+   *      DEVICE_NOT_REGISTERED; mismatch → AUTHOR_MISMATCH. Replaces the Slice-R
+   *      VE-3a first-writer-wins heuristic. Entry NOT stored, NOT relayed.
+   *   4. seq-collision (VE-3, deterministic-nonce reuse) → divergent content at an
+   *      existing (docId,deviceId,seq); → SEQ_COLLISION_DETECTED + restore-clone
+   *      hint; NOT stored, NOT relayed. (Idempotent re-send → no re-store.)
+   *   5. store + live-relay to currently connected recipient devices (no inbox
+   *      queue, no delete-on-ACK).
    */
   private async handleLogEntry(
     ws: WebSocket,
     envelope: Record<string, unknown>,
     entryJws: string,
   ): Promise<void> {
+    // (1) Verify the JWS first — authority via authorKid (Sync 002 Z.126), never
+    // envelope.from. The broker NEVER decrypts `data`.
     let payload
     try {
       payload = await verifyLogEntryJws(entryJws, { crypto: protocolCrypto })
@@ -637,37 +760,65 @@ export class RelayServer {
     }
 
     const { docId, deviceId, seq, authorKid } = payload
+    const messageId = (envelope.id as string) ?? 'unknown'
+
+    // (2) Live device-active check: the AUTHENTICATED socket's (did, deviceId)
+    // MUST currently be active. A mid-session revocation must be rejected here —
+    // author-binding DID-equality alone would still pass for a revoked device.
+    const socketDid = this.socketToDid.get(ws)
+    const socketDeviceId = this.socketToDeviceId.get(ws)
+    if (
+      socketDid === undefined ||
+      socketDeviceId === undefined ||
+      !this.docLog.isActive(socketDid, socketDeviceId)
+    ) {
+      this.sendTo(ws, {
+        type: 'error',
+        code: 'DEVICE_REVOKED',
+        message: 'This device is not active (revoked or not registered).',
+      })
+      return
+    }
+
+    // (3) Author-binding against the DURABLE device list (Sync 003 §Autor-Bindung):
+    // the DID owning payload.deviceId MUST equal the DID in payload.authorKid.
+    const ownerDid = this.docLog.didForDevice(deviceId)
+    if (ownerDid === null) {
+      // payload.deviceId is not registered at all.
+      this.sendTo(ws, {
+        type: 'error',
+        code: 'DEVICE_NOT_REGISTERED',
+        message: 'The log-entry deviceId is not registered in the broker device list.',
+      })
+      return
+    }
+    if (ownerDid !== didOrKidToDid(authorKid)) {
+      // The authorKid DID does not own this deviceId. Not stored, not relayed.
+      this.sendTo(ws, {
+        type: 'error',
+        code: 'AUTHOR_MISMATCH',
+        message: 'Author mismatch: the authorKid DID does not own this deviceId.',
+      })
+      return
+    }
+
     // Sync 003 §Broker: collision/dedup hash is over the JCS-canonicalized PAYLOAD
     // (not the JWS envelope), so an identical payload re-encoded into a different
     // valid JWS dedups as idempotent rather than a false SEQ_COLLISION_DETECTED.
     const incomingContentHash = await this.docLog.hashPayload(payload)
-    const messageId = (envelope.id as string) ?? 'unknown'
 
-    // Author-binding (VE-3a) + seq-collision (VE-3) + the durable insert run
-    // ATOMICALLY inside appendEntry (one SQLite transaction, no intervening
-    // await), so a foreign author cannot squat a (docId,deviceId) namespace and a
-    // divergent seq cannot race a concurrent first write. The broker reads the
-    // coordinates + authorKid from the verified JWS only (authority via authorKid,
-    // Sync 002 Z.126) and never decrypts `data`.
+    // (4) seq-collision (VE-3) + the durable insert run ATOMICALLY inside
+    // appendEntry (one SQLite transaction, no intervening await), so a divergent
+    // seq cannot race a concurrent first write. The broker reads the coordinates
+    // from the verified JWS only.
     const result = this.docLog.appendEntry({
       docId,
       deviceId,
       seq,
-      authorKid,
       contentHash: incomingContentHash,
       entryJws,
     })
 
-    if (result.disposition === 'reject-author-mismatch') {
-      // VE-3a: this (docId,deviceId) namespace is owned by a different authorKid.
-      // Not stored, not relayed.
-      this.sendTo(ws, {
-        type: 'error',
-        code: result.errorCode,
-        message: 'Author mismatch: this (docId,deviceId) namespace is owned by a different authorKid.',
-      })
-      return
-    }
     if (result.disposition === 'reject-seq-collision') {
       // Nonce-safety boundary: the divergent entry never reached the durable log
       // and is not relayed. Sender gets the restore-clone hint.
@@ -718,8 +869,27 @@ export class RelayServer {
    * from seq 0 (cold reconstruction). Finer per-space membership authz is out of
    * scope — content is E2E ciphertext the broker cannot read. Authority for each
    * served entry is its own authorKid, not the response envelope `from`.
+   *
+   * Live device-active check (Sync 003): the authenticated socket's
+   * (did, deviceId) MUST currently be status==active. A device revoked DURING the
+   * open session is rejected with DEVICE_REVOKED before any log read.
    */
   private handleSyncRequest(ws: WebSocket, envelope: Record<string, unknown>): void {
+    const socketDid = this.socketToDid.get(ws)
+    const socketDeviceId = this.socketToDeviceId.get(ws)
+    if (
+      socketDid === undefined ||
+      socketDeviceId === undefined ||
+      !this.docLog.isActive(socketDid, socketDeviceId)
+    ) {
+      this.sendTo(ws, {
+        type: 'error',
+        code: 'DEVICE_REVOKED',
+        message: 'This device is not active (revoked or not registered).',
+      })
+      return
+    }
+
     let request
     try {
       request = parseSyncRequestMessage(envelope)
