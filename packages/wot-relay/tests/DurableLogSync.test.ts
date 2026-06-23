@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { randomUUID } from 'crypto'
+import { randomUUID, randomBytes } from 'crypto'
 import WebSocket from 'ws'
 import { RelayServer } from '../src/relay.js'
 import type { RelayMessage } from '../src/types.js'
@@ -14,6 +14,10 @@ import { protocol, WebCryptoProtocolCryptoAdapter } from '@web_of_trust/core'
 const PORT = 9884
 const RELAY_URL = `ws://localhost:${PORT}`
 const FIXED_TIMESTAMP = '2026-06-22T10:00:00Z'
+// Capability validity window: far-future validUntil so `now < validUntil` always
+// holds at the broker (Sync 003 §Capability-Prüfung). issuedAt is in the past.
+const CAP_ISSUED_AT = '2026-01-01T00:00:00Z'
+const CAP_VALID_UNTIL = '2099-01-01T00:00:00Z'
 
 // Vector-validated WebCrypto adapter for SHA-256 / Ed25519 key derivation. The
 // global `crypto` (Node WebCrypto) is used directly for detached subtle signing.
@@ -23,6 +27,79 @@ const {
   createBrokerAuthTranscriptSigningBytes,
   formatBrokerChallengeResponseSignature,
 } = protocol
+
+// --- Space Capability keypair (Phase 4 / Sync 003 §Capability-Format) ---------
+//
+// A space has a Space Capability KEY PAIR distinct from any identity DID: members
+// sign capabilities with the shared signing seed, the broker verifies with the
+// base64url-encoded public key registered via `space-register`. Generate a random
+// Ed25519 seed and derive the verification key the broker stores.
+
+interface SpaceCapabilityKeypair {
+  signingSeed: Uint8Array
+  /** base64url(Ed25519 public key) — the registered spaceCapabilityVerificationKey. */
+  verificationKey: string
+}
+
+async function makeSpaceCapabilityKeypair(): Promise<SpaceCapabilityKeypair> {
+  const signingSeed = new Uint8Array(randomBytes(32))
+  const pub = await cryptoAdapter.ed25519PublicKeyFromSeed(signingSeed)
+  return { signingSeed, verificationKey: protocol.encodeBase64Url(pub) }
+}
+
+/**
+ * Mint a Space capability JWS (kid = `wot:space:<spaceId>#cap-<generation>`,
+ * computed inside createSpaceCapabilityJws) for one audience DID. Signed with the
+ * space's capability signing seed; the broker verifies it against the registered
+ * verification key at the matching generation.
+ */
+async function mintSpaceCapability(params: {
+  keypair: SpaceCapabilityKeypair
+  spaceId: string
+  audience: string
+  permissions: Array<'read' | 'write'>
+  generation?: number
+}): Promise<string> {
+  return protocol.createSpaceCapabilityJws({
+    payload: {
+      type: 'capability',
+      spaceId: params.spaceId,
+      audience: params.audience,
+      permissions: params.permissions,
+      generation: params.generation ?? 0,
+      issuedAt: CAP_ISSUED_AT,
+      validUntil: CAP_VALID_UNTIL,
+    },
+    signingSeed: params.keypair.signingSeed,
+  })
+}
+
+/**
+ * Mint a self-issued Personal-Doc capability JWS (kid = the owner's identity
+ * verification-method id `<did>#<vm>`; generation MUST be 0). Signed with the
+ * owner's Identity Key seed; the broker verifies it against the authenticated
+ * DID's identity key (Sync 003 §Persönliche Dokumente).
+ */
+async function mintPersonalDocCapability(params: {
+  owner: RawIdentity
+  docId: string
+  permissions: Array<'read' | 'write'>
+  validUntil?: string
+}): Promise<string> {
+  return protocol.createPersonalDocCapabilityJws({
+    payload: {
+      type: 'capability',
+      spaceId: params.docId,
+      audience: params.owner.did,
+      permissions: params.permissions,
+      generation: 0,
+      issuedAt: CAP_ISSUED_AT,
+      validUntil: params.validUntil ?? CAP_VALID_UNTIL,
+    },
+    kid: params.owner.authorKid,
+    signingSeed: params.owner.seed,
+  })
+}
 
 // --- raw-seed identity (needed to PRODUCE valid log-entry JWS) ---------------
 
@@ -67,6 +144,74 @@ async function makeRawIdentity(label: string): Promise<RawIdentity> {
 
 async function deriveSpaceContentKey(docId: string, generation = 0): Promise<Uint8Array> {
   return cryptoAdapter.sha256(new TextEncoder().encode(`sck|${docId}|gen${generation}`))
+}
+
+// --- space setup + capability presentation helpers (Phase 4) -----------------
+//
+// SPACE path: a space is registered at the broker by an admin (whose DID is in
+// adminDids), then every participating client presents a per-audience capability
+// (write for producers, read for catch-up readers) BEFORE its first
+// log-entry/sync-request. These wrap the per-client presentCapability + the
+// admin's sendSpaceRegister so each migrated test reads as a one-liner.
+
+interface SpaceParticipant {
+  client: TestClient
+  identity: RawIdentity
+  permissions: Array<'read' | 'write'>
+}
+
+/**
+ * Register `spaceId` via `admin` (its DID is the sole adminDid) over the admin's
+ * authenticated client, then have every participant present a Space capability
+ * minted for its own DID. Asserts each step is `delivered` so a setup regression
+ * fails loudly at setup rather than as a confusing downstream CAPABILITY_REQUIRED.
+ */
+async function setupSpace(params: {
+  spaceId: string
+  keypair: SpaceCapabilityKeypair
+  admin: { client: TestClient; identity: RawIdentity }
+  participants: SpaceParticipant[]
+}): Promise<void> {
+  const reg = await params.admin.client.sendSpaceRegister({
+    signer: params.admin.identity,
+    spaceId: params.spaceId,
+    spaceCapabilityVerificationKey: params.keypair.verificationKey,
+    adminDids: [params.admin.identity.did],
+  })
+  expect((reg as Record<string, unknown>).status).toBe('delivered')
+
+  for (const participant of params.participants) {
+    await presentSpaceCapability({
+      client: participant.client,
+      keypair: params.keypair,
+      spaceId: params.spaceId,
+      audience: participant.identity.did,
+      permissions: participant.permissions,
+    })
+  }
+}
+
+/**
+ * Mint + present a Space capability on `client`'s socket (its own DID as audience)
+ * and assert it is `delivered`. Used for clients that connect AFTER setupSpace —
+ * e.g. the fresh catch-up reader that comes online once producers are gone (scope
+ * presentation is per-socket, so it cannot be done up-front in setupSpace).
+ */
+async function presentSpaceCapability(params: {
+  client: TestClient
+  keypair: SpaceCapabilityKeypair
+  spaceId: string
+  audience: string
+  permissions: Array<'read' | 'write'>
+}): Promise<void> {
+  const cap = await mintSpaceCapability({
+    keypair: params.keypair,
+    spaceId: params.spaceId,
+    audience: params.audience,
+    permissions: params.permissions,
+  })
+  const outcome = await params.client.presentCapability(cap)
+  expect((outcome as Record<string, unknown>).status).toBe('delivered')
 }
 
 // --- minimal authenticated relay client over ws ------------------------------
@@ -166,6 +311,36 @@ class TestClient {
       })
       this.ws!.send(JSON.stringify(frame))
     })
+  }
+
+  /**
+   * Present a capability for a docId (Sync 003 §Capability-Prüfung). Sends the
+   * CLOSED `present-capability` control-frame and resolves on the receipt OR error.
+   */
+  presentCapability(capabilityJws: string): Promise<SendOutcome> {
+    return this.sendControlFrame({ type: 'present-capability', capabilityJws })
+  }
+
+  /**
+   * Build (via the core primitive) and send a `space-register` control-frame whose
+   * inner JWS is signed by `signer` (an admin identity whose DID MUST be in
+   * `adminDids`). Resolves on the relay's receipt OR error. Mirrors the Phase-3
+   * SpaceRegister harness.
+   */
+  async sendSpaceRegister(params: {
+    signer: RawIdentity
+    spaceId: string
+    spaceCapabilityVerificationKey: string
+    adminDids: string[]
+  }): Promise<SendOutcome> {
+    const frame = await protocol.createSpaceRegisterMessage({
+      spaceId: params.spaceId,
+      spaceCapabilityVerificationKey: params.spaceCapabilityVerificationKey,
+      adminDids: params.adminDids,
+      kid: params.signer.authorKid,
+      signingSeed: params.signer.seed,
+    })
+    return this.sendControlFrame(frame as unknown as Record<string, unknown>)
   }
 
   /** Send a sync-request and wait for the sync-response message envelope. */
@@ -359,6 +534,19 @@ describe('Durable log sync over the real relay (Slice R / Sync 002)', () => {
     await aliceClient.connect()
     await bobClient.connect()
 
+    // SPACE path: register the shared space (alice = admin) and present a WRITE
+    // capability for each producer before they push log entries.
+    const keypair = await makeSpaceCapabilityKeypair()
+    await setupSpace({
+      spaceId: docId,
+      keypair,
+      admin: { client: aliceClient, identity: alice },
+      participants: [
+        { client: aliceClient, identity: alice, permissions: ['write'] },
+        { client: bobClient, identity: bob, permissions: ['write'] },
+      ],
+    })
+
     // Two producer devices push several log entries (interleaved devices).
     const written: { jws: string; text: string }[] = []
     const writeFrom = async (producer: TestClient, id: RawIdentity, seq: number, text: string) => {
@@ -380,9 +568,11 @@ describe('Durable log sync over the real relay (Slice R / Sync 002)', () => {
     await bobClient.disconnect()
     expect(server.connectedDids).toHaveLength(0)
 
-    // Fresh device authenticates and asks for the full log (EMPTY heads).
+    // Fresh device authenticates, presents a READ capability, and asks for the
+    // full log (EMPTY heads).
     const freshClient = new TestClient(fresh)
     await freshClient.connect()
+    await presentSpaceCapability({ client: freshClient, keypair, spaceId: docId, audience: fresh.did, permissions: ['read'] })
     const response = await freshClient.syncRequest(syncRequestEnvelope(fresh.did, docId, {}))
 
     expect(response.type).toBe(protocol.SYNC_RESPONSE_MESSAGE_TYPE)
@@ -404,15 +594,25 @@ describe('Durable log sync over the real relay (Slice R / Sync 002)', () => {
     const alice = await makeRawIdentity('alice2')
     const fresh = await makeRawIdentity('fresh2')
 
+    const keypair = await makeSpaceCapabilityKeypair()
     const aliceClient = new TestClient(alice)
     await aliceClient.connect()
+    // SPACE path: alice (admin) registers the space + presents a WRITE capability.
+    await setupSpace({
+      spaceId: docId,
+      keypair,
+      admin: { client: aliceClient, identity: alice },
+      participants: [{ client: aliceClient, identity: alice, permissions: ['write'] }],
+    })
     const jws0 = await buildLogEntryJws({ identity: alice, docId, seq: 0, plaintext: 'persist-0' })
     await aliceClient.send(logEntryEnvelope(alice.did, [fresh.did], jws0))
     await aliceClient.disconnect()
 
-    // First fresh device reconstructs.
+    // First fresh device reconstructs (presents a READ capability — the space
+    // registration is durable across the producer disconnect).
     const fresh1 = new TestClient(fresh)
     await fresh1.connect()
+    await presentSpaceCapability({ client: fresh1, keypair, spaceId: docId, audience: fresh.did, permissions: ['read'] })
     const r1 = await fresh1.syncRequest(syncRequestEnvelope(fresh.did, docId, {}))
     expect((r1.body as { entries: string[] }).entries).toHaveLength(1)
     await fresh1.disconnect()
@@ -422,6 +622,7 @@ describe('Durable log sync over the real relay (Slice R / Sync 002)', () => {
     const fresh2Id = await makeRawIdentity('fresh2b')
     const fresh2 = new TestClient(fresh2Id)
     await fresh2.connect()
+    await presentSpaceCapability({ client: fresh2, keypair, spaceId: docId, audience: fresh2Id.did, permissions: ['read'] })
     const r2 = await fresh2.syncRequest(syncRequestEnvelope(fresh2Id.did, docId, {}))
     const entries2 = (r2.body as { entries: string[] }).entries
     expect(entries2).toHaveLength(1)
@@ -434,8 +635,15 @@ describe('Durable log sync over the real relay (Slice R / Sync 002)', () => {
     const alice = await makeRawIdentity('alice3')
     const fresh = await makeRawIdentity('fresh3')
 
+    const keypair = await makeSpaceCapabilityKeypair()
     const aliceClient = new TestClient(alice)
     await aliceClient.connect()
+    await setupSpace({
+      spaceId: docId,
+      keypair,
+      admin: { client: aliceClient, identity: alice },
+      participants: [{ client: aliceClient, identity: alice, permissions: ['write'] }],
+    })
 
     // Accept seq 0.
     const jws0 = await buildLogEntryJws({ identity: alice, docId, seq: 0, plaintext: 'original-0' })
@@ -457,6 +665,7 @@ describe('Durable log sync over the real relay (Slice R / Sync 002)', () => {
     // ONE entry, and it is the original content.
     const freshClient = new TestClient(fresh)
     await freshClient.connect()
+    await presentSpaceCapability({ client: freshClient, keypair, spaceId: docId, audience: fresh.did, permissions: ['read'] })
     const response = await freshClient.syncRequest(syncRequestEnvelope(fresh.did, docId, {}))
     const body = response.body as { entries: string[] }
     expect(body.entries).toHaveLength(1)
@@ -469,8 +678,15 @@ describe('Durable log sync over the real relay (Slice R / Sync 002)', () => {
     const alice = await makeRawIdentity('alice4')
     const fresh = await makeRawIdentity('fresh4')
 
+    const keypair = await makeSpaceCapabilityKeypair()
     const aliceClient = new TestClient(alice)
     await aliceClient.connect()
+    await setupSpace({
+      spaceId: docId,
+      keypair,
+      admin: { client: aliceClient, identity: alice },
+      participants: [{ client: aliceClient, identity: alice, permissions: ['write'] }],
+    })
     const texts = ['c0', 'c1', 'c2']
     for (let seq = 0; seq < texts.length; seq += 1) {
       const jws = await buildLogEntryJws({ identity: alice, docId, seq, plaintext: texts[seq] })
@@ -480,6 +696,7 @@ describe('Durable log sync over the real relay (Slice R / Sync 002)', () => {
 
     const freshClient = new TestClient(fresh)
     await freshClient.connect()
+    await presentSpaceCapability({ client: freshClient, keypair, spaceId: docId, audience: fresh.did, permissions: ['read'] })
     // Already have alice@0 → expect only c1, c2.
     const response = await freshClient.syncRequest(
       syncRequestEnvelope(fresh.did, docId, { [alice.deviceId]: 0 }),
@@ -496,6 +713,11 @@ describe('Durable log sync over the real relay (Slice R / Sync 002)', () => {
     const fresh = await makeRawIdentity('fresh-dberr')
     const aliceClient = new TestClient(alice)
     await aliceClient.connect()
+    // PERSONAL path (single self-owned writer): present a self-issued write
+    // capability for docId so the capability gate passes and we exercise the
+    // durable-write failure path, not CAPABILITY_REQUIRED.
+    const personalCap = await mintPersonalDocCapability({ owner: alice, docId, permissions: ['read', 'write'] })
+    expect(((await aliceClient.presentCapability(personalCap)) as Record<string, unknown>).status).toBe('delivered')
 
     // Simulate a transient SQLite failure (SQLITE_IOERR / disk-full / closed
     // handle) on the durable write. Before the fix this threw inside a
@@ -526,6 +748,10 @@ describe('Durable log sync over the real relay (Slice R / Sync 002)', () => {
     const fresh = await makeRawIdentity('fresh-syncerr')
     const freshClient = new TestClient(fresh)
     await freshClient.connect()
+    // PERSONAL path: present a self-issued read capability so sync-request passes the
+    // capability gate and reaches the (mocked) durable read.
+    const personalCap = await mintPersonalDocCapability({ owner: fresh, docId, permissions: ['read', 'write'] })
+    expect(((await freshClient.presentCapability(personalCap)) as Record<string, unknown>).status).toBe('delivered')
 
     const docLog = (server as unknown as {
       docLog: { getSinceWithTruncation: (...a: unknown[]) => unknown }
@@ -564,6 +790,20 @@ describe('Durable log sync over the real relay (Slice R / Sync 002)', () => {
     await aliceClient.connect() // registers (alice.did, alice.deviceId)
     await bobClient.connect() // registers (bob.did, bob.deviceId)
 
+    // SPACE path: both producers hold a WRITE capability so the capability gate
+    // passes and the AUTHOR_MISMATCH rejection comes from author-binding (the check
+    // under test), not from a missing capability.
+    const keypair = await makeSpaceCapabilityKeypair()
+    await setupSpace({
+      spaceId: docId,
+      keypair,
+      admin: { client: aliceClient, identity: alice },
+      participants: [
+        { client: aliceClient, identity: alice, permissions: ['write'] },
+        { client: bobClient, identity: bob, permissions: ['write'] },
+      ],
+    })
+
     // Alice writes seq 0 under her own registered deviceId → accepted.
     const a0 = await buildLogEntryJws({ identity: alice, docId, seq: 0, plaintext: 'alice-0' })
     expect(
@@ -586,6 +826,7 @@ describe('Durable log sync over the real relay (Slice R / Sync 002)', () => {
     // Cold reconstruction contains ONLY Alice's entry — the log was not poisoned.
     const freshClient = new TestClient(fresh)
     await freshClient.connect()
+    await presentSpaceCapability({ client: freshClient, keypair, spaceId: docId, audience: fresh.did, permissions: ['read'] })
     const response = await freshClient.syncRequest(syncRequestEnvelope(fresh.did, docId, {}))
     const body = response.body as { entries: string[] }
     expect(body.entries).toHaveLength(1)
@@ -602,6 +843,11 @@ describe('Durable log sync over the real relay (Slice R / Sync 002)', () => {
 
     const aliceClient = new TestClient(alice)
     await aliceClient.connect()
+    // PERSONAL path: alice holds a write capability for docId so the gate passes and
+    // the rejection comes from author-binding (DEVICE_NOT_REGISTERED), the check
+    // under test.
+    const aliceCap = await mintPersonalDocCapability({ owner: alice, docId, permissions: ['read', 'write'] })
+    expect(((await aliceClient.presentCapability(aliceCap)) as Record<string, unknown>).status).toBe('delivered')
 
     // Alice is registered, but she writes a payload whose deviceId is a brand-new
     // random UUID that was never registered.
@@ -615,6 +861,8 @@ describe('Durable log sync over the real relay (Slice R / Sync 002)', () => {
     // Nothing was stored.
     const freshClient = new TestClient(fresh)
     await freshClient.connect()
+    const freshCap = await mintPersonalDocCapability({ owner: fresh, docId, permissions: ['read'] })
+    expect(((await freshClient.presentCapability(freshCap)) as Record<string, unknown>).status).toBe('delivered')
     const response = await freshClient.syncRequest(syncRequestEnvelope(fresh.did, docId, {}))
     expect((response.body as { entries: string[] }).entries).toEqual([])
     await freshClient.disconnect()
@@ -651,8 +899,19 @@ describe('Durable log sync over the real relay (Slice R / Sync 002)', () => {
     const alice = await makeRawIdentity('alice-revoke')
     const fresh = await makeRawIdentity('fresh-revoke')
 
+    const keypair = await makeSpaceCapabilityKeypair()
     const aliceClient = new TestClient(alice)
     await aliceClient.connect()
+    // SPACE path: alice holds read+write so the post-revoke rejections are
+    // unambiguously the live device-active check (DEVICE_REVOKED), not a missing
+    // capability. The device-active check runs BEFORE the gate on log-entry, and
+    // before the read gate on sync-request — a revoked device is rejected regardless.
+    await setupSpace({
+      spaceId: docId,
+      keypair,
+      admin: { client: aliceClient, identity: alice },
+      participants: [{ client: aliceClient, identity: alice, permissions: ['read', 'write'] }],
+    })
 
     // A first write succeeds while active.
     const a0 = await buildLogEntryJws({ identity: alice, docId, seq: 0, plaintext: 'before-revoke' })
@@ -680,6 +939,7 @@ describe('Durable log sync over the real relay (Slice R / Sync 002)', () => {
     // The post-revoke entry was never stored: cold reconstruction holds only seq 0.
     const freshClient = new TestClient(fresh)
     await freshClient.connect()
+    await presentSpaceCapability({ client: freshClient, keypair, spaceId: docId, audience: fresh.did, permissions: ['read'] })
     const response = await freshClient.syncRequest(syncRequestEnvelope(fresh.did, docId, {}))
     const body = response.body as { entries: string[] }
     expect(body.entries).toHaveLength(1)
@@ -699,8 +959,12 @@ describe('Durable log sync over the real relay (Slice R / Sync 002)', () => {
     const malformed = { ...valid, thid: randomUUID() }
     expect(await aliceClient.sendControlFrame(malformed)).toMatchObject({ error: 'MALFORMED_MESSAGE' })
 
-    // The device is still active (the malformed frame had no effect).
+    // The device is still active (the malformed frame had no effect). Present a
+    // self-issued write capability (PERSONAL path) so the write reaches the
+    // device-active check instead of CAPABILITY_REQUIRED.
     const docId = randomUUID()
+    const cap = await mintPersonalDocCapability({ owner: alice, docId, permissions: ['read', 'write'] })
+    expect(((await aliceClient.presentCapability(cap)) as Record<string, unknown>).status).toBe('delivered')
     const jws = await buildLogEntryJws({ identity: alice, docId, seq: 0, plaintext: 'still-active' })
     expect(((await aliceClient.send(logEntryEnvelope(alice.did, [peer.did], jws))) as Record<string, unknown>).status).toBe('delivered')
     await aliceClient.disconnect()
@@ -726,8 +990,12 @@ describe('Durable log sync over the real relay (Slice R / Sync 002)', () => {
     const frame = { type: 'device-revoke', revocationJws: forgedJws }
     expect(await aliceClient.sendControlFrame(frame)).toMatchObject({ error: 'AUTH_INVALID' })
 
-    // alice's device is untouched: still active.
+    // alice's device is untouched: still active. Present a self-issued write
+    // capability (PERSONAL path) so the write is gated-through to the device-active
+    // check.
     const docId = randomUUID()
+    const cap = await mintPersonalDocCapability({ owner: alice, docId, permissions: ['read', 'write'] })
+    expect(((await aliceClient.presentCapability(cap)) as Record<string, unknown>).status).toBe('delivered')
     const jws = await buildLogEntryJws({ identity: alice, docId, seq: 0, plaintext: 'untouched' })
     expect(((await aliceClient.send(logEntryEnvelope(alice.did, [peer.did], jws))) as Record<string, unknown>).status).toBe('delivered')
     await aliceClient.disconnect()
@@ -737,8 +1005,15 @@ describe('Durable log sync over the real relay (Slice R / Sync 002)', () => {
     const docId = randomUUID()
     const alice = await makeRawIdentity('alice-payloadhash')
     const fresh = await makeRawIdentity('fresh-payloadhash')
+    const keypair = await makeSpaceCapabilityKeypair()
     const aliceClient = new TestClient(alice)
     await aliceClient.connect()
+    await setupSpace({
+      spaceId: docId,
+      keypair,
+      admin: { client: aliceClient, identity: alice },
+      participants: [{ client: aliceClient, identity: alice, permissions: ['write'] }],
+    })
 
     // One log-entry PAYLOAD, two valid JWS encodings: jws1 via createLogEntryJws
     // ({alg,kid}); jws2 via createJcsEd25519Jws with an extra `typ` header field.
@@ -776,6 +1051,7 @@ describe('Durable log sync over the real relay (Slice R / Sync 002)', () => {
 
     const freshClient = new TestClient(fresh)
     await freshClient.connect()
+    await presentSpaceCapability({ client: freshClient, keypair, spaceId: docId, audience: fresh.did, permissions: ['read'] })
     const resp = await freshClient.syncRequest(syncRequestEnvelope(fresh.did, docId, {}))
     expect((resp.body as { entries: string[] }).entries).toHaveLength(1)
     await freshClient.disconnect()
@@ -825,6 +1101,10 @@ describe('Durable log sync over the real relay (Slice R / Sync 002)', () => {
 
     const freshClient = new TestClient(fresh)
     await freshClient.connect()
+    // PERSONAL path: the docId was never space-registered (entries were seeded
+    // directly), so a self-issued read capability gates the sync-request through.
+    const freshCap = await mintPersonalDocCapability({ owner: fresh, docId, permissions: ['read'] })
+    expect(((await freshClient.presentCapability(freshCap)) as Record<string, unknown>).status).toBe('delivered')
     // No `limit` in the request → relay applies the spec default of 100.
     const resp = await freshClient.syncRequest(syncRequestEnvelope(fresh.did, docId, {}))
     const body = resp.body as { entries: string[]; truncated: boolean }

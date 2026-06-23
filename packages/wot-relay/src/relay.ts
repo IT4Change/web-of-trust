@@ -29,10 +29,20 @@ const {
   verifyLogEntryJws,
   parseSyncRequestMessage,
   createSyncResponseMessage,
+  verifySpaceCapabilityJws,
+  verifyPersonalDocCapabilityJws,
+  decodeJws,
+  decodeBase64Url,
 } = protocol
 
 const BROKER_DEVICE_REVOKE_CONTROL_FRAME_TYPE = protocol.BROKER_DEVICE_REVOKE_CONTROL_FRAME_TYPE
 const SPACE_REGISTER_MESSAGE_TYPE = protocol.SPACE_REGISTER_MESSAGE_TYPE
+
+// Sync 003 §Capability-Prüfung: a `present-capability` control-frame is a CLOSED
+// top-level frame carrying exactly `{ type, capabilityJws }`. Like device-revoke /
+// space-register it is dispatched at the top level (NOT wrapped in a `send`
+// envelope) and a malformed shape is rejected with MALFORMED_MESSAGE here.
+const PRESENT_CAPABILITY_CONTROL_FRAME_TYPE = 'present-capability'
 
 const DIDCOMM_PLAINTEXT_TYP = protocol.DIDCOMM_PLAINTEXT_TYP
 const ACK_MESSAGE_TYPE = protocol.ACK_MESSAGE_TYPE
@@ -59,6 +69,21 @@ interface PendingChallenge {
   createdAt: number
 }
 
+/**
+ * A capability scope established by a verified `present-capability` for one
+ * `(WebSocket, docId)` (Sync 003 §Capability-Prüfung). The cache MUST carry the
+ * `permissions` AND the `generation` (generation-aware from day one, so a
+ * `space-rotate`/STALE check has the data it needs). `path` records whether the
+ * scope was established via the Space path (registered docId) or the Personal-Doc
+ * path (no registry entry) — the VE-8 first-register invalidation drops only
+ * `personal` scopes for a docId.
+ */
+interface CachedScope {
+  permissions: Set<'read' | 'write'>
+  generation: number
+  path: 'space' | 'personal'
+}
+
 const CHALLENGE_TIMEOUT_MS = 30_000 // 30 seconds to respond
 const NONCE_BYTE_LENGTH = 32
 
@@ -68,6 +93,10 @@ export class RelayServer {
   private connections = new Map<string, Set<WebSocket>>() // DID → Set of WebSockets (multi-device)
   private socketToDid = new Map<WebSocket, string>() // WebSocket → DID (reverse lookup)
   private socketToDeviceId = new Map<WebSocket, string>() // WebSocket → deviceId
+  // Per-WebSocket capability scope cache (Sync 003 §Capability-Prüfung,
+  // session-scoped). Sessions are WS-bound, so this is correctly in-memory and
+  // cleared on close. Map<WebSocket, Map<docId, CachedScope>>.
+  private socketToScopes = new Map<WebSocket, Map<string, CachedScope>>()
   private pendingChallenges = new Map<WebSocket, PendingChallenge>()
   private consumedChallengeNonces = new Map<string, number>() // canonical nonce → expiresAt epoch ms
   private db: Database.Database
@@ -129,6 +158,7 @@ export class RelayServer {
     this.connections.clear()
     this.socketToDid.clear()
     this.socketToDeviceId.clear()
+    this.socketToScopes.clear()
     this.pendingChallenges.clear()
     this.consumedChallengeNonces.clear()
 
@@ -209,6 +239,9 @@ export class RelayServer {
 
     ws.on('close', () => {
       this.pendingChallenges.delete(ws)
+      // Capability scopes are session-scoped (per-WebSocket); drop this socket's
+      // entire scope cache on close (Sync 003 §Capability-Prüfung).
+      this.socketToScopes.delete(ws)
       const did = this.socketToDid.get(ws)
       if (did) {
         const sockets = this.connections.get(did)
@@ -254,6 +287,9 @@ export class RelayServer {
           break
         case SPACE_REGISTER_MESSAGE_TYPE:
           void this.handleSpaceRegister(ws, record)
+          break
+        case PRESENT_CAPABILITY_CONTROL_FRAME_TYPE:
+          void this.handlePresentCapability(ws, record)
           break
         case 'ping':
           this.sendTo(ws, { type: 'pong' })
@@ -670,11 +706,289 @@ export class RelayServer {
       return
     }
 
+    // VE-8 (Sync 003 §Scope-Invalidierung bei Erst-Register, MUSS): on the INITIAL
+    // registration (disposition 'registered', NOT an idempotent recovery), this
+    // docId transitions Personal-Doc → Space. Any Personal-Doc scope a socket
+    // cached BEFORE the register would otherwise let it bypass the now-mandatory
+    // Space path on its still-open connection. Drop every cached PERSONAL scope for
+    // this docId across ALL open sockets. Space scopes (there are none yet for a
+    // just-registered space) are untouched.
+    if (disposition.disposition === 'registered') {
+      this.invalidatePersonalScopesForDoc(spaceId)
+    }
+
     // 'registered' or 'idempotent' (identical recovery re-register) → delivered.
     this.sendTo(ws, {
       type: 'receipt',
       receipt: {
         messageId: spaceId,
+        status: 'delivered',
+        timestamp: new Date().toISOString(),
+      },
+    })
+  }
+
+  /**
+   * Sync 003 §Capability-Prüfung (Präsentation, session-scoped MUSS):
+   * `present-capability` Broker Control-Frame.
+   *
+   * Wire shape `{ type: 'present-capability', capabilityJws }` (CLOSED top-level
+   * keys — a malformed shape → MALFORMED_MESSAGE, never falls through). Requires an
+   * AUTHENTICATED socket (challenge-response done) — otherwise NOT_REGISTERED;
+   * `audience` is bound to that authenticated DID.
+   *
+   * The broker reads spaceId(=docId)/audience/permissions/generation from the
+   * DECODED capability payload (`decodeJws`, no signature trust yet) only to choose
+   * the verification PATH and parameters; the cryptographic decision is made by the
+   * core primitive:
+   *  - docId IS a registered space → SPACE path: verify against the registered
+   *    `spaceCapabilityVerificationKey` at the CURRENT generation. A capability of
+   *    an OLDER generation → CAPABILITY_GENERATION_STALE (generation-aware from day
+   *    one; Phase 5 `space-rotate` bumps the live generation). Verify failure →
+   *    CAPABILITY_INVALID (CAPABILITY_EXPIRED if it is specifically a validUntil
+   *    expiry).
+   *  - docId is NOT registered → PERSONAL path: self-issued capability verified
+   *    against the authenticated DID's Identity Key (generation 0, kid-DID =
+   *    audience = authenticated DID). Verify failure → CAPABILITY_INVALID.
+   *
+   * On success the broker caches `{ permissions, generation, path }` for
+   * `(this socket, docId)` and replies with a delivered receipt. Subsequent
+   * log-entry / sync-request on the Log-Sync channel are gated against this cache
+   * (no re-presentation per message). The Inbox channel is NEVER gated.
+   *
+   * relay.ts stays crypto-free (source guard): it only calls protocol.* helpers
+   * (decodeJws / decodeBase64Url / didKeyToPublicKeyBytes / verify*CapabilityJws)
+   * and the durable registry — no inline decoders or crypto.subtle here.
+   */
+  private async handlePresentCapability(ws: WebSocket, raw: Record<string, unknown>): Promise<void> {
+    // Closed-frame structural gate first (MALFORMED_MESSAGE on any defect),
+    // mirroring device-revoke / space-register. Exactly {type, capabilityJws}.
+    const capabilityJws = this.parsePresentCapabilityFrame(raw)
+    if (capabilityJws === null) {
+      this.sendTo(ws, {
+        type: 'error',
+        code: 'MALFORMED_MESSAGE',
+        message: 'present-capability MUST carry exactly { type, capabilityJws } with a string capabilityJws.',
+      })
+      return
+    }
+
+    // Must be authenticated: the audience is bound to the challenge-response DID,
+    // and the Personal path resolves the signer key from it. (handleSend uses the
+    // same NOT_REGISTERED literal for the unauthenticated case.)
+    const socketDid = this.socketToDid.get(ws)
+    if (socketDid === undefined) {
+      this.sendTo(ws, {
+        type: 'error',
+        code: 'NOT_REGISTERED',
+        message: 'Must register (challenge-response) before presenting a capability.',
+      })
+      return
+    }
+
+    // Decode the payload (NO signature trust here) only to read docId(=spaceId) and
+    // pick the path. The cryptographic decision is the verify* primitive's job.
+    const docId = this.tryDecodeCapabilityDocId(capabilityJws)
+    if (docId === null) {
+      this.sendTo(ws, {
+        type: 'error',
+        code: 'CAPABILITY_INVALID',
+        message: 'present-capability JWS payload is not a decodable capability (missing spaceId).',
+      })
+      return
+    }
+
+    if (this.docLog.isSpaceRegistered(docId)) {
+      await this.presentSpaceCapability(ws, socketDid, docId, capabilityJws)
+    } else {
+      await this.presentPersonalCapability(ws, socketDid, docId, capabilityJws)
+    }
+  }
+
+  /**
+   * SPACE path (Sync 003 §Capability-Prüfung): the docId has a `space-register`
+   * binding. Verify the capability against the registered verification key at the
+   * CURRENT generation. An older-generation capability is STALE; a verify failure
+   * is INVALID (or EXPIRED on a validUntil failure).
+   */
+  private async presentSpaceCapability(
+    ws: WebSocket,
+    socketDid: string,
+    docId: string,
+    capabilityJws: string,
+  ): Promise<void> {
+    const space = this.docLog.getSpace(docId)
+    if (space === null) {
+      // isSpaceRegistered said yes but the record vanished (impossible under the
+      // single shared connection); treat defensively as not verifiable.
+      this.sendTo(ws, { type: 'error', code: 'CAPABILITY_INVALID', message: 'Space record unavailable.' })
+      return
+    }
+
+    // Generation gate (VE-8 generation-awareness / Phase-5 rotation): a capability
+    // of an older generation than the live space generation is STALE — the client
+    // must obtain a renewed capability and re-present. Checked from the decoded
+    // payload BEFORE the signature verify so a stale-but-otherwise-valid capability
+    // reports STALE, not a generic mismatch.
+    const presentedGeneration = this.tryDecodeCapabilityGeneration(capabilityJws)
+    if (presentedGeneration !== null && presentedGeneration < space.generation) {
+      this.sendTo(ws, {
+        type: 'error',
+        code: 'CAPABILITY_GENERATION_STALE',
+        message: 'Capability generation is older than the current space generation; obtain a renewed capability.',
+      })
+      return
+    }
+
+    let payload
+    try {
+      payload = await verifySpaceCapabilityJws(capabilityJws, {
+        crypto: protocolCrypto,
+        publicKey: decodeBase64Url(space.verificationKey),
+        expectedSpaceId: docId,
+        expectedAudience: socketDid,
+        expectedGeneration: space.generation,
+        now: new Date(),
+      })
+    } catch (err) {
+      this.sendCapabilityVerifyError(ws, err)
+      return
+    }
+
+    this.cacheScope(ws, docId, {
+      permissions: new Set(payload.permissions),
+      generation: space.generation,
+      path: 'space',
+    })
+    this.sendCapabilityReceipt(ws, docId)
+  }
+
+  /**
+   * PERSONAL path (Sync 003 §Persönliche Dokumente): no `space-register` binding
+   * for docId. Self-issued capability: verify against the authenticated DID's
+   * Identity Key, with kid-DID = audience = authenticated DID and generation 0.
+   */
+  private async presentPersonalCapability(
+    ws: WebSocket,
+    socketDid: string,
+    docId: string,
+    capabilityJws: string,
+  ): Promise<void> {
+    let publicKey: Uint8Array
+    try {
+      publicKey = didKeyToPublicKeyBytes(socketDid)
+    } catch {
+      // The authenticated DID is always a resolvable did:key (it passed register),
+      // so this is defensive only.
+      this.sendTo(ws, { type: 'error', code: 'CAPABILITY_INVALID', message: 'Authenticated DID is not a resolvable did:key.' })
+      return
+    }
+
+    let payload
+    try {
+      payload = await verifyPersonalDocCapabilityJws(capabilityJws, {
+        crypto: protocolCrypto,
+        publicKey,
+        expectedSpaceId: docId,
+        expectedAudience: socketDid,
+        now: new Date(),
+      })
+    } catch (err) {
+      this.sendCapabilityVerifyError(ws, err)
+      return
+    }
+
+    this.cacheScope(ws, docId, {
+      permissions: new Set(payload.permissions),
+      generation: 0, // Personal docs are not rotated in wot-sync@0.1.
+      path: 'personal',
+    })
+    this.sendCapabilityReceipt(ws, docId)
+  }
+
+  /**
+   * Parse a `present-capability` CLOSED control-frame. Returns the capabilityJws
+   * string, or null if the shape is malformed (exactly {type, capabilityJws};
+   * capabilityJws MUST be a string). No core primitive exists for this frame yet,
+   * so the structural check is inline (NOT crypto — allowed under the source guard).
+   */
+  private parsePresentCapabilityFrame(raw: Record<string, unknown>): string | null {
+    const keys = Object.keys(raw)
+    if (keys.length !== 2) return null
+    if (raw.type !== PRESENT_CAPABILITY_CONTROL_FRAME_TYPE) return null
+    if (typeof raw.capabilityJws !== 'string' || raw.capabilityJws.length === 0) return null
+    return raw.capabilityJws
+  }
+
+  /** Decode the capability payload's spaceId (=docId) without trusting the signature, or null. */
+  private tryDecodeCapabilityDocId(capabilityJws: string): string | null {
+    try {
+      const { payload } = decodeJws<Record<string, unknown>, { spaceId?: unknown }>(capabilityJws)
+      return typeof payload.spaceId === 'string' ? payload.spaceId : null
+    } catch {
+      return null
+    }
+  }
+
+  /** Decode the capability payload's generation without trusting the signature, or null. */
+  private tryDecodeCapabilityGeneration(capabilityJws: string): number | null {
+    try {
+      const { payload } = decodeJws<Record<string, unknown>, { generation?: unknown }>(capabilityJws)
+      return typeof payload.generation === 'number' ? payload.generation : null
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * Map a capability verify failure to the wire code. The core verifiers throw
+   * `'Capability expired'` specifically on a `now >= validUntil` failure; that maps
+   * to CAPABILITY_EXPIRED. Every other verify failure (bad signature, kid mismatch,
+   * audience/spaceId/generation mismatch, malformed payload) is CAPABILITY_INVALID.
+   */
+  private sendCapabilityVerifyError(ws: WebSocket, err: unknown): void {
+    const message = err instanceof Error ? err.message : 'Capability verification failed'
+    const code = message === 'Capability expired' ? 'CAPABILITY_EXPIRED' : 'CAPABILITY_INVALID'
+    this.sendTo(ws, { type: 'error', code, message })
+  }
+
+  /** Record a verified capability scope for (socket, docId). */
+  private cacheScope(ws: WebSocket, docId: string, scope: CachedScope): void {
+    let scopes = this.socketToScopes.get(ws)
+    if (!scopes) {
+      scopes = new Map()
+      this.socketToScopes.set(ws, scopes)
+    }
+    scopes.set(docId, scope)
+  }
+
+  /** The cached scope for (socket, docId), or null. */
+  private getScope(ws: WebSocket, docId: string): CachedScope | null {
+    return this.socketToScopes.get(ws)?.get(docId) ?? null
+  }
+
+  /** True if (socket, docId) holds a cached scope including `permission`. */
+  private hasScopePermission(ws: WebSocket, docId: string, permission: 'read' | 'write'): boolean {
+    return this.getScope(ws, docId)?.permissions.has(permission) ?? false
+  }
+
+  /**
+   * VE-8 / Phase-5 helper: drop every cached PERSONAL-path scope for `docId` across
+   * ALL open sockets. Space-path scopes are left intact. Called on the initial
+   * `space-register` for a docId (Sync 003 §Scope-Invalidierung bei Erst-Register).
+   */
+  private invalidatePersonalScopesForDoc(docId: string): void {
+    for (const scopes of this.socketToScopes.values()) {
+      const scope = scopes.get(docId)
+      if (scope && scope.path === 'personal') scopes.delete(docId)
+    }
+  }
+
+  private sendCapabilityReceipt(ws: WebSocket, docId: string): void {
+    this.sendTo(ws, {
+      type: 'receipt',
+      receipt: {
+        messageId: docId,
         status: 'delivered',
         timestamp: new Date().toISOString(),
       },
@@ -859,6 +1173,22 @@ export class RelayServer {
     const { docId, deviceId, seq, authorKid } = payload
     const messageId = (envelope.id as string) ?? 'unknown'
 
+    // (Capability gate, VE-5 — Sync 003 §Gate, Log-Sync channel only): a cached
+    // WRITE scope for `docId` is REQUIRED on THIS socket before any durable side
+    // effect. Established session-scoped via present-capability; missing →
+    // CAPABILITY_REQUIRED (NOT stored, NOT relayed). The docId is read from the
+    // VERIFIED payload (authority via authorKid, never envelope fields), so the
+    // gate trusts a cryptographically-anchored docId. The Phase-2 device-active /
+    // author-binding / seq checks follow.
+    if (!this.hasScopePermission(ws, docId, 'write')) {
+      this.sendTo(ws, {
+        type: 'error',
+        code: 'CAPABILITY_REQUIRED',
+        message: 'No cached write capability for this docId. Present a capability first.',
+      })
+      return
+    }
+
     // (2) Live device-active check: the AUTHENTICATED socket's (did, deviceId)
     // MUST currently be active. A mid-session revocation must be rejected here —
     // author-binding DID-equality alone would still pass for a revoked device.
@@ -1004,6 +1334,20 @@ export class RelayServer {
     // unbounded sync-response; the client pages on `truncated` via the existing
     // paging path.
     const { docId, heads, limit } = request.body
+
+    // (Capability gate, VE-5 — Sync 003 §Gate, Log-Sync channel only): a cached
+    // READ scope for `docId` is REQUIRED on THIS socket before serving any
+    // catch-up. Established session-scoped via present-capability; missing →
+    // CAPABILITY_REQUIRED (nothing served).
+    if (!this.hasScopePermission(ws, docId, 'read')) {
+      this.sendTo(ws, {
+        type: 'error',
+        code: 'CAPABILITY_REQUIRED',
+        message: 'No cached read capability for this docId. Present a capability first.',
+      })
+      return
+    }
+
     const effectiveLimit = limit ?? 100
     const { entries, truncated } = this.docLog.getSinceWithTruncation(docId, heads, effectiveLimit)
     const responseHeads = this.docLog.getHeads(docId)
