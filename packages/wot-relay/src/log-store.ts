@@ -28,9 +28,10 @@ const logStoreCrypto = new WebCryptoProtocolCryptoAdapter()
  * offline (cold reconstruction). Pruning/snapshots are out of scope (Slice C).
  *
  * The store treats `entry_jws` as opaque: it never decrypts the `data` payload.
- * It hashes the JWS compact string for collision/dedup detection — the only
- * crypto in this layer keeps the relay.ts source guard intact (no inline crypto
- * in relay.ts).
+ * For collision/dedup it hashes the JCS-canonicalized log-entry PAYLOAD (Sync 003
+ * §Broker — `hashPayload`), not the JWS envelope, so re-encodings of the same
+ * payload dedup correctly. Keeping all crypto in this layer leaves the relay.ts
+ * source guard intact (no inline crypto in relay.ts).
  *
  * Schema:
  *   doc_log(doc_id, device_id, seq, content_hash, entry_jws, created_at,
