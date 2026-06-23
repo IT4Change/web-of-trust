@@ -4,9 +4,10 @@ import Database from 'better-sqlite3'
 import { DocLog } from '../src/log-store.js'
 import { protocol, WebCryptoProtocolCryptoAdapter } from '@web_of_trust/core'
 
-// Slice R / Sync 002 durable-log store unit tests. Entries are REAL log-entry
-// JWS (encryptLogPayload + createLogEntryJws over a raw-seed Ed25519 identity),
-// so verifyLogEntryJws-derived coordinates and content hashing match production.
+// Slice R / Sync 002+003 durable-log store unit tests. Entries are REAL log-entry
+// JWS (encryptLogPayload + createLogEntryJws over a raw-seed Ed25519 identity), and
+// the broker content-hash is over the JCS-canonicalized payload (Sync 003 §Broker),
+// so collision/dedup matches production.
 
 const crypto = new WebCryptoProtocolCryptoAdapter()
 const FIXED_TIMESTAMP = '2026-06-22T10:00:00Z'
@@ -28,15 +29,15 @@ async function deriveKey(docId: string, generation = 0): Promise<Uint8Array> {
   return crypto.sha256(new TextEncoder().encode(`sck|${docId}|gen${generation}`))
 }
 
-/** Build a real log-entry JWS for (docId, author, deviceId, seq). */
-async function makeEntryJws(params: {
+/** Build a real log-entry: returns both the compact JWS and its payload object. */
+async function makeEntry(params: {
   author: Author
   docId: string
   deviceId: string
   seq: number
   plaintext: string
   keyGeneration?: number
-}): Promise<string> {
+}): Promise<{ jws: string; payload: protocol.LogEntryPayload }> {
   const generation = params.keyGeneration ?? 0
   const spaceContentKey = await deriveKey(params.docId, generation)
   const enc = await protocol.encryptLogPayload({
@@ -46,7 +47,7 @@ async function makeEntryJws(params: {
     seq: params.seq,
     plaintext: new TextEncoder().encode(params.plaintext),
   })
-  const payload = {
+  const payload: protocol.LogEntryPayload = {
     seq: params.seq,
     deviceId: params.deviceId,
     docId: params.docId,
@@ -55,7 +56,8 @@ async function makeEntryJws(params: {
     data: enc.blobBase64Url,
     timestamp: FIXED_TIMESTAMP,
   }
-  return protocol.createLogEntryJws({ payload, signingSeed: params.author.seed })
+  const jws = await protocol.createLogEntryJws({ payload, signingSeed: params.author.seed })
+  return { jws, payload }
 }
 
 describe('DocLog (durable append-only log store)', () => {
@@ -65,7 +67,7 @@ describe('DocLog (durable append-only log store)', () => {
     log = new DocLog(':memory:')
   })
 
-  /** Convenience: append a real entry, returning its JWS + the disposition. */
+  /** Convenience: append a real entry (payload-hash per Sync 003), with its disposition. */
   async function append(
     author: Author,
     docId: string,
@@ -73,16 +75,16 @@ describe('DocLog (durable append-only log store)', () => {
     seq: number,
     plaintext: string,
   ) {
-    const jws = await makeEntryJws({ author, docId, deviceId, seq, plaintext })
+    const { jws, payload } = await makeEntry({ author, docId, deviceId, seq, plaintext })
     const result = log.appendEntry({
       docId,
       deviceId,
       seq,
       authorKid: author.authorKid,
-      contentHash: await log.hashEntry(jws),
+      contentHash: await log.hashPayload(payload),
       entryJws: jws,
     })
-    return { jws, result }
+    return { jws, payload, result }
   }
 
   it('appends an entry and serves it via getSince with empty heads (cold reconstruction)', async () => {
@@ -97,12 +99,12 @@ describe('DocLog (durable append-only log store)', () => {
     expect(log.entryCount(docId)).toBe(1)
   })
 
-  it('is idempotent on the same contentHash at the same (docId,deviceId,seq)', async () => {
+  it('is idempotent on the same payload at the same (docId,deviceId,seq)', async () => {
     const author = await makeAuthor('a')
     const docId = randomUUID()
     const deviceId = randomUUID()
-    const jws = await makeEntryJws({ author, docId, deviceId, seq: 0, plaintext: 'x' })
-    const hash = await log.hashEntry(jws)
+    const { jws, payload } = await makeEntry({ author, docId, deviceId, seq: 0, plaintext: 'x' })
+    const hash = await log.hashPayload(payload)
 
     const first = log.appendEntry({ docId, deviceId, seq: 0, authorKid: author.authorKid, contentHash: hash, entryJws: jws })
     const again = log.appendEntry({ docId, deviceId, seq: 0, authorKid: author.authorKid, contentHash: hash, entryJws: jws })
@@ -113,7 +115,31 @@ describe('DocLog (durable append-only log store)', () => {
     expect(log.getSince(docId, {})).toEqual([jws])
   })
 
-  it('rejects a divergent contentHash at the same coordinate and never overwrites the first entry', async () => {
+  it('Sync 003: content-hash is over the canonical PAYLOAD, not the JWS envelope — same payload, different JWS → idempotent', async () => {
+    // Two valid JWS of the SAME log-entry payload but DIFFERENT envelopes (one via
+    // createLogEntryJws {alg,kid}, one with an extra header field). The broker
+    // hashes the JCS-canonicalized payload, so both map to the same content-hash →
+    // the second is an idempotent retransmission, NOT a false SEQ_COLLISION.
+    const author = await makeAuthor('a')
+    const docId = randomUUID()
+    const deviceId = randomUUID()
+    const { jws: jws1, payload } = await makeEntry({ author, docId, deviceId, seq: 0, plaintext: 'same-payload' })
+    const jws2 = await protocol.createJcsEd25519Jws(
+      { alg: 'EdDSA', kid: payload.authorKid, typ: 'JWT' },
+      payload as unknown as protocol.JsonValue,
+      author.seed,
+    )
+    expect(jws1).not.toBe(jws2) // different envelope, same payload
+    const hash = await log.hashPayload(payload)
+
+    const r1 = log.appendEntry({ docId, deviceId, seq: 0, authorKid: author.authorKid, contentHash: hash, entryJws: jws1 })
+    const r2 = log.appendEntry({ docId, deviceId, seq: 0, authorKid: author.authorKid, contentHash: hash, entryJws: jws2 })
+    expect(r1.disposition).toBe('accept-new-entry')
+    expect(r2.disposition).toBe('idempotent-retransmission')
+    expect(log.entryCount(docId)).toBe(1)
+  })
+
+  it('rejects a divergent payload at the same coordinate and never overwrites the first entry', async () => {
     // The same author writes two different contents at (docId,deviceId,seq=0). The
     // second is a deterministic-nonce reuse hazard → reject-seq-collision inside
     // appendEntry (before store); the stored content is unchanged. INSERT OR IGNORE
@@ -121,20 +147,20 @@ describe('DocLog (durable append-only log store)', () => {
     const author = await makeAuthor('a')
     const docId = randomUUID()
     const deviceId = randomUUID()
-    const first = await makeEntryJws({ author, docId, deviceId, seq: 0, plaintext: 'first' })
-    const second = await makeEntryJws({ author, docId, deviceId, seq: 0, plaintext: 'second' })
-    const firstHash = await log.hashEntry(first)
-    const secondHash = await log.hashEntry(second)
+    const a = await makeEntry({ author, docId, deviceId, seq: 0, plaintext: 'first' })
+    const b = await makeEntry({ author, docId, deviceId, seq: 0, plaintext: 'second' })
+    const firstHash = await log.hashPayload(a.payload)
+    const secondHash = await log.hashPayload(b.payload)
     expect(firstHash).not.toBe(secondHash)
 
-    const r1 = log.appendEntry({ docId, deviceId, seq: 0, authorKid: author.authorKid, contentHash: firstHash, entryJws: first })
-    const r2 = log.appendEntry({ docId, deviceId, seq: 0, authorKid: author.authorKid, contentHash: secondHash, entryJws: second })
+    const r1 = log.appendEntry({ docId, deviceId, seq: 0, authorKid: author.authorKid, contentHash: firstHash, entryJws: a.jws })
+    const r2 = log.appendEntry({ docId, deviceId, seq: 0, authorKid: author.authorKid, contentHash: secondHash, entryJws: b.jws })
 
     expect(r1.disposition).toBe('accept-new-entry')
     expect(r2.disposition).toBe('reject-seq-collision')
     expect(log.entryCount(docId)).toBe(1)
     expect(log.getContentHash(docId, deviceId, 0)).toBe(firstHash)
-    expect(log.getSince(docId, {})).toEqual([first])
+    expect(log.getSince(docId, {})).toEqual([a.jws])
   })
 
   it('getSince returns only entries with seq > heads[deviceId], per device ascending', async () => {
@@ -240,12 +266,12 @@ describe('DocLog (durable append-only log store)', () => {
 
     // mallory mints a genuinely mallory-signed entry (her authorKid) but claiming
     // alice's deviceId — both a new seq and alice's existing seq 0 are rejected.
-    const m1 = await makeEntryJws({ author: mallory, docId, deviceId, seq: 1, plaintext: 'mallory-1' })
-    const rejected1 = log.appendEntry({ docId, deviceId, seq: 1, authorKid: mallory.authorKid, contentHash: await log.hashEntry(m1), entryJws: m1 })
+    const m1 = await makeEntry({ author: mallory, docId, deviceId, seq: 1, plaintext: 'mallory-1' })
+    const rejected1 = log.appendEntry({ docId, deviceId, seq: 1, authorKid: mallory.authorKid, contentHash: await log.hashPayload(m1.payload), entryJws: m1.jws })
     expect(rejected1.disposition).toBe('reject-author-mismatch')
 
-    const m0 = await makeEntryJws({ author: mallory, docId, deviceId, seq: 0, plaintext: 'mallory-0' })
-    const rejected0 = log.appendEntry({ docId, deviceId, seq: 0, authorKid: mallory.authorKid, contentHash: await log.hashEntry(m0), entryJws: m0 })
+    const m0 = await makeEntry({ author: mallory, docId, deviceId, seq: 0, plaintext: 'mallory-0' })
+    const rejected0 = log.appendEntry({ docId, deviceId, seq: 0, authorKid: mallory.authorKid, contentHash: await log.hashPayload(m0.payload), entryJws: m0.jws })
     expect(rejected0.disposition).toBe('reject-author-mismatch')
 
     // Log unchanged: only alice's entry; owner still alice.
@@ -264,16 +290,16 @@ describe('DocLog (durable append-only log store)', () => {
     const docId = randomUUID()
     const deviceId = randomUUID()
 
-    const a0 = await makeEntryJws({ author: alice, docId, deviceId, seq: 0, plaintext: 'alice' })
-    const b0 = await makeEntryJws({ author: bob, docId, deviceId, seq: 0, plaintext: 'bob' })
-    const r1 = log.appendEntry({ docId, deviceId, seq: 0, authorKid: alice.authorKid, contentHash: await log.hashEntry(a0), entryJws: a0 })
-    const r2 = log.appendEntry({ docId, deviceId, seq: 0, authorKid: bob.authorKid, contentHash: await log.hashEntry(b0), entryJws: b0 })
+    const a0 = await makeEntry({ author: alice, docId, deviceId, seq: 0, plaintext: 'alice' })
+    const b0 = await makeEntry({ author: bob, docId, deviceId, seq: 0, plaintext: 'bob' })
+    const r1 = log.appendEntry({ docId, deviceId, seq: 0, authorKid: alice.authorKid, contentHash: await log.hashPayload(a0.payload), entryJws: a0.jws })
+    const r2 = log.appendEntry({ docId, deviceId, seq: 0, authorKid: bob.authorKid, contentHash: await log.hashPayload(b0.payload), entryJws: b0.jws })
 
     expect(r1.disposition).toBe('accept-new-entry')
     expect(r2.disposition).toBe('reject-author-mismatch')
     expect(log.getAuthor(docId, deviceId)).toBe(alice.authorKid)
     expect(log.entryCount(docId)).toBe(1)
-    expect(log.getSince(docId, {})).toEqual([a0])
+    expect(log.getSince(docId, {})).toEqual([a0.jws])
   })
 
   it('shares one Database handle and does not close a borrowed connection', async () => {
@@ -284,8 +310,8 @@ describe('DocLog (durable append-only log store)', () => {
     const author = await makeAuthor('a')
     const docId = randomUUID()
     const deviceId = randomUUID()
-    const jws = await makeEntryJws({ author, docId, deviceId, seq: 0, plaintext: 'shared' })
-    shared.appendEntry({ docId, deviceId, seq: 0, authorKid: author.authorKid, contentHash: await shared.hashEntry(jws), entryJws: jws })
+    const { jws, payload } = await makeEntry({ author, docId, deviceId, seq: 0, plaintext: 'shared' })
+    shared.appendEntry({ docId, deviceId, seq: 0, authorKid: author.authorKid, contentHash: await shared.hashPayload(payload), entryJws: jws })
 
     shared.close() // no-op for a borrowed handle
     expect(db.open).toBe(true)

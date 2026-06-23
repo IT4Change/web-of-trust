@@ -497,4 +497,105 @@ describe('Durable log sync over the real relay (Slice R / Sync 002)', () => {
     expect(await reconstruct(body.entries, docId)).toEqual(['alice-0'])
     await freshClient.disconnect()
   })
+
+  it('Sync 003: the same payload re-encoded into a DIFFERENT JWS envelope dedups (content-hash over payload, not JWS)', async () => {
+    const docId = randomUUID()
+    const alice = await makeRawIdentity('alice-payloadhash')
+    const fresh = await makeRawIdentity('fresh-payloadhash')
+    const aliceClient = new TestClient(alice)
+    await aliceClient.connect()
+
+    // One log-entry PAYLOAD, two valid JWS encodings: jws1 via createLogEntryJws
+    // ({alg,kid}); jws2 via createJcsEd25519Jws with an extra `typ` header field.
+    // Both pass verifyLogEntryJws (deviceId/seq/authorKid identical), so the broker
+    // must dedup them as one entry — not flag SEQ_COLLISION_DETECTED.
+    const spaceContentKey = await deriveSpaceContentKey(docId, 0)
+    const enc = await protocol.encryptLogPayload({
+      crypto: cryptoAdapter,
+      spaceContentKey,
+      deviceId: alice.deviceId,
+      seq: 0,
+      plaintext: new TextEncoder().encode('same-payload'),
+    })
+    const payload = {
+      seq: 0,
+      deviceId: alice.deviceId,
+      docId,
+      authorKid: alice.authorKid,
+      keyGeneration: 0,
+      data: enc.blobBase64Url,
+      timestamp: FIXED_TIMESTAMP,
+    }
+    const jws1 = await protocol.createLogEntryJws({ payload, signingSeed: alice.seed })
+    const jws2 = await protocol.createJcsEd25519Jws(
+      { alg: 'EdDSA', kid: alice.authorKid, typ: 'JWT' },
+      payload as unknown as protocol.JsonValue,
+      alice.seed,
+    )
+    expect(jws1).not.toBe(jws2)
+
+    expect(((await aliceClient.send(logEntryEnvelope(alice.did, [fresh.did], jws1))) as Record<string, unknown>).status).toBe('delivered')
+    // Same payload, different envelope → idempotent, NOT SEQ_COLLISION_DETECTED.
+    expect(((await aliceClient.send(logEntryEnvelope(alice.did, [fresh.did], jws2))) as Record<string, unknown>).status).toBe('delivered')
+    await aliceClient.disconnect()
+
+    const freshClient = new TestClient(fresh)
+    await freshClient.connect()
+    const resp = await freshClient.syncRequest(syncRequestEnvelope(fresh.did, docId, {}))
+    expect((resp.body as { entries: string[] }).entries).toHaveLength(1)
+    await freshClient.disconnect()
+  })
+
+  it('Sync 003: sync-request without limit caps at the spec default of 100 and reports truncated', async () => {
+    const docId = randomUUID()
+    const alice = await makeRawIdentity('alice-limit')
+    const fresh = await makeRawIdentity('fresh-limit')
+
+    // Seed 101 entries straight into the durable log (the limit logic under test is
+    // in handleSyncRequest, not the ingest path — direct seeding keeps it fast).
+    const docLog = (server as unknown as {
+      docLog: {
+        appendEntry: (p: Record<string, unknown>) => { disposition: string }
+        hashPayload: (p: unknown) => Promise<string>
+      }
+    }).docLog
+    const spaceContentKey = await deriveSpaceContentKey(docId, 0)
+    for (let seq = 0; seq <= 100; seq += 1) {
+      const enc = await protocol.encryptLogPayload({
+        crypto: cryptoAdapter,
+        spaceContentKey,
+        deviceId: alice.deviceId,
+        seq,
+        plaintext: new TextEncoder().encode(`e${seq}`),
+      })
+      const payload = {
+        seq,
+        deviceId: alice.deviceId,
+        docId,
+        authorKid: alice.authorKid,
+        keyGeneration: 0,
+        data: enc.blobBase64Url,
+        timestamp: FIXED_TIMESTAMP,
+      }
+      const jws = await protocol.createLogEntryJws({ payload, signingSeed: alice.seed })
+      const r = docLog.appendEntry({
+        docId,
+        deviceId: alice.deviceId,
+        seq,
+        authorKid: alice.authorKid,
+        contentHash: await docLog.hashPayload(payload),
+        entryJws: jws,
+      })
+      expect(r.disposition).toBe('accept-new-entry')
+    }
+
+    const freshClient = new TestClient(fresh)
+    await freshClient.connect()
+    // No `limit` in the request → relay applies the spec default of 100.
+    const resp = await freshClient.syncRequest(syncRequestEnvelope(fresh.did, docId, {}))
+    const body = resp.body as { entries: string[]; truncated: boolean }
+    expect(body.entries).toHaveLength(100)
+    expect(body.truncated).toBe(true)
+    await freshClient.disconnect()
+  })
 })

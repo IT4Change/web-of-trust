@@ -637,7 +637,10 @@ export class RelayServer {
     }
 
     const { docId, deviceId, seq, authorKid } = payload
-    const incomingContentHash = await this.docLog.hashEntry(entryJws)
+    // Sync 003 §Broker: collision/dedup hash is over the JCS-canonicalized PAYLOAD
+    // (not the JWS envelope), so an identical payload re-encoded into a different
+    // valid JWS dedups as idempotent rather than a false SEQ_COLLISION_DETECTED.
+    const incomingContentHash = await this.docLog.hashPayload(payload)
     const messageId = (envelope.id as string) ?? 'unknown'
 
     // Author-binding (VE-3a) + seq-collision (VE-3) + the durable insert run
@@ -729,8 +732,13 @@ export class RelayServer {
       return
     }
 
+    // Sync 003: `limit` Default is 100. Without an effective cap, cold
+    // reconstruction with empty heads on a large doc would build + send one
+    // unbounded sync-response; the client pages on `truncated` via the existing
+    // paging path.
     const { docId, heads, limit } = request.body
-    const { entries, truncated } = this.docLog.getSinceWithTruncation(docId, heads, limit)
+    const effectiveLimit = limit ?? 100
+    const { entries, truncated } = this.docLog.getSinceWithTruncation(docId, heads, effectiveLimit)
     const responseHeads = this.docLog.getHeads(docId)
 
     const response = createSyncResponseMessage({

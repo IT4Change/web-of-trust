@@ -1,8 +1,9 @@
 import Database from 'better-sqlite3'
 import { protocol, WebCryptoProtocolCryptoAdapter } from '@web_of_trust/core'
 
-const { bytesToHex, classifyBrokerSeqCollision } = protocol
+const { bytesToHex, classifyBrokerSeqCollision, canonicalizeToBytes } = protocol
 type SyncHeads = protocol.SyncHeads
+type LogEntryPayload = protocol.LogEntryPayload
 
 /**
  * Result of an ingest attempt (VE-3 seq-collision + VE-3a author-binding).
@@ -96,12 +97,18 @@ export class DocLog {
   }
 
   /**
-   * Content hash (hex) of a JWS compact string. Computed in this layer so the
-   * relay never hashes inline. Used as the (docId,deviceId,seq) collision/dedup
-   * key per Sync 002 (deterministic-nonce reuse protection).
+   * Content hash (hex) of a log entry, per Sync 003 §Broker: SHA-256 over the
+   * **JCS-canonicalized log-entry payload** (NOT the compact-JWS string), indexed
+   * by (docId,deviceId,seq). Hashing the canonical payload — not the JWS envelope
+   * — means two semantically-identical entries (same payload, different JWS header
+   * serialization / re-encoding) dedup as idempotent retransmissions instead of
+   * being mis-flagged SEQ_COLLISION_DETECTED. Computed in this layer so relay.ts
+   * stays crypto-free (source guard). `canonicalizeToBytes` is the same JCS RFC
+   * 8785 serializer the author signs over (createLogEntryJws), so the broker hash
+   * is byte-aligned with the signed payload.
    */
-  async hashEntry(entryJws: string): Promise<string> {
-    return bytesToHex(await logStoreCrypto.sha256(new TextEncoder().encode(entryJws)))
+  async hashPayload(payload: LogEntryPayload): Promise<string> {
+    return bytesToHex(await logStoreCrypto.sha256(canonicalizeToBytes(payload as unknown as protocol.JsonValue)))
   }
 
   /**
