@@ -83,7 +83,7 @@ describe('VE-11 Yjs — real gated relay', () => {
 
     const N = 5
     for (let i = 0; i < N; i++) {
-      aliceHandle.transact((d) => { d.items[`a-${i}`] = { title: `alice-${i}` } })
+      aliceHandle.transact((d: TestDoc) => { d.items[`a-${i}`] = { title: `alice-${i}` } })
       await wait(60)
     }
 
@@ -112,8 +112,8 @@ describe('VE-11 Yjs — real gated relay', () => {
     const spaceId = await createSharedSpace(alice, [])
 
     const handle = await alice.adapter.openSpace<TestDoc>(spaceId)
-    handle.transact((d) => { d.items['t1'] = { title: 'first' } })
-    handle.transact((d) => { d.items['t2'] = { title: 'second' } })
+    handle.transact((d: TestDoc) => { d.items['t1'] = { title: 'first' } })
+    handle.transact((d: TestDoc) => { d.items['t2'] = { title: 'second' } })
     await wait(200)
 
     expect(alice.probe.sentTypes).not.toContain('content')
@@ -133,7 +133,7 @@ describe('VE-11 Yjs — real gated relay', () => {
     // received them via live broadcast — only sync-request can deliver them).
     const aliceHandle = await alice.adapter.openSpace<TestDoc>(spaceId)
     for (let i = 0; i < 3; i++) {
-      aliceHandle.transact((d) => { d.items[`pre-${i}`] = { title: `pre-${i}` } })
+      aliceHandle.transact((d: TestDoc) => { d.items[`pre-${i}`] = { title: `pre-${i}` } })
       await wait(40)
     }
     await wait(150)
@@ -175,8 +175,8 @@ describe('VE-11 Yjs — real gated relay', () => {
 
     // Interleaved parallel writes from both devices.
     for (let i = 0; i < 3; i++) {
-      aliceHandle.transact((d) => { d.items[`a-${i}`] = { title: `A${i}` } })
-      bobHandle.transact((d) => { d.items[`b-${i}`] = { title: `B${i}` } })
+      aliceHandle.transact((d: TestDoc) => { d.items[`a-${i}`] = { title: `A${i}` } })
+      bobHandle.transact((d: TestDoc) => { d.items[`b-${i}`] = { title: `B${i}` } })
       await wait(60)
     }
 
@@ -207,7 +207,7 @@ describe('VE-11 Yjs — real gated relay', () => {
     const spaceId = await createSharedSpace(alice, [bob])
 
     const aliceHandle = await alice.adapter.openSpace<TestDoc>(spaceId)
-    aliceHandle.transact((d) => { d.items['base'] = { title: 'base' } })
+    aliceHandle.transact((d: TestDoc) => { d.items['base'] = { title: 'base' } })
     await wait(150)
 
     // A SECOND Bob device (new deviceId), sharing keys+metadata, fresh log+compact.
@@ -225,7 +225,7 @@ describe('VE-11 Yjs — real gated relay', () => {
     expect(await waitFor(() => bob2Handle.getDoc().items['base']?.title === 'base')).toBe(true)
 
     // The new device can also WRITE under its fresh namespace and Alice converges.
-    bob2Handle.transact((d) => { d.items['from-bob2'] = { title: 'b2' } })
+    bob2Handle.transact((d: TestDoc) => { d.items['from-bob2'] = { title: 'b2' } })
     expect(await waitFor(() => aliceHandle.getDoc().items['from-bob2']?.title === 'b2')).toBe(true)
     assertLegacyIsolation(alice, bob2)
 
@@ -241,13 +241,13 @@ describe('VE-11 Yjs — real gated relay', () => {
 
     const aliceHandle = await alice.adapter.openSpace<TestDoc>(spaceId)
     const bobHandle = await bob.adapter.openSpace<TestDoc>(spaceId)
-    aliceHandle.transact((d) => { d.items['base'] = { title: 'base' } })
+    aliceHandle.transact((d: TestDoc) => { d.items['base'] = { title: 'base' } })
     expect(await waitFor(() => bobHandle.getDoc().items['base']?.title === 'base')).toBe(true)
 
     // Alice writes under a gen-1 key Bob does NOT have yet.
     const gen1 = crypto.getRandomValues(new Uint8Array(32))
     await alice.keyManagement.saveKey(spaceId, 1, gen1)
-    aliceHandle.transact((d) => { d.items['secret'] = { title: 'secret' } })
+    aliceHandle.transact((d: TestDoc) => { d.items['secret'] = { title: 'secret' } })
     await wait(250)
 
     const bobCoord = (bob.adapter as unknown as {
@@ -278,7 +278,7 @@ describe('VE-11 Yjs — real gated relay', () => {
     expect(relay.getSpaceAdmins(spaceId)).toContain(alice.identity.getDid())
     // The creator already presented a Space capability + wrote → entries exist.
     const handle = await alice.adapter.openSpace<TestDoc>(spaceId)
-    handle.transact((d) => { d.items['x'] = { title: 'x' } })
+    handle.transact((d: TestDoc) => { d.items['x'] = { title: 'x' } })
     await wait(150)
     expect(relay.entryCount(spaceId)).toBeGreaterThanOrEqual(1)
     assertLegacyIsolation(alice)
@@ -410,11 +410,11 @@ describe('VE-11 Yjs — real gated relay', () => {
     // Alice + Bob both write into the shared space.
     const aliceHandle = await alice.adapter.openSpace<TestDoc>(spaceId)
     const bobHandle = await bob.adapter.openSpace<TestDoc>(spaceId)
-    aliceHandle.transact((d) => { d.items['a1'] = { title: 'A1' } })
+    aliceHandle.transact((d: TestDoc) => { d.items['a1'] = { title: 'A1' } })
     await wait(80)
-    aliceHandle.transact((d) => { d.items['a2'] = { title: 'A2' } })
+    aliceHandle.transact((d: TestDoc) => { d.items['a2'] = { title: 'A2' } })
     await wait(80)
-    bobHandle.transact((d) => { d.items['b1'] = { title: 'B1' } })
+    bobHandle.transact((d: TestDoc) => { d.items['b1'] = { title: 'B1' } })
     await wait(200)
 
     // Positive proof BEFORE the fresh client: the relay holds exactly N entries.

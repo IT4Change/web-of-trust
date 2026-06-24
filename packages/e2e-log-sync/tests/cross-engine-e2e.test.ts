@@ -64,7 +64,7 @@ describe('VE-11 cross-engine protocol conformance — real gated relay', () => {
     // Baseline Yjs convergence works (pure Yjs).
     const aliceHandle = await aliceClient.adapter.openSpace<TestDoc>(spaceId)
     const bobHandle = await bobClient.adapter.openSpace<TestDoc>(spaceId)
-    aliceHandle.transact((d) => { d.items['yjs-1'] = { title: 'yjs-1' } })
+    aliceHandle.transact((d: TestDoc) => { d.items['yjs-1'] = { title: 'yjs-1' } })
     expect(await waitFor(() => bobHandle.getDoc().items['yjs-1']?.title === 'yjs-1')).toBe(true)
 
     // An AUTOMERGE client joins the SAME registered Space using Bob's identity +
@@ -109,7 +109,7 @@ describe('VE-11 cross-engine protocol conformance — real gated relay', () => {
     // reconstruct the Yjs-authored state — it engine-foreign-skips those frames —
     // so its Automerge doc has no `items` root yet; initialize it. The point is to
     // emit a well-formed Automerge log-entry frame, not to share CRDT state.)
-    amHandle.transact((d) => {
+    amHandle.transact((d: TestDoc) => {
       if (!d.items) d.items = {}
       d.items['am-1'] = { title: 'from-automerge' }
     })
@@ -139,7 +139,7 @@ describe('VE-11 cross-engine protocol conformance — real gated relay', () => {
     expect(JSON.stringify(aliceHandle.getDoc())).toBe(aliceDocBefore)
 
     // Alice's OWN Yjs convergence still works after tolerating the foreign frame.
-    aliceHandle.transact((d) => { d.items['yjs-2'] = { title: 'yjs-2' } })
+    aliceHandle.transact((d: TestDoc) => { d.items['yjs-2'] = { title: 'yjs-2' } })
     expect(await waitFor(() => bobHandle.getDoc().items['yjs-2']?.title === 'yjs-2')).toBe(true)
 
     // Legacy isolation held throughout (no content applied anywhere).

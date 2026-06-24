@@ -85,7 +85,7 @@ describe('VE-11 Automerge — real gated relay', () => {
 
     const N = 5
     for (let i = 0; i < N; i++) {
-      aliceHandle.transact((d) => { d.items[`a-${i}`] = { title: `alice-${i}` } })
+      aliceHandle.transact((d: TestDoc) => { d.items[`a-${i}`] = { title: `alice-${i}` } })
       await wait(70)
     }
 
@@ -112,8 +112,8 @@ describe('VE-11 Automerge — real gated relay', () => {
     const handle = await alice.adapter.openSpace<TestDoc>(spaceId)
     // Steady-state baseline (see Loop-safety note on the initial-handshake content).
     const baseline = alice.probe.sentTypes.length
-    handle.transact((d) => { d.items['t1'] = { title: 'first' } })
-    handle.transact((d) => { d.items['t2'] = { title: 'second' } })
+    handle.transact((d: TestDoc) => { d.items['t1'] = { title: 'first' } })
+    handle.transact((d: TestDoc) => { d.items['t2'] = { title: 'second' } })
     await wait(250)
     expect(alice.probe.sentTypes.slice(baseline)).not.toContain('content')
     expect(alice.probe.sentLogEntries).toBeGreaterThanOrEqual(2)
@@ -131,8 +131,8 @@ describe('VE-11 Automerge — real gated relay', () => {
     const bobHandle = await bob.adapter.openSpace<TestDoc>(spaceId)
 
     for (let i = 0; i < 3; i++) {
-      aliceHandle.transact((d) => { d.items[`a-${i}`] = { title: `A${i}` } })
-      bobHandle.transact((d) => { d.items[`b-${i}`] = { title: `B${i}` } })
+      aliceHandle.transact((d: TestDoc) => { d.items[`a-${i}`] = { title: `A${i}` } })
+      bobHandle.transact((d: TestDoc) => { d.items[`b-${i}`] = { title: `B${i}` } })
       await wait(70)
     }
 
@@ -155,7 +155,7 @@ describe('VE-11 Automerge — real gated relay', () => {
     const bob = track(await makeAutomergeClient({ relay, identity: await newIdentity() }))
     const spaceId = await createSharedSpace(alice, [bob])
     const aliceHandle = await alice.adapter.openSpace<TestDoc>(spaceId)
-    aliceHandle.transact((d) => { d.items['base'] = { title: 'base' } })
+    aliceHandle.transact((d: TestDoc) => { d.items['base'] = { title: 'base' } })
     await wait(200)
 
     const bob2 = track(await makeAutomergeClient({
@@ -171,7 +171,7 @@ describe('VE-11 Automerge — real gated relay', () => {
     const bob2Handle = await bob2.adapter.openSpace<TestDoc>(spaceId)
     expect(await waitFor(() => bob2Handle.getDoc().items['base']?.title === 'base')).toBe(true)
 
-    bob2Handle.transact((d) => { d.items['from-bob2'] = { title: 'b2' } })
+    bob2Handle.transact((d: TestDoc) => { d.items['from-bob2'] = { title: 'b2' } })
     expect(await waitFor(() => aliceHandle.getDoc().items['from-bob2']?.title === 'b2')).toBe(true)
     assertLegacyIsolation(alice, bob2)
 
@@ -186,12 +186,12 @@ describe('VE-11 Automerge — real gated relay', () => {
     const spaceId = await createSharedSpace(alice, [bob])
     const aliceHandle = await alice.adapter.openSpace<TestDoc>(spaceId)
     const bobHandle = await bob.adapter.openSpace<TestDoc>(spaceId)
-    aliceHandle.transact((d) => { d.items['base'] = { title: 'base' } })
+    aliceHandle.transact((d: TestDoc) => { d.items['base'] = { title: 'base' } })
     expect(await waitFor(() => bobHandle.getDoc().items['base']?.title === 'base')).toBe(true)
 
     const gen1 = crypto.getRandomValues(new Uint8Array(32))
     await alice.keyManagement.saveKey(spaceId, 1, gen1)
-    aliceHandle.transact((d) => { d.items['secret'] = { title: 'secret' } })
+    aliceHandle.transact((d: TestDoc) => { d.items['secret'] = { title: 'secret' } })
     await wait(250)
 
     const bobCoord = (bob.adapter as unknown as {
@@ -234,7 +234,7 @@ describe('VE-11 Automerge — real gated relay', () => {
     expect(base58).not.toBe(spaceId)
 
     const aliceHandle = await alice.adapter.openSpace<TestDoc>(spaceId)
-    aliceHandle.transact((d) => { d.items['shared'] = { title: 'shared-item' } })
+    aliceHandle.transact((d: TestDoc) => { d.items['shared'] = { title: 'shared-item' } })
     await wait(250)
 
     // (b) a second Automerge client converged (UUID wire identity).
@@ -284,11 +284,11 @@ describe('VE-11 Automerge — real gated relay', () => {
 
     const aliceHandle = await alice.adapter.openSpace<TestDoc>(spaceId)
     const bobHandle = await bob.adapter.openSpace<TestDoc>(spaceId)
-    aliceHandle.transact((d) => { d.items['a1'] = { title: 'A1' } })
+    aliceHandle.transact((d: TestDoc) => { d.items['a1'] = { title: 'A1' } })
     await wait(90)
-    aliceHandle.transact((d) => { d.items['a2'] = { title: 'A2' } })
+    aliceHandle.transact((d: TestDoc) => { d.items['a2'] = { title: 'A2' } })
     await wait(90)
-    bobHandle.transact((d) => { d.items['b1'] = { title: 'B1' } })
+    bobHandle.transact((d: TestDoc) => { d.items['b1'] = { title: 'B1' } })
     await wait(250)
 
     const N = relay.entryCount(spaceId)
