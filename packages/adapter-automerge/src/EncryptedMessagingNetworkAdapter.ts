@@ -54,6 +54,12 @@ export class EncryptedMessagingNetworkAdapter extends NetworkAdapter {
   // Document -> Space mapping (needed to find the right group key)
   private docToSpace = new Map<DocumentId, string>()
 
+  // VE-7 (Slice A Phase 4): spaceIds whose steady-state sync the log path owns.
+  // For these, the automerge-repo native content/full-state send is a NO-OP
+  // (the log-entry JWS carries the update) and incoming content is ignored — so
+  // `expect(sentTypes).not.toContain('content')` holds and there is no double-apply.
+  private logSyncManagedSpaces = new Set<string>()
+
   // Known peers per space
   private spacePeers = new Map<string, Set<string>>() // spaceId -> Set<DID>
 
@@ -146,6 +152,11 @@ export class EncryptedMessagingNetworkAdapter extends NetworkAdapter {
       const spaceId = payload.spaceId as string
       const generation = payload.generation as number
 
+      // VE-7 (Slice A Phase 4): a log-sync-managed space converges via the log
+      // path only — ignore any stray content envelope (no double-apply, no
+      // blocked-by-key buffering on the dead content channel).
+      if (this.logSyncManagedSpaces.has(spaceId)) return
+
       // Get the group key for decryption
       const groupKey = await this.keyManagement.getKeyByGeneration(spaceId, generation)
       if (!groupKey) {
@@ -209,6 +220,11 @@ export class EncryptedMessagingNetworkAdapter extends NetworkAdapter {
 
     const spaceId = this.docToSpace.get(message.documentId)
     if (!spaceId) return
+
+    // VE-7 (Slice A Phase 4): under log-sync the content/full-state channel is a
+    // NO-OP — the log-entry JWS carries the update. This is the structural
+    // guarantee behind `expect(sentTypes).not.toContain('content')`.
+    if (this.logSyncManagedSpaces.has(spaceId)) return
 
     // Resolve phantom self-peer to actual DID
     const targetId = message.targetId as string
@@ -290,6 +306,16 @@ export class EncryptedMessagingNetworkAdapter extends NetworkAdapter {
    */
   registerDocument(documentId: DocumentId, spaceId: string): void {
     this.docToSpace.set(documentId, spaceId)
+  }
+
+  /**
+   * VE-7 (Slice A Phase 4): mark/unmark a space as log-sync-managed. When marked,
+   * the native automerge-repo content send for that space is a NO-OP and incoming
+   * content for it is ignored — the log path is the single steady-state channel.
+   */
+  setLogSyncManaged(spaceId: string, managed: boolean): void {
+    if (managed) this.logSyncManagedSpaces.add(spaceId)
+    else this.logSyncManagedSpaces.delete(spaceId)
   }
 
   /**

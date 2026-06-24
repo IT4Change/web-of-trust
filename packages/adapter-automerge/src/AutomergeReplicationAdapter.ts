@@ -2,7 +2,7 @@ import { Repo, parseAutomergeUrl, type DocumentId, type AutomergeUrl, type PeerI
 import type { StorageAdapterInterface } from '@automerge/automerge-repo'
 import type { DocHandle } from '@automerge/automerge-repo'
 import * as Automerge from '@automerge/automerge'
-import type { ReplicationAdapter, SpaceHandle, TransactOptions, Subscribable, MessagingAdapter, MessageIdHistoryPort, SpaceMetadataStorage, KeyManagementPort, MemberUpdatePendingStore, WireMessage } from '@web_of_trust/core/ports'
+import type { ReplicationAdapter, SpaceHandle, TransactOptions, Subscribable, MessagingAdapter, MessageIdHistoryPort, SpaceMetadataStorage, KeyManagementPort, MemberUpdatePendingStore, WireMessage, DocLogStore } from '@web_of_trust/core/ports'
 import type { IdentitySession, SpaceInfo, SpaceMemberChange, IncomingSpaceInvite, ReplicationState, MessageEnvelope } from '@web_of_trust/core/types'
 import {
   createSpaceKey, rotateSpaceKey, importKey, processMemberUpdate,
@@ -17,17 +17,23 @@ import type {
   MembershipEvent, AdminEntry,
 } from '@web_of_trust/core/protocol'
 import {
-  decryptOneShot, encryptOneShot, assertMemberUpdateBody, decodeBase64Url,
+  decryptOneShot, encryptOneShot, assertMemberUpdateBody, decodeBase64Url, encodeBase64Url,
   assertSpaceInviteBody, assertKeyRotationBody,
   SPACE_INVITE_MESSAGE_TYPE, MEMBER_UPDATE_MESSAGE_TYPE, KEY_ROTATION_MESSAGE_TYPE,
   isDidcommMessage, isEncryptedInboxMessageType, INBOX_MESSAGE_TYPE,
   createAckMessage, evaluateInboxAckDisposition, createDidKeyResolver,
   formatMembershipEventKey, parseMembershipEventKey, resolveActiveMembers, resolveMembershipWinner, assertMembershipEvent,
   resolveActiveAdmins, assertAdminEntry,
+  LogSyncCoordinator, AuthorMismatchError, createSpaceCapabilityJws,
+  createSpaceRegisterMessageWithSigner,
+  LOG_ENTRY_MESSAGE_TYPE, SYNC_RESPONSE_MESSAGE_TYPE,
 } from '@web_of_trust/core/protocol'
+import type { LogSyncEngineHooks, CapabilitySource, ControlFrameReceipt, WriteRejectHandler } from '@web_of_trust/core/protocol'
 import { WebCryptoProtocolCryptoAdapter } from '@web_of_trust/core/protocol-adapters'
-import { VaultClient, base64ToUint8, VaultPushScheduler, InMemoryKeyManagementAdapter, InMemoryMemberUpdatePendingStore, InMemoryMessageIdHistory } from '@web_of_trust/core/adapters'
+import { VaultClient, base64ToUint8, VaultPushScheduler, InMemoryKeyManagementAdapter, InMemoryMemberUpdatePendingStore, InMemoryMessageIdHistory, createRestoreCloneHandler } from '@web_of_trust/core/adapters'
 import { EncryptedMessagingNetworkAdapter } from './EncryptedMessagingNetworkAdapter'
+import { spaceIdToDocumentId } from './automerge-doc-id'
+import { frameChanges, unframeChanges } from './automerge-change-framing'
 import { CompactionService } from './CompactionService'
 import {
   decodeSpaceInviteSnapshotPayload,
@@ -123,6 +129,15 @@ interface SpaceState {
   // gehoert dem NAECHSTEN Space-Sync, nicht dem vorherigen).
   membershipResolutionChain?: Promise<void>
   unsubDocChange?: () => void
+  // Slice A Phase 4 / VE-2/3: the log-path change observer's unsubscribe. The
+  // observer captures LOCAL Automerge changes (getChanges before→after) and
+  // routes them through the LogSyncCoordinator. Separate from the membership
+  // observer above (which only re-projects info.members/admins).
+  unsubLogChange?: () => void
+  // VE-3 LOOP-GUARD: set while applyRemoteUpdate() applies a decrypted remote
+  // change, so the log-path change observer does NOT emit a new log-entry for a
+  // remote-originated change (the Automerge pendant of Yjs origin='remote').
+  applyingRemoteLog?: boolean
 }
 
 /** Duck-typed interface for CompactStorageManager / InMemoryCompactStore */
@@ -159,6 +174,30 @@ export interface AutomergeReplicationAdapterConfig {
   didResolver?: DidResolver
   /** Replay-Schutz Sync 003 Z.466 (Default: InMemory; durable Store kommt mit 1.D). */
   messageIdHistory?: MessageIdHistoryPort
+  /**
+   * Slice A / VE-2..9 (Phase 4): durable per-(deviceId,docId) log store for the
+   * Sync 002/003 log path. When provided together with `enableLogSync`, the
+   * adapter wires the primary steady-state CRDT sync through the
+   * LogSyncCoordinator (encrypted log-entry envelopes + space-register +
+   * present-capability + sync-request catch-up) instead of the legacy
+   * automerge-repo content/full-state broadcast. The wire docId is the canonical
+   * UUID spaceId (VE-9), never the native base58 documentId.
+   */
+  docLogStore?: DocLogStore
+  /**
+   * Enable the Sync 002/003 log path as the primary steady-state sync path
+   * (VE-2..9, Phase 4). Requires `docLogStore` and a `sendControlFrame`-capable
+   * messaging adapter. Default false: the legacy automerge-repo content path
+   * stays the default (VE-7 hard-disables it when on). NO global default flip
+   * (P5/VE-11).
+   */
+  enableLogSync?: boolean
+  /**
+   * Stable per-device UUID for the log-entry seq namespace (per (deviceId,docId)).
+   * Defaults to a fresh random UUID. SHOULD be the same stable id the messaging
+   * adapter registers with the broker.
+   */
+  deviceId?: string
 }
 
 class AutomergeSpaceHandle<T> implements SpaceHandle<T> {
@@ -291,6 +330,17 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
   private repo!: Repo
   private networkAdapter!: EncryptedMessagingNetworkAdapter
 
+  // Slice A Phase 4 / VE-2..9: log-path infrastructure (mirrors the Yjs adapter).
+  private readonly docLogStore?: DocLogStore
+  private readonly logSyncEnabled: boolean
+  /** Active per-device UUID (re-bound process-wide by a restore-clone, VE-4/VE-5). */
+  private deviceId: string
+  /** True once the store-bound deviceId has been resolved (BLOCKER-1b). */
+  private deviceIdResolved = false
+  /** Per-space LogSyncCoordinator (engine-neutral orchestration), keyed by spaceId UUID. */
+  private coordinators = new Map<string, LogSyncCoordinator>()
+  private docLogStoreInitialized = false
+
   constructor(config: AutomergeReplicationAdapterConfig) {
     this.identity = config.identity
     this.messaging = config.messaging
@@ -305,6 +355,14 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
     this.repoStorage = config.repoStorage
     this.compactStore = config.compactStore ?? null
     this.spaceFilter = config.spaceFilter ?? null
+    this.docLogStore = config.docLogStore
+    this.deviceId = config.deviceId ?? crypto.randomUUID()
+    // The log path is the primary steady-state path only when both a durable log
+    // store and a control-frame-capable messaging adapter are present (VE-9/VE-11).
+    this.logSyncEnabled =
+      config.enableLogSync === true &&
+      this.docLogStore !== undefined &&
+      typeof (this.messaging as MessagingAdapter).sendControlFrame === 'function'
     if (config.vaultUrl) {
       this.vault = new VaultClient(config.vaultUrl, config.identity)
     }
@@ -356,16 +414,23 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
     // Space-Restore laden — der Restore replayed sie pro Space.
     await this.restorePendingMessages()
 
+    // Listen for application-level messages (invites, key rotation, member updates)
+    // BEFORE restoreSpacesFromMetadata: under log-sync the restore runs the
+    // per-space catch-up (present-capability → sync-request), and the broker's
+    // sync-RESPONSE comes back as a routed message that MUST reach handleMessage →
+    // the coordinator. Registering the handler after the restore would let the
+    // cold-start catch-up time out (Phase 4 VE-9(d) regression). A log-path message
+    // for a not-yet-restored space is harmlessly dropped (the sync-request is only
+    // sent once a space's coordinator exists).
+    this.unsubscribeMessaging = this.messaging.onMessage(
+      (message) => this.handleMessage(message)
+    )
+
     // Restore persisted space metadata and group keys
     await this.restoreSpacesFromMetadata()
 
     this.state = 'idle'
     this._notifySpacesSubscribers()
-
-    // Listen for application-level messages (invites, key rotation, member updates)
-    this.unsubscribeMessaging = this.messaging.onMessage(
-      (message) => this.handleMessage(message)
-    )
   }
 
   /**
@@ -391,10 +456,23 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
         memberKeys.set(did, key)
       }
 
+      // VE-9 Cold-Start Re-Map: under log-sync the native base58 documentId is
+      // session-/instance-local and is RE-DERIVED from the canonical UUID spaceId
+      // (the only persistent/wire identity) on every start — NOT trusted from the
+      // persisted metadata. Under the deterministic mapping the two are equal, but
+      // re-deriving makes the UUID the single source of truth and survives a
+      // metadata that stored a stale/foreign base58 id.
+      const restoredDocumentId = this.logSyncEnabled
+        ? spaceIdToDocumentId(meta.info.id)
+        : (meta.documentId as DocumentId)
+      const restoredDocumentUrl = this.logSyncEnabled
+        ? (`automerge:${restoredDocumentId}` as AutomergeUrl)
+        : (meta.documentUrl as AutomergeUrl)
+
       const spaceState: SpaceState = {
         info: meta.info,
-        documentId: meta.documentId as DocumentId,
-        documentUrl: meta.documentUrl as AutomergeUrl,
+        documentId: restoredDocumentId,
+        documentUrl: restoredDocumentUrl,
         handles: new Set(),
         memberEncryptionKeys: memberKeys,
       }
@@ -460,6 +538,24 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
       }
       changed = true
 
+      // VE-9/VE-4 (Phase 4) cold-start: under log-sync the doc MUST exist locally
+      // (under the UUID-derived base58 docId) so the membership projection + the
+      // coordinator can read/applyChanges even with NO CompactStore/vault snapshot.
+      // If nothing restored a ready handle, import the deterministic bootstrap
+      // under the derived docId NOW (before resolveCanonicallyAnsweredMemberUpdates
+      // reads doc()), making the doc ready and the membership observer safe to
+      // attach. The full log is replayed via catchUp below.
+      if (this.logSyncEnabled && !docRestored) {
+        const handle = this.repo.handles[spaceState.documentId]
+        if (!handle || !handle.isReady()) {
+          const bootstrap = this.repo.import<unknown>(this.inviteBootstrapBinary(meta.info.id), {
+            docId: spaceState.documentId,
+          })
+          if (!bootstrap.isReady()) bootstrap.doneLoading()
+        }
+        docRestored = true
+      }
+
       if (docRestored) {
         // VE-1: die members-Projektion kommt aus dem Event-Set des Docs — die
         // PersonalDoc-Metadata ist nur ein Cache (Seed im Attach).
@@ -485,6 +581,21 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
       // Space (key-rotations + blocked-by-key-Content) bei App-Start erneut
       // pruefen — der start()-Restore-Replay-Hook.
       await this.processPendingForSpace(meta.info.id)
+
+      // VE-9/VE-4 (Phase 4) cold-start catch-up: the doc handle exists (restored
+      // or bootstrapped above) under the UUID-derived base58 docId. Attach the log
+      // observer and run the catch-up (present-capability → sync-request → full log
+      // replay) so the cold-started device converges from the broker log alone. The
+      // UUID spaceId is the wire/seq identity; the base58 docId was re-derived.
+      if (this.logSyncEnabled) {
+        this.attachLogChangeObserver(spaceState)
+        const coordinator = await this.getOrCreateCoordinator(spaceState)
+        if (coordinator) {
+          await coordinator.catchUp().catch((err) =>
+            console.warn('[ReplicationAdapter] restore log catch-up failed:', err),
+          )
+        }
+      }
     }
 
     if (changed) {
@@ -730,10 +841,15 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
     for (const space of this.spaces.values()) {
       space.unsubDocChange?.()
       space.unsubDocChange = undefined
+      // Slice A Phase 4: detach the log-path change observer too.
+      space.unsubLogChange?.()
+      space.unsubLogChange = undefined
       for (const handle of space.handles) {
         handle.close()
       }
     }
+    // Drop the per-space coordinators (a fresh start() re-creates them lazily).
+    this.coordinators.clear()
     // Review-M1 (Fix-Runde, Spiegel des Yjs-stop()-Teardowns): die Space-Map
     // leeren, damit die Reentranz-Guards (applyMemberUpdateResolution,
     // resolvePendingMemberUpdates, _persistSpaceMetadata) nachlaufende
@@ -769,7 +885,15 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
     // unterlegenen Seite verschwanden aus der Merge-Sicht.
     // BREAKING (deklarierter Alt-Space-Bruch): die Initial-Change
     // bestehender createSpace-Docs aendert sich.
-    const docHandle = this.repo.import<T>(this.inviteBootstrapBinary(spaceId))
+    // VE-9 (Phase 4): under log-sync the native base58 documentId is DERIVED from
+    // the canonical UUID spaceId (deterministic + reversible), so every device
+    // re-maps the same base58 id from the same UUID on cold-start, and the wire
+    // docId (UUID) stays in sync with the repo's docId. Outside log-sync the
+    // legacy random documentId is kept (the invite snapshot carries the
+    // documentUrl) — no behaviour change for the 146 baseline tests.
+    const docHandle = this.logSyncEnabled
+      ? this.repo.import<T>(this.inviteBootstrapBinary(spaceId), { docId: spaceIdToDocumentId(spaceId) })
+      : this.repo.import<T>(this.inviteBootstrapBinary(spaceId))
     if (!docHandle.isReady()) {
       docHandle.doneLoading()
     }
@@ -845,6 +969,32 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
     await this._persistSpaceMetadata(spaceState)
     // Flush repo so the doc is persisted to IndexedDB
     await this.repo.flush([docHandle.documentId])
+
+    // VE-8/VE-2 (Sync 002 §207): under log-sync the creator runs the closed
+    // first-publication sequence — space-register → present-capability →
+    // sync-request — and attaches the log-path change observer BEFORE any user
+    // edit, so the first local write appends seq=0. The initial doc seed (above)
+    // rode in the encrypted invite snapshot, NOT as a log entry (the observer is
+    // attached only now, mirroring the Yjs setupSpaceSync ordering).
+    if (this.logSyncEnabled) {
+      this.attachLogChangeObserver(spaceState)
+      const coordinator = await this.getOrCreateCoordinator(spaceState)
+      if (coordinator) {
+        await coordinator.ensurePublished().catch((err) => {
+          if (err instanceof AuthorMismatchError) {
+            console.error('[ReplicationAdapter] AUTHOR_MISMATCH during createSpace publish:', err.message)
+          } else {
+            console.debug('[ReplicationAdapter] first-publication deferred (will retry):', err)
+          }
+        })
+        // VE-4 (self-contained log): the creator's INITIAL doc seed (members/admins/
+        // meta) was written to the Automerge doc BEFORE the observer attached, so it
+        // is NOT yet in the log. Publish it as the first log-entry (seq=0, full
+        // state) so a cold-start device with NO snapshot reconstructs the doc purely
+        // from `leere heads → kompletter Log`. Subsequent edits append from seq=1.
+        await this.writeFullStateViaLog(spaceState)
+      }
+    }
 
     // Save initial snapshot to CompactStore (fire-and-forget)
     this._saveToCompactStore(spaceState).catch(() => {})
@@ -1090,6 +1240,20 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
   async removeMember(spaceId: string, memberDid: string): Promise<void> {
     const space = this.spaces.get(spaceId)
     if (!space) throw new Error(`Unknown space: ${spaceId}`)
+
+    // Slice A: member removal over the log-sync path is explicitly NOT supported
+    // yet. Safe removal requires a two-phase broker-enforced space-rotate (stage →
+    // broker-confirm → commit) plus a relay-side ingest-generation gate; that is a
+    // dedicated follow-up slice (VE-10 broker-enforcement). Until then we REFUSE the
+    // operation BEFORE any side effect (no membership event, no key rotation, no
+    // space-rotate send) rather than run a removal whose broker-side capability
+    // revocation is not enforced. The legacy content path (enableLogSync=false) is
+    // unaffected and keeps working as before.
+    if (this.logSyncEnabled) {
+      throw new Error(
+        'Member removal over the log-sync path is not yet supported (VE-10 broker-enforcement is a follow-up slice).',
+      )
+    }
 
     const myDid = this.identity.getDid()
 
@@ -1793,6 +1957,11 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
     if (space) {
       space.unsubDocChange?.()
       space.unsubDocChange = undefined
+      // Slice A Phase 4: detach the log-path change observer + drop the coordinator.
+      space.unsubLogChange?.()
+      space.unsubLogChange = undefined
+      this.coordinators.delete(spaceId)
+      this.networkAdapter.setLogSyncManaged(spaceId, false)
       for (const handle of space.handles) handle.close()
       try {
         this.repo.delete(space.documentId)
@@ -1837,7 +2006,22 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
     return this.keyManagement.getCurrentGeneration(spaceId)
   }
 
-  async requestSync(_spaceId: string): Promise<void> {
+  async requestSync(spaceId: string): Promise<void> {
+    // VE-4 (Phase 4): under log-sync, sync-request(localHeads) is the PRIMARY
+    // catch-up path — present read-capability → sync-request → idempotent apply.
+    // (Outside log-sync this stays a No-op, see below.)
+    if (this.logSyncEnabled && spaceId !== '__all__') {
+      const space = this.spaces.get(spaceId)
+      if (space) {
+        const coordinator = await this.getOrCreateCoordinator(space)
+        if (coordinator) {
+          await coordinator.catchUp().catch((err) =>
+            console.warn(`[ReplicationAdapter] log catch-up failed for ${spaceId}:`, err),
+          )
+        }
+      }
+      return
+    }
     // VE-6d: No-op — einen expliziten Request-Send wie den Old-World-
     // `sendSpaceSyncRequest` des Yjs-Adapters (dort SPEC-APPROX) gibt es in
     // dieser Architektur nicht; den verlustfreien Normalbetrieb traegt der
@@ -2018,6 +2202,21 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
   }
 
   private async handleMessage(message: WireMessage): Promise<void> {
+    // Slice A Phase 4 / VE-3+VE-4: the Sync 002/003 log-path messages
+    // (log-entry/1.0, sync-response/1.0) are DIDComm-plaintext too, so route them
+    // to the per-space LogSyncCoordinator BEFORE the inbox dispatch. The read path
+    // is strictly LOOP-GUARDed (no write, no re-broadcast).
+    if (this.logSyncEnabled && isLogPathMessage(message)) {
+      await this.routeLogPathMessage(message)
+      return
+    }
+    // P2-NIT-1 (VE-4/VE-5): a routed write-path reject `{ type:'error', thid }` for
+    // a SENT log-entry. Route it to the coordinator that owns the correlated thid
+    // (so an error for doc A never restore-clones doc B).
+    if (this.logSyncEnabled && isErrorFrame(message)) {
+      await this.routeWritePathError(message)
+      return
+    }
     // VE-1/VE-8 Familien-Split (Sync 003 Z.328-341): DIDComm-Inbox-Familie
     // (space-invite/member-update/key-rotation als ECIES+Inner-JWS) vs.
     // Old-World-CRDT-Sync-Kanal (content). Kein Typ existiert in beiden Familien.
@@ -2028,6 +2227,345 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
     // Old-World-Envelopes haben hier keine Cases mehr: content läuft über den
     // EncryptedMessagingNetworkAdapter (eigene Signatur-Prüfung dort);
     // sync-request/sync-response are no longer needed (automerge-repo handles sync).
+  }
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // Slice A Phase 4 / VE-2..9: log-path wiring (LogSyncCoordinator per space)
+  // ──────────────────────────────────────────────────────────────────────────
+
+  /** Lazily init the durable log store exactly once. */
+  private async ensureDocLogStore(): Promise<DocLogStore | null> {
+    if (!this.docLogStore) return null
+    if (!this.docLogStoreInitialized) {
+      await this.docLogStore.init()
+      this.docLogStoreInitialized = true
+    }
+    return this.docLogStore
+  }
+
+  /**
+   * BLOCKER-1b: resolve the deviceId from the DURABLE log store, not from config /
+   * external localStorage. Binding the deviceId to the log-store lifecycle makes a
+   * store wipe (which empties the log) ALSO mint a fresh deviceId — a fresh nonce
+   * namespace — so a leaked store can never re-enter seq=0 under a stable deviceId.
+   * Idempotent + cached in `this.deviceId` (process-wide: one device, one id across
+   * all docs). Falls back to the config/random id only when no store is wired.
+   */
+  private async ensureDeviceId(): Promise<string> {
+    if (this.deviceIdResolved) return this.deviceId
+    const store = await this.ensureDocLogStore()
+    if (!store) {
+      this.deviceIdResolved = true
+      return this.deviceId
+    }
+    // The DURABLE store is authoritative for the deviceId: it mints+persists a
+    // fresh one on an empty store and returns the established (or restore-cloned)
+    // id thereafter. A store wipe drops it ⇒ a fresh nonce namespace (BLOCKER-1b),
+    // never a re-entered seq=0 under a stable deviceId. The composition root mints
+    // this id FIRST and registers the messaging adapter with it, so the relay's
+    // author-binding (log deviceId == registered deviceId) holds.
+    this.deviceId = await store.getOrCreateDeviceId()
+    this.deviceIdResolved = true
+    return this.deviceId
+  }
+
+  /**
+   * The log-entry author kid (`<did>#sig-0`, the Identity-Key verification method).
+   * `verifyLogEntryJws` resolves the key from the DID part; signing is via
+   * {@link IdentitySession.signEd25519}, so the kid's key matches the signer.
+   */
+  private authorKid(): string {
+    return `${this.identity.getDid()}#sig-0`
+  }
+
+  /**
+   * VE-9 capability source for a Space-doc: re-issue a Space-Capability JWS
+   * (read+write) for the current generation, signed with the per-generation Space
+   * Capability signing key (NEVER the Identity key; kid = wot:space:<spaceId>#cap-<gen>).
+   * spaceId is the canonical UUID — the kid match holds on the wire.
+   */
+  private spaceCapabilitySource(spaceId: string): CapabilitySource {
+    return {
+      getCapabilityJws: async () => {
+        const generation = await this.keyManagement.getCurrentGeneration(spaceId)
+        const signingSeed = await this.keyManagement.getCapabilitySigningSeed(spaceId, generation)
+        if (!signingSeed) throw new Error(`No capability signing seed for space ${spaceId} @ gen ${generation}`)
+        const now = Date.now()
+        const validityMs = this.capabilityValidityMs ?? 6 * 30 * 24 * 60 * 60 * 1000
+        return createSpaceCapabilityJws({
+          payload: {
+            type: 'capability',
+            spaceId,
+            audience: this.identity.getDid(),
+            permissions: ['read', 'write'],
+            generation,
+            issuedAt: new Date(now).toISOString(),
+            validUntil: new Date(now + validityMs).toISOString(),
+          },
+          signingSeed,
+        })
+      },
+    }
+  }
+
+  /**
+   * Automerge engine hooks (VE-2/VE-3). encode = identity (the change observer
+   * already passes Automerge change bytes); applyRemote = applyChanges under the
+   * LOOP-GUARD flag so a remote-applied change does not re-emit a log-entry.
+   * Engine-foreign payloads (e.g. Yjs bytes) make applyChanges throw — the
+   * coordinator catches that and skips (engine-foreign-skip), never crashing.
+   */
+  private automergeEngineHooks(space: SpaceState): LogSyncEngineHooks {
+    return {
+      engine: 'automerge',
+      // The change observer already frames the captured Automerge changes
+      // (frameChanges) into the log payload bytes, so encode is identity.
+      encodeUpdate: (update) => update,
+      applyRemoteUpdate: (plaintext) => {
+        const docHandle = this.repo.handles[space.documentId]
+        if (!docHandle) throw new Error(`No doc handle for space ${space.info.id}`)
+        // Unframe the change array (one log payload may carry 1 steady-state change
+        // or N changes for a full-state restore-clone re-write). A non-Automerge
+        // (engine-foreign) payload throws here → coordinator skips (VE-3).
+        const changes = unframeChanges(plaintext)
+        // LOOP-GUARD: mark remote-apply so the change observer suppresses a
+        // log-entry for the change this apply produces (Automerge pendant of
+        // Yjs origin='remote'). Apply the WHOLE array in ONE update() so exactly
+        // one change event fires (and is suppressed). applyChanges throws on
+        // engine-foreign / corrupt change bytes.
+        space.applyingRemoteLog = true
+        try {
+          docHandle.update((doc: unknown) => {
+            const [next] = Automerge.applyChanges(doc as Automerge.Doc<unknown>, changes)
+            return next as never
+          })
+        } finally {
+          space.applyingRemoteLog = false
+        }
+        // Persist the merged state locally (debounced), mirroring the content path.
+        this.compactSchedulers.get(space.info.id)?.pushDebounced()
+      },
+    }
+  }
+
+  /**
+   * VE-8 space-register sender for a space. The local user signs the registration
+   * with its own admin DID; on join a member re-sends an identical registration
+   * (first-writer-wins idempotency). Returns undefined if the user is not an admin.
+   */
+  private makeSendSpaceRegister(space: SpaceState): () => Promise<ControlFrameReceipt | undefined> {
+    return async () => {
+      const messaging = this.messaging as MessagingAdapter
+      if (typeof messaging.sendControlFrame !== 'function') return undefined
+      const spaceId = space.info.id
+      const adminDids = this.spaceAdminDids(space)
+      const myDid = this.identity.getDid()
+      // Only an admin can sign a valid space-register (kid DID MUST be in adminDids).
+      if (!adminDids.includes(myDid)) return undefined
+      const generation = await this.keyManagement.getCurrentGeneration(spaceId)
+      const verificationKey = await this.keyManagement.getCapabilityVerificationKey(spaceId, generation)
+      if (!verificationKey) return undefined
+      // VE-11: the inner JWS MUST be signed by the Identity key that the `kid`'s
+      // did:key resolves to — the REAL relay (verifySpaceRegisterMessage) verifies
+      // the signature against that did:key. Sign through identity.signEd25519 via the
+      // WithSigner variant (operation-shaped vault never exposes the seed; a
+      // deriveFrameworkKey seed would be rejected AUTH_INVALID by the real relay).
+      const register = await createSpaceRegisterMessageWithSigner({
+        spaceId,
+        spaceCapabilityVerificationKey: encodeBase64Url(verificationKey),
+        adminDids,
+        kid: this.authorKid(),
+        sign: (input) => this.identity.signEd25519(input),
+      })
+      return (await messaging.sendControlFrame(register)) as ControlFrameReceipt
+    }
+  }
+
+  /**
+   * Get (or lazily create) the LogSyncCoordinator for a space (VE-2..9). Returns
+   * null when the log path is disabled or there is no durable store. The
+   * coordinator's docId is the canonical UUID spaceId (VE-9) — NOT the base58
+   * documentId — so all three wire surfaces carry the UUID.
+   */
+  private async getOrCreateCoordinator(space: SpaceState): Promise<LogSyncCoordinator | null> {
+    if (!this.logSyncEnabled) return null
+    const spaceId = space.info.id
+    const existing = this.coordinators.get(spaceId)
+    if (existing) return existing
+    const logStore = await this.ensureDocLogStore()
+    if (!logStore) return null
+    // BLOCKER-1b: bind the deviceId to the durable store BEFORE constructing the
+    // coordinator (the seq-namespace owner), so a wiped store yields a fresh id.
+    const deviceId = await this.ensureDeviceId()
+
+    const sendControlFrame = (this.messaging as MessagingAdapter).sendControlFrame!
+    const coordinator = new LogSyncCoordinator({
+      docId: spaceId, // VE-9: canonical UUID, never the base58 documentId.
+      deviceId,
+      ownDid: this.identity.getDid(),
+      authorKid: this.authorKid(),
+      crypto: this.crypto,
+      logStore,
+      control: { sendControlFrame: (frame) => sendControlFrame.call(this.messaging, frame) },
+      envelopes: { send: (envelope) => this.messaging.send(envelope as WireMessage) },
+      capabilities: this.spaceCapabilitySource(spaceId),
+      hooks: this.automergeEngineHooks(space),
+      signLogEntry: (input) => this.identity.signEd25519(input),
+      getRecipients: () => space.info.members,
+      getContentKey: async () => {
+        const generation = await this.keyManagement.getCurrentGeneration(spaceId)
+        const key = await this.keyManagement.getKeyByGeneration(spaceId, generation)
+        return key ? { key, generation } : null
+      },
+      getContentKeyByGeneration: (generation) => this.keyManagement.getKeyByGeneration(spaceId, generation),
+      getAvailableKeyGenerations: async () => {
+        const current = await this.keyManagement.getCurrentGeneration(spaceId)
+        const gens: number[] = []
+        for (let g = 0; g <= current; g++) {
+          if (await this.keyManagement.getKeyByGeneration(spaceId, g)) gens.push(g)
+        }
+        return gens
+      },
+      sendSpaceRegister: this.makeSendSpaceRegister(space),
+      onWriteRejected: this.makeWriteRejectHandler(),
+      onAfterRestoreClone: async () => {
+        await this.writeFullStateViaLog(space)
+      },
+    })
+    this.coordinators.set(spaceId, coordinator)
+    // VE-7: the log path now owns this space's steady-state sync — disable the
+    // native automerge-repo content/full-state channel for it.
+    this.networkAdapter.setLogSyncManaged(spaceId, true)
+    return coordinator
+  }
+
+  /**
+   * Build the {@link WriteRejectHandler} for a space coordinator (P2-NIT-1). The
+   * deviceId minted here is process-wide (one device = one id across all docs);
+   * onDeviceIdChanged updates the adapter's active deviceId so subsequent space
+   * coordinators created lazily inherit the new id.
+   */
+  private makeWriteRejectHandler(): WriteRejectHandler {
+    return createRestoreCloneHandler({
+      identity: this.identity,
+      messaging: this.messaging,
+      onDeviceIdChanged: async (_docId, newDeviceId) => {
+        this.deviceId = newDeviceId
+        // BLOCKER-1b: persist the restore-clone's new deviceId into the durable
+        // store so a reload adopts the NEW namespace, never the revoked one.
+        await this.docLogStore?.setDeviceId(newDeviceId)
+      },
+    })
+  }
+
+  /**
+   * Re-write the full current Automerge state of a space as ONE fresh log-entry
+   * (restore-clone re-write hook): after the deviceId was re-bound, the new
+   * (deviceId,docId) namespace starts at seq=0, so a single full-state entry
+   * re-publishes everything under the new device without re-using the colliding
+   * seq. The full state is `Automerge.getChanges(init, doc)` flattened into one
+   * change blob via save → the receiver applies it through applyChanges.
+   */
+  private async writeFullStateViaLog(space: SpaceState): Promise<void> {
+    const coordinator = this.coordinators.get(space.info.id)
+    if (!coordinator) return
+    const docHandle = this.repo.handles[space.documentId]
+    const doc = docHandle?.doc()
+    if (!doc) return
+    // The full change set since the empty doc — one log payload carrying every
+    // change so the second device converges purely from this entry.
+    const changes = Automerge.getAllChanges(doc)
+    if (changes.length === 0) return
+    const fullStateBlob = frameChanges(changes)
+    await coordinator.writeLocalUpdate(fullStateBlob).catch((err) => {
+      if (err instanceof AuthorMismatchError) {
+        console.error('[ReplicationAdapter] AUTHOR_MISMATCH during restore-clone re-write:', err.message)
+        return
+      }
+      console.debug('[ReplicationAdapter] restore-clone re-write failed (retry on reconnect):', err)
+    })
+  }
+
+  /**
+   * VE-2 write path: route a captured local Automerge change through the
+   * LogSyncCoordinator (ensurePublished → appendLocalEntry → log-entry envelope).
+   * A hard AUTHOR_MISMATCH is surfaced to audit; transient errors are swallowed
+   * (offline / retry on reconnect).
+   */
+  private async writeLocalUpdateViaLog(space: SpaceState, change: Uint8Array): Promise<void> {
+    const coordinator = await this.getOrCreateCoordinator(space)
+    if (!coordinator) return
+    try {
+      await coordinator.writeLocalUpdate(change)
+    } catch (err) {
+      if (err instanceof AuthorMismatchError) {
+        console.error('[ReplicationAdapter] AUTHOR_MISMATCH on log write — hard stop:', err.message)
+        return
+      }
+      console.debug('[ReplicationAdapter] log write failed (will retry on reconnect):', err)
+    }
+  }
+
+  /**
+   * Attach the log-path change observer (VE-2/VE-3): on every LOCAL Automerge
+   * change (origin != remote, gated by {@link SpaceState.applyingRemoteLog}),
+   * compute the delta via getChanges(before→after) and write it as ONE log-entry.
+   * The single producer of outgoing log-entry envelopes for this space.
+   */
+  private attachLogChangeObserver(space: SpaceState): void {
+    if (!this.logSyncEnabled) return
+    if (space.unsubLogChange) return
+    const docHandle = this.repo.handles[space.documentId]
+    if (!docHandle) return
+    const handler = (payload: { patchInfo?: { before: unknown; after: unknown } }) => {
+      // LOOP-GUARD: a remote-apply sets applyingRemoteLog — never emit a log-entry
+      // for a change we applied from a remote log-entry (the 5000+-outbox regression).
+      if (space.applyingRemoteLog) return
+      const info = payload?.patchInfo
+      if (!info) return
+      const changes = Automerge.getChanges(
+        info.before as Automerge.Doc<unknown>,
+        info.after as Automerge.Doc<unknown>,
+      )
+      if (changes.length === 0) return
+      // One local change() yields exactly one Automerge change; frame the array
+      // so the read path can unframe + applyChanges uniformly (VE-2).
+      void this.writeLocalUpdateViaLog(space, frameChanges(changes))
+    }
+    docHandle.on('change', handler)
+    space.unsubLogChange = () => docHandle.off('change', handler)
+  }
+
+  /**
+   * VE-3/VE-4 read path: dispatch an incoming log-path message (log-entry/1.0 or
+   * sync-response/1.0) to the coordinator of the doc it targets. The wire docId is
+   * the canonical UUID spaceId, so the pre-route is a direct spaces.get(spaceId).
+   * LOOP-GUARD: the coordinator never writes/re-broadcasts on receive.
+   */
+  private async routeLogPathMessage(message: WireMessage): Promise<void> {
+    const docId = logPathDocId(message)
+    if (!docId) return
+    const space = this.spaces.get(docId)
+    if (!space) return
+    const coordinator = await this.getOrCreateCoordinator(space)
+    if (!coordinator) return
+    await coordinator.handleIncoming(message)
+  }
+
+  /**
+   * P2-NIT-1 (VE-4/VE-5): route a routed write-path `error` frame to the
+   * coordinator that has the correlated thid in-flight (so an error for doc A never
+   * false-triggers a restore-clone on doc B). Dropped if no coordinator owns it.
+   */
+  private async routeWritePathError(message: WireMessage): Promise<void> {
+    const thid = (message as { thid?: unknown }).thid
+    if (typeof thid !== 'string') return
+    for (const coordinator of this.coordinators.values()) {
+      if (coordinator.hasInFlightWrite(thid)) {
+        await coordinator.handleIncoming(message)
+        return
+      }
+    }
   }
 
   /**
@@ -2236,14 +2774,17 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
         return { kind: 'applied', durable: true }
       }
 
-      // Import the doc into automerge-repo with the SAME documentId as the sender
-      // so automerge-repo can sync them via the NetworkAdapter. Die documentUrl
-      // stammt aus dem GCM-geschützten Snapshot-Payload (M2) und wurde oben
-      // validiert. repo.import() is what creates the doc handle under the
-      // sender's docId — ohne Snapshot-Binary wird der deterministische
-      // Bootstrap importiert (members-Container-Seed, Review-Minor): Inhalt
-      // kommt via regulaeren Live-Sync.
-      const docHandle = this.repo.import<any>(docBinary ?? this.inviteBootstrapBinary(spaceId), { docId: senderDocId! })
+      // Import the doc into automerge-repo. Outside log-sync: under the SENDER's
+      // documentId (from the GCM-protected snapshot) so automerge-repo's native
+      // sync converges them via the NetworkAdapter. Under log-sync (VE-9): under
+      // the docId DERIVED from the canonical UUID spaceId — every device re-maps
+      // the SAME base58 id from the SAME UUID, independent of the snapshot
+      // documentUrl (cold-start re-map invariant). The creator imported under the
+      // identical derived id, so the snapshot's lineage still applies. Without a
+      // snapshot binary the deterministic bootstrap is imported (members-container
+      // seed); live content rides the log path.
+      const importDocId = this.logSyncEnabled ? spaceIdToDocumentId(spaceId) : senderDocId!
+      const docHandle = this.repo.import<any>(docBinary ?? this.inviteBootstrapBinary(spaceId), { docId: importDocId })
       // Note: repo.import() with docId does NOT call doneLoading() (automerge-repo bug),
       // so whenReady() would timeout. The doc IS loaded though — call doneLoading() ourselves.
       if (!docHandle.isReady()) {
@@ -2303,6 +2844,28 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
       await this._persistSpaceMetadata(spaceState)
       // Flush repo so the doc is persisted to IndexedDB
       await this.repo.flush([docHandle.documentId])
+
+      // VE-8/VE-4 (Sync 002 §207): the joining member runs the FULL publish at
+      // invite-accept — space-register (idempotent first-writer-wins for the
+      // creator's set) → present-capability → sync-request head-abgleich — BEFORE
+      // any local write, then catches up the existing log. The log observer is
+      // attached so subsequent edits append from the right seq.
+      if (this.logSyncEnabled) {
+        this.attachLogChangeObserver(spaceState)
+        const coordinator = await this.getOrCreateCoordinator(spaceState)
+        if (coordinator) {
+          await coordinator.ensurePublished().catch((err) => {
+            if (err instanceof AuthorMismatchError) {
+              console.error('[ReplicationAdapter] AUTHOR_MISMATCH during join publish:', err.message)
+            } else {
+              console.debug('[ReplicationAdapter] join first-publication deferred (will retry):', err)
+            }
+          })
+          await coordinator.catchUp().catch((err) =>
+            console.warn('[ReplicationAdapter] join log catch-up failed:', err),
+          )
+        }
+      }
 
       // Save to CompactStore (fire-and-forget)
       this._saveToCompactStore(spaceState).catch(() => {})
@@ -2519,4 +3082,47 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
       ? { kind: 'applied', durable: true }
       : { kind: 'processing-incomplete', waitingOn: 'durable-apply' }
   }
+}
+
+// ── Slice A Phase 4 log-path helpers (module-level) ───────────────────────────
+
+/** True for a log-path envelope (log-entry/1.0 or sync-response/1.0). */
+function isLogPathMessage(message: WireMessage): boolean {
+  const type = (message as { type?: unknown }).type
+  return type === LOG_ENTRY_MESSAGE_TYPE || type === SYNC_RESPONSE_MESSAGE_TYPE
+}
+
+/** True for a routed write-path reject frame (`{ type:'error', thid, code }`). */
+function isErrorFrame(message: WireMessage): boolean {
+  return (message as { type?: unknown }).type === 'error'
+}
+
+/**
+ * Coarse docId pre-route for a log-path message (the coordinator re-derives +
+ * verifies). The wire docId is the canonical UUID spaceId (VE-9), so a direct
+ * spaces.get(docId) picks the owning coordinator:
+ *  - sync-response: `body.docId` directly.
+ *  - log-entry: decode (NOT verify) the inner JWS payload to read `docId`; the
+ *    coordinator's receiveLogEntry then does the authoritative verify + docId check.
+ */
+function logPathDocId(message: WireMessage): string | undefined {
+  const type = (message as { type?: unknown }).type
+  if (type === SYNC_RESPONSE_MESSAGE_TYPE) {
+    const body = (message as { body?: { docId?: unknown } }).body
+    return typeof body?.docId === 'string' ? body.docId : undefined
+  }
+  if (type === LOG_ENTRY_MESSAGE_TYPE) {
+    const entry = (message as { body?: { entry?: unknown } }).body?.entry
+    if (typeof entry !== 'string') return undefined
+    try {
+      const payloadSegment = entry.split('.')[1]
+      if (!payloadSegment) return undefined
+      const json = new TextDecoder().decode(decodeBase64Url(payloadSegment))
+      const payload = JSON.parse(json) as { docId?: unknown }
+      return typeof payload.docId === 'string' ? payload.docId : undefined
+    } catch {
+      return undefined
+    }
+  }
+  return undefined
 }

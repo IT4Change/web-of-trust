@@ -1,5 +1,6 @@
 export * from './CryptoAdapter'
 export * from './DiscoveryAdapter'
+export * from './DocLogStore'
 export * from './GraphCacheStore'
 export * from './identity-vault'
 export * from './key-management'

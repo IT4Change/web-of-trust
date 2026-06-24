@@ -1,0 +1,527 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { IndexedDBDocLogStore } from '../src/adapters/storage/IndexedDBDocLogStore'
+import { InMemoryDocLogStore } from '../src/adapters/storage/InMemoryDocLogStore'
+import { InProcessSeqLock, WebLocksSeqLock, type SeqLock } from '../src/adapters/storage/SeqLock'
+import type { DocLogStore } from '../src/ports/DocLogStore'
+import { WebCryptoProtocolCryptoAdapter } from '../src/adapters/protocol-crypto'
+import {
+  createLogEntryJws,
+  deriveLogPayloadNonce,
+  encryptLogPayload,
+  publicKeyToDidKey,
+} from '../src/protocol'
+
+// ── Realistic build(): exactly what the later adapter (VE-2+) will do ────────
+// deterministic nonce(deviceId,seq) → AES-GCM encrypt CRDT update under the
+// Space Content Key → sign the LogEntryPayload as a JWS. Driving the store with
+// the REAL crypto lets the crash/atomicity tests demonstrate the concrete
+// nonce-reuse danger the invariants prevent, not a stand-in.
+const crypto = new WebCryptoProtocolCryptoAdapter()
+const SIGNING_SEED = new Uint8Array(32).fill(7)
+const CONTENT_KEY = new Uint8Array(32).fill(9)
+
+function uuid(): string {
+  return globalThis.crypto.randomUUID()
+}
+
+async function makeAuthorKid(): Promise<string> {
+  const pub = await crypto.ed25519PublicKeyFromSeed(SIGNING_SEED)
+  return `${publicKeyToDidKey(pub)}#${publicKeyToDidKey(pub).slice('did:key:'.length)}`
+}
+
+/** Build a real encrypted+signed log-entry JWS for the given coordinates. */
+async function buildRealEntry(
+  deviceId: string,
+  docId: string,
+  seq: number,
+  plaintext: string,
+  authorKid: string,
+): Promise<string> {
+  const { blobBase64Url } = await encryptLogPayload({
+    crypto,
+    spaceContentKey: CONTENT_KEY,
+    deviceId,
+    seq,
+    plaintext: new TextEncoder().encode(plaintext),
+  })
+  return createLogEntryJws({
+    payload: {
+      seq,
+      deviceId,
+      docId,
+      authorKid,
+      keyGeneration: 0,
+      data: blobBase64Url,
+      timestamp: new Date(1_700_000_000_000 + seq).toISOString(),
+    },
+    signingSeed: SIGNING_SEED,
+  })
+}
+
+// The two implementations are exercised against an identical contract. The
+// IndexedDB factory takes a UNIQUE db name per case (isolation) and lets a test
+// reopen the SAME name on a fresh instance to simulate crash + restart.
+type Factory = (dbName: string, lock?: SeqLock) => DocLogStore
+
+const implementations: Array<{ name: string; create: Factory; durable: boolean }> = [
+  {
+    name: 'InMemoryDocLogStore',
+    create: (_dbName, lock) => new InMemoryDocLogStore(lock),
+    durable: false,
+  },
+  {
+    name: 'IndexedDBDocLogStore',
+    create: (dbName, lock) => new IndexedDBDocLogStore(dbName, lock),
+    durable: true,
+  },
+]
+
+let dbCounter = 0
+function freshDbName(): string {
+  return `test-doc-log-${Date.now()}-${++dbCounter}`
+}
+
+describe.each(implementations)('DocLogStore contract — $name', ({ create, durable }) => {
+  let authorKid: string
+  beforeEach(async () => {
+    authorKid = await makeAuthorKid()
+  })
+
+  // ── Group 5: lifecycle — getPending → markAcked → no longer pending ───────
+  describe('lifecycle (Group 5)', () => {
+    it('appends seq=0,1,2 in order, lists them pending, then markAcked removes them', async () => {
+      const store = create(freshDbName())
+      await store.init()
+      const deviceId = uuid()
+      const docId = uuid()
+
+      const e0 = await store.appendLocalEntry({
+        deviceId,
+        docId,
+        build: (seq) => buildRealEntry(deviceId, docId, seq, 'a', authorKid),
+      })
+      const e1 = await store.appendLocalEntry({
+        deviceId,
+        docId,
+        build: (seq) => buildRealEntry(deviceId, docId, seq, 'b', authorKid),
+      })
+      expect(e0.seq).toBe(0)
+      expect(e1.seq).toBe(1)
+      expect(e0.status).toBe('pending')
+
+      const pending = await store.getPending()
+      expect(pending.map((p) => p.seq)).toEqual([0, 1])
+
+      await store.markAcked(docId, deviceId, 0)
+      const stillPending = await store.getPending()
+      expect(stillPending.map((p) => p.seq)).toEqual([1])
+
+      // getEntry still returns the acked entry with its unchanged JWS.
+      const acked = await store.getEntry(docId, deviceId, 0)
+      expect(acked?.status).toBe('acked')
+      expect(acked?.entryJws).toBe(e0.entryJws)
+
+      // markAcked is a no-op on an already-acked / unknown entry.
+      await expect(store.markAcked(docId, deviceId, 0)).resolves.toBeUndefined()
+      await expect(store.markAcked(docId, deviceId, 999)).resolves.toBeUndefined()
+    })
+  })
+
+  // ── Group 4: heads = max seq per device (own + applied remote) ────────────
+  describe('getKnownHeads (Group 4)', () => {
+    it('returns the max seq per device across own writes and recordRemoteApplied', async () => {
+      const store = create(freshDbName())
+      await store.init()
+      const ownDevice = uuid()
+      const remoteDevice = uuid()
+      const otherDoc = uuid()
+      const docId = uuid()
+
+      // Own writes: seq 0,1,2 on docId.
+      for (let i = 0; i < 3; i++) {
+        await store.appendLocalEntry({
+          deviceId: ownDevice,
+          docId,
+          build: (seq) => buildRealEntry(ownDevice, docId, seq, `own-${i}`, authorKid),
+        })
+      }
+      // Applied remote entries on docId (seq 0 then 5 — non-contiguous max).
+      await store.recordRemoteApplied({ docId, deviceId: remoteDevice, seq: 0 })
+      await store.recordRemoteApplied({ docId, deviceId: remoteDevice, seq: 5 })
+      // A different doc must not leak into this doc's heads.
+      await store.recordRemoteApplied({ docId: otherDoc, deviceId: remoteDevice, seq: 42 })
+
+      const heads = await store.getKnownHeads(docId)
+      expect(heads).toEqual({ [ownDevice]: 2, [remoteDevice]: 5 })
+
+      // Unknown doc → empty heads.
+      expect(await store.getKnownHeads(uuid())).toEqual({})
+    })
+
+    it('recordRemoteApplied is idempotent and never clobbers a local pending entry', async () => {
+      const store = create(freshDbName())
+      await store.init()
+      const deviceId = uuid()
+      const docId = uuid()
+
+      const local = await store.appendLocalEntry({
+        deviceId,
+        docId,
+        build: (seq) => buildRealEntry(deviceId, docId, seq, 'local', authorKid),
+      })
+      // A spurious remote record for the SAME (deviceId,seq) must not overwrite
+      // our pending local JWS nor downgrade its status.
+      await store.recordRemoteApplied({ docId, deviceId, seq: 0, entryJws: 'REMOTE-JUNK' })
+      const after = await store.getEntry(docId, deviceId, 0)
+      expect(after?.entryJws).toBe(local.entryJws)
+      expect(after?.status).toBe('pending')
+
+      // Re-applying the same remote entry twice keeps a single head value.
+      const remote = uuid()
+      await store.recordRemoteApplied({ docId, deviceId: remote, seq: 3 })
+      await store.recordRemoteApplied({ docId, deviceId: remote, seq: 3 })
+      expect((await store.getKnownHeads(docId))[remote]).toBe(3)
+    })
+  })
+
+  // ── Group 2: cross-tab atomicity proxy — concurrent appends get 0..N-1 ────
+  describe('cross-tab seq atomicity (Group 2)', () => {
+    it('N concurrent appendLocalEntry on the same (deviceId,docId) yield exactly 0..N-1, all distinct', async () => {
+      const store = create(freshDbName())
+      await store.init()
+      const deviceId = uuid()
+      const docId = uuid()
+      const N = 25
+
+      // Promise.all with no await between launches: the SeqLock must serialize
+      // the read-max-seq → build → persist section. Without it, separate
+      // readers would observe the same maxSeq and collide on seq=k.
+      const results = await Promise.all(
+        Array.from({ length: N }, (_, i) =>
+          store.appendLocalEntry({
+            deviceId,
+            docId,
+            build: (seq) => buildRealEntry(deviceId, docId, seq, `c-${i}`, authorKid),
+          }),
+        ),
+      )
+
+      const seqs = results.map((r) => r.seq).sort((a, b) => a - b)
+      expect(seqs).toEqual(Array.from({ length: N }, (_, i) => i))
+      expect(new Set(seqs).size).toBe(N) // all distinct ⇒ no nonce reuse
+
+      const heads = await store.getKnownHeads(docId)
+      expect(heads[deviceId]).toBe(N - 1)
+    })
+
+    if (durable) {
+      it('NEGATIVE CONTROL: raw read-modify-write WITHOUT the lock collides (proves the lock is required)', async () => {
+        // Same fake-IndexedDB, but bypassing appendLocalEntry: read max seq,
+        // await (yield the microtask queue), then write. Concurrent runs all see
+        // the same maxSeq → duplicate seqs → the very nonce reuse the lock
+        // prevents. This documents WHY the SeqLock (not a per-tab IDB txn) is
+        // the atomicity boundary.
+        const { openDB } = await import('idb')
+        const dbName = freshDbName()
+        const db = await openDB(dbName, 1, {
+          upgrade(d) {
+            d.createObjectStore('e', { keyPath: ['docId', 'deviceId', 'seq'] })
+          },
+        })
+        const deviceId = uuid()
+        const docId = uuid()
+
+        async function unsafeAppend(): Promise<number> {
+          // read max (short txn)
+          const all = (await db.getAll('e')) as Array<{ seq: number }>
+          const maxSeq = all.reduce((m, r) => Math.max(m, r.seq), -1)
+          const seq = maxSeq + 1
+          await Promise.resolve() // simulate the async build() gap
+          await db.put('e', { docId, deviceId, seq })
+          return seq
+        }
+
+        const seqs = await Promise.all(Array.from({ length: 10 }, () => unsafeAppend()))
+        const distinct = new Set(seqs).size
+        // The unguarded path MUST produce at least one collision.
+        expect(distinct).toBeLessThan(seqs.length)
+        db.close()
+      })
+    }
+  })
+
+  // ── Group 1: crash-safety / persist-before-send ───────────────────────────
+  describe('crash-safety / persist-before-send (Group 1)', () => {
+    it('build() that THROWS persists nothing and leaves the seq free for reuse with new plaintext (no wire reuse)', async () => {
+      const store = create(freshDbName())
+      await store.init()
+      const deviceId = uuid()
+      const docId = uuid()
+
+      // Crash DURING build (before persist): seq 0 is reserved internally but
+      // nothing is written and nothing is sent.
+      await expect(
+        store.appendLocalEntry({
+          deviceId,
+          docId,
+          build: async () => {
+            throw new Error('crash during crypto build')
+          },
+        }),
+      ).rejects.toThrow('crash during crypto build')
+
+      // Nothing persisted, seq NOT consumed.
+      expect(await store.getPending()).toEqual([])
+      expect(await store.getEntry(docId, deviceId, 0)).toBeNull()
+      expect(await store.getKnownHeads(docId)).toEqual({})
+
+      // The next append reuses the SAME seq=0 with NEW plaintext — provably
+      // safe, because no JWS for seq=0 ever hit the wire.
+      const recovered = await store.appendLocalEntry({
+        deviceId,
+        docId,
+        build: (seq) => buildRealEntry(deviceId, docId, seq, 'after-crash', authorKid),
+      })
+      expect(recovered.seq).toBe(0)
+      expect(recovered.status).toBe('pending')
+    })
+  })
+
+  // ── Group 5b: identical contract — getEntry round-trips the exact JWS ─────
+  it('getEntry returns null for an absent entry', async () => {
+    const store = create(freshDbName())
+    await store.init()
+    expect(await store.getEntry(uuid(), uuid(), 0)).toBeNull()
+  })
+})
+
+// ── Group 1 (durable only): true crash + restart on the SAME database ────────
+describe('IndexedDBDocLogStore — durable crash + restart (Group 1)', () => {
+  let authorKid: string
+  beforeEach(async () => {
+    authorKid = await makeAuthorKid()
+  })
+
+  it('a persisted pending entry survives a process "crash" and a fresh instance replays the bit-identical JWS', async () => {
+    const dbName = freshDbName()
+    const deviceId = uuid()
+    const docId = uuid()
+
+    // Instance A persists one entry, then "crashes" (we simply drop the ref;
+    // the entry is already durable in fake-IndexedDB) BEFORE any send/ack.
+    const storeA = new IndexedDBDocLogStore(dbName)
+    await storeA.init()
+    const appended = await storeA.appendLocalEntry({
+      deviceId,
+      docId,
+      build: (seq) => buildRealEntry(deviceId, docId, seq, 'durable-payload', authorKid),
+    })
+
+    // Instance B opens the SAME database — the crash-recovery view.
+    const storeB = new IndexedDBDocLogStore(dbName)
+    await storeB.init()
+
+    const pending = await storeB.getPending()
+    expect(pending).toHaveLength(1)
+    expect(pending[0].status).toBe('pending')
+    // The retry sends the STORED JWS unchanged (broker dedups via contentHash).
+    expect(pending[0].entryJws).toBe(appended.entryJws)
+
+    const fetched = await storeB.getEntry(docId, deviceId, 0)
+    expect(fetched?.entryJws).toBe(appended.entryJws)
+
+    // Heads survive the restart too.
+    expect((await storeB.getKnownHeads(docId))[deviceId]).toBe(0)
+
+    // After restart, the next seq continues at maxSeq+1 (never re-using seq=0).
+    const next = await storeB.appendLocalEntry({
+      deviceId,
+      docId,
+      build: (seq) => buildRealEntry(deviceId, docId, seq, 'second', authorKid),
+    })
+    expect(next.seq).toBe(1)
+  })
+
+  it('proves the persisted seq=0 JWS embeds the deterministic nonce(deviceId,0) — why rebuilding with new bytes would reuse it', async () => {
+    // This makes invariant 1 concrete: the stored entry's `data` blob begins
+    // with nonce(deviceId, seq) = SHA-256(deviceId|seq)[0:12]. Re-building seq=0
+    // with DIFFERENT plaintext would encrypt under the SAME (key, nonce) → an
+    // AES-GCM break. Hence the store persists the JWS once and never rebuilds.
+    const dbName = freshDbName()
+    const deviceId = uuid()
+    const docId = uuid()
+    const store = new IndexedDBDocLogStore(dbName)
+    await store.init()
+
+    const entry = await store.appendLocalEntry({
+      deviceId,
+      docId,
+      build: (seq) => buildRealEntry(deviceId, docId, seq, 'payload', authorKid),
+    })
+
+    const payloadB64 = JSON.parse(
+      new TextDecoder().decode(
+        Uint8Array.from(atob(entry.entryJws.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')), (c) =>
+          c.charCodeAt(0),
+        ),
+      ),
+    ) as { data: string; seq: number; deviceId: string }
+    expect(payloadB64.seq).toBe(0)
+    expect(payloadB64.deviceId).toBe(deviceId)
+
+    const expectedNonce = await deriveLogPayloadNonce(crypto, deviceId, 0)
+    const blob = Uint8Array.from(
+      atob(payloadB64.data.replace(/-/g, '+').replace(/_/g, '/')),
+      (c) => c.charCodeAt(0),
+    )
+    expect(Array.from(blob.slice(0, 12))).toEqual(Array.from(expectedNonce))
+  })
+})
+
+// ── Group 3: WebLocks path is wired when navigator.locks exists ──────────────
+// happy-dom exposes navigator.locks as a getter-only property, so we install
+// and remove the mock via Object.defineProperty rather than plain assignment.
+function installLocksMock(locks: unknown): void {
+  const nav = (globalThis as { navigator?: object }).navigator ?? {}
+  ;(globalThis as { navigator?: object }).navigator = nav
+  Object.defineProperty(nav, 'locks', { value: locks, configurable: true, writable: true })
+}
+function clearLocksMock(): void {
+  const nav = (globalThis as { navigator?: object }).navigator
+  if (nav && Object.prototype.hasOwnProperty.call(nav, 'locks')) {
+    Object.defineProperty(nav, 'locks', { value: undefined, configurable: true, writable: true })
+  }
+}
+
+describe('SeqLock — Web Locks path (Group 3)', () => {
+  let authorKid: string
+  beforeEach(async () => {
+    authorKid = await makeAuthorKid()
+  })
+  afterEach(() => {
+    // Remove the mock so it cannot bleed into other suites.
+    clearLocksMock()
+    vi.restoreAllMocks()
+  })
+
+  it('appendLocalEntry routes seq reservation through navigator.locks.request when present', async () => {
+    // happy-dom has no navigator.locks; inject a spy LockManager that honors the
+    // exclusive contract (runs the callback to completion). Proves the cross-tab
+    // guarantee is actually wired, not merely the in-process fallback.
+    const request = vi.fn(
+      async (_name: string, _opts: { mode: string }, cb: () => Promise<unknown>) => cb(),
+    )
+    installLocksMock({ request })
+
+    const lock = new WebLocksSeqLock()
+    const store = new IndexedDBDocLogStore(freshDbName(), lock)
+    await store.init()
+    const deviceId = uuid()
+    const docId = uuid()
+
+    await store.appendLocalEntry({
+      deviceId,
+      docId,
+      build: (seq) => buildRealEntry(deviceId, docId, seq, 'web-locks', authorKid),
+    })
+
+    expect(request).toHaveBeenCalledTimes(1)
+    expect(request).toHaveBeenCalledWith(
+      `doclog:${deviceId}:${docId}`,
+      { mode: 'exclusive' },
+      expect.any(Function),
+    )
+  })
+
+  it('WebLocksSeqLock serializes concurrent runs on the same key (exclusive contract)', async () => {
+    // A faithful exclusive LockManager: per-name promise chain. With it, two
+    // concurrent appends still get distinct seqs 0 and 1.
+    const chains = new Map<string, Promise<unknown>>()
+    const request = vi.fn(
+      <T>(name: string, _opts: { mode: string }, cb: () => Promise<T>): Promise<T> => {
+        const prev = chains.get(name) ?? Promise.resolve()
+        const run = prev.then(() => cb())
+        chains.set(
+          name,
+          run.then(
+            () => undefined,
+            () => undefined,
+          ),
+        )
+        return run
+      },
+    )
+    installLocksMock({ request })
+
+    const store = new IndexedDBDocLogStore(freshDbName(), new WebLocksSeqLock())
+    await store.init()
+    const deviceId = uuid()
+    const docId = uuid()
+
+    const [a, b] = await Promise.all([
+      store.appendLocalEntry({
+        deviceId,
+        docId,
+        build: (seq) => buildRealEntry(deviceId, docId, seq, 'p0', authorKid),
+      }),
+      store.appendLocalEntry({
+        deviceId,
+        docId,
+        build: (seq) => buildRealEntry(deviceId, docId, seq, 'p1', authorKid),
+      }),
+    ])
+    expect([a.seq, b.seq].sort()).toEqual([0, 1])
+  })
+
+  it('constructing WebLocksSeqLock without navigator.locks throws', () => {
+    clearLocksMock()
+    expect(() => new WebLocksSeqLock()).toThrow('Web Locks')
+  })
+})
+
+// ── Public surface: ports + adapters exports resolve as documented ───────────
+describe('DocLogStore public exports', () => {
+  it('exposes the port types + in-memory impl + SeqLock from the root, and the durable adapter only from the indexeddb subpath', async () => {
+    const root = await import('../src')
+    const storageBarrel = await import('../src/adapters/storage')
+    const indexeddbSubpath = await import('../src/adapters/storage/indexeddb')
+
+    // InMemory + SeqLock are engine-neutral → root + storage barrel.
+    expect(typeof root.InMemoryDocLogStore).toBe('function')
+    expect(typeof root.InProcessSeqLock).toBe('function')
+    expect(typeof root.WebLocksSeqLock).toBe('function')
+    expect(typeof root.createSeqLock).toBe('function')
+    expect(typeof storageBarrel.InMemoryDocLogStore).toBe('function')
+
+    // Durable browser adapter is exposed ONLY via the fine-grained subpath
+    // (mirrors the IndexedDbIdentitySeedVault posture).
+    expect(typeof indexeddbSubpath.IndexedDBDocLogStore).toBe('function')
+    expect((root as Record<string, unknown>).IndexedDBDocLogStore).toBeUndefined()
+    expect(
+      (storageBarrel as Record<string, unknown>).IndexedDBDocLogStore,
+    ).toBeUndefined()
+  })
+})
+
+describe('InProcessSeqLock', () => {
+  it('serializes same-key runs and allows different keys to interleave', async () => {
+    const lock = new InProcessSeqLock()
+    const order: string[] = []
+    const slow = lock.run('k', async () => {
+      await Promise.resolve()
+      order.push('slow-end')
+    })
+    const fast = lock.run('k', async () => {
+      order.push('fast-start')
+    })
+    await Promise.all([slow, fast])
+    // fast must wait for slow on the same key.
+    expect(order).toEqual(['slow-end', 'fast-start'])
+  })
+
+  it('does not let one run failure poison the next on the same key', async () => {
+    const lock = new InProcessSeqLock()
+    await expect(lock.run('k', async () => Promise.reject(new Error('boom')))).rejects.toThrow('boom')
+    await expect(lock.run('k', async () => 42)).resolves.toBe(42)
+  })
+})

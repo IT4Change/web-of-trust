@@ -1,6 +1,6 @@
 import type { ProtocolCryptoAdapter } from '../crypto/ports'
 import type { JsonValue } from '../crypto/jcs'
-import { createJcsEd25519Jws, verifyJwsWithPublicKey } from '../crypto/jws'
+import { createJcsEd25519Jws, createJcsEd25519JwsWithSigner, verifyJwsWithPublicKey, type JcsEd25519SignFn } from '../crypto/jws'
 import { didOrKidToDid } from '../identity/did-key'
 
 /**
@@ -81,6 +81,36 @@ export async function createPersonalDocCapabilityJws(
     { alg: 'EdDSA', kid: options.kid, typ: 'wot-capability+jwt' },
     options.payload as unknown as JsonValue,
     options.signingSeed,
+  )
+}
+
+export interface CreatePersonalDocCapabilityJwsWithSignerOptions {
+  payload: PersonalDocCapabilityPayload
+  /** The owner's Identity-Key verification-method id (`<did>#<vm>`); DID == audience. */
+  kid: string
+  /**
+   * Signs the JWS signing input with the owner's Identity-Key Ed25519 key
+   * (operation-shaped; the vault never returns the raw seed). The kid's DID MUST
+   * resolve to this key so `verifyPersonalDocCapabilityJws` accepts it.
+   */
+  sign: JcsEd25519SignFn
+}
+
+/**
+ * Like {@link createPersonalDocCapabilityJws}, but signs via an injected signer
+ * (VE-6): the Personal-Doc capability is self-issued under the operation-shaped
+ * Identity Key, which never exposes a raw seed. Mirrors
+ * `createLogEntryJwsWithSigner`.
+ */
+export async function createPersonalDocCapabilityJwsWithSigner(
+  options: CreatePersonalDocCapabilityJwsWithSignerOptions,
+): Promise<string> {
+  assertPersonalDocCapabilityPayload(options.payload)
+  assertPersonalDocKid(options.kid, options.payload.audience)
+  return createJcsEd25519JwsWithSigner(
+    { alg: 'EdDSA', kid: options.kid, typ: 'wot-capability+jwt' },
+    options.payload as unknown as JsonValue,
+    options.sign,
   )
 }
 

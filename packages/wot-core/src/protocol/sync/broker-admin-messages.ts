@@ -1,6 +1,6 @@
 import { decodeJws, type DecodedJws } from '../crypto/jws'
 import type { JsonValue } from '../crypto/jcs'
-import { createJcsEd25519Jws } from '../crypto/jws'
+import { createJcsEd25519Jws, createJcsEd25519JwsWithSigner, type JcsEd25519SignFn } from '../crypto/jws'
 import type { ProtocolCryptoAdapter } from '../crypto/ports'
 import { didKeyToPublicKeyBytes, didOrKidToDid } from '../identity/did-key'
 import type { BrokerErrorCode } from './broker-error'
@@ -172,6 +172,36 @@ export interface CreateAdminRemoveMessageOptions {
   signingSeed: Uint8Array
 }
 
+/**
+ * Operation-shaped variant of {@link CreateSpaceRegisterMessageOptions}: instead
+ * of a raw `signingSeed` the caller supplies a `sign` function that produces the
+ * Ed25519 signature over the JWS signing input. Required when the admin's
+ * Identity key lives behind an operation-shaped vault (no raw seed). The signer
+ * MUST be the Identity key that `kid`'s `did:key` resolves to — otherwise the
+ * relay's `verifySpaceRegisterMessage` rejects it (AUTH_INVALID). The kid's DID
+ * MUST still be one of `adminDids`.
+ */
+export interface CreateSpaceRegisterMessageWithSignerOptions {
+  spaceId: string
+  spaceCapabilityVerificationKey: string
+  adminDids: string[]
+  /** The signing `adminDid` verification-method id (`<did>#<vm>`); DID part ∈ adminDids. */
+  kid: string
+  /** Signs the JWS signing input with the admin Identity Ed25519 key. */
+  sign: JcsEd25519SignFn
+}
+
+/** Operation-shaped variant of {@link CreateSpaceRotateMessageOptions} (see WithSigner rationale). */
+export interface CreateSpaceRotateMessageWithSignerOptions {
+  spaceId: string
+  newSpaceCapabilityVerificationKey: string
+  newGeneration: number
+  /** The signing `adminDid` verification-method id (`<did>#<vm>`). */
+  kid: string
+  /** Signs the JWS signing input with the admin Identity Ed25519 key. */
+  sign: JcsEd25519SignFn
+}
+
 // ---------------------------------------------------------------------------
 // Verify option shapes + result
 // ---------------------------------------------------------------------------
@@ -226,6 +256,32 @@ export async function createSpaceRegisterMessage(
     { alg: 'EdDSA', kid: options.kid },
     payload as unknown as JsonValue,
     options.signingSeed,
+  )
+  return { type: SPACE_REGISTER_MESSAGE_TYPE, registrationJws }
+}
+
+/**
+ * Operation-shaped {@link createSpaceRegisterMessage}: signs the inner JWS via a
+ * `sign` function (the admin Identity key behind an opaque vault) rather than a
+ * raw seed. Identical wire output + identical TOFU constraint (kid-DID ∈
+ * adminDids). Used by the replication adapters whose IdentitySession never
+ * exposes the seed, so the JWS signature matches the kid-DID's `did:key` and the
+ * real relay accepts the registration.
+ */
+export async function createSpaceRegisterMessageWithSigner(
+  options: CreateSpaceRegisterMessageWithSignerOptions,
+): Promise<SpaceRegisterMessage> {
+  const payload = parseSpaceRegisterPayload({
+    type: SPACE_REGISTER_MESSAGE_TYPE,
+    spaceId: options.spaceId,
+    spaceCapabilityVerificationKey: options.spaceCapabilityVerificationKey,
+    adminDids: options.adminDids,
+  })
+  assertAdminKidInList(options.kid, payload.adminDids)
+  const registrationJws = await createJcsEd25519JwsWithSigner(
+    { alg: 'EdDSA', kid: options.kid },
+    payload as unknown as JsonValue,
+    options.sign,
   )
   return { type: SPACE_REGISTER_MESSAGE_TYPE, registrationJws }
 }
@@ -316,6 +372,31 @@ export async function createSpaceRotateMessage(
     { alg: 'EdDSA', kid: options.kid },
     payload as unknown as JsonValue,
     options.signingSeed,
+  )
+  return { type: SPACE_ROTATE_MESSAGE_TYPE, rotationJws }
+}
+
+/**
+ * Operation-shaped {@link createSpaceRotateMessage}: signs the inner JWS via a
+ * `sign` function (the admin Identity key behind an opaque vault) rather than a
+ * raw seed. Identical wire output. The relay's `resolveAdminSigner` derives the
+ * signer from the JWS `kid` and requires the signature to verify against that
+ * `did:key`, so the signer MUST be the admin's Identity key.
+ */
+export async function createSpaceRotateMessageWithSigner(
+  options: CreateSpaceRotateMessageWithSignerOptions,
+): Promise<SpaceRotateMessage> {
+  const payload = parseSpaceRotatePayload({
+    type: SPACE_ROTATE_MESSAGE_TYPE,
+    spaceId: options.spaceId,
+    newSpaceCapabilityVerificationKey: options.newSpaceCapabilityVerificationKey,
+    newGeneration: options.newGeneration,
+  })
+  assertAdminKid(options.kid)
+  const rotationJws = await createJcsEd25519JwsWithSigner(
+    { alg: 'EdDSA', kid: options.kid },
+    payload as unknown as JsonValue,
+    options.sign,
   )
   return { type: SPACE_ROTATE_MESSAGE_TYPE, rotationJws }
 }

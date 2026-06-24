@@ -70,6 +70,12 @@ export type { ReplicationAdapter, SpaceHandle, TransactOptions } from './ports/R
 export type { PublishStateStore, PublishStateField } from './ports/PublishStateStore'
 export type { GraphCacheStore, GraphCacheSnapshot, CachedGraphEntry } from './ports/GraphCacheStore'
 export type { OutboxStore, OutboxEntry } from './ports/OutboxStore'
+export type {
+  DocLogStore,
+  LocalLogEntry,
+  AppendLocalEntryParams,
+  RecordRemoteAppliedEntry,
+} from './ports/DocLogStore'
 export type { AuthorizationAdapter } from './application/authorization/AuthorizationAdapter'
 
 // Crypto Utilities
@@ -127,6 +133,9 @@ export type { VaultPushSchedulerConfig } from './adapters/vault/VaultPushSchedul
 // Adapter Implementations (CRDT-agnostic)
 export { WebCryptoAdapter } from './adapters/crypto/WebCryptoAdapter'
 export { InMemoryMessagingAdapter } from './adapters/messaging/InMemoryMessagingAdapter'
+// Slice A (Phase 4): engine-neutral restore/clone mechanism for the log path.
+export { createRestoreCloneHandler } from './adapters/messaging/logRestoreClone'
+export type { RestoreCloneControllerConfig } from './adapters/messaging/logRestoreClone'
 export { CompactStorageManager } from './storage/CompactStorageManager'
 export { OfflineFirstDiscoveryAdapter } from './adapters/discovery/OfflineFirstDiscoveryAdapter'
 export { InMemoryPublishStateStore } from './adapters/discovery/InMemoryPublishStateStore'
@@ -135,6 +144,14 @@ export { OutboxMessagingAdapter } from './adapters/messaging/OutboxMessagingAdap
 export { InMemoryOutboxStore } from './adapters/messaging/InMemoryOutboxStore'
 export { InMemorySpaceMetadataStorage } from './adapters/storage/InMemorySpaceMetadataStorage'
 export { InMemoryCompactStore } from './adapters/storage/InMemoryCompactStore'
+export { InMemoryDocLogStore } from './adapters/storage/InMemoryDocLogStore'
+export {
+  WebLocksSeqLock,
+  InProcessSeqLock,
+  createSeqLock,
+  hasWebLocks,
+} from './adapters/storage/SeqLock'
+export type { SeqLock } from './adapters/storage/SeqLock'
 export type { SpaceMetadataStorage, PersistedSpaceMetadata, PersistedGroupKey } from './ports/SpaceMetadataStorage'
 export { InMemoryAuthorizationAdapter } from './adapters/authorization/InMemoryAuthorizationAdapter'
 export { PersonalDocOutboxStore } from './adapters/messaging/AutomergeOutboxStore'
