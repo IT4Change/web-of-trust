@@ -335,6 +335,8 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
   private readonly logSyncEnabled: boolean
   /** Active per-device UUID (re-bound process-wide by a restore-clone, VE-4/VE-5). */
   private deviceId: string
+  /** True once the store-bound deviceId has been resolved (BLOCKER-1b). */
+  private deviceIdResolved = false
   /** Per-space LogSyncCoordinator (engine-neutral orchestration), keyed by spaceId UUID. */
   private coordinators = new Map<string, LogSyncCoordinator>()
   private docLogStoreInitialized = false
@@ -2240,6 +2242,32 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
   }
 
   /**
+   * BLOCKER-1b: resolve the deviceId from the DURABLE log store, not from config /
+   * external localStorage. Binding the deviceId to the log-store lifecycle makes a
+   * store wipe (which empties the log) ALSO mint a fresh deviceId — a fresh nonce
+   * namespace — so a leaked store can never re-enter seq=0 under a stable deviceId.
+   * Idempotent + cached in `this.deviceId` (process-wide: one device, one id across
+   * all docs). Falls back to the config/random id only when no store is wired.
+   */
+  private async ensureDeviceId(): Promise<string> {
+    if (this.deviceIdResolved) return this.deviceId
+    const store = await this.ensureDocLogStore()
+    if (!store) {
+      this.deviceIdResolved = true
+      return this.deviceId
+    }
+    // The DURABLE store is authoritative for the deviceId: it mints+persists a
+    // fresh one on an empty store and returns the established (or restore-cloned)
+    // id thereafter. A store wipe drops it ⇒ a fresh nonce namespace (BLOCKER-1b),
+    // never a re-entered seq=0 under a stable deviceId. The composition root mints
+    // this id FIRST and registers the messaging adapter with it, so the relay's
+    // author-binding (log deviceId == registered deviceId) holds.
+    this.deviceId = await store.getOrCreateDeviceId()
+    this.deviceIdResolved = true
+    return this.deviceId
+  }
+
+  /**
    * The log-entry author kid (`<did>#sig-0`, the Identity-Key verification method).
    * `verifyLogEntryJws` resolves the key from the DID part; signing is via
    * {@link IdentitySession.signEd25519}, so the kid's key matches the signer.
@@ -2364,11 +2392,14 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
     if (existing) return existing
     const logStore = await this.ensureDocLogStore()
     if (!logStore) return null
+    // BLOCKER-1b: bind the deviceId to the durable store BEFORE constructing the
+    // coordinator (the seq-namespace owner), so a wiped store yields a fresh id.
+    const deviceId = await this.ensureDeviceId()
 
     const sendControlFrame = (this.messaging as MessagingAdapter).sendControlFrame!
     const coordinator = new LogSyncCoordinator({
       docId: spaceId, // VE-9: canonical UUID, never the base58 documentId.
-      deviceId: this.deviceId,
+      deviceId,
       ownDid: this.identity.getDid(),
       authorKid: this.authorKid(),
       crypto: this.crypto,
@@ -2416,8 +2447,11 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
     return createRestoreCloneHandler({
       identity: this.identity,
       messaging: this.messaging,
-      onDeviceIdChanged: (_docId, newDeviceId) => {
+      onDeviceIdChanged: async (_docId, newDeviceId) => {
         this.deviceId = newDeviceId
+        // BLOCKER-1b: persist the restore-clone's new deviceId into the durable
+        // store so a reload adopts the NEW namespace, never the revoked one.
+        await this.docLogStore?.setDeviceId(newDeviceId)
       },
     })
   }

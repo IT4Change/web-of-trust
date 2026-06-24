@@ -53,6 +53,16 @@ export class WebSocketMessagingAdapter implements MessagingAdapter {
     string,
     { resolve: (receipt: ControlFrameReceipt) => void; reject: (err: Error) => void }
   >()
+  /**
+   * CONCERN-2: per-docId serialization tail for control frames. The receipt
+   * correlation is keyed by docId and `pendingControlFrames` holds ONE waiter per
+   * docId, so two control frames for the SAME docId in flight at once (e.g. a
+   * coordinator present-capability racing an out-of-band space-rotate) would
+   * overwrite each other's waiter → a spurious timeout. Chaining same-docId frames
+   * on this tail guarantees at most one is in flight per docId, independent of
+   * which caller path sent it. Different docIds still run concurrently.
+   */
+  private controlFrameTails = new Map<string, Promise<unknown>>()
   /** Buffer for messages that arrive before any onMessage handler is registered */
   private earlyMessageBuffer: WireMessage[] = []
   private heartbeatInterval: ReturnType<typeof setInterval> | null = null
@@ -261,6 +271,7 @@ export class WebSocketMessagingAdapter implements MessagingAdapter {
       waiter.reject(new Error('WebSocket disconnected before control-frame receipt'))
     }
     this.pendingControlFrames.clear()
+    this.controlFrameTails.clear()
     if (this.ws) {
       this.ws.close()
       this.ws = null
@@ -400,12 +411,38 @@ export class WebSocketMessagingAdapter implements MessagingAdapter {
    * docId.
    */
   async sendControlFrame(frame: ControlFrame): Promise<ControlFrameReceipt> {
-    if (this.state !== 'connected' || !this.ws) {
-      throw new Error('WebSocketMessagingAdapter: must call connect() before sendControlFrame()')
-    }
     const docId = controlFrameDocId(frame)
     if (!docId) {
       throw new Error('WebSocketMessagingAdapter: control frame has no docId for receipt correlation')
+    }
+    // CONCERN-2: serialize control frames per docId so a same-docId race (e.g. an
+    // out-of-band space-rotate vs. a present-capability) never overwrites the
+    // single per-docId receipt waiter. When NO same-docId frame is in flight, send
+    // immediately (preserving the VE-9 single-in-flight timing the callers rely
+    // on). When one IS in flight, chain behind it; the prior's rejection does not
+    // poison the next.
+    const prior = this.controlFrameTails.get(docId)
+    const run = prior
+      ? prior.then(
+          () => this.sendControlFrameNow(frame, docId),
+          () => this.sendControlFrameNow(frame, docId),
+        )
+      : this.sendControlFrameNow(frame, docId)
+    const tail = run.then(
+      () => undefined,
+      () => undefined,
+    )
+    this.controlFrameTails.set(docId, tail)
+    void tail.then(() => {
+      if (this.controlFrameTails.get(docId) === tail) this.controlFrameTails.delete(docId)
+    })
+    return run
+  }
+
+  /** Send one control frame and await its receipt (the per-docId-serialized body). */
+  private async sendControlFrameNow(frame: ControlFrame, docId: string): Promise<ControlFrameReceipt> {
+    if (this.state !== 'connected' || !this.ws) {
+      throw new Error('WebSocketMessagingAdapter: must call connect() before sendControlFrame()')
     }
 
     return new Promise<ControlFrameReceipt>((resolve, reject) => {

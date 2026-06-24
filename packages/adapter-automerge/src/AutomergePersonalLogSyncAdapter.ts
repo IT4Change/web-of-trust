@@ -81,7 +81,13 @@ export class AutomergePersonalLogSyncAdapter {
   private readonly personalKey: Uint8Array
   private readonly docId: string
   private readonly crypto: ProtocolCryptoAdapter
-  private readonly coordinator: LogSyncCoordinator
+  private readonly docLogStore: DocLogStore
+  private readonly mintDeviceId?: () => string
+  private readonly onDeviceIdChangedHook?: (newDeviceId: string, oldDeviceId: string) => void | Promise<void>
+  /** Built lazily in start() AFTER the deviceId is resolved from the store (BLOCKER-1b). */
+  private coordinator: LogSyncCoordinator | null = null
+  /** The deviceId fallback until the store-bound id is resolved. */
+  private deviceId: string
   private unsubDocChange: (() => void) | null = null
   private unsubMessage: (() => void) | null = null
   private unsubStateChange: (() => void) | null = null
@@ -96,14 +102,29 @@ export class AutomergePersonalLogSyncAdapter {
     this.personalKey = config.personalKey
     this.docId = config.docId
     this.crypto = config.crypto ?? new WebCryptoProtocolCryptoAdapter()
+    this.docLogStore = config.docLogStore
+    this.deviceId = config.deviceId
+    this.mintDeviceId = config.mintDeviceId
+    this.onDeviceIdChangedHook = config.onDeviceIdChanged
+  }
+
+  /**
+   * Build the coordinator AFTER resolving the deviceId from the durable store
+   * (BLOCKER-1b): the store mints+persists the per-device id, so a store wipe
+   * yields a fresh nonce namespace. Idempotent (built once).
+   */
+  private async ensureCoordinator(): Promise<LogSyncCoordinator> {
+    if (this.coordinator) return this.coordinator
+    await this.docLogStore.init()
+    this.deviceId = await this.docLogStore.getOrCreateDeviceId()
 
     this.coordinator = new LogSyncCoordinator({
       docId: this.docId, // VE-9: canonical UUID, never the base58 documentId.
-      deviceId: config.deviceId,
+      deviceId: this.deviceId,
       ownDid: this.identity.getDid(),
       authorKid: `${this.identity.getDid()}#sig-0`,
       crypto: this.crypto,
-      logStore: config.docLogStore,
+      logStore: this.docLogStore,
       control: {
         sendControlFrame: (frame) => this.messaging.sendControlFrame!(frame),
       },
@@ -126,9 +147,14 @@ export class AutomergePersonalLogSyncAdapter {
       onWriteRejected: createRestoreCloneHandler({
         identity: this.identity,
         messaging: this.messaging,
-        mintDeviceId: config.mintDeviceId,
-        onDeviceIdChanged: (_docId, newDeviceId, oldDeviceId) =>
-          config.onDeviceIdChanged?.(newDeviceId, oldDeviceId),
+        mintDeviceId: this.mintDeviceId,
+        onDeviceIdChanged: async (_docId, newDeviceId, oldDeviceId) => {
+          this.deviceId = newDeviceId
+          // BLOCKER-1b: persist the restore-clone's new deviceId so a reload adopts
+          // the NEW namespace, never the revoked one.
+          await this.docLogStore.setDeviceId(newDeviceId)
+          await this.onDeviceIdChangedHook?.(newDeviceId, oldDeviceId)
+        },
       }),
       // VE-6 (MUSS, identical strictness to Spaces): after a restore-clone
       // re-binds the deviceId, re-write the FULL Personal-Doc state as a fresh log
@@ -137,6 +163,7 @@ export class AutomergePersonalLogSyncAdapter {
       // PERSISTENT collision already rejects → the edit would never converge.
       onAfterRestoreClone: () => this.writeFullStateViaLog(),
     })
+    return this.coordinator
   }
 
   /**
@@ -145,6 +172,7 @@ export class AutomergePersonalLogSyncAdapter {
    * after a real (persistent) seq-collision restore. Generation stays 0.
    */
   private async writeFullStateViaLog(): Promise<void> {
+    if (!this.coordinator) return
     const doc = this.docHandle.doc()
     if (!doc) return
     const changes = Automerge.getAllChanges(doc)
@@ -158,23 +186,32 @@ export class AutomergePersonalLogSyncAdapter {
     })
   }
 
-  /** The underlying coordinator (test/inspection + manual catch-up). */
-  getCoordinator(): LogSyncCoordinator {
+  /** The underlying coordinator (test/inspection + manual catch-up); null until start() resolves it. */
+  getCoordinator(): LogSyncCoordinator | null {
     return this.coordinator
   }
 
-  /** The active local deviceId (re-bound by a restore-clone). */
+  /** The active local deviceId (store-bound; re-bound by a restore-clone). */
   getDeviceId(): string {
-    return this.coordinator.getDeviceId()
+    return this.coordinator?.getDeviceId() ?? this.deviceId
   }
 
   start(): void {
     if (this.started) return
     this.started = true
+    // Coordinator construction is async (it resolves the store-bound deviceId
+    // first, BLOCKER-1b). Kick off init; doc edits in tests happen after a wait.
+    void this.init().catch((err) => this.reportPublishError('init', err))
+  }
+
+  /** Async startup: build the coordinator (store-bound deviceId), then wire the paths. */
+  private async init(): Promise<void> {
+    const coordinator = await this.ensureCoordinator()
+    if (!this.started) return // destroyed during async init
 
     // First publication + catch-up: present-capability → sync-request head-abgleich
     // (VE-2/VE-4) BEFORE the first local write reserves seq.
-    void this.coordinator
+    void coordinator
       .catchUp()
       .catch((err) => this.reportPublishError('initial catch-up', err))
 
@@ -188,7 +225,7 @@ export class AutomergePersonalLogSyncAdapter {
         info.after as Automerge.Doc<unknown>,
       )
       if (changes.length === 0) return
-      void this.coordinator.writeLocalUpdate(frameChanges(changes)).catch((err) => {
+      void coordinator.writeLocalUpdate(frameChanges(changes)).catch((err) => {
         if (err instanceof AuthorMismatchError) {
           console.error('[AutomergePersonalLogSync] AUTHOR_MISMATCH on personal-doc write — hard stop:', err.message)
           return
@@ -205,17 +242,17 @@ export class AutomergePersonalLogSyncAdapter {
     // ours; the coordinator re-verifies + filters by docId internally.
     this.unsubMessage = this.messaging.onMessage(async (message) => {
       if (this.isLogPathMessage(message) || this.isErrorFrame(message)) {
-        await this.coordinator.handleIncoming(message)
+        await coordinator.handleIncoming(message)
       }
     })
 
     // Re-sync on reconnect: a new socket = empty scope cache → re-present + catch-up.
     this.unsubStateChange = this.messaging.onStateChange((state) => {
       if (state === 'connected' && this.started) {
-        this.coordinator.resetForReconnect()
-        void this.coordinator
+        coordinator.resetForReconnect()
+        void coordinator
           .catchUp()
-          .then(() => this.coordinator.resendPending())
+          .then(() => coordinator.resendPending())
           .catch((err) => this.reportPublishError('reconnect catch-up', err))
       }
     })

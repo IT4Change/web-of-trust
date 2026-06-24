@@ -79,12 +79,16 @@ describe('AutomergeReplicationAdapter — Slice A Phase 4 (VE-2..10 log path + V
   let aliceAdapter: AutomergeReplicationAdapter
   let bobAdapter: AutomergeReplicationAdapter
 
-  function makeAdapter(
+  // BLOCKER-1b: the deviceId is store-bound; seed the store with the desired id.
+  async function makeAdapter(
     identity: PublicIdentitySession,
     messaging: InMemoryMessagingAdapter,
     deviceId: string,
     enableLogSync = true,
-  ): AutomergeReplicationAdapter {
+  ): Promise<AutomergeReplicationAdapter> {
+    const docLogStore = new InMemoryDocLogStore()
+    await docLogStore.init()
+    await docLogStore.setDeviceId(deviceId)
     return new AutomergeReplicationAdapter({
       identity,
       messaging,
@@ -95,7 +99,7 @@ describe('AutomergeReplicationAdapter — Slice A Phase 4 (VE-2..10 log path + V
       // Slice A: log path as the primary steady-state path. NO vault, NO
       // CompactStore (the standalone-convergence regression anchor: convergence
       // rides sync-request + log-entry only).
-      docLogStore: new InMemoryDocLogStore(),
+      docLogStore,
       enableLogSync,
       deviceId,
     })
@@ -110,8 +114,8 @@ describe('AutomergeReplicationAdapter — Slice A Phase 4 (VE-2..10 log path + V
     bobMessaging = new InMemoryMessagingAdapter({ broker, socketId: 'bob-socket' })
     await aliceMessaging.connect(alice.getDid())
     await bobMessaging.connect(bob.getDid())
-    aliceAdapter = makeAdapter(alice, aliceMessaging, DEVICE_ALICE)
-    bobAdapter = makeAdapter(bob, bobMessaging, DEVICE_BOB)
+    aliceAdapter = await makeAdapter(alice, aliceMessaging, DEVICE_ALICE)
+    bobAdapter = await makeAdapter(bob, bobMessaging, DEVICE_BOB)
     await aliceAdapter.start()
     await bobAdapter.start()
   })
@@ -321,6 +325,11 @@ describe('AutomergeReplicationAdapter — Slice A Phase 4 (VE-2..10 log path + V
 
     const bobColdMessaging = new InMemoryMessagingAdapter({ broker, socketId: 'bob-cold-socket' })
     await bobColdMessaging.connect(bob.getDid())
+    // BLOCKER-1b: a cold restart of the SAME logical device seeds its store with
+    // the same DEVICE_BOB id (so the relay author-binding keeps recognizing it).
+    const bobColdLogStore = new InMemoryDocLogStore()
+    await bobColdLogStore.init()
+    await bobColdLogStore.setDeviceId(DEVICE_BOB)
     const bobCold = new AutomergeReplicationAdapter({
       identity: bob,
       messaging: bobColdMessaging,
@@ -330,7 +339,7 @@ describe('AutomergeReplicationAdapter — Slice A Phase 4 (VE-2..10 log path + V
       repoStorage: new InMemoryRepoStorageAdapter(),
       // NO compactStore — the doc is NOT locally cached; the docId must be
       // re-derived from the canonical UUID spaceId.
-      docLogStore: new InMemoryDocLogStore(),
+      docLogStore: bobColdLogStore,
       enableLogSync: true,
       deviceId: DEVICE_BOB,
     })
@@ -514,7 +523,7 @@ describe('AutomergeReplicationAdapter — Slice A Phase 4 (VE-2..10 log path + V
   it('Test 7a (VE-7) — with enableLogSync=false, the legacy content path is unchanged (content IS sent, no log-entry)', async () => {
     const legacyMessaging = new InMemoryMessagingAdapter({ broker, socketId: 'legacy-socket' })
     await legacyMessaging.connect(alice.getDid())
-    const legacy = makeAdapter(alice, legacyMessaging, 'dddddddd-dddd-4ddd-8ddd-dddddddddddd', false)
+    const legacy = await makeAdapter(alice, legacyMessaging, 'dddddddd-dddd-4ddd-8ddd-dddddddddddd', false)
     await legacy.start()
     try {
       const space = await legacy.createSpace<TestDoc>('personal', { items: {} }, { name: 'Legacy' })
@@ -648,19 +657,24 @@ describe('AutomergePersonalLogSyncAdapter — Slice A VE-6 (Personal-Doc on the 
     return handle
   }
 
-  function makePersonalAdapter(
+  // BLOCKER-1b: the personal-doc deviceId is store-bound; seed the store so the
+  // log authors under the desired id (broker arming scoped to it still matches).
+  async function makePersonalAdapter(
     handle: ReturnType<typeof makePersonalDoc>,
     messaging: InMemoryMessagingAdapter,
     deviceId: string,
     mintDeviceId?: () => string,
   ) {
+    const docLogStore = new InMemoryDocLogStore()
+    await docLogStore.init()
+    await docLogStore.setDeviceId(deviceId)
     return new AutomergePersonalLogSyncAdapter({
       docHandle: handle as never,
       messaging,
       identity,
       personalKey,
       docId,
-      docLogStore: new InMemoryDocLogStore(),
+      docLogStore,
       deviceId,
       mintDeviceId,
     })
@@ -669,8 +683,8 @@ describe('AutomergePersonalLogSyncAdapter — Slice A VE-6 (Personal-Doc on the 
   it('Test 6a (VE-6) — a local Personal-Doc change → exactly one log-entry (docId = canonical UUID); the other device applies it loop-free; multi-device converges', async () => {
     const handle1 = makePersonalDoc(repo1)
     const handle2 = makePersonalDoc(repo2)
-    const sync1 = makePersonalAdapter(handle1, messaging1, DEVICE_ALICE)
-    const sync2 = makePersonalAdapter(handle2, messaging2, DEVICE_BOB)
+    const sync1 = await makePersonalAdapter(handle1, messaging1, DEVICE_ALICE)
+    const sync2 = await makePersonalAdapter(handle2, messaging2, DEVICE_BOB)
 
     const tally1 = instrumentSentTypes(messaging1)
     const tally2 = instrumentSentTypes(messaging2)
@@ -706,7 +720,7 @@ describe('AutomergePersonalLogSyncAdapter — Slice A VE-6 (Personal-Doc on the 
 
   it('Test 6b (VE-7) — content channel carries only log-entry (no personal-sync / content envelope)', async () => {
     const handle1 = makePersonalDoc(repo1)
-    const sync1 = makePersonalAdapter(handle1, messaging1, DEVICE_ALICE)
+    const sync1 = await makePersonalAdapter(handle1, messaging1, DEVICE_ALICE)
     const tally1 = instrumentSentTypes(messaging1)
     sync1.start()
     await wait(160)
@@ -724,8 +738,8 @@ describe('AutomergePersonalLogSyncAdapter — Slice A VE-6 (Personal-Doc on the 
     const NEW_DEVICE = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd'
     const handle1 = makePersonalDoc(repo1)
     const handle2 = makePersonalDoc(repo2)
-    const sync1 = makePersonalAdapter(handle1, messaging1, DEVICE_ALICE, () => NEW_DEVICE)
-    const sync2 = makePersonalAdapter(handle2, messaging2, DEVICE_BOB)
+    const sync1 = await makePersonalAdapter(handle1, messaging1, DEVICE_ALICE, () => NEW_DEVICE)
+    const sync2 = await makePersonalAdapter(handle2, messaging2, DEVICE_BOB)
     sync1.start()
     sync2.start()
     await wait(200)
@@ -754,6 +768,8 @@ describe('AutomergePersonalLogSyncAdapter — Slice A VE-6 (Personal-Doc on the 
 
   it('Test 6d (VE-6) — the personal-doc log-entry docId is the canonical lowercase UUID v4 (=personalDocId), NOT base58', async () => {
     const logStore = new InMemoryDocLogStore()
+    await logStore.init()
+    await logStore.setDeviceId(DEVICE_ALICE) // BLOCKER-1b: store-bound deviceId
     const handle1 = makePersonalDoc(repo1)
     const sync1 = new AutomergePersonalLogSyncAdapter({
       docHandle: handle1 as never,

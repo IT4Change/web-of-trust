@@ -46,6 +46,25 @@
  *   Hence: 'pending' status + {@link DocLogStore.getPending} +
  *   {@link DocLogStore.markAcked}. The retry returns the STORED JWS unchanged.
  *
+ * ── deviceId bound to the log-store lifecycle (BLOCKER-1b) ───────────────────
+ *
+ * The per-device seq namespace is the FIRST half of the deterministic nonce
+ * nonce(deviceId, seq); the Content-Key is the other input. For a Personal-Doc
+ * the Content-Key is PERMANENT (generation 0, never rotated), so nonce-uniqueness
+ * rests SOLELY on (deviceId, seq) never repeating with divergent plaintext.
+ *
+ * A naive design persists the deviceId OUTSIDE this store (e.g. localStorage),
+ * independently evictable from the log (iOS/Safari 7-day IDB eviction, quota,
+ * partial clear-site-data). After such a wipe the log is empty (readMaxSeq=-1 ⇒
+ * seq=0 again) while the deviceId survives — re-entering the seq=0 namespace under
+ * a STABLE deviceId ⇒ nonce(deviceId, 0) reused with new bytes ⇒ AES-GCM break.
+ *
+ * Mitigation (MUSS): the deviceId lives in the SAME durable store as the log, so
+ * a wipe that empties the log ALSO drops the deviceId, and {@link
+ * DocLogStore.getOrCreateDeviceId} mints a FRESH one — a fresh nonce namespace.
+ * seq=0 under the new deviceId has a DIFFERENT nonce, so no reuse can occur.
+ * {@link DocLogStore.setDeviceId} persists a restore-clone's new deviceId.
+ *
  * ── Out of scope for VE-1 (Phase 1) ─────────────────────────────────────────
  *
  * The reject-handling orchestration path (relay error SEQ_COLLISION_DETECTED →
@@ -111,8 +130,32 @@ export interface DocLogStore {
    * docId), call build(seq) (the async crypto), and durably persist the
    * returned JWS as a 'pending' entry BEFORE returning — and thus before any
    * send. Returns the persisted entry. seq starts at 0.
+   *
+   * Durable seq-uniqueness (BLOCKER-1a): the persist MUST be an insert that
+   * FAILS if (docId, deviceId, seq) already exists (IDB `add`, not `put`), and
+   * on that conflict the WHOLE read→build→insert cycle retries with the next
+   * seq. The SeqLock alone cannot guarantee uniqueness across JS contexts when
+   * Web Locks is unavailable (it silently degrades to in-process); the key
+   * constraint is the durable backstop, so a discarded build is NEVER sent
+   * (persist-before-send) and two contexts can never persist the same seq.
    */
   appendLocalEntry(params: AppendLocalEntryParams): Promise<LocalLogEntry>
+
+  /**
+   * The durable per-device id bound to THIS store's lifecycle (BLOCKER-1b).
+   * Mints a canonical lowercase UUID-v4 on first call, persists it in the SAME
+   * durable store as the log, and returns the SAME value thereafter. A store
+   * wipe (which empties the log) therefore yields a FRESH deviceId — a fresh
+   * nonce namespace — so seq=0 can never be re-entered under a stale deviceId.
+   */
+  getOrCreateDeviceId(): Promise<string>
+
+  /**
+   * Persist a new deviceId (restore-clone, VE-4/VE-5): after a SEQ_COLLISION /
+   * DEVICE_REVOKED the coordinator mints a new deviceId; persisting it here makes
+   * the new namespace survive a reload (so the revoked id is never re-adopted).
+   */
+  setDeviceId(deviceId: string): Promise<void>
 
   /**
    * Record an entry from another device after it has been successfully applied,

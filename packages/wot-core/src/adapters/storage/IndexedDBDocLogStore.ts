@@ -8,9 +8,15 @@ import type {
 import { createSeqLock, type SeqLock } from './SeqLock'
 
 const DB_NAME = 'wot-doc-log'
-const DB_VERSION = 1
+// v2: adds the `meta` key-value store that binds the deviceId to the log-store
+// lifecycle (BLOCKER-1b) so a wipe that empties the log also drops the deviceId.
+const DB_VERSION = 2
 const ENTRIES_STORE = 'entries'
 const PENDING_INDEX = 'byStatus'
+const META_STORE = 'meta'
+const DEVICE_ID_KEY = 'deviceId'
+/** Bounded retry budget for the add-on-duplicate seq-reservation race (BLOCKER-1a). */
+const MAX_SEQ_RETRIES = 64
 
 /**
  * Durable IndexedDB {@link DocLogStore}.
@@ -65,29 +71,70 @@ export class IndexedDBDocLogStore implements DocLogStore {
   async appendLocalEntry(params: AppendLocalEntryParams): Promise<LocalLogEntry> {
     const { deviceId, docId, build } = params
     return this.lock.run(`doclog:${deviceId}:${docId}`, async () => {
-      // ── short IDB txn 1: read the durable max seq for (docId, deviceId) ──
-      const maxSeq = await this.readMaxSeq(docId, deviceId)
-      const seq = maxSeq + 1
+      // BLOCKER-1a: the SeqLock is only an OPTIMIZATION here. The durable
+      // backstop is the composite-key UNIQUE constraint enforced by db.add():
+      // when Web Locks is unavailable the lock degrades to in-process and two
+      // tabs could both read maxSeq=k and build seq=k+1 — but only ONE add() for
+      // [docId,deviceId,k+1] succeeds; the loser hits a ConstraintError and
+      // retries the whole read→build→add cycle with the next seq. The discarded
+      // build is NEVER sent (persist-before-send), so no divergent (key,nonce)
+      // pair ever reaches the wire.
+      for (let attempt = 0; attempt < MAX_SEQ_RETRIES; attempt++) {
+        // ── short IDB txn 1: read the durable max seq for (docId, deviceId) ──
+        const maxSeq = await this.readMaxSeq(docId, deviceId)
+        const seq = maxSeq + 1
 
-      // ── async crypto: NOT inside any IDB txn (it would have closed) ──
-      // Build the encrypted+signed entry JWS for the reserved seq. If this
-      // rejects, we fall straight out of the lock without persisting — the seq
-      // stays free (crash case (a)).
-      const entryJws = await build(seq)
+        // ── async crypto: NOT inside any IDB txn (it would have closed) ──
+        // Build the encrypted+signed entry JWS for the reserved seq. If this
+        // rejects, we fall straight out of the lock without persisting — the seq
+        // stays free (crash case (a)).
+        const entryJws = await build(seq)
 
-      const entry: LocalLogEntry = {
-        docId,
-        deviceId,
-        seq,
-        entryJws,
-        status: 'pending',
-        createdAt: Date.now(),
+        const entry: LocalLogEntry = {
+          docId,
+          deviceId,
+          seq,
+          entryJws,
+          status: 'pending',
+          createdAt: Date.now(),
+        }
+        // ── short IDB txn 2: durable INSERT (add, not put) BEFORE returning ──
+        // add() throws ConstraintError if [docId,deviceId,seq] already exists —
+        // the key-constraint backstop. On conflict, retry with the next seq.
+        const db = await this.db()
+        try {
+          await db.add(ENTRIES_STORE, toStored(entry))
+        } catch (err) {
+          if (isConstraintError(err)) continue
+          throw err
+        }
+        return { ...entry }
       }
-      // ── short IDB txn 2: durably persist BEFORE returning (⇒ before send) ──
-      const db = await this.db()
-      await db.put(ENTRIES_STORE, toStored(entry))
-      return { ...entry }
+      throw new Error(
+        `appendLocalEntry: seq reservation kept colliding for (${docId}, ${deviceId}) after ${MAX_SEQ_RETRIES} attempts`,
+      )
     })
+  }
+
+  async getOrCreateDeviceId(): Promise<string> {
+    const db = await this.db()
+    // Atomic mint-or-read in ONE readwrite txn so two concurrent first-callers in
+    // the same context cannot both mint (the second reads the first's value).
+    const tx = db.transaction(META_STORE, 'readwrite')
+    const existing = (await tx.store.get(DEVICE_ID_KEY)) as string | undefined
+    if (typeof existing === 'string' && existing.length > 0) {
+      await tx.done
+      return existing
+    }
+    const minted = mintDeviceId()
+    await tx.store.put(minted, DEVICE_ID_KEY)
+    await tx.done
+    return minted
+  }
+
+  async setDeviceId(deviceId: string): Promise<void> {
+    const db = await this.db()
+    await db.put(META_STORE, deviceId, DEVICE_ID_KEY)
   }
 
   async recordRemoteApplied(entry: RecordRemoteAppliedEntry): Promise<void> {
@@ -158,6 +205,9 @@ export class IndexedDBDocLogStore implements DocLogStore {
   async clear(): Promise<void> {
     const db = await this.db()
     await db.clear(ENTRIES_STORE)
+    // BLOCKER-1b: a wipe that empties the log MUST also drop the deviceId so the
+    // next getOrCreateDeviceId() mints a FRESH nonce namespace (no seq=0 reuse).
+    await db.clear(META_STORE)
   }
 
   /**
@@ -185,6 +235,12 @@ export class IndexedDBDocLogStore implements DocLogStore {
               keyPath: ['docId', 'deviceId', 'seq'],
             })
             store.createIndex(PENDING_INDEX, 'status')
+          }
+          // v2 (BLOCKER-1b): key-value store binding the deviceId to this DB's
+          // lifecycle. Created on a fresh DB AND on a v1→v2 migration (an existing
+          // log keeps its entries; the deviceId is minted lazily on first use).
+          if (!db.objectStoreNames.contains(META_STORE)) {
+            db.createObjectStore(META_STORE)
           }
         },
       })
@@ -233,4 +289,21 @@ function comparePending(a: LocalLogEntry, b: LocalLogEntry): number {
   if (a.deviceId !== b.deviceId) return a.deviceId < b.deviceId ? -1 : 1
   if (a.seq !== b.seq) return a.seq - b.seq
   return a.createdAt - b.createdAt
+}
+
+/**
+ * True when an IndexedDB write failed because the composite key already exists.
+ * idb surfaces the native DOMException (name 'ConstraintError'); we also accept a
+ * structural match so the fake-IndexedDB used in tests is covered.
+ */
+function isConstraintError(err: unknown): boolean {
+  if (err && typeof err === 'object' && 'name' in err) {
+    return (err as { name?: unknown }).name === 'ConstraintError'
+  }
+  return false
+}
+
+/** Mint a canonical lowercase UUID-v4 deviceId (Sync 003 register format). */
+function mintDeviceId(): string {
+  return globalThis.crypto.randomUUID()
 }

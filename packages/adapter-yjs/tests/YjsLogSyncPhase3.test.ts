@@ -57,12 +57,16 @@ describe('YjsReplicationAdapter — Slice A Phase 3 (VE-5/6/7/10 + write-reject 
   let aliceAdapter: YjsReplicationAdapter
   let bobAdapter: YjsReplicationAdapter
 
-  function makeAdapter(
+  // BLOCKER-1b: the deviceId is store-bound; seed the store with the desired id.
+  async function makeAdapter(
     identity: PublicIdentitySession,
     messaging: InMemoryMessagingAdapter,
     deviceId: string,
     enableLogSync = true,
-  ): YjsReplicationAdapter {
+  ): Promise<YjsReplicationAdapter> {
+    const docLogStore = new InMemoryDocLogStore()
+    await docLogStore.init()
+    await docLogStore.setDeviceId(deviceId)
     return new YjsReplicationAdapter({
       identity,
       messaging,
@@ -70,7 +74,7 @@ describe('YjsReplicationAdapter — Slice A Phase 3 (VE-5/6/7/10 + write-reject 
       keyManagement: new InMemoryKeyManagementAdapter(),
       metadataStorage: new InMemorySpaceMetadataStorage(),
       compactStore: new InMemoryCompactStore(),
-      docLogStore: new InMemoryDocLogStore(),
+      docLogStore,
       enableLogSync,
       deviceId,
     })
@@ -85,8 +89,8 @@ describe('YjsReplicationAdapter — Slice A Phase 3 (VE-5/6/7/10 + write-reject 
     bobMessaging = new InMemoryMessagingAdapter({ broker, socketId: 'bob-socket' })
     await aliceMessaging.connect(alice.getDid())
     await bobMessaging.connect(bob.getDid())
-    aliceAdapter = makeAdapter(alice, aliceMessaging, DEVICE_ALICE)
-    bobAdapter = makeAdapter(bob, bobMessaging, DEVICE_BOB)
+    aliceAdapter = await makeAdapter(alice, aliceMessaging, DEVICE_ALICE)
+    bobAdapter = await makeAdapter(bob, bobMessaging, DEVICE_BOB)
     await aliceAdapter.start()
     await bobAdapter.start()
   })
@@ -128,7 +132,7 @@ describe('YjsReplicationAdapter — Slice A Phase 3 (VE-5/6/7/10 + write-reject 
     // A separate non-log-sync pair (legacy content broadcast still the default).
     const legacyMessaging = new InMemoryMessagingAdapter({ broker, socketId: 'legacy-socket' })
     await legacyMessaging.connect(alice.getDid())
-    const legacy = makeAdapter(alice, legacyMessaging, 'dddddddd-dddd-4ddd-8ddd-dddddddddddd', false)
+    const legacy = await makeAdapter(alice, legacyMessaging, 'dddddddd-dddd-4ddd-8ddd-dddddddddddd', false)
     await legacy.start()
     try {
       const space = await legacy.createSpace<TestDoc>('private', { items: {} }, { name: 'Legacy' })
@@ -346,14 +350,19 @@ describe('YjsPersonalLogSyncAdapter — Slice A VE-6 (Personal-Doc on the log co
     try { await identity.deleteStoredIdentity() } catch {}
   })
 
-  function makePersonalAdapter(doc: Y.Doc, messaging: InMemoryMessagingAdapter, deviceId: string, mintDeviceId?: () => string) {
+  // BLOCKER-1b: the personal-doc deviceId is store-bound; seed the store so the
+  // log authors under the desired id (broker arming scoped to it still matches).
+  async function makePersonalAdapter(doc: Y.Doc, messaging: InMemoryMessagingAdapter, deviceId: string, mintDeviceId?: () => string) {
+    const docLogStore = new InMemoryDocLogStore()
+    await docLogStore.init()
+    await docLogStore.setDeviceId(deviceId)
     return new YjsPersonalLogSyncAdapter({
       doc,
       messaging,
       identity,
       personalKey,
       docId,
-      docLogStore: new InMemoryDocLogStore(),
+      docLogStore,
       deviceId,
       mintDeviceId,
     })
@@ -362,8 +371,8 @@ describe('YjsPersonalLogSyncAdapter — Slice A VE-6 (Personal-Doc on the log co
   it('VE-6 — a local Personal-Doc change produces exactly one log-entry; the other device applies it (origin=remote) with NO re-broadcast; multi-device converges loop-free', async () => {
     const doc1 = new Y.Doc()
     const doc2 = new Y.Doc()
-    const sync1 = makePersonalAdapter(doc1, messaging1, DEVICE_ALICE)
-    const sync2 = makePersonalAdapter(doc2, messaging2, DEVICE_BOB)
+    const sync1 = await makePersonalAdapter(doc1, messaging1, DEVICE_ALICE)
+    const sync2 = await makePersonalAdapter(doc2, messaging2, DEVICE_BOB)
 
     const tally1 = instrumentSentTypes(messaging1)
     const tally2 = instrumentSentTypes(messaging2)
@@ -405,7 +414,7 @@ describe('YjsPersonalLogSyncAdapter — Slice A VE-6 (Personal-Doc on the log co
 
   it('VE-6 — content channel carries only log-entry (no personal-sync / content envelope)', async () => {
     const doc1 = new Y.Doc()
-    const sync1 = makePersonalAdapter(doc1, messaging1, DEVICE_ALICE)
+    const sync1 = await makePersonalAdapter(doc1, messaging1, DEVICE_ALICE)
     const tally1 = instrumentSentTypes(messaging1)
     sync1.start()
     await wait(120)
@@ -422,7 +431,7 @@ describe('YjsPersonalLogSyncAdapter — Slice A VE-6 (Personal-Doc on the log co
 
   it('VE-6 — Personal-Doc restore (same deviceId, stale local seq) → SEQ_COLLISION → deviceId change (generation stays 0, full restore-clone strictness)', async () => {
     const doc1 = new Y.Doc()
-    const sync1 = makePersonalAdapter(doc1, messaging1, DEVICE_ALICE, () => 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee')
+    const sync1 = await makePersonalAdapter(doc1, messaging1, DEVICE_ALICE, () => 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee')
     sync1.start()
     await wait(120)
 
@@ -453,8 +462,8 @@ describe('YjsPersonalLogSyncAdapter — Slice A VE-6 (Personal-Doc on the log co
     const NEW_DEVICE = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd'
     const doc1 = new Y.Doc()
     const doc2 = new Y.Doc()
-    const sync1 = makePersonalAdapter(doc1, messaging1, DEVICE_ALICE, () => NEW_DEVICE)
-    const sync2 = makePersonalAdapter(doc2, messaging2, DEVICE_BOB)
+    const sync1 = await makePersonalAdapter(doc1, messaging1, DEVICE_ALICE, () => NEW_DEVICE)
+    const sync2 = await makePersonalAdapter(doc2, messaging2, DEVICE_BOB)
     sync1.start()
     sync2.start()
     await wait(150)

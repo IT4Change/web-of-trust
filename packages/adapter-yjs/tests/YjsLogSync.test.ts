@@ -50,11 +50,17 @@ describe('YjsReplicationAdapter — Slice A log path (VE-2..9)', () => {
   let aliceAdapter: YjsReplicationAdapter
   let bobAdapter: YjsReplicationAdapter
 
-  function makeAdapter(
+  // BLOCKER-1b: the deviceId is store-bound. Seed the store with the desired id so
+  // the log authors under it (and the broker-registered id matches), exactly the
+  // composition-root pattern (mint/seed in the store first, then wire).
+  async function makeAdapter(
     identity: PublicIdentitySession,
     messaging: InMemoryMessagingAdapter,
     deviceId: string,
-  ): YjsReplicationAdapter {
+  ): Promise<YjsReplicationAdapter> {
+    const docLogStore = new InMemoryDocLogStore()
+    await docLogStore.init()
+    await docLogStore.setDeviceId(deviceId)
     return new YjsReplicationAdapter({
       identity,
       messaging,
@@ -64,7 +70,7 @@ describe('YjsReplicationAdapter — Slice A log path (VE-2..9)', () => {
       compactStore: new InMemoryCompactStore(),
       // Slice A: log path as the primary steady-state path. NO vault (the
       // standalone-convergence regression anchor: sync-request-only).
-      docLogStore: new InMemoryDocLogStore(),
+      docLogStore,
       enableLogSync: true,
       deviceId,
     })
@@ -81,8 +87,8 @@ describe('YjsReplicationAdapter — Slice A log path (VE-2..9)', () => {
     await aliceMessaging.connect(alice.getDid())
     await bobMessaging.connect(bob.getDid())
 
-    aliceAdapter = makeAdapter(alice, aliceMessaging, 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa')
-    bobAdapter = makeAdapter(bob, bobMessaging, 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb')
+    aliceAdapter = await makeAdapter(alice, aliceMessaging, 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa')
+    bobAdapter = await makeAdapter(bob, bobMessaging, 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb')
 
     await aliceAdapter.start()
     await bobAdapter.start()

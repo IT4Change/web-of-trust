@@ -488,24 +488,32 @@ describe('LogSyncCoordinator — VE-2/3/4/8/9', () => {
     const alice = (await createTestIdentity('alice')).identity
     const h = await makeHarness(alice, DEVICE_A, broker)
 
+    // Suppress the delivery receipt for the FIRST write so the entry stays
+    // 'pending' (CONCERN-1 markAcked-on-receipt would otherwise ack it). This
+    // isolates the property under test: re-emission of a STILL-PENDING entry uses
+    // the bit-identical stored JWS (no rebuild / no re-encrypt across generations).
+    let suppressReceipt = true
+    h.messaging.onMessage(() => {})
+    const baseSend = h.messaging.send.bind(h.messaging)
+    let resentJws: string | null = null
+    ;(h.messaging as unknown as { send: typeof h.messaging.send }).send = async (envelope: never) => {
+      if (isLogEntry(envelope)) {
+        resentJws = (envelope as { body: { entry: string } }).body.entry
+        const receipt = await baseSend(envelope)
+        return suppressReceipt ? (undefined as never) : receipt
+      }
+      return baseSend(envelope)
+    }
+
     const entry = await h.coordinator.writeLocalUpdate(new Uint8Array([1, 2, 3]))
     const storedJws = entry!.entryJws
 
-    // Simulate a generation switch: the content key advances, but a pending entry
-    // keeps its seq AND keyGeneration and is re-emitted bit-identically.
+    // Pending (receipt suppressed): keeps its seq AND keyGeneration for re-emission.
     const stored = await h.logStore.getEntry(SPACE_ID, DEVICE_A, 0)
     expect(stored!.status).toBe('pending')
 
     // Re-emit pending: the SAME JWS is sent (no rebuild, no re-encrypt at gen=1).
-    let resentJws: string | null = null
-    h.messaging.onMessage(() => {})
-    const baseSend = h.messaging.send.bind(h.messaging)
-    ;(h.messaging as unknown as { send: typeof h.messaging.send }).send = async (envelope: never) => {
-      if (isLogEntry(envelope)) {
-        resentJws = (envelope as { body: { entry: string } }).body.entry
-      }
-      return baseSend(envelope)
-    }
+    resentJws = null
     await h.coordinator.resendPending()
     expect(resentJws).toBe(storedJws)
 

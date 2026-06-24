@@ -18,7 +18,6 @@ import type { PublicIdentitySession } from '@web_of_trust/core/application'
 import type { WebSocketMessagingAdapter } from '@web_of_trust/core/adapters/messaging/websocket'
 import {
   connectMessaging,
-  deviceUuid,
   sharedCrypto,
   type MessagingProbe,
   type StartedRelay,
@@ -64,13 +63,20 @@ export interface MakeYjsClientOptions {
  * blocked by the messaging spy. Convergence MUST ride the log path.
  */
 export async function makeYjsClient(opts: MakeYjsClientOptions): Promise<YjsClient> {
-  const deviceId = opts.deviceId ?? deviceUuid()
-  const { messaging, probe } = await connectMessaging(opts.relay.url, opts.identity, deviceId)
-
   const keyManagement = opts.keyManagement ?? new InMemoryKeyManagementAdapter()
   const metadataStorage = opts.metadataStorage ?? new InMemorySpaceMetadataStorage()
   const docLogStore = opts.docLogStore ?? new InMemoryDocLogStore()
   const compactStore = opts.compactStore ?? new InMemoryCompactStore()
+
+  // BLOCKER-1b: the deviceId is OWNED by the durable log store and resolved FIRST,
+  // so the messaging adapter registers with the SAME id the log path authors under
+  // (the relay's author-binding requires log deviceId == registered deviceId). A
+  // caller-pinned id seeds the store; otherwise the store mints one. A fresh store
+  // (cold-reconstruction / clone) therefore yields a fresh nonce namespace.
+  await docLogStore.init()
+  if (opts.deviceId) await docLogStore.setDeviceId(opts.deviceId)
+  const deviceId = await docLogStore.getOrCreateDeviceId()
+  const { messaging, probe } = await connectMessaging(opts.relay.url, opts.identity, deviceId)
 
   const adapter = new YjsReplicationAdapter({
     identity: opts.identity,

@@ -6,6 +6,9 @@ import type {
 } from '../../ports/DocLogStore'
 import { InProcessSeqLock, type SeqLock } from './SeqLock'
 
+/** Bounded retry budget for the add-on-duplicate seq-reservation race (BLOCKER-1a). */
+const MAX_SEQ_RETRIES = 64
+
 /**
  * In-memory {@link DocLogStore} for tests. Mirrors {@link IndexedDBDocLogStore}
  * semantics — same seq derivation (maxSeq + 1, starting at 0), the same
@@ -19,6 +22,8 @@ export class InMemoryDocLogStore implements DocLogStore {
   /** Composite key `${docId}\u0000${deviceId}\u0000${seq}` → entry. */
   private readonly entries = new Map<string, LocalLogEntry>()
   private readonly lock: SeqLock
+  /** deviceId bound to this store's lifecycle (BLOCKER-1b); cleared by clear(). */
+  private deviceId: string | null = null
 
   constructor(lock: SeqLock = new InProcessSeqLock()) {
     this.lock = lock
@@ -31,25 +36,46 @@ export class InMemoryDocLogStore implements DocLogStore {
   async appendLocalEntry(params: AppendLocalEntryParams): Promise<LocalLogEntry> {
     const { deviceId, docId, build } = params
     return this.lock.run(`doclog:${deviceId}:${docId}`, async () => {
-      const seq = this.maxSeq(docId, deviceId) + 1
-      // build() (the async crypto) runs INSIDE the lock but is NOT covered by an
-      // IDB transaction here either — parity with the durable adapter, where the
-      // lock (not a txn) is the atomicity boundary across the await.
-      const entryJws = await build(seq)
-      const entry: LocalLogEntry = {
-        docId,
-        deviceId,
-        seq,
-        entryJws,
-        status: 'pending',
-        createdAt: Date.now(),
+      // BLOCKER-1a parity with the durable adapter (add, not put): the seq is
+      // only durably consumed by the set below. If a second writer running
+      // WITHOUT a shared lock consumed this seq across our `await build()`, the
+      // key is already occupied — detect it and retry with the next seq. The
+      // discarded build is NEVER returned (and thus never sent).
+      for (let attempt = 0; attempt < MAX_SEQ_RETRIES; attempt++) {
+        const seq = this.maxSeq(docId, deviceId) + 1
+        // build() (the async crypto) runs INSIDE the lock but is NOT covered by an
+        // IDB transaction here either — parity with the durable adapter, where the
+        // lock (not a txn) is the atomicity boundary across the await.
+        const entryJws = await build(seq)
+        const key = this.key(docId, deviceId, seq)
+        if (this.entries.has(key)) continue // lost the race → next seq (add, not put)
+        const entry: LocalLogEntry = {
+          docId,
+          deviceId,
+          seq,
+          entryJws,
+          status: 'pending',
+          createdAt: Date.now(),
+        }
+        // Persist BEFORE returning (and thus before any send): only here is the
+        // seq durably consumed. If build() threw above, nothing is stored and the
+        // seq stays free for the next attempt.
+        this.entries.set(key, entry)
+        return { ...entry }
       }
-      // Persist BEFORE returning (and thus before any send): only here is the
-      // seq durably consumed. If build() threw above, nothing is stored and the
-      // seq stays free for the next attempt.
-      this.entries.set(this.key(docId, deviceId, seq), entry)
-      return { ...entry }
+      throw new Error(
+        `appendLocalEntry: seq reservation kept colliding for (${docId}, ${deviceId}) after ${MAX_SEQ_RETRIES} attempts`,
+      )
     })
+  }
+
+  async getOrCreateDeviceId(): Promise<string> {
+    if (this.deviceId === null) this.deviceId = globalThis.crypto.randomUUID()
+    return this.deviceId
+  }
+
+  async setDeviceId(deviceId: string): Promise<void> {
+    this.deviceId = deviceId
   }
 
   async recordRemoteApplied(entry: RecordRemoteAppliedEntry): Promise<void> {
@@ -100,6 +126,9 @@ export class InMemoryDocLogStore implements DocLogStore {
 
   async clear(): Promise<void> {
     this.entries.clear()
+    // BLOCKER-1b: a wipe that empties the log MUST also drop the deviceId so the
+    // next getOrCreateDeviceId() mints a FRESH nonce namespace (no seq=0 reuse).
+    this.deviceId = null
   }
 
   private maxSeq(docId: string, deviceId: string): number {

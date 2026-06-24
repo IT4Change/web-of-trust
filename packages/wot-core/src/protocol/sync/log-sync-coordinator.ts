@@ -428,10 +428,12 @@ export class LogSyncCoordinator {
     }
     // (2) present-capability (VE-9), with the reject-disposition retry loop.
     await this.presentCapabilityWithRetry()
-    // (3)+(4) sync-request head-abgleich + seq-consistency (VE-4). A restore-clone
-    //     disposition is surfaced to the caller — the coordinator does not mint a
-    //     new deviceId itself (that is an adapter/runtime concern in this phase).
-    await this.catchUpInternal({ presentCapabilityFirst: false })
+    // (3)+(4) sync-request head-abgleich + seq-consistency (VE-4). BLOCKER-1b
+    //     defense-in-depth: a broker_seq>local_seq disposition is no longer dead
+    //     code — it is acted on HERE (restore-clone BEFORE the first write), so a
+    //     seq=0 is never re-entered under a broker-known deviceId.
+    const result = await this.catchUpInternal({ presentCapabilityFirst: false })
+    await this.actOnRestoreDisposition(result)
   }
 
   /**
@@ -516,11 +518,22 @@ export class LogSyncCoordinator {
     return entry
   }
 
-  /** Re-send a pending entry's STORED JWS unchanged (reconnect retry, VE-2). */
+  /**
+   * Re-send a pending entry's STORED JWS unchanged (reconnect retry, VE-2).
+   *
+   * CONCERN-1: filter to the ACTIVE deviceId. After a restore-clone re-bound the
+   * deviceId, the OLD (revoked/colliding) deviceId's entries stay 'pending' in
+   * the store (markAcked never ran for them — they were rejected, not accepted).
+   * Re-emitting them on every reconnect would re-trigger DEVICE_REVOKED /
+   * SEQ_COLLISION_DETECTED → a restore-clone reconnect loop (the same bug class as
+   * the 5000+-outbox). The active-deviceId filter stops the loop: only entries the
+   * relay can still accept are re-sent.
+   */
   async resendPending(): Promise<void> {
     const pending = await this.config.logStore.getPending()
     for (const entry of pending) {
       if (entry.docId !== this.config.docId) continue
+      if (entry.deviceId !== this.deviceId) continue
       await this.sendLogEntryEnvelope(entry.entryJws, entry.deviceId, entry.seq)
     }
   }
@@ -542,7 +555,37 @@ export class LogSyncCoordinator {
       createdTime: Math.floor(this.now().getTime() / 1000),
       entry: entryJws,
     })
-    await this.config.envelopes.send(message)
+    const sendResult = await this.config.envelopes.send(message)
+    // CONCERN-1: correlate the send's delivery receipt back to this exact write
+    // and mark it acked, so it leaves the pending outbox. Without this every
+    // self-authored entry stays 'pending' forever and resendPending re-emits the
+    // whole log on every reconnect (stale-pending churn). The transport's
+    // `send()` resolves with the relay's `{ messageId, status }` receipt
+    // (messageId == this envelope id); delivered/accepted both mean the relay
+    // took it (delivered = relayed to a peer, accepted = durably queued).
+    this.markAckedOnReceipt(sendResult, messageId, deviceId, seq)
+  }
+
+  /**
+   * If `sendResult` is a delivery receipt for `messageId` with a terminal-ok
+   * status, drop the in-flight correlation and mark the (docId,deviceId,seq)
+   * entry acked. Tolerant of transports that return a non-receipt value (then a
+   * later routed `error` frame, or the next reconnect, drives the outcome).
+   */
+  private markAckedOnReceipt(
+    sendResult: unknown,
+    messageId: string,
+    deviceId: string,
+    seq: number,
+  ): void {
+    const receipt = asDeliveryReceipt(sendResult)
+    if (!receipt) return
+    if (receipt.messageId !== messageId) return
+    if (receipt.status !== 'delivered' && receipt.status !== 'accepted') return
+    this.inFlightWrites.delete(messageId)
+    // Fire-and-forget: a failed markAcked only means a redundant re-send later,
+    // never a correctness break (the stored JWS is bit-identical).
+    void this.config.logStore.markAcked(this.config.docId, deviceId, seq).catch(() => {})
   }
 
   private rememberInFlight(messageId: string, deviceId: string, seq: number): void {
@@ -719,11 +762,35 @@ export class LogSyncCoordinator {
   /**
    * (Re)connect catch-up (VE-4): present read-capability for the docId (a new
    * socket has an empty scope cache, so re-present), then sync-request(localHeads)
-   * → sync-response → idempotent apply. Returns the broker-head-abgleich result so
-   * the caller can act on a restore-clone disposition.
+   * → sync-response → idempotent apply. Returns the broker-head-abgleich result.
+   *
+   * BLOCKER-1b: when the broker reports a higher seq under our deviceId than we
+   * hold locally (the store-wipe / clone case), this ACTS on it — a real
+   * restore-clone (mint a fresh deviceId, re-write under it) BEFORE any first
+   * write, so a leaked store can never re-enter seq=0 under a broker-known
+   * deviceId. The disposition is still returned (callers/tests may inspect it).
    */
   async catchUp(): Promise<{ restoreCloneRequired: boolean }> {
-    return this.catchUpInternal({ presentCapabilityFirst: true })
+    const result = await this.catchUpInternal({ presentCapabilityFirst: true })
+    await this.actOnRestoreDisposition(result)
+    return result
+  }
+
+  /**
+   * BLOCKER-1b: drive a real restore-clone when the broker-head-abgleich detected
+   * broker_seq>local_seq. Routed through the SAME machinery as a write-path
+   * SEQ_COLLISION_DETECTED reject (mint a new deviceId via the WriteRejectHandler,
+   * re-write the full state under it from seq=0). A no-op when no restore is
+   * required or no handler is wired (degenerate; the deviceId-binding already makes
+   * an empty store a fresh namespace, so this is belt-and-suspenders).
+   */
+  private async actOnRestoreDisposition(result: { restoreCloneRequired: boolean }): Promise<void> {
+    if (!result.restoreCloneRequired) return
+    if (this.restoreCloneInFlight) return
+    await this.restoreClone({
+      code: 'SEQ_COLLISION_DETECTED',
+      rejectedDeviceId: this.deviceId,
+    })
   }
 
   private async catchUpInternal(
@@ -776,6 +843,16 @@ export class LogSyncCoordinator {
    * seq under our deviceId than we have locally).
    */
   async applySyncResponse(response: SyncResponseMessage): Promise<{ restoreCloneRequired: boolean }> {
+    // BLOCKER-1b (disposition-before-apply): compute the broker-vs-local seq
+    // disposition AGAINST response.body.heads BEFORE applying any entry. The apply
+    // loop below records broker entries via recordRemoteApplied — INCLUDING any
+    // entry the broker holds under OUR OWN deviceId (the restore-clone case). If we
+    // read localSeq from getKnownHeads AFTER the loop, that back-fill would have
+    // raised localSeq to brokerSeq and the disposition would be (wrongly) false —
+    // the dead-code bug. Snapshotting localSeq first keeps brokerSeq>localSeq
+    // observable, so the restore-clone actually fires before the first write.
+    const disposition = await this.computeRestoreDisposition(response.body.heads)
+
     for (const entryJws of response.body.entries) {
       // Re-wrap each entry as a log-entry message so the SAME verify+apply+heads
       // path (and LOOP-GUARD) handles it — no separate decode path.
@@ -789,13 +866,26 @@ export class LogSyncCoordinator {
       await this.receiveLogEntry(message)
     }
 
-    // VE-4 broker head-abgleich: deviceId absent in heads => broker_seq=-1 => no
-    // restore (normal first-write/creator). broker_seq>local_seq => restore-clone.
-    // Uses the ACTIVE deviceId (a restore-clone re-bound it) so a fresh post-clone
-    // namespace is never falsely flagged against the old device's broker head.
+    return disposition
+  }
+
+  /**
+   * VE-4 broker head-abgleich (Sync 002 seq-Konsistenz), computed against the
+   * broker's reported heads and our CURRENT local heads — call this BEFORE
+   * applying the sync-response entries (BLOCKER-1b), so a broker entry under our
+   * own deviceId cannot back-fill localSeq and mask a restore-clone.
+   *
+   * deviceId absent in broker heads => broker_seq=-1 => no restore (normal
+   * first-write/creator). broker_seq>local_seq => restore-clone. Uses the ACTIVE
+   * deviceId (a restore-clone re-bound it) so a fresh post-clone namespace is
+   * never falsely flagged against the old device's broker head.
+   */
+  private async computeRestoreDisposition(
+    brokerHeads: Record<string, number>,
+  ): Promise<{ restoreCloneRequired: boolean }> {
     const deviceId = this.deviceId
-    const brokerSeq = Object.prototype.hasOwnProperty.call(response.body.heads, deviceId)
-      ? response.body.heads[deviceId]
+    const brokerSeq = Object.prototype.hasOwnProperty.call(brokerHeads, deviceId)
+      ? brokerHeads[deviceId]
       : -1
     const localHeads = await this.config.logStore.getKnownHeads(this.config.docId)
     const localSeq = Object.prototype.hasOwnProperty.call(localHeads, deviceId)
@@ -1027,4 +1117,19 @@ function isMessageWrapper(value: unknown): value is { type: 'message'; envelope:
 
 function cryptoRandomUuid(): string {
   return globalThis.crypto.randomUUID()
+}
+
+/** A minimal delivery-receipt view: the relay/transport `send()` result shape. */
+interface DeliveryReceiptLike {
+  messageId: string
+  status: string
+}
+
+/** Structural parse of a `send()` result into a delivery receipt, or null. */
+function asDeliveryReceipt(value: unknown): DeliveryReceiptLike | null {
+  if (typeof value !== 'object' || value === null) return null
+  const messageId = (value as { messageId?: unknown }).messageId
+  const status = (value as { status?: unknown }).status
+  if (typeof messageId !== 'string' || typeof status !== 'string') return null
+  return { messageId, status }
 }

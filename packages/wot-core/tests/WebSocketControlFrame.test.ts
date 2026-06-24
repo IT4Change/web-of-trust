@@ -4,6 +4,7 @@ import {
   ControlFrameRejectedError,
   createPresentCapabilityControlFrame,
   createSpaceCapabilityJws,
+  createSpaceRotateMessage,
   formatBrokerChallengeNonce,
 } from '../src/protocol'
 import { WebCryptoProtocolCryptoAdapter } from '../src/adapters/protocol-crypto'
@@ -145,5 +146,57 @@ describe('WebSocketMessagingAdapter.sendControlFrame (VE-9/VE-11)', () => {
     socket.push({ type: 'receipt', receipt: { messageId: SPACE_ID, status: 'delivered', timestamp: 't2' } })
     const receipt = await promise
     expect(receipt.timestamp).toBe('t2')
+  })
+
+  // ── CONCERN-2 (Group 6): per-docId serialization of control frames ────────────
+  it('CONCERN-2 — a same-docId space-rotate does NOT overwrite an in-flight present-capability waiter (no spurious timeout)', async () => {
+    const { adapter, socket } = await connectedAdapter()
+    const present = await presentFrame()
+    // A space-rotate frame for the SAME docId (spaceId), constructed independently
+    // (out-of-band, as YjsReplicationAdapter.sendSpaceRotate does).
+    const rotate = await createSpaceRotateMessage({
+      spaceId: SPACE_ID,
+      newSpaceCapabilityVerificationKey: 'AAAA',
+      newGeneration: 1,
+      kid: `${DID}#sig-0`,
+      signingSeed: new Uint8Array(32).fill(3),
+    })
+
+    // Send present-capability (waiter set for docId), THEN — before its receipt —
+    // an out-of-band rotate for the SAME docId. With per-docId serialization the
+    // rotate QUEUES behind present-capability instead of clobbering its waiter.
+    const presentPromise = adapter.sendControlFrame(present)
+    const rotatePromise = adapter.sendControlFrame(rotate)
+
+    // Only present-capability has been written so far (rotate is queued).
+    const writtenTypes = socket.sent.map((s) => JSON.parse(s).type)
+    expect(writtenTypes.filter((t) => t === 'present-capability')).toHaveLength(1)
+    expect(writtenTypes).not.toContain('space-rotate')
+
+    // The relay answers present-capability first → its waiter (NOT the rotate's)
+    // resolves. If the rotate had clobbered the docId waiter, this receipt would
+    // resolve the rotate and present-capability would time out.
+    socket.push({ type: 'receipt', receipt: { messageId: SPACE_ID, status: 'delivered', timestamp: 'p' } })
+    const presentReceipt = await presentPromise
+    expect(presentReceipt.timestamp).toBe('p')
+
+    // Now the rotate is dequeued + written; its receipt resolves it.
+    await Promise.resolve()
+    expect(socket.sent.map((s) => JSON.parse(s).type)).toContain('space-rotate')
+    socket.push({ type: 'receipt', receipt: { messageId: SPACE_ID, status: 'delivered', timestamp: 'r' } })
+    const rotateReceipt = await rotatePromise
+    expect(rotateReceipt.timestamp).toBe('r')
+  })
+
+  it('CONCERN-2 TEETH — without per-docId serialization, a same-docId second frame overwrites the first waiter (single-slot Map)', async () => {
+    // Demonstrates the underlying hazard the serialization fixes: the receipt
+    // correlation Map holds ONE waiter per docId. Two raw concurrent sets for the
+    // same docId leave only the LAST waiter; the first can never resolve.
+    const waiters = new Map<string, string>()
+    waiters.set(SPACE_ID, 'present-capability-waiter')
+    // A second same-docId frame (rotate) registered WITHOUT serialization:
+    waiters.set(SPACE_ID, 'rotate-waiter') // clobbers the present waiter
+    expect(waiters.get(SPACE_ID)).toBe('rotate-waiter')
+    expect(waiters.size).toBe(1) // the present-capability waiter is lost ⇒ timeout
   })
 })
