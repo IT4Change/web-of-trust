@@ -16,6 +16,7 @@ import {
 } from '../../protocol/sync/control-frame-transport'
 import { isKnownBrokerErrorCode } from '../../protocol/sync/broker-error'
 import { controlFrameDocId } from '../../protocol/sync/control-frame-doc-id'
+import { SYNC_REQUEST_MESSAGE_TYPE } from '../../protocol/sync/sync-messages'
 
 /**
  * Signs the JCS-canonicalized Broker-Auth-Transcript bytes for Sync 003
@@ -347,6 +348,21 @@ export class WebSocketMessagingAdapter implements MessagingAdapter {
   async send(envelope: WireMessage): Promise<DeliveryReceipt> {
     if (this.state !== 'connected' || !this.ws) {
       throw new Error('WebSocketMessagingAdapter: must call connect() before send()')
+    }
+
+    // VE-11 wire-contract: a `sync-request/1.0` is a ONE-WAY request. The relay
+    // never answers it with a `receipt` — it answers asynchronously with a
+    // `sync-response/1.0` MESSAGE (routed to onMessage; the LogSyncCoordinator
+    // correlates it by thid) or, on a gate failure, an `error` frame. Awaiting a
+    // receipt here would therefore always time out. Send fire-and-forget and
+    // resolve immediately with an `accepted` acknowledgement; the coordinator's
+    // own pending-sync-request waiter resolves when the sync-response arrives.
+    if ((envelope as { type?: string }).type === SYNC_REQUEST_MESSAGE_TYPE) {
+      if (this.ws.readyState !== WebSocket.OPEN) {
+        throw new Error('WebSocket not open')
+      }
+      this.ws.send(JSON.stringify({ type: 'send', envelope }))
+      return { messageId: envelope.id, status: 'accepted', timestamp: new Date().toISOString() }
     }
 
     return new Promise<DeliveryReceipt>((resolve, reject) => {

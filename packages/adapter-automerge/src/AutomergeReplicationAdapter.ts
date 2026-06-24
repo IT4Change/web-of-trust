@@ -24,8 +24,8 @@ import {
   createAckMessage, evaluateInboxAckDisposition, createDidKeyResolver,
   formatMembershipEventKey, parseMembershipEventKey, resolveActiveMembers, resolveMembershipWinner, assertMembershipEvent,
   resolveActiveAdmins, assertAdminEntry,
-  LogSyncCoordinator, AuthorMismatchError, createSpaceCapabilityJws, createSpaceRegisterMessage,
-  createSpaceRotateMessage,
+  LogSyncCoordinator, AuthorMismatchError, createSpaceCapabilityJws,
+  createSpaceRegisterMessageWithSigner, createSpaceRotateMessageWithSigner,
   LOG_ENTRY_MESSAGE_TYPE, SYNC_RESPONSE_MESSAGE_TYPE,
 } from '@web_of_trust/core/protocol'
 import type { LogSyncEngineHooks, CapabilitySource, ControlFrameReceipt, WriteRejectHandler } from '@web_of_trust/core/protocol'
@@ -2335,26 +2335,20 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
       const generation = await this.keyManagement.getCurrentGeneration(spaceId)
       const verificationKey = await this.keyManagement.getCapabilityVerificationKey(spaceId, generation)
       if (!verificationKey) return undefined
-      const register = await createSpaceRegisterMessage({
+      // VE-11: the inner JWS MUST be signed by the Identity key that the `kid`'s
+      // did:key resolves to — the REAL relay (verifySpaceRegisterMessage) verifies
+      // the signature against that did:key. Sign through identity.signEd25519 via the
+      // WithSigner variant (operation-shaped vault never exposes the seed; a
+      // deriveFrameworkKey seed would be rejected AUTH_INVALID by the real relay).
+      const register = await createSpaceRegisterMessageWithSigner({
         spaceId,
         spaceCapabilityVerificationKey: encodeBase64Url(verificationKey),
         adminDids,
         kid: this.authorKid(),
-        signingSeed: await this.adminRegisterSigningSeed(),
+        sign: (input) => this.identity.signEd25519(input),
       })
       return (await messaging.sendControlFrame(register)) as ControlFrameReceipt
     }
-  }
-
-  /**
-   * The Identity vault is operation-shaped (no raw seed). `createSpaceRegisterMessage`
-   * needs a raw seed for the inner JWS. Mirror the Yjs adapter: sign the
-   * registration with a deterministic per-identity framework key (the broker mock
-   * parses + first-writer-wins; full admin-key verification is the relay-phase
-   * concern). This keeps VE-8 wired without exposing the Identity seed.
-   */
-  private async adminRegisterSigningSeed(): Promise<Uint8Array> {
-    return this.identity.deriveFrameworkKey('wot/space-register-signer/v1')
   }
 
   /**
@@ -2554,12 +2548,14 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
     const newGeneration = await this.keyManagement.getCurrentGeneration(spaceId)
     const verificationKey = await this.keyManagement.getCapabilityVerificationKey(spaceId, newGeneration)
     if (!verificationKey) return
-    const rotate = await createSpaceRotateMessage({
+    // VE-11: signed by the Identity key behind `kid` (relay resolveAdminSigner
+    // verifies against the kid's did:key). WithSigner keeps the seed in the vault.
+    const rotate = await createSpaceRotateMessageWithSigner({
       spaceId,
       newSpaceCapabilityVerificationKey: encodeBase64Url(verificationKey),
       newGeneration,
       kid: this.authorKid(),
-      signingSeed: await this.adminRegisterSigningSeed(),
+      sign: (input) => this.identity.signEd25519(input),
     })
     await messaging.sendControlFrame(rotate)
   }

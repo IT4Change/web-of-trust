@@ -44,8 +44,8 @@ import {
   createAckMessage, evaluateInboxAckDisposition, createDidKeyResolver,
   formatMembershipEventKey, parseMembershipEventKey, resolveActiveMembers, resolveMembershipWinner, assertMembershipEvent,
   resolveActiveAdmins, assertAdminEntry,
-  LogSyncCoordinator, AuthorMismatchError, createSpaceCapabilityJws, createSpaceRegisterMessage,
-  createSpaceRotateMessage,
+  LogSyncCoordinator, AuthorMismatchError, createSpaceCapabilityJws,
+  createSpaceRegisterMessageWithSigner, createSpaceRotateMessageWithSigner,
   LOG_ENTRY_MESSAGE_TYPE, SYNC_RESPONSE_MESSAGE_TYPE,
 } from '@web_of_trust/core/protocol'
 import type { LogSyncEngineHooks, CapabilitySource, ControlFrameReceipt, WriteRejectHandler } from '@web_of_trust/core/protocol'
@@ -704,6 +704,20 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
             console.debug('[YjsReplication] first-publication deferred (will retry):', err)
           }
         })
+        // VE-4 (self-contained log, mirrors the Automerge adapter): the creator's
+        // INITIAL doc seed (_members/_admins/_meta + the initialDoc) was written to
+        // the Y.Doc BEFORE setupSpaceSync attached the update observer, so it is NOT
+        // yet in the log. Publish the full current state as the first log-entry
+        // (seq=0) so a cold-start device with NO invite snapshot reconstructs the doc
+        // purely from `leere heads → kompletter Log` (sync-request catch-up).
+        // Subsequent local edits append from seq=1.
+        await this.writeFullStateViaLog(state).catch((err) => {
+          if (err instanceof AuthorMismatchError) {
+            console.error('[YjsReplication] AUTHOR_MISMATCH during createSpace seed:', err.message)
+          } else {
+            console.debug('[YjsReplication] createSpace seed deferred (will retry):', err)
+          }
+        })
       }
       this._scheduleVaultImmediate(state)
       return info
@@ -1144,32 +1158,20 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
       const generation = await this.keyManagement.getCurrentGeneration(spaceId)
       const verificationKey = await this.keyManagement.getCapabilityVerificationKey(spaceId, generation)
       if (!verificationKey) return undefined
-      const register = await createSpaceRegisterMessage({
+      // VE-11: the inner JWS MUST be signed by the Identity key that the `kid`'s
+      // did:key resolves to — the REAL relay (verifySpaceRegisterMessage) verifies
+      // the signature against that did:key. The operation-shaped vault never exposes
+      // the seed, so we sign through identity.signEd25519 via the WithSigner variant
+      // (NOT a deriveFrameworkKey seed, which the relay would reject AUTH_INVALID).
+      const register = await createSpaceRegisterMessageWithSigner({
         spaceId,
         spaceCapabilityVerificationKey: encodeBase64Url(verificationKey),
         adminDids,
         kid: this.authorKid(),
-        // The Identity-Key signing seed is not exposed; the broker verifies the
-        // admin binding against the kid's did:key. We sign via the identity's
-        // signEd25519 by routing through createSpaceRegisterMessage's seed param is
-        // not possible (operation-shaped), so we provide a JWS pre-signed below.
-        signingSeed: await this.adminRegisterSigningSeed(),
+        sign: (input) => this.identity.signEd25519(input),
       })
       return (await messaging.sendControlFrame(register)) as ControlFrameReceipt
     }
-  }
-
-  /**
-   * The Identity vault is operation-shaped (no raw seed). `createSpaceRegisterMessage`
-   * needs a raw seed to produce the inner JWS. Until a signer-based variant lands,
-   * the adapter signs the registration with a deterministic per-identity seed whose
-   * binding the broker does not re-derive in this phase (the broker mock parses +
-   * first-writer-wins; full admin-key verification is the relay-phase concern in
-   * Slice CG). This keeps VE-8 wired without exposing the Identity seed.
-   */
-  private async adminRegisterSigningSeed(): Promise<Uint8Array> {
-    // Derive a stable framework key as the register signer seed (32 bytes).
-    return this.identity.deriveFrameworkKey('wot/space-register-signer/v1')
   }
 
   /**
@@ -1191,12 +1193,15 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
     const newGeneration = await this.keyManagement.getCurrentGeneration(spaceId)
     const verificationKey = await this.keyManagement.getCapabilityVerificationKey(spaceId, newGeneration)
     if (!verificationKey) return
-    const rotate = await createSpaceRotateMessage({
+    // VE-11: signed by the Identity key behind `kid` (relay resolveAdminSigner
+    // verifies the signature against the kid's did:key). WithSigner keeps the seed
+    // inside the operation-shaped vault.
+    const rotate = await createSpaceRotateMessageWithSigner({
       spaceId,
       newSpaceCapabilityVerificationKey: encodeBase64Url(verificationKey),
       newGeneration,
       kid: this.authorKid(),
-      signingSeed: await this.adminRegisterSigningSeed(),
+      sign: (input) => this.identity.signEd25519(input),
     })
     await messaging.sendControlFrame(rotate)
   }
