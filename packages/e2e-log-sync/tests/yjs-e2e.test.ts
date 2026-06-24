@@ -535,4 +535,3 @@ async function startRelayWithClock(now: () => number): Promise<StartedRelay> {
     stop: () => server.stop(),
   }
 }
-
