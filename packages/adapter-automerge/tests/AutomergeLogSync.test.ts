@@ -580,6 +580,69 @@ describe('AutomergeReplicationAdapter — Slice A Phase 4 (VE-2..10 log path + V
     expect(parsed.payload.spaceId).toBe(spaceId)
   })
 
+  it('Test 7d (VE-10 NEGATIVE) — a transient space-rotate reject on removeMember persists the intent DURABLY (no silent swallow); removeMember still resolves; reconnect retries → broker rotates → the removed member over its OPEN socket is rejected', async () => {
+    const spaceId = await createSharedSpace()
+    const aliceStore = (aliceAdapter as unknown as { docLogStore: InMemoryDocLogStore }).docLogStore
+
+    expect(broker.getGeneration(spaceId)).toBe(0)
+    const bobHandle = await bobAdapter.openSpace<TestDoc>(spaceId)
+    bobHandle.transact((doc) => { doc.items['bob-pre'] = { title: 'pre' } })
+    await wait(250)
+    expect(broker.entryCount(spaceId)).toBeGreaterThan(0)
+
+    // Arm a ONE-SHOT transient reject (RATE_LIMITED) on the FIRST space-rotate frame.
+    broker.armRejection({
+      code: 'RATE_LIMITED',
+      target: 'control',
+      docId: spaceId,
+      frameType: SPACE_ROTATE_MESSAGE_TYPE,
+    })
+
+    const genBefore = await aliceAdapter.getKeyGeneration(spaceId)
+    // removeMember rotates the local key ONCE and enqueues the broker rotate. The
+    // transient broker failure must NOT throw AND must NOT be silently swallowed.
+    await expect(aliceAdapter.removeMember(spaceId, bob.getDid())).resolves.toBeUndefined()
+    await wait(250)
+    const genAfter = await aliceAdapter.getKeyGeneration(spaceId)
+    expect(genAfter).toBe(genBefore + 1)
+
+    // (a) DURABLE intent persisted, (b) broker STILL on the old generation.
+    const pending = await aliceStore.getPendingSpaceRotate(spaceId)
+    expect(pending).not.toBeNull()
+    expect(pending?.newGeneration).toBe(genAfter)
+    expect(broker.getGeneration(spaceId)).toBe(0)
+
+    // (c)+(d) reconnect / requestSync re-sends the stored frame → broker advances,
+    // pending cleared.
+    await aliceAdapter.requestSync(spaceId)
+    await wait(250)
+    expect(broker.getGeneration(spaceId)).toBe(genAfter)
+    expect(await aliceStore.getPendingSpaceRotate(spaceId)).toBeNull()
+
+    // (e) The removed member (Bob) over its OPEN socket is rejected: its gen-0 scope
+    // was invalidated by the rotate, so its post-rotate write is NOT persisted.
+    const entriesAfterRotate = broker.entryCount(spaceId)
+    bobHandle.transact((doc) => { doc.items['bob-evil'] = { title: 'evil' } })
+    await wait(250)
+    expect(broker.entryCount(spaceId)).toBe(entriesAfterRotate)
+  })
+
+  it('Test 7e (VE-10 IDEMPOTENCY) — a retry after the broker already rotated is treated as already-enforced (pending cleared, no double rotation)', async () => {
+    const spaceId = await createSharedSpace()
+    const aliceStore = (aliceAdapter as unknown as { docLogStore: InMemoryDocLogStore }).docLogStore
+
+    await aliceAdapter.removeMember(spaceId, bob.getDid())
+    await wait(250)
+    expect(broker.getGeneration(spaceId)).toBe(1)
+    expect(await aliceStore.getPendingSpaceRotate(spaceId)).toBeNull()
+
+    // A reconnect/requestSync with nothing pending is a clean no-op (no double rotation).
+    await aliceAdapter.requestSync(spaceId)
+    await wait(200)
+    expect(broker.getGeneration(spaceId)).toBe(1)
+    expect(await aliceStore.getPendingSpaceRotate(spaceId)).toBeNull()
+  })
+
   // ── VE-3 engine-foreign skip (a non-Automerge payload must not crash/loop) ───
   it('VE-3 engine-foreign — an invalid/engine-foreign log-entry is rejected gracefully (no throw, no loop) and convergence still works for the next real edit', async () => {
     const spaceId = await createSharedSpace()

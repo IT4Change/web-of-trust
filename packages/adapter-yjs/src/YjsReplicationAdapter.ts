@@ -937,10 +937,18 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
     // The admin MUST therefore send space-rotate(newGeneration = current+1) AFTER
     // the key rotation (order: rotate-key THEN space-rotate). Only the log-sync
     // configuration has a broker registration to rotate.
+    //
+    // BLOCKER FIX (VE-10): the broker-rotation error is NO LONGER swallowed into a
+    // console.warn. sendSpaceRotate routes through the coordinator, which DURABLY
+    // persists the rotate intent BEFORE removeMember resolves and retries it on
+    // every reconnect/publish until the broker confirms (idempotent). removeMember
+    // therefore only resolves once the rotation is either confirmed OR durably
+    // persisted for retry — so the removed member can never keep writing under the
+    // old generation across a transient relay failure / app restart without the
+    // revocation being guaranteed to catch up. A transient failure does not throw
+    // (the durable intent enforces it); a genuine authorization error propagates.
     if (this.logSyncEnabled) {
-      await this.sendSpaceRotate(state).catch((err) =>
-        console.warn('[YjsReplication] space-rotate send failed (broker scope not invalidated):', err),
-      )
+      await this.sendSpaceRotate(state)
     }
 
     // Notify remaining members AND the removed member (Sync 005 Z.238). member-update
@@ -1210,6 +1218,16 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
    * member's capability scope (Sync 003 capability-revoke-über-rotation). MUST run
    * AFTER rotateSpaceKeyAndDistribute (so getCurrentGeneration is already the new
    * generation and the new verification key exists). Only an admin may sign it.
+   *
+   * DURABLE + IDEMPOTENT (VE-10 blocker fix): the signed frame is handed to the
+   * LogSyncCoordinator, which (1) DURABLY persists the rotate intent BEFORE the
+   * first send (so a transient relay failure / app restart can never silently drop
+   * the broker-side capability revocation — the removed member could otherwise keep
+   * writing under the OLD generation over an open socket) and (2) retries it on
+   * every (re)connect/publish until the broker confirms. The local key rotation
+   * happened EXACTLY ONCE in rotateSpaceKeyAndDistribute; this signs ONCE and never
+   * re-rotates. A transient failure does NOT throw (the durable intent guarantees
+   * enforcement); a genuine first-send AUTH error propagates to the caller.
    */
   private async sendSpaceRotate(state: YjsSpaceState): Promise<void> {
     const messaging = this.messaging as MessagingAdapter
@@ -1223,7 +1241,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
     if (!verificationKey) return
     // VE-11: signed by the Identity key behind `kid` (relay resolveAdminSigner
     // verifies the signature against the kid's did:key). WithSigner keeps the seed
-    // inside the operation-shaped vault.
+    // inside the operation-shaped vault. Signed ONCE; stored verbatim for retry.
     const rotate = await createSpaceRotateMessageWithSigner({
       spaceId,
       newSpaceCapabilityVerificationKey: encodeBase64Url(verificationKey),
@@ -1231,7 +1249,16 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
       kid: this.authorKid(),
       sign: (input) => this.identity.signEd25519(input),
     })
-    await messaging.sendControlFrame(rotate)
+    const coordinator = await this.getOrCreateCoordinator(state)
+    if (!coordinator) {
+      // No log-sync coordinator (degenerate): fall back to a direct send so the
+      // rotate is at least attempted. No durable retry is possible without the
+      // coordinator/store, but this branch is unreachable under enableLogSync.
+      await messaging.sendControlFrame(rotate)
+      return
+    }
+    // Durable persist BEFORE resolve + idempotent retry on reconnect (VE-10).
+    await coordinator.enqueueSpaceRotate({ newGeneration, rotationFrame: rotate })
   }
 
   /**
@@ -1260,7 +1287,10 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
     // coordinator (the seq-namespace owner), so a wiped store yields a fresh id.
     const deviceId = await this.ensureDeviceId()
 
-    const sendControlFrame = (this.messaging as MessagingAdapter).sendControlFrame!
+    // Dynamic lookup (NOT a captured reference): a test spy or a reconnected
+    // messaging adapter that re-installs sendControlFrame must be seen on every
+    // call. A once-captured reference would route around a later-installed spy
+    // (and around the VE-10 durable-rotate retry's observability).
     const coordinator = new LogSyncCoordinator({
       docId: spaceId,
       deviceId,
@@ -1268,7 +1298,10 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
       authorKid: this.authorKid(),
       crypto: this.crypto,
       logStore,
-      control: { sendControlFrame: (frame) => sendControlFrame.call(this.messaging, frame) },
+      control: {
+        sendControlFrame: (frame) =>
+          (this.messaging as MessagingAdapter).sendControlFrame!.call(this.messaging, frame),
+      },
       envelopes: { send: (envelope) => this.messaging.send(envelope as WireMessage) },
       capabilities: this.spaceCapabilitySource(spaceId),
       hooks: this.yjsEngineHooks(state),
@@ -1300,6 +1333,20 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
       // state under the NEW deviceId from seq=0 (the colliding seq is abandoned).
       onAfterRestoreClone: async () => {
         await this.writeFullStateViaLog(state)
+      },
+      // VE-10: observable broker-rotation status (no silent swallow). 'broker-pending'
+      // means the rotate did NOT get a receipt yet — it stays durable + is retried on
+      // reconnect; 'confirmed' means the broker advanced (or already had) the generation.
+      onSpaceRotateStatus: (status) => {
+        if (status.outcome === 'broker-pending') {
+          console.warn(
+            `[YjsReplication] space-rotate broker-pending for ${status.docId} (gen ${status.newGeneration}) — persisted durably, will retry on reconnect`,
+          )
+        } else {
+          console.debug(
+            `[YjsReplication] space-rotate confirmed for ${status.docId} (gen ${status.newGeneration})`,
+          )
+        }
       },
     })
     this.coordinators.set(spaceId, coordinator)

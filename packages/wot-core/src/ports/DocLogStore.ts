@@ -121,6 +121,45 @@ export interface RecordRemoteAppliedEntry {
   entryJws?: string
 }
 
+/**
+ * A durably persisted broker `space-rotate` intent that has NOT yet been
+ * confirmed by the broker (VE-10). Created at member-removal time — BEFORE
+ * {@link DocLogStore.removeMember}'s caller resolves — so a transient relay
+ * failure (reject / timeout / offline) can never silently drop the broker-side
+ * capability revocation. One pending rotate per (docId): the latest generation
+ * a removal needs the broker to advance to.
+ *
+ * ── Why this lives in the SAME durable store as the log ──────────────────────
+ *
+ * VE-10 invariant: after removeMember(removed) there must be NO window — across
+ * transient relay errors OR an app restart — in which the removed member can keep
+ * writing under the OLD generation without the broker rotation being GUARANTEED to
+ * catch up. A best-effort `console.warn` send drops the intent on a crash/offline;
+ * persisting it next to the log makes the broker invalidation eventually-consistent
+ * GUARANTEED (durable retry), not best-effort. Co-located with the log so one wipe
+ * drops both consistently (no orphan pending against a wiped log).
+ *
+ * ── Decoupled from the LOCAL key rotation (no double-rotate) ─────────────────
+ *
+ * removeMember rotates the local Content-Key EXACTLY ONCE and signs the
+ * `rotationJws` ONCE; that signed frame is STORED here verbatim. A retry re-sends
+ * the STORED `rotationJws` unchanged — it NEVER re-rotates the local key and never
+ * re-signs. Idempotent at the broker: the relay's gate accepts only
+ * `newGeneration === current + 1`; a re-send after the rotation already landed is
+ * rejected (AUTH_INVALID / CAPABILITY_GENERATION_STALE) and the retry treats that
+ * as "already enforced" → deletes the pending.
+ */
+export interface PendingSpaceRotate {
+  /** The space whose broker generation must be advanced. */
+  docId: string
+  /** The target generation (= the local post-rotation generation; broker gate: current + 1). */
+  newGeneration: number
+  /** The complete signed `space-rotate` control frame (`{ type, rotationJws }`) as JSON. Stored verbatim, re-sent unchanged on retry. */
+  rotationFrameJson: string
+  /** Local creation time (ms since epoch), for stable retry ordering. */
+  createdAt: number
+}
+
 export interface DocLogStore {
   /** Open/initialize the backing store. Idempotent. */
   init(): Promise<void>
@@ -182,6 +221,28 @@ export interface DocLogStore {
 
   /** Mark a previously pending entry as acknowledged. No-op if already acked/absent. */
   markAcked(docId: string, deviceId: string, seq: number): Promise<void>
+
+  /**
+   * Durably persist (or replace) the pending broker `space-rotate` intent for a
+   * docId (VE-10). Idempotent on (docId): a second removal that raises the target
+   * generation overwrites the record with the higher `newGeneration` + its frame.
+   * MUST complete BEFORE removeMember resolves, so the broker invalidation is
+   * guaranteed even if the immediate send fails (transient / offline / crash).
+   */
+  putPendingSpaceRotate(record: PendingSpaceRotate): Promise<void>
+
+  /** The pending broker space-rotate intent for a docId, or null if none is outstanding. */
+  getPendingSpaceRotate(docId: string): Promise<PendingSpaceRotate | null>
+
+  /** All outstanding pending space-rotate intents (reconnect retry set), ascending by createdAt. */
+  getAllPendingSpaceRotates(): Promise<PendingSpaceRotate[]>
+
+  /**
+   * Clear the pending space-rotate intent for a docId once the broker confirmed it
+   * (receipt) OR rejected it as already-enforced/stale (AUTH_INVALID /
+   * CAPABILITY_GENERATION_STALE). No-op if absent.
+   */
+  deletePendingSpaceRotate(docId: string): Promise<void>
 
   /** Remove all entries. Test/reset helper. */
   clear(): Promise<void>

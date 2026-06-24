@@ -184,6 +184,118 @@ describe.each(implementations)('DocLogStore contract — $name', ({ create, dura
     })
   })
 
+  // ── VE-10: durable pending broker space-rotate intent ─────────────────────
+  describe('pending space-rotate (VE-10 durable broker rotation)', () => {
+    it('persists, reads back, and deletes a pending space-rotate by docId', async () => {
+      const store = create(freshDbName())
+      await store.init()
+      const docId = uuid()
+
+      // Absent initially.
+      expect(await store.getPendingSpaceRotate(docId)).toBeNull()
+
+      await store.putPendingSpaceRotate({
+        docId,
+        newGeneration: 1,
+        rotationFrameJson: JSON.stringify({ type: 'space-rotate', rotationJws: 'jws-a.b.c' }),
+        createdAt: 100,
+      })
+
+      const read = await store.getPendingSpaceRotate(docId)
+      expect(read).not.toBeNull()
+      expect(read?.docId).toBe(docId)
+      expect(read?.newGeneration).toBe(1)
+      expect(JSON.parse(read!.rotationFrameJson).rotationJws).toBe('jws-a.b.c')
+
+      await store.deletePendingSpaceRotate(docId)
+      expect(await store.getPendingSpaceRotate(docId)).toBeNull()
+      // delete is idempotent (no throw on an absent record).
+      await expect(store.deletePendingSpaceRotate(docId)).resolves.toBeUndefined()
+    })
+
+    it('is idempotent on docId: a higher generation replaces, a lower/equal one never downgrades', async () => {
+      const store = create(freshDbName())
+      await store.init()
+      const docId = uuid()
+
+      await store.putPendingSpaceRotate({
+        docId,
+        newGeneration: 2,
+        rotationFrameJson: JSON.stringify({ type: 'space-rotate', rotationJws: 'gen2' }),
+        createdAt: 1,
+      })
+      // A lower generation MUST NOT downgrade the outstanding higher intent.
+      await store.putPendingSpaceRotate({
+        docId,
+        newGeneration: 1,
+        rotationFrameJson: JSON.stringify({ type: 'space-rotate', rotationJws: 'gen1' }),
+        createdAt: 2,
+      })
+      expect((await store.getPendingSpaceRotate(docId))?.newGeneration).toBe(2)
+      expect(JSON.parse((await store.getPendingSpaceRotate(docId))!.rotationFrameJson).rotationJws).toBe('gen2')
+
+      // A higher generation replaces (a second removal raising the target gen).
+      await store.putPendingSpaceRotate({
+        docId,
+        newGeneration: 3,
+        rotationFrameJson: JSON.stringify({ type: 'space-rotate', rotationJws: 'gen3' }),
+        createdAt: 3,
+      })
+      expect((await store.getPendingSpaceRotate(docId))?.newGeneration).toBe(3)
+      expect(JSON.parse((await store.getPendingSpaceRotate(docId))!.rotationFrameJson).rotationJws).toBe('gen3')
+    })
+
+    it('getAllPendingSpaceRotates returns every outstanding intent ascending by createdAt', async () => {
+      const store = create(freshDbName())
+      await store.init()
+      const docA = uuid()
+      const docB = uuid()
+
+      await store.putPendingSpaceRotate({ docId: docB, newGeneration: 1, rotationFrameJson: '{"b":1}', createdAt: 200 })
+      await store.putPendingSpaceRotate({ docId: docA, newGeneration: 1, rotationFrameJson: '{"a":1}', createdAt: 100 })
+
+      const all = await store.getAllPendingSpaceRotates()
+      expect(all.map((r) => r.docId)).toEqual([docA, docB]) // sorted by createdAt asc
+
+      await store.deletePendingSpaceRotate(docA)
+      expect((await store.getAllPendingSpaceRotates()).map((r) => r.docId)).toEqual([docB])
+    })
+
+    it('clear() drops pending space-rotates (co-located wipe with the log)', async () => {
+      const store = create(freshDbName())
+      await store.init()
+      const docId = uuid()
+      await store.putPendingSpaceRotate({ docId, newGeneration: 1, rotationFrameJson: '{}', createdAt: 1 })
+      expect(await store.getPendingSpaceRotate(docId)).not.toBeNull()
+      await store.clear()
+      expect(await store.getPendingSpaceRotate(docId)).toBeNull()
+      expect(await store.getAllPendingSpaceRotates()).toEqual([])
+    })
+
+    it('survives a restart on the SAME durable backing (crash-safe enforcement)', async () => {
+      // The whole point of VE-10: a pending rotate that did not get a receipt must
+      // survive an app restart so the broker invalidation is retried. For the
+      // in-memory store this is a same-instance assertion; for IndexedDB it is a
+      // genuine reopen of the SAME db name on a FRESH instance.
+      const dbName = freshDbName()
+      const storeA = create(dbName)
+      await storeA.init()
+      const docId = uuid()
+      await storeA.putPendingSpaceRotate({
+        docId,
+        newGeneration: 5,
+        rotationFrameJson: JSON.stringify({ type: 'space-rotate', rotationJws: 'survives' }),
+        createdAt: 42,
+      })
+
+      const storeB = durable ? create(dbName) : storeA
+      await storeB.init()
+      const read = await storeB.getPendingSpaceRotate(docId)
+      expect(read?.newGeneration).toBe(5)
+      expect(JSON.parse(read!.rotationFrameJson).rotationJws).toBe('survives')
+    })
+  })
+
   // ── Group 2: cross-tab atomicity proxy — concurrent appends get 0..N-1 ────
   describe('cross-tab seq atomicity (Group 2)', () => {
     it('N concurrent appendLocalEntry on the same (deviceId,docId) yield exactly 0..N-1, all distinct', async () => {

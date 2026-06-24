@@ -1283,10 +1283,18 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
     // scope (rotateSpaceKeyAndDistribute rotates the CONTENT key + key-rotation
     // inbox messages but does NOT touch the broker). Order: rotate-key THEN
     // space-rotate. Only log-sync has a broker registration to rotate.
+    //
+    // BLOCKER FIX (VE-10): the broker-rotation error is NO LONGER swallowed into a
+    // console.warn. sendSpaceRotate routes through the coordinator, which DURABLY
+    // persists the rotate intent BEFORE removeMember resolves and retries it on
+    // every reconnect/publish until the broker confirms (idempotent). removeMember
+    // therefore only resolves once the rotation is either confirmed OR durably
+    // persisted for retry — so the removed member can never keep writing under the
+    // old generation across a transient relay failure / app restart without the
+    // revocation being guaranteed to catch up. A transient failure does not throw;
+    // a genuine authorization error propagates.
     if (this.logSyncEnabled) {
-      await this.sendSpaceRotate(space).catch((err) =>
-        console.warn('[ReplicationAdapter] space-rotate send failed (broker scope not invalidated):', err),
-      )
+      await this.sendSpaceRotate(space)
     }
 
     // Notify remaining members AND the removed member (Sync 005 Z.238). member-update
@@ -2396,7 +2404,10 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
     // coordinator (the seq-namespace owner), so a wiped store yields a fresh id.
     const deviceId = await this.ensureDeviceId()
 
-    const sendControlFrame = (this.messaging as MessagingAdapter).sendControlFrame!
+    // Dynamic lookup (NOT a captured reference): a test spy or a reconnected
+    // messaging adapter that re-installs sendControlFrame must be seen on every
+    // call. A once-captured reference would route around a later-installed spy
+    // (and around the VE-10 durable-rotate retry's observability).
     const coordinator = new LogSyncCoordinator({
       docId: spaceId, // VE-9: canonical UUID, never the base58 documentId.
       deviceId,
@@ -2404,7 +2415,10 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
       authorKid: this.authorKid(),
       crypto: this.crypto,
       logStore,
-      control: { sendControlFrame: (frame) => sendControlFrame.call(this.messaging, frame) },
+      control: {
+        sendControlFrame: (frame) =>
+          (this.messaging as MessagingAdapter).sendControlFrame!.call(this.messaging, frame),
+      },
       envelopes: { send: (envelope) => this.messaging.send(envelope as WireMessage) },
       capabilities: this.spaceCapabilitySource(spaceId),
       hooks: this.automergeEngineHooks(space),
@@ -2428,6 +2442,20 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
       onWriteRejected: this.makeWriteRejectHandler(),
       onAfterRestoreClone: async () => {
         await this.writeFullStateViaLog(space)
+      },
+      // VE-10: observable broker-rotation status (no silent swallow). 'broker-pending'
+      // means the rotate did NOT get a receipt yet — it stays durable + is retried on
+      // reconnect; 'confirmed' means the broker advanced (or already had) the generation.
+      onSpaceRotateStatus: (status) => {
+        if (status.outcome === 'broker-pending') {
+          console.warn(
+            `[ReplicationAdapter] space-rotate broker-pending for ${status.docId} (gen ${status.newGeneration}) — persisted durably, will retry on reconnect`,
+          )
+        } else {
+          console.debug(
+            `[ReplicationAdapter] space-rotate confirmed for ${status.docId} (gen ${status.newGeneration})`,
+          )
+        }
       },
     })
     this.coordinators.set(spaceId, coordinator)
@@ -2572,6 +2600,16 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
    * INVALIDATES the removed member's capability scope. MUST run AFTER the key
    * rotation (so getCurrentGeneration is already the new generation). Only an
    * admin signs it. No-op outside log-sync (no broker registration to rotate).
+   *
+   * DURABLE + IDEMPOTENT (VE-10 blocker fix): the signed frame is handed to the
+   * LogSyncCoordinator, which (1) DURABLY persists the rotate intent BEFORE the
+   * first send (so a transient relay failure / app restart can never silently drop
+   * the broker-side capability revocation) and (2) retries it on every (re)connect/
+   * publish until the broker confirms. The local key rotation happened EXACTLY ONCE
+   * in rotateSpaceKeyAndDistribute; this signs ONCE and never re-rotates. A transient
+   * failure does NOT throw (the durable intent enforces it); a genuine first-send
+   * AUTH error propagates to the caller. Engine-neutral: shared with the Yjs adapter
+   * via the coordinator + the DocLogStore pending-rotation persistence.
    */
   private async sendSpaceRotate(space: SpaceState): Promise<void> {
     const messaging = this.messaging as MessagingAdapter
@@ -2584,6 +2622,7 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
     if (!verificationKey) return
     // VE-11: signed by the Identity key behind `kid` (relay resolveAdminSigner
     // verifies against the kid's did:key). WithSigner keeps the seed in the vault.
+    // Signed ONCE; stored verbatim for retry.
     const rotate = await createSpaceRotateMessageWithSigner({
       spaceId,
       newSpaceCapabilityVerificationKey: encodeBase64Url(verificationKey),
@@ -2591,7 +2630,15 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
       kid: this.authorKid(),
       sign: (input) => this.identity.signEd25519(input),
     })
-    await messaging.sendControlFrame(rotate)
+    const coordinator = await this.getOrCreateCoordinator(space)
+    if (!coordinator) {
+      // No log-sync coordinator (degenerate; unreachable under enableLogSync): fall
+      // back to a direct send. No durable retry is possible without the coordinator.
+      await messaging.sendControlFrame(rotate)
+      return
+    }
+    // Durable persist BEFORE resolve + idempotent retry on reconnect (VE-10).
+    await coordinator.enqueueSpaceRotate({ newGeneration, rotationFrame: rotate })
   }
 
   /**

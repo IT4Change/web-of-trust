@@ -364,4 +364,60 @@ describe('VE-11 Automerge — real gated relay', () => {
     adminHandle.close()
     bobHandle.close()
   })
+
+  // ── Removal-E2E with a TRANSIENT space-rotate failure (VE-10 durable retry) ──
+  it('Removal-E2E transient — a transient space-rotate failure on removeMember is NOT swallowed: the intent persists durably, removeMember resolves, reconnect/requestSync retries → relay generation rotates → the removed member over its OPEN socket is rejected; relay.docLog.entryCount unchanged by the post-rotate write', async () => {
+    const admin = track(await makeAutomergeClient({ relay, identity: await newIdentity() }))
+    const bob = track(await makeAutomergeClient({ relay, identity: await newIdentity() }))
+    const spaceId = await createSharedSpace(admin, [bob])
+    const adminHandle = await admin.adapter.openSpace<TestDoc>(spaceId)
+    const bobHandle = await bob.adapter.openSpace<TestDoc>(spaceId)
+    adminHandle.transact((d) => { d.items['before'] = { title: 'before' } })
+    expect(await waitFor(() => bobHandle.getDoc().items['before']?.title === 'before')).toBe(true)
+
+    const genBefore = relay.getSpace(spaceId)?.generation ?? 0
+    const adminStore = (admin.adapter as unknown as { docLogStore: InMemoryDocLogStore }).docLogStore
+
+    // Inject a ONE-SHOT transient failure on the FIRST space-rotate control frame.
+    let failedOnce = false
+    const baseSendControl = admin.messaging.sendControlFrame!.bind(admin.messaging)
+    ;(admin.messaging as unknown as { sendControlFrame: typeof admin.messaging.sendControlFrame }).sendControlFrame =
+      async (frame) => {
+        if (!failedOnce && (frame as { type?: string }).type === 'space-rotate') {
+          failedOnce = true
+          throw new Error('injected transient space-rotate failure (relay hiccup)')
+        }
+        return baseSendControl(frame)
+      }
+
+    // Admin removes Bob: local key rotates ONCE, broker rotate fails transiently but is
+    // DURABLY persisted (no swallow). removeMember still resolves.
+    await expect(admin.adapter.removeMember(spaceId, bob.identity.getDid())).resolves.toBeUndefined()
+    await wait(350)
+
+    // (a) Durable intent persisted; (b) the relay is STILL on the old generation.
+    expect(await adminStore.getPendingSpaceRotate(spaceId)).not.toBeNull()
+    expect(relay.getSpace(spaceId)?.generation).toBe(genBefore)
+
+    // (c)+(d) reconnect / requestSync re-sends the stored frame → relay advances, pending cleared.
+    await admin.adapter.requestSync(spaceId)
+    expect(await waitFor(() => relay.getSpace(spaceId)?.generation === genBefore + 1)).toBe(true)
+    expect(await adminStore.getPendingSpaceRotate(spaceId)).toBeNull()
+
+    // (e) The removed member (Bob) over its OPEN socket is rejected: its post-rotate write
+    // is NOT persisted (stale generation).
+    const countAfterRotate = relay.entryCount(spaceId)
+    bobHandle.transact((d) => { d.items['evil'] = { title: 'evil' } })
+    await wait(450)
+    expect(relay.entryCount(spaceId)).toBe(countAfterRotate)
+
+    adminHandle.transact((d) => { d.items['after'] = { title: 'after' } })
+    await wait(250)
+    expect(adminHandle.getDoc().items['after']?.title).toBe('after')
+    expect(adminHandle.getDoc().items['evil']).toBeUndefined()
+    assertLegacyIsolation(admin)
+
+    adminHandle.close()
+    bobHandle.close()
+  })
 })

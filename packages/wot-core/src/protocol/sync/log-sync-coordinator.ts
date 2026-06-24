@@ -1,5 +1,5 @@
 import type { ProtocolCryptoAdapter } from '../crypto/ports'
-import type { DocLogStore, LocalLogEntry } from '../../ports/DocLogStore'
+import type { DocLogStore, LocalLogEntry, PendingSpaceRotate } from '../../ports/DocLogStore'
 import { decodeBase64Url } from '../crypto/encoding'
 import {
   createLogEntryJwsWithSigner,
@@ -229,8 +229,32 @@ export interface LogSyncCoordinatorConfig {
    * (only safe when the store's pending entries were already re-keyed externally).
    */
   onAfterRestoreClone?: (newDeviceId: string) => Promise<void> | void
+  /**
+   * VE-10 observability: surfaces the outcome of a broker `space-rotate` (member
+   * removal). `confirmed` — the broker advanced its generation (receipt) OR a
+   * re-send was rejected as already-enforced (AUTH_INVALID / STALE), so the
+   * pending intent is cleared. `broker-pending` — the send hit a transient error
+   * (offline / timeout / reject other than already-enforced); the intent stays
+   * DURABLE and is retried on the next (re)connect/publish. Lets the adapter log
+   * the non-swallowed status without removeMember having to throw.
+   */
+  onSpaceRotateStatus?: (status: SpaceRotateStatus) => void
   /** Clock (testable). */
   now?: () => Date
+}
+
+/** Outcome of a durable broker space-rotate attempt (VE-10). */
+export interface SpaceRotateStatus {
+  docId: string
+  newGeneration: number
+  /**
+   * - `confirmed`: broker advanced its generation (receipt) OR a re-send was
+   *   rejected as already-enforced (AUTH_INVALID / CAPABILITY_GENERATION_STALE).
+   *   The durable pending intent has been cleared.
+   * - `broker-pending`: a transient failure (offline / timeout / other reject);
+   *   the durable pending intent REMAINS and will be retried on reconnect/publish.
+   */
+  outcome: 'confirmed' | 'broker-pending'
 }
 
 /** Result of {@link LogSyncCoordinator.receiveLogEntry}. */
@@ -426,6 +450,19 @@ export class LogSyncCoordinator {
         throw err
       }
     }
+    // (1.5) VE-10: re-drive any DURABLE space-rotate intent that did not get a broker
+    //     receipt before (transient failure / app restart) — AFTER space-register (the
+    //     space must be registered for the relay to accept a rotate) but BEFORE
+    //     present-capability. Ordering matters: a pending rotate means our LOCAL
+    //     generation is already ahead of the broker's, so our capability is the NEW
+    //     generation; advancing the broker first lets the subsequent present-capability
+    //     verify against the rotated key (otherwise it would fail against the broker's
+    //     stale-generation key and throw before the retry could run). The publish path
+    //     runs on first-publication AND on every reconnect re-publish (resetForReconnect
+    //     → ensurePublished), so the broker invalidation is GUARANTEED eventually-
+    //     consistent. Idempotent (broker gate); a fresh failure keeps the durable
+    //     intent for the next reconnect. Never throws.
+    await this.retryPendingSpaceRotates().catch(() => {})
     // (2) present-capability (VE-9), with the reject-disposition retry loop.
     await this.presentCapabilityWithRetry()
     // (3)+(4) sync-request head-abgleich + seq-consistency (VE-4). BLOCKER-1b
@@ -536,6 +573,142 @@ export class LogSyncCoordinator {
       if (entry.deviceId !== this.deviceId) continue
       await this.sendLogEntryEnvelope(entry.entryJws, entry.deviceId, entry.seq)
     }
+  }
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // VE-10: durable, idempotent broker space-rotate (member-removal revocation)
+  // ──────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Enqueue + drive a broker `space-rotate` (VE-10, Sync 003 capability-revoke-
+   * über-rotation). Called by removeMember AFTER the local key rotation:
+   *
+   *  1. DURABLY persist the intent (spaceId, newGeneration, the SIGNED frame)
+   *     BEFORE any send — so a transient relay failure / crash can never drop the
+   *     broker-side capability revocation. This persist MUST complete before
+   *     removeMember resolves (the reviewer MUST: "removeMember darf NICHT
+   *     erfolgreich abschliessen, solange die Broker-Rotation weder bestätigt NOCH
+   *     durabel für Retry persistiert ist").
+   *  2. Attempt to send (idempotent — see {@link attemptSpaceRotate}).
+   *
+   * Decoupled from the LOCAL key rotation: removeMember rotates + signs ONCE; this
+   * NEVER re-rotates or re-signs. A retry re-sends the STORED frame unchanged.
+   *
+   * Returns the outcome (confirmed | broker-pending). Does NOT throw on a transient
+   * failure: the durable record + reconnect retry GUARANTEE eventual enforcement,
+   * so removeMember can resolve with the intent safely persisted. AUTH_INVALID-on-
+   * first-send (e.g. a non-admin / wrong key) is a genuine error and propagates.
+   */
+  async enqueueSpaceRotate(params: {
+    newGeneration: number
+    /** The complete signed `space-rotate` control frame `{ type, rotationJws }` (JSON-serializable). */
+    rotationFrame: ControlFrame
+  }): Promise<SpaceRotateStatus> {
+    const record: PendingSpaceRotate = {
+      docId: this.config.docId,
+      newGeneration: params.newGeneration,
+      rotationFrameJson: JSON.stringify(params.rotationFrame),
+      createdAt: this.now().getTime(),
+    }
+    // (1) Durable-persist BEFORE the first send (the MUST). Even if the process
+    //     dies right here, the next start retries from the durable store.
+    await this.config.logStore.putPendingSpaceRotate(record)
+    // (2) Best-effort immediate send; a transient failure leaves the record for
+    //     the reconnect retry (never swallowed without persistence).
+    return this.attemptSpaceRotate(record, { firstSend: true })
+  }
+
+  /**
+   * Re-send every outstanding durable space-rotate intent for THIS doc (reconnect /
+   * publish path). Idempotent: the broker gate accepts only newGeneration ===
+   * current + 1; an already-applied rotate is rejected as already-enforced and the
+   * intent is cleared (no endless retry). A still-transient failure keeps the
+   * intent for the next attempt. Returns the number of intents that converged
+   * (confirmed) on this pass.
+   */
+  async retryPendingSpaceRotates(): Promise<number> {
+    const record = await this.config.logStore.getPendingSpaceRotate(this.config.docId)
+    if (!record) return 0
+    const status = await this.attemptSpaceRotate(record, { firstSend: false })
+    return status.outcome === 'confirmed' ? 1 : 0
+  }
+
+  /**
+   * Send one space-rotate frame and reconcile the durable intent with the outcome:
+   *  - receipt → DELETE pending (broker advanced its generation), status confirmed.
+   *  - reject AUTH_INVALID / CAPABILITY_GENERATION_STALE → the broker is ALREADY at
+   *    (or past) newGeneration; the rotation is already enforced → DELETE pending,
+   *    status confirmed. (Idempotency: a re-sent already-applied rotate fails the
+   *    relay's `newGeneration === current + 1` gate with AUTH_INVALID.)
+   *  - any other reject / transient error / timeout → KEEP pending (durable retry),
+   *    status broker-pending. On the FIRST send, a hard AUTH_INVALID is a genuine
+   *    authorization error and is re-thrown so the caller sees it; on a RETRY it is
+   *    treated as already-enforced (the only way a previously accepted rotate now
+   *    rejects is that it already landed).
+   */
+  private async attemptSpaceRotate(
+    record: PendingSpaceRotate,
+    opts: { firstSend: boolean },
+  ): Promise<SpaceRotateStatus> {
+    let frame: ControlFrame
+    try {
+      frame = JSON.parse(record.rotationFrameJson) as ControlFrame
+    } catch {
+      // A corrupt stored frame can never be enforced — drop it so it does not loop.
+      await this.config.logStore.deletePendingSpaceRotate(record.docId)
+      return this.reportSpaceRotate(record, 'confirmed')
+    }
+    try {
+      await this.enqueueControlFrame(frame)
+      // Receipt: the broker advanced its generation. Enforcement done.
+      await this.config.logStore.deletePendingSpaceRotate(record.docId)
+      return this.reportSpaceRotate(record, 'confirmed')
+    } catch (err) {
+      const code = brokerErrorCodeOf(err)
+      if (this.isRotationAlreadyEnforced(code, opts.firstSend)) {
+        // The broker is already at/past newGeneration — the revocation is in force.
+        await this.config.logStore.deletePendingSpaceRotate(record.docId)
+        return this.reportSpaceRotate(record, 'confirmed')
+      }
+      // Transient (offline / timeout / RATE_LIMITED / INTERNAL_ERROR / a genuine
+      // first-send AUTH error): KEEP the durable intent for the reconnect retry.
+      // NEVER swallowed without persistence — the record guarantees enforcement.
+      if (opts.firstSend && code === 'AUTH_INVALID') {
+        // A hard authorization failure on the FIRST send is a real error (e.g. not
+        // an admin / wrong signer): surface it. The durable record still stands, so
+        // a later legitimate retry can converge if the cause was misclassified.
+        this.reportSpaceRotate(record, 'broker-pending')
+        throw err
+      }
+      return this.reportSpaceRotate(record, 'broker-pending')
+    }
+  }
+
+  /**
+   * Whether a space-rotate reject means the rotation is ALREADY ENFORCED at the
+   * broker (so the durable intent can be cleared). CAPABILITY_GENERATION_STALE is
+   * unambiguous. AUTH_INVALID only counts as already-enforced on a RETRY: the relay
+   * returns AUTH_INVALID when newGeneration !== current + 1, which — for a frame
+   * the broker once accepted — means it already advanced past it. On the FIRST send
+   * AUTH_INVALID is treated as a genuine authorization error (not already-enforced).
+   */
+  private isRotationAlreadyEnforced(code: BrokerErrorCode | null, firstSend: boolean): boolean {
+    if (code === 'CAPABILITY_GENERATION_STALE') return true
+    if (code === 'AUTH_INVALID' && !firstSend) return true
+    return false
+  }
+
+  private reportSpaceRotate(
+    record: PendingSpaceRotate,
+    outcome: SpaceRotateStatus['outcome'],
+  ): SpaceRotateStatus {
+    const status: SpaceRotateStatus = {
+      docId: record.docId,
+      newGeneration: record.newGeneration,
+      outcome,
+    }
+    this.config.onSpaceRotateStatus?.(status)
+    return status
   }
 
   /**
@@ -771,6 +944,16 @@ export class LogSyncCoordinator {
    * deviceId. The disposition is still returned (callers/tests may inspect it).
    */
   async catchUp(): Promise<{ restoreCloneRequired: boolean }> {
+    // VE-10: a (re)connect is the trigger to re-drive an outstanding durable
+    // space-rotate intent (member-removal revocation that didn't get a receipt yet).
+    // Run it BEFORE present-capability: a pending rotate means our LOCAL generation
+    // is ahead of the broker's, so our capability is the NEW generation; advancing
+    // the broker first lets the present-capability inside catchUpInternal verify
+    // against the rotated key (otherwise the broker rejects our new-generation
+    // capability against its stale key and catchUpInternal throws before the retry
+    // could run). No-op + never throws for the common case (no pending rotate, e.g.
+    // every non-admin member).
+    await this.retryPendingSpaceRotates().catch(() => {})
     const result = await this.catchUpInternal({ presentCapabilityFirst: true })
     await this.actOnRestoreDisposition(result)
     return result

@@ -269,6 +269,82 @@ describe('YjsReplicationAdapter — Slice A Phase 3 (VE-5/6/7/10 + write-reject 
     expect(parsed.payload.spaceId).toBe(spaceId)
   })
 
+  // ── Group 5b: VE-10 BLOCKER — transient space-rotate failure is DURABLE + retried ─
+  it('VE-10 NEGATIVE — a transient space-rotate reject on removeMember persists the intent DURABLY (no silent swallow); removeMember still resolves; reconnect retries → broker rotates → the removed member over its OPEN socket is rejected', async () => {
+    const spaceId = await createSharedSpace()
+
+    // Helpers reaching into the doc-log store to assert durable persistence.
+    const aliceStore = (aliceAdapter as unknown as { docLogStore: InMemoryDocLogStore }).docLogStore
+
+    // Sanity: broker at gen 0 before removal; Bob has a (gen-0) write scope.
+    expect(broker.getGeneration(spaceId)).toBe(0)
+    const bobHandle = await bobAdapter.openSpace<TestDoc>(spaceId)
+    bobHandle.transact((doc) => { doc.items['bob-pre'] = { title: 'pre' } })
+    await wait(200)
+    const entriesBeforeRotate = broker.entryCount(spaceId)
+    expect(entriesBeforeRotate).toBeGreaterThan(0)
+
+    // Arm a ONE-SHOT transient reject (RATE_LIMITED) on the FIRST space-rotate frame.
+    broker.armRejection({
+      code: 'RATE_LIMITED',
+      target: 'control',
+      docId: spaceId,
+      frameType: SPACE_ROTATE_MESSAGE_TYPE,
+    })
+
+    // removeMember rotates the local key ONCE and enqueues the broker rotate. The
+    // transient broker failure must NOT throw (durable intent guarantees it) AND
+    // must NOT be silently swallowed without persistence.
+    const genBefore = await aliceAdapter.getKeyGeneration(spaceId)
+    await expect(aliceAdapter.removeMember(spaceId, bob.getDid())).resolves.toBeUndefined()
+    await wait(200)
+    const genAfter = await aliceAdapter.getKeyGeneration(spaceId)
+    expect(genAfter).toBe(genBefore + 1) // local rotation happened exactly once
+
+    // (a) The space-rotate intent is DURABLE (persisted for retry), and (b) the
+    // broker is STILL on the old generation (the rotate did not land yet).
+    const pending = await aliceStore.getPendingSpaceRotate(spaceId)
+    expect(pending).not.toBeNull()
+    expect(pending?.newGeneration).toBe(genAfter)
+    expect(broker.getGeneration(spaceId)).toBe(0)
+
+    // (c) On reconnect / requestSync the durable intent is re-sent; (d) the broker
+    // now advances its generation and the pending intent is cleared.
+    await aliceAdapter.requestSync(spaceId)
+    await wait(200)
+    expect(broker.getGeneration(spaceId)).toBe(genAfter)
+    expect(await aliceStore.getPendingSpaceRotate(spaceId)).toBeNull()
+
+    // (e) The removed member (Bob) over its STILL-OPEN socket is now rejected: its
+    // gen-0 scope was invalidated by the rotate, so its post-rotate write is NOT
+    // accepted by the broker (the durable-log poisoning the blocker warned about).
+    const entriesAfterRotate = broker.entryCount(spaceId)
+    bobHandle.transact((doc) => { doc.items['bob-evil'] = { title: 'evil' } })
+    await wait(200)
+    // MASKING CONTROL: the broker log did NOT grow from Bob's rejected post-rotate write.
+    expect(broker.entryCount(spaceId)).toBe(entriesAfterRotate)
+
+    bobHandle.close()
+  })
+
+  it('VE-10 IDEMPOTENCY — a retry after the broker already rotated is treated as already-enforced (pending cleared, no double rotation)', async () => {
+    const spaceId = await createSharedSpace()
+    const aliceStore = (aliceAdapter as unknown as { docLogStore: InMemoryDocLogStore }).docLogStore
+
+    // Normal removal: the rotate confirms immediately (broker 0 → 1, pending cleared).
+    await aliceAdapter.removeMember(spaceId, bob.getDid())
+    await wait(200)
+    expect(broker.getGeneration(spaceId)).toBe(1)
+    expect(await aliceStore.getPendingSpaceRotate(spaceId)).toBeNull()
+
+    // Now a reconnect/requestSync with nothing pending is a clean no-op (no endless
+    // retry, no double rotation to gen 2).
+    await aliceAdapter.requestSync(spaceId)
+    await wait(150)
+    expect(broker.getGeneration(spaceId)).toBe(1)
+    expect(await aliceStore.getPendingSpaceRotate(spaceId)).toBeNull()
+  })
+
   // ── Group 6: Join-register — joining member publishes (incl. register) at join ─
   it('Join-register — the joining member runs the full publish (present-capability) at invite-accept, BEFORE any local write', async () => {
     // The P2-NIT-2 fix routes the join through ensurePublished() (space-register →
