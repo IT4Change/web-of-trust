@@ -1,33 +1,39 @@
 /**
- * YjsPersonalLogSyncAdapter — Personal-Doc multi-device sync on the Sync 002/003
- * LOG path (Slice A VE-6, Sync 006).
+ * AutomergePersonalLogSyncAdapter — Personal-Doc multi-device sync on the
+ * Sync 002/003 LOG path (Slice A VE-6, Sync 006) — the Automerge counterpart of
+ * {@link YjsPersonalLogSyncAdapter}.
  *
- * This is the additive, opt-in (`enableLogSync`) counterpart to
- * {@link YjsPersonalSyncAdapter} (the legacy `personal-sync` OneShot broadcast).
  * It reuses the SAME engine-neutral {@link LogSyncCoordinator} as the Space path,
  * so the Personal-Doc gets the identical single-writer / multi-device / loop-guard
- * / catch-up / restore-clone machinery.
+ * / catch-up / restore-clone machinery. Only the engine hooks (Automerge change
+ * capture + applyChanges) and the VE-9 docId differ.
  *
  * Personal-Doc bindings (Sync 006 / Sync 003 `#persönliche-dokumente`):
- *  - It is a Single-Writer-per-device, Multi-Device CRDT — same Log-Core.
- *  - NO space-register (the personal doc is not a Space; `sendSpaceRegister`
- *    is omitted). The capability is a SELF-ISSUED Personal-Doc-Capability under
- *    the Identity Key (kid = `<did>#sig-0`, audience = own DID).
+ *  - Single-Writer-per-device, Multi-Device CRDT — same Log-Core.
+ *  - NO space-register (the personal doc is not a Space; `sendSpaceRegister` is
+ *    omitted). The capability is a SELF-ISSUED Personal-Doc-Capability under the
+ *    Identity Key (kid = `<did>#sig-0`, audience = own DID).
  *  - The content key is derived deterministically from the seed and is NEVER
  *    rotated (generation = 0 permanently). Nonce uniqueness therefore rests
  *    SOLELY on seq monotonicity per deviceId — so the broker-head-abgleich
  *    (VE-2) before the first publication AND the restore/clone path (VE-4) apply
  *    to the Personal-Doc docId with IDENTICAL strictness as for Spaces.
  *
- * LOOP-GUARD (VE-3, as in the Space path): the Y.Doc `update` observer writes a
- * log entry ONLY for LOCAL changes (`origin !== 'remote'`); the read path applies
- * remote entries with `origin='remote'` and NEVER re-broadcasts or re-writes.
+ * VE-9: the wire docId is the canonical UUID Personal-Doc id (= personalDocIdFromKey),
+ * present on present-capability + log-entry + sync-request. The Automerge handle's
+ * native base58 documentId is derived from that UUID (spaceIdToDocumentId) — the
+ * UUID is the single persistent/wire identity.
+ *
+ * LOOP-GUARD (VE-3): the Automerge change observer writes a log entry ONLY for
+ * LOCAL changes; the read path applies remote changes under the `applyingRemote`
+ * flag and NEVER re-broadcasts or re-writes.
  *
  * NON-GOAL: this does NOT touch `useProfileSync` / the `profile-update` envelope
- * (that is Old-World contact distribution, not a Personal-Doc CRDT sync) and does
- * NOT touch the legacy `personal-sync` path.
+ * (Old-World contact distribution) and does NOT touch the legacy `personal-sync`
+ * path (PersonalNetworkAdapter).
  */
-import * as Y from 'yjs'
+import * as Automerge from '@automerge/automerge'
+import type { DocHandle } from '@automerge/automerge-repo'
 import type { MessagingAdapter, WireMessage, DocLogStore } from '@web_of_trust/core/ports'
 import type { IdentitySession } from '@web_of_trust/core/types'
 import type {
@@ -44,17 +50,19 @@ import {
 } from '@web_of_trust/core/protocol'
 import { WebCryptoProtocolCryptoAdapter } from '@web_of_trust/core/protocol-adapters'
 import { createRestoreCloneHandler } from '@web_of_trust/core/adapters'
+import { frameChanges, unframeChanges } from './automerge-change-framing'
 
 /** The Personal-Doc capability/content generation — permanently 0 (never rotated). */
 const PERSONAL_DOC_GENERATION = 0
 
-export interface YjsPersonalLogSyncConfig {
-  doc: Y.Doc
+export interface AutomergePersonalLogSyncConfig {
+  /** The Personal-Doc handle (caller owns the Repo; the native base58 docId is derived from `docId`). */
+  docHandle: DocHandle<unknown>
   messaging: MessagingAdapter
   identity: IdentitySession
   /** The deterministic Personal-Doc content key (derived from the seed; never rotated). */
   personalKey: Uint8Array
-  /** The Personal-Doc docId (UUID v4, e.g. personalDocIdFromKey(personalKey)). */
+  /** The Personal-Doc docId (canonical UUID v4 = personalDocIdFromKey(personalKey)). */
   docId: string
   docLogStore: DocLogStore
   /** Stable per-device UUID for the seq namespace. */
@@ -66,21 +74,23 @@ export interface YjsPersonalLogSyncConfig {
   onDeviceIdChanged?: (newDeviceId: string, oldDeviceId: string) => void | Promise<void>
 }
 
-export class YjsPersonalLogSyncAdapter {
-  private readonly doc: Y.Doc
+export class AutomergePersonalLogSyncAdapter {
+  private readonly docHandle: DocHandle<unknown>
   private readonly messaging: MessagingAdapter
   private readonly identity: IdentitySession
   private readonly personalKey: Uint8Array
   private readonly docId: string
   private readonly crypto: ProtocolCryptoAdapter
   private readonly coordinator: LogSyncCoordinator
-  private unsubDocUpdate: (() => void) | null = null
+  private unsubDocChange: (() => void) | null = null
   private unsubMessage: (() => void) | null = null
   private unsubStateChange: (() => void) | null = null
   private started = false
+  /** VE-3 LOOP-GUARD: set while applyRemoteUpdate() applies a remote change. */
+  private applyingRemote = false
 
-  constructor(config: YjsPersonalLogSyncConfig) {
-    this.doc = config.doc
+  constructor(config: AutomergePersonalLogSyncConfig) {
+    this.docHandle = config.docHandle
     this.messaging = config.messaging
     this.identity = config.identity
     this.personalKey = config.personalKey
@@ -88,7 +98,7 @@ export class YjsPersonalLogSyncAdapter {
     this.crypto = config.crypto ?? new WebCryptoProtocolCryptoAdapter()
 
     this.coordinator = new LogSyncCoordinator({
-      docId: this.docId,
+      docId: this.docId, // VE-9: canonical UUID, never the base58 documentId.
       deviceId: config.deviceId,
       ownDid: this.identity.getDid(),
       authorKid: `${this.identity.getDid()}#sig-0`,
@@ -101,7 +111,7 @@ export class YjsPersonalLogSyncAdapter {
         send: (envelope) => this.messaging.send(envelope as WireMessage),
       },
       capabilities: this.personalCapabilitySource(),
-      hooks: this.yjsEngineHooks(),
+      hooks: this.automergeEngineHooks(),
       signLogEntry: (input) => this.identity.signEd25519(input),
       // Personal-Doc is single-owner multi-device: recipients = just own DID.
       getRecipients: () => [this.identity.getDid()],
@@ -121,30 +131,30 @@ export class YjsPersonalLogSyncAdapter {
           config.onDeviceIdChanged?.(newDeviceId, oldDeviceId),
       }),
       // VE-6 (MUSS, identical strictness to Spaces): after a restore-clone
-      // re-binds the deviceId, re-write the FULL Personal-Doc state as a fresh
-      // log entry under the new deviceId (seq=0). Without this, restoreClone()
-      // would fall back to resendPending() — re-sending the OLD colliding
-      // (oldDeviceId,seq) entry, which a PERSISTENT collision (the real restore
-      // case) already rejects → the edit would never reach the other device.
-      // Mirrors writeFullStateViaLog in the Space path.
+      // re-binds the deviceId, re-write the FULL Personal-Doc state as a fresh log
+      // entry under the new deviceId (seq=0). Without this, restoreClone() would
+      // fall back to resendPending() — re-sending the OLD colliding entry, which a
+      // PERSISTENT collision already rejects → the edit would never converge.
       onAfterRestoreClone: () => this.writeFullStateViaLog(),
     })
   }
 
   /**
-   * VE-6 restore-clone re-write: publish the full Personal-Doc state as one log
+   * VE-6 restore-clone re-write: publish the full Personal-Doc state as ONE log
    * entry under the (freshly re-bound) deviceId, so the second device converges
    * after a real (persistent) seq-collision restore. Generation stays 0.
    */
   private async writeFullStateViaLog(): Promise<void> {
-    const fullState = Y.encodeStateAsUpdate(this.doc)
-    if (fullState.length <= 2) return // empty Y.Doc update — nothing to republish
-    await this.coordinator.writeLocalUpdate(fullState).catch((err) => {
+    const doc = this.docHandle.doc()
+    if (!doc) return
+    const changes = Automerge.getAllChanges(doc)
+    if (changes.length === 0) return
+    await this.coordinator.writeLocalUpdate(frameChanges(changes)).catch((err) => {
       if (err instanceof AuthorMismatchError) {
-        console.error('[YjsPersonalLogSync] AUTHOR_MISMATCH during restore-clone re-write:', err.message)
+        console.error('[AutomergePersonalLogSync] AUTHOR_MISMATCH during restore-clone re-write:', err.message)
         return
       }
-      console.debug('[YjsPersonalLogSync] restore-clone re-write failed (retry on reconnect):', err)
+      console.debug('[AutomergePersonalLogSync] restore-clone re-write failed (retry on reconnect):', err)
     })
   }
 
@@ -163,25 +173,31 @@ export class YjsPersonalLogSyncAdapter {
     this.started = true
 
     // First publication + catch-up: present-capability → sync-request head-abgleich
-    // (VE-2/VE-4) BEFORE the first local write reserves seq. Fire-and-forget; a
-    // hard AUTHOR_MISMATCH is surfaced to audit, transient errors retry on reconnect.
+    // (VE-2/VE-4) BEFORE the first local write reserves seq.
     void this.coordinator
       .catchUp()
       .catch((err) => this.reportPublishError('initial catch-up', err))
 
     // LOOP-GUARD: write a log entry ONLY for LOCAL changes.
-    const updateHandler = (update: Uint8Array, origin: unknown) => {
-      if (origin === 'remote') return
-      void this.coordinator.writeLocalUpdate(update).catch((err) => {
+    const changeHandler = (payload: { patchInfo?: { before: unknown; after: unknown } }) => {
+      if (this.applyingRemote) return
+      const info = payload?.patchInfo
+      if (!info) return
+      const changes = Automerge.getChanges(
+        info.before as Automerge.Doc<unknown>,
+        info.after as Automerge.Doc<unknown>,
+      )
+      if (changes.length === 0) return
+      void this.coordinator.writeLocalUpdate(frameChanges(changes)).catch((err) => {
         if (err instanceof AuthorMismatchError) {
-          console.error('[YjsPersonalLogSync] AUTHOR_MISMATCH on personal-doc write — hard stop:', err.message)
+          console.error('[AutomergePersonalLogSync] AUTHOR_MISMATCH on personal-doc write — hard stop:', err.message)
           return
         }
-        console.debug('[YjsPersonalLogSync] personal-doc log write failed (retry on reconnect):', err)
+        console.debug('[AutomergePersonalLogSync] personal-doc log write failed (retry on reconnect):', err)
       })
     }
-    this.doc.on('update', updateHandler)
-    this.unsubDocUpdate = () => this.doc.off('update', updateHandler)
+    this.docHandle.on('change', changeHandler)
+    this.unsubDocChange = () => this.docHandle.off('change', changeHandler)
 
     // Read path: route log-path messages (log-entry/1.0, sync-response/1.0) AND the
     // routed write-path error frames to the coordinator. Personal-doc messages are
@@ -206,8 +222,8 @@ export class YjsPersonalLogSyncAdapter {
   }
 
   destroy(): void {
-    this.unsubDocUpdate?.()
-    this.unsubDocUpdate = null
+    this.unsubDocChange?.()
+    this.unsubDocChange = null
     this.unsubMessage?.()
     this.unsubMessage = null
     this.unsubStateChange?.()
@@ -244,15 +260,26 @@ export class YjsPersonalLogSyncAdapter {
     }
   }
 
-  /** Yjs engine hooks: encode = identity; applyRemote = applyUpdate(origin='remote'). */
-  private yjsEngineHooks(): LogSyncEngineHooks {
+  /**
+   * Automerge engine hooks: encode = identity (the change observer frames the
+   * changes); applyRemote = applyChanges under the LOOP-GUARD flag so a
+   * remote-applied change never re-enters the write path.
+   */
+  private automergeEngineHooks(): LogSyncEngineHooks {
     return {
-      engine: 'yjs',
+      engine: 'automerge',
       encodeUpdate: (update) => update,
       applyRemoteUpdate: (plaintext) => {
-        // LOOP-GUARD: origin='remote' suppresses the local update observer above,
-        // so this apply never re-enters the write path / re-broadcasts.
-        Y.applyUpdate(this.doc, plaintext, 'remote')
+        const changes = unframeChanges(plaintext)
+        this.applyingRemote = true
+        try {
+          this.docHandle.update((doc: unknown) => {
+            const [next] = Automerge.applyChanges(doc as Automerge.Doc<unknown>, changes)
+            return next as never
+          })
+        } finally {
+          this.applyingRemote = false
+        }
       },
     }
   }
@@ -268,9 +295,9 @@ export class YjsPersonalLogSyncAdapter {
 
   private reportPublishError(phase: string, err: unknown): void {
     if (err instanceof AuthorMismatchError) {
-      console.error(`[YjsPersonalLogSync] AUTHOR_MISMATCH during ${phase}:`, err.message)
+      console.error(`[AutomergePersonalLogSync] AUTHOR_MISMATCH during ${phase}:`, err.message)
       return
     }
-    console.debug(`[YjsPersonalLogSync] ${phase} deferred (retry on reconnect):`, err)
+    console.debug(`[AutomergePersonalLogSync] ${phase} deferred (retry on reconnect):`, err)
   }
 }

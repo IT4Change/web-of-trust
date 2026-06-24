@@ -8,7 +8,7 @@ import 'fake-indexeddb/auto'
 // failing the run even though every test passed. Drop only this known, expected
 // noise; real failures surface via assertions, not these logs.
 const EXPECTED_SYNC_NOISE =
-  /^\[(EncryptedSync|Replication|ReplicationAdapter|YjsReplication|Discovery|InboxReception)\]|^Message callback error|must call connect\(\) before send|PendingMessageNotDurableError/
+  /^\[(EncryptedSync|Replication|ReplicationAdapter|AutomergePersonalLogSync|YjsReplication|Discovery|InboxReception)\]|^Message callback error|must call connect\(\) before send|PendingMessageNotDurableError/
 
 for (const level of ['log', 'warn', 'error'] as const) {
   const original = console[level].bind(console)

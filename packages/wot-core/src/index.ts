@@ -133,6 +133,9 @@ export type { VaultPushSchedulerConfig } from './adapters/vault/VaultPushSchedul
 // Adapter Implementations (CRDT-agnostic)
 export { WebCryptoAdapter } from './adapters/crypto/WebCryptoAdapter'
 export { InMemoryMessagingAdapter } from './adapters/messaging/InMemoryMessagingAdapter'
+// Slice A (Phase 4): engine-neutral restore/clone mechanism for the log path.
+export { createRestoreCloneHandler } from './adapters/messaging/logRestoreClone'
+export type { RestoreCloneControllerConfig } from './adapters/messaging/logRestoreClone'
 export { CompactStorageManager } from './storage/CompactStorageManager'
 export { OfflineFirstDiscoveryAdapter } from './adapters/discovery/OfflineFirstDiscoveryAdapter'
 export { InMemoryPublishStateStore } from './adapters/discovery/InMemoryPublishStateStore'

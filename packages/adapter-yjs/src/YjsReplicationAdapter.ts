@@ -49,7 +49,6 @@ import {
   LOG_ENTRY_MESSAGE_TYPE, SYNC_RESPONSE_MESSAGE_TYPE,
 } from '@web_of_trust/core/protocol'
 import type { LogSyncEngineHooks, CapabilitySource, ControlFrameReceipt, WriteRejectHandler } from '@web_of_trust/core/protocol'
-import { createRestoreCloneHandler } from './logRestoreClone'
 import type { MembershipEvent, AdminEntry } from '@web_of_trust/core/protocol'
 import { WebCryptoProtocolCryptoAdapter } from '@web_of_trust/core/protocol-adapters'
 import {
@@ -59,6 +58,7 @@ import {
   InMemoryKeyManagementAdapter,
   InMemoryMemberUpdatePendingStore,
   InMemoryMessageIdHistory,
+  createRestoreCloneHandler,
 } from '@web_of_trust/core/adapters'
 import {
   signEnvelope,

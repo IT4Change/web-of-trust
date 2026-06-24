@@ -1,14 +1,16 @@
 /**
  * Restore/Clone mechanism for the Sync 002/003 log path (Slice A, P2-NIT-1,
- * VE-4/VE-5).
+ * VE-4/VE-5) — engine-neutral.
  *
  * The {@link LogSyncCoordinator} decides WHEN a restore-clone is needed (a
  * SEQ_COLLISION_DETECTED or a mid-session DEVICE_REVOKED on a SENT log-entry),
  * but the MECHANISM — mint a brand-new deviceId, device-revoke the old one,
  * re-register the new device — is an adapter/runtime concern. This module
- * encapsulates that mechanism as a {@link WriteRejectHandler} factory so BOTH the
- * Yjs Space path and the Yjs Personal-Doc path (and, later, the Automerge adapter
- * in Phase 4) reuse the exact same restore/clone code.
+ * encapsulates that mechanism as a {@link WriteRejectHandler} factory so the Yjs
+ * Space path, the Yjs Personal-Doc path AND the Automerge adapter (Phase 4)
+ * reuse the exact same restore/clone code. It depends ONLY on the Identity and
+ * the MessagingAdapter (no CRDT engine), which is why it lives in wot-core
+ * instead of per-adapter (DRY, single source of truth).
  *
  * Security invariant (Sync 002): a restore-clone produces a NEW deviceId, which
  * is a fresh per-(deviceId,docId) seq namespace starting at seq=0. The colliding
@@ -20,13 +22,11 @@
  * P5/VE-11; here the device-revoke is sent (best-effort) and the new deviceId is
  * adopted, which is exactly what the InProcessLogBroker exercises.
  */
-import type { MessagingAdapter, WireMessage } from '@web_of_trust/core/ports'
-import type { IdentitySession } from '@web_of_trust/core/types'
-import type { WriteReject, WriteRejectHandler } from '@web_of_trust/core/protocol'
-import {
-  createBrokerDeviceRevokeControlFrame,
-  createJcsEd25519JwsWithSigner,
-} from '@web_of_trust/core/protocol'
+import type { MessagingAdapter, WireMessage } from '../../ports/MessagingAdapter'
+import type { IdentitySession } from '../../types/identity-session'
+import type { WriteReject, WriteRejectHandler } from '../../protocol/sync/log-sync-coordinator'
+import { createBrokerDeviceRevokeControlFrame } from '../../protocol/sync/broker-device-revoke-control-frame'
+import { createJcsEd25519JwsWithSigner } from '../../protocol/crypto/jws'
 
 export interface RestoreCloneControllerConfig {
   identity: IdentitySession
