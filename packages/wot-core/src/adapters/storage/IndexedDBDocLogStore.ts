@@ -3,7 +3,6 @@ import type {
   AppendLocalEntryParams,
   DocLogStore,
   LocalLogEntry,
-  PendingSpaceRotate,
   RecordRemoteAppliedEntry,
 } from '../../ports/DocLogStore'
 import { createSeqLock, type SeqLock } from './SeqLock'
@@ -11,14 +10,10 @@ import { createSeqLock, type SeqLock } from './SeqLock'
 const DB_NAME = 'wot-doc-log'
 // v2: adds the `meta` key-value store that binds the deviceId to the log-store
 // lifecycle (BLOCKER-1b) so a wipe that empties the log also drops the deviceId.
-// v3 (VE-10): adds the `pendingRotations` store holding the durable broker
-// space-rotate intent so a member-removal's broker invalidation survives a
-// transient relay failure / app restart and is retried on reconnect.
-const DB_VERSION = 3
+const DB_VERSION = 2
 const ENTRIES_STORE = 'entries'
 const PENDING_INDEX = 'byStatus'
 const META_STORE = 'meta'
-const PENDING_ROTATIONS_STORE = 'pendingRotations'
 const DEVICE_ID_KEY = 'deviceId'
 /** Bounded retry budget for the add-on-duplicate seq-reservation race (BLOCKER-1a). */
 const MAX_SEQ_RETRIES = 64
@@ -207,39 +202,9 @@ export class IndexedDBDocLogStore implements DocLogStore {
     await tx.done
   }
 
-  async putPendingSpaceRotate(record: PendingSpaceRotate): Promise<void> {
-    const db = await this.db()
-    // Idempotent on docId (keyPath = docId): a higher-generation removal overwrites
-    // a lower one; a lower/equal generation never downgrades an outstanding intent.
-    const tx = db.transaction(PENDING_ROTATIONS_STORE, 'readwrite')
-    const existing = (await tx.store.get(record.docId)) as PendingSpaceRotate | undefined
-    if (!existing || existing.newGeneration <= record.newGeneration) {
-      await tx.store.put({ ...record })
-    }
-    await tx.done
-  }
-
-  async getPendingSpaceRotate(docId: string): Promise<PendingSpaceRotate | null> {
-    const db = await this.db()
-    const record = (await db.get(PENDING_ROTATIONS_STORE, docId)) as PendingSpaceRotate | undefined
-    return record ? { ...record } : null
-  }
-
-  async getAllPendingSpaceRotates(): Promise<PendingSpaceRotate[]> {
-    const db = await this.db()
-    const records = (await db.getAll(PENDING_ROTATIONS_STORE)) as PendingSpaceRotate[]
-    return records.sort((a, b) => a.createdAt - b.createdAt)
-  }
-
-  async deletePendingSpaceRotate(docId: string): Promise<void> {
-    const db = await this.db()
-    await db.delete(PENDING_ROTATIONS_STORE, docId)
-  }
-
   async clear(): Promise<void> {
     const db = await this.db()
     await db.clear(ENTRIES_STORE)
-    await db.clear(PENDING_ROTATIONS_STORE)
     // BLOCKER-1b: a wipe that empties the log MUST also drop the deviceId so the
     // next getOrCreateDeviceId() mints a FRESH nonce namespace (no seq=0 reuse).
     await db.clear(META_STORE)
@@ -276,12 +241,6 @@ export class IndexedDBDocLogStore implements DocLogStore {
           // log keeps its entries; the deviceId is minted lazily on first use).
           if (!db.objectStoreNames.contains(META_STORE)) {
             db.createObjectStore(META_STORE)
-          }
-          // v3 (VE-10): durable broker space-rotate intents, keyed by docId. One
-          // outstanding rotate per space (the latest generation a removal needs the
-          // broker to reach). Created on a fresh DB AND on a v2→v3 migration.
-          if (!db.objectStoreNames.contains(PENDING_ROTATIONS_STORE)) {
-            db.createObjectStore(PENDING_ROTATIONS_STORE, { keyPath: 'docId' })
           }
         },
       })

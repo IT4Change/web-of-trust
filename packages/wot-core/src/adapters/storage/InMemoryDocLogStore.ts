@@ -2,7 +2,6 @@ import type {
   AppendLocalEntryParams,
   DocLogStore,
   LocalLogEntry,
-  PendingSpaceRotate,
   RecordRemoteAppliedEntry,
 } from '../../ports/DocLogStore'
 import { InProcessSeqLock, type SeqLock } from './SeqLock'
@@ -22,8 +21,6 @@ const MAX_SEQ_RETRIES = 64
 export class InMemoryDocLogStore implements DocLogStore {
   /** Composite key `${docId}\u0000${deviceId}\u0000${seq}` → entry. */
   private readonly entries = new Map<string, LocalLogEntry>()
-  /** docId → pending broker space-rotate intent (VE-10). One per docId. */
-  private readonly pendingRotations = new Map<string, PendingSpaceRotate>()
   private readonly lock: SeqLock
   /** deviceId bound to this store's lifecycle (BLOCKER-1b); cleared by clear(). */
   private deviceId: string | null = null
@@ -127,32 +124,8 @@ export class InMemoryDocLogStore implements DocLogStore {
     this.entries.set(key, { ...entry, status: 'acked' })
   }
 
-  async putPendingSpaceRotate(record: PendingSpaceRotate): Promise<void> {
-    // Idempotent on docId: a higher-generation removal overwrites a lower one. A
-    // lower/equal generation never downgrades an outstanding higher intent.
-    const existing = this.pendingRotations.get(record.docId)
-    if (existing && existing.newGeneration > record.newGeneration) return
-    this.pendingRotations.set(record.docId, { ...record })
-  }
-
-  async getPendingSpaceRotate(docId: string): Promise<PendingSpaceRotate | null> {
-    const record = this.pendingRotations.get(docId)
-    return record ? { ...record } : null
-  }
-
-  async getAllPendingSpaceRotates(): Promise<PendingSpaceRotate[]> {
-    return [...this.pendingRotations.values()]
-      .sort((a, b) => a.createdAt - b.createdAt)
-      .map((record) => ({ ...record }))
-  }
-
-  async deletePendingSpaceRotate(docId: string): Promise<void> {
-    this.pendingRotations.delete(docId)
-  }
-
   async clear(): Promise<void> {
     this.entries.clear()
-    this.pendingRotations.clear()
     // BLOCKER-1b: a wipe that empties the log MUST also drop the deviceId so the
     // next getOrCreateDeviceId() mints a FRESH nonce namespace (no seq=0 reuse).
     this.deviceId = null

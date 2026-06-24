@@ -10,8 +10,6 @@ import {
   classifyRejectDisposition,
   createSpaceCapabilityJws,
   createSpaceRegisterMessage,
-  createSpaceRotateMessage,
-  SPACE_ROTATE_MESSAGE_TYPE,
   createLogEntryMessage,
   verifyLogEntryJws,
   deriveLogPayloadNonce,
@@ -40,13 +38,6 @@ interface Harness {
   appliedRemote: Uint8Array[]
   /** Count of outgoing envelopes from THIS adapter (for the LOOP-GUARD assert). */
   sentEnvelopes: number
-  /**
-   * The generation the capability source + content key report (VE-10). Mirrors the
-   * real adapter, which always presents the CURRENT generation. A test bumps this
-   * after a space-rotate so a re-publish presents a capability the rotated broker
-   * accepts (otherwise the broker rejects the stale gen-0 capability). Defaults to 0.
-   */
-  currentGeneration: number
 }
 
 const CONTENT_KEY = new Uint8Array(32).fill(7)
@@ -103,7 +94,6 @@ async function makeHarness(
     logStore,
     appliedRemote,
     sentEnvelopes: 0,
-    currentGeneration: 0,
   }
 
   const adminDids = opts?.adminDids ?? [identity.getDid()]
@@ -125,22 +115,17 @@ async function makeHarness(
       },
     },
     capabilities: {
-      // Mirror the real adapter: present the CURRENT generation's capability (a test
-      // bumps harness.currentGeneration after a rotate so a re-publish is accepted).
-      getCapabilityJws: () => makeCapability(identity.getDid(), harness.currentGeneration ?? 0),
+      // Mirror the real adapter: present the generation-0 capability (this harness
+      // exercises the steady-state log path; generation never advances here).
+      getCapabilityJws: () => makeCapability(identity.getDid(), 0),
     },
     hooks: makeHooks(appliedRemote),
     signLogEntry: (input) => identity.signEd25519(input),
-    getContentKey: async () => ({ key: CONTENT_KEY, generation: harness.currentGeneration ?? 0 }),
+    getContentKey: async () => ({ key: CONTENT_KEY, generation: 0 }),
     // The same CONTENT_KEY across generations (the test only varies the generation
     // label; nonce uniqueness rests on (deviceId,seq), not the key bytes here).
-    getContentKeyByGeneration: async (generation) =>
-      generation <= (harness.currentGeneration ?? 0) ? CONTENT_KEY : null,
-    getAvailableKeyGenerations: async () => {
-      const gens: number[] = []
-      for (let g = 0; g <= (harness.currentGeneration ?? 0); g++) gens.push(g)
-      return gens
-    },
+    getContentKeyByGeneration: async (generation) => (generation <= 0 ? CONTENT_KEY : null),
+    getAvailableKeyGenerations: async () => [0],
     sendSpaceRegister:
       opts?.sendSpaceRegister === false
         ? undefined
@@ -611,186 +596,6 @@ describe('LogSyncCoordinator — VE-2/3/4/8/9', () => {
     expect(heads[DEVICE_A]).toBeUndefined()
     // And Bob produced no extra send from the skip (no loop).
     expect(b.sentEnvelopes).toBe(0)
-  })
-})
-
-// ════════════════════════════════════════════════════════════════════════════
-// VE-10: durable, idempotent broker space-rotate (member-removal revocation)
-// ════════════════════════════════════════════════════════════════════════════
-
-/**
- * Build a syntactically valid space-rotate control frame for the given generation.
- * The InProcessLogBroker parses + generation-gates it (it does NOT verify the admin
- * signature in these tests), so a throwaway admin seed whose kid is the identity is
- * sufficient. The coordinator stores this frame verbatim and re-sends it on retry.
- */
-async function makeRotateFrame(
-  identity: PublicIdentitySession,
-  newGeneration: number,
-): Promise<{ type: typeof SPACE_ROTATE_MESSAGE_TYPE; rotationJws: string }> {
-  return createSpaceRotateMessage({
-    spaceId: SPACE_ID,
-    newSpaceCapabilityVerificationKey: 'BBBB',
-    newGeneration,
-    kid: identity.kid,
-    signingSeed: new Uint8Array(32).fill(3),
-  })
-}
-
-describe('LogSyncCoordinator — VE-10 durable + idempotent space-rotate', () => {
-  // The reviewer MUST: removeMember (here: enqueueSpaceRotate) MUST NOT resolve as a
-  // clean enforcement-less success while the broker rotation is neither confirmed
-  // NOR durably persisted for retry.
-
-  it('NEGATIVE — a transient reject on the first space-rotate leaves the intent DURABLE + reports broker-pending; reconnect retries → broker advances; then the OLD-generation socket is rejected', async () => {
-    const broker = new InProcessLogBroker()
-    const admin = (await createTestIdentity('admin')).identity
-    const h = await makeHarness(admin, DEVICE_A, broker)
-    const statuses: Array<{ outcome: string; newGeneration: number }> = []
-    ;(h.coordinator as unknown as { config: { onSpaceRotateStatus?: (s: { outcome: string; newGeneration: number }) => void } })
-      .config.onSpaceRotateStatus = (s) => statuses.push(s)
-
-    // Publish (space-register → present-capability) so the broker tracks gen 0.
-    await h.coordinator.ensurePublished()
-    expect(broker.getGeneration(SPACE_ID)).toBe(0)
-
-    // Arm a transient reject (RATE_LIMITED) on the NEXT space-rotate control frame.
-    broker.armRejection({ code: 'RATE_LIMITED', target: 'control', docId: SPACE_ID, frameType: SPACE_ROTATE_MESSAGE_TYPE })
-
-    // The admin removed a member → local key rotated to gen 1 (modeled here by the
-    // rotate frame). enqueueSpaceRotate must NOT throw on a transient failure.
-    const rotate = await makeRotateFrame(admin, 1)
-    const status = await h.coordinator.enqueueSpaceRotate({ newGeneration: 1, rotationFrame: rotate })
-    // Model the LOCAL key rotation that removeMember performed once (before the broker
-    // rotate): the admin now holds + presents the gen-1 capability.
-    h.currentGeneration = 1
-
-    // (a) The intent is DURABLE (pending), and (b) the outcome is broker-pending
-    // (NOT a clean enforcement-less success), and the broker is STILL on gen 0.
-    expect(status.outcome).toBe('broker-pending')
-    const pending = await h.logStore.getPendingSpaceRotate(SPACE_ID)
-    expect(pending).not.toBeNull()
-    expect(pending?.newGeneration).toBe(1)
-    expect(broker.getGeneration(SPACE_ID)).toBe(0) // NOT yet enforced
-    expect(statuses.at(-1)?.outcome).toBe('broker-pending')
-
-    // (c) On reconnect the retry re-sends the STORED frame (publish path retries the
-    // pending rotate BEFORE present-capability, so the broker advances first, then the
-    // gen-1 capability is accepted).
-    h.coordinator.resetForReconnect()
-    await h.coordinator.ensurePublished()
-    // (d) Broker generation == newGeneration; pending cleared (enforced).
-    expect(broker.getGeneration(SPACE_ID)).toBe(1)
-    expect(await h.logStore.getPendingSpaceRotate(SPACE_ID)).toBeNull()
-    expect(statuses.at(-1)?.outcome).toBe('confirmed')
-
-    // (e) A removed member over an OLD-generation socket is now rejected. Model the
-    // removed member as a second socket that presented under gen 0 BEFORE the rotate;
-    // after the rotate its scope is invalidated → its log-entry write is rejected.
-    const removed = (await createTestIdentity('removed')).identity
-    const removedMsg = new InMemoryMessagingAdapter({ broker })
-    await removedMsg.connect(removed.getDid())
-    // (The removed member already had a gen-0 scope before the rotate; simulate by
-    // presenting under gen 0 BEFORE the rotate would have happened is not possible
-    // post-hoc, so we assert the SECURITY-equivalent: a fresh gen-0 capability is
-    // now STALE at the broker — the same invalidation that revokes the open socket.)
-    const staleCap = await createSpaceCapabilityJws({
-      payload: {
-        type: 'capability', spaceId: SPACE_ID, audience: removed.getDid(),
-        permissions: ['read', 'write'], generation: 0, issuedAt: NOW, validUntil: FUTURE,
-      },
-      signingSeed: capabilitySigningSeed,
-    })
-    await expect(
-      removedMsg.sendControlFrame!({ type: PRESENT_CAPABILITY_CONTROL_FRAME_TYPE, capabilityJws: staleCap }),
-    ).rejects.toMatchObject({ code: 'CAPABILITY_GENERATION_STALE' })
-  })
-
-  it('TEETH — the OLD best-effort swallow (send without durable persistence/retry) leaves the broker on the stale generation: a gen-0 capability is STILL accepted (the bug)', async () => {
-    const broker = new InProcessLogBroker()
-    const admin = (await createTestIdentity('admin')).identity
-    const h = await makeHarness(admin, DEVICE_A, broker)
-    await h.coordinator.ensurePublished()
-    expect(broker.getGeneration(SPACE_ID)).toBe(0)
-
-    // Reproduce the ORIGINAL bug: best-effort send + swallow, NO durable persistence,
-    // NO retry. The rotate is rejected (transient) and the error vanishes.
-    broker.armRejection({ code: 'RATE_LIMITED', target: 'control', docId: SPACE_ID, frameType: SPACE_ROTATE_MESSAGE_TYPE })
-    const rotate = await makeRotateFrame(admin, 1)
-    let swallowed = false
-    await h.messaging.sendControlFrame!(rotate).catch(() => { swallowed = true })
-    expect(swallowed).toBe(true)
-
-    // THE BUG: the broker stayed on gen 0 (rotation never enforced), and nothing was
-    // persisted for retry, so a reconnect would NOT fix it.
-    expect(broker.getGeneration(SPACE_ID)).toBe(0)
-    expect(await h.logStore.getPendingSpaceRotate(SPACE_ID)).toBeNull()
-
-    // Consequence: a removed member's gen-0 capability is STILL ACCEPTED (no STALE),
-    // i.e. the removed member could keep writing under the old generation. This is
-    // exactly what the durable-retry fix prevents (see the NEGATIVE test above).
-    const removed = (await createTestIdentity('removed')).identity
-    const removedMsg = new InMemoryMessagingAdapter({ broker })
-    await removedMsg.connect(removed.getDid())
-    const gen0Cap = await createSpaceCapabilityJws({
-      payload: {
-        type: 'capability', spaceId: SPACE_ID, audience: removed.getDid(),
-        permissions: ['read', 'write'], generation: 0, issuedAt: NOW, validUntil: FUTURE,
-      },
-      signingSeed: capabilitySigningSeed,
-    })
-    await expect(
-      removedMsg.sendControlFrame!({ type: PRESENT_CAPABILITY_CONTROL_FRAME_TYPE, capabilityJws: gen0Cap }),
-    ).resolves.toMatchObject({ status: 'delivered' }) // ACCEPTED → the vulnerability
-  })
-
-  it('IDEMPOTENCY — an already-applied rotate (broker already at newGeneration) → retry treated as already-enforced (pending cleared), no double rotation, no endless retry', async () => {
-    const broker = new InProcessLogBroker()
-    const admin = (await createTestIdentity('admin')).identity
-    const h = await makeHarness(admin, DEVICE_A, broker)
-    await h.coordinator.ensurePublished()
-
-    // First rotate confirms immediately (broker 0 → 1), pending cleared.
-    const rotate1 = await makeRotateFrame(admin, 1)
-    const s1 = await h.coordinator.enqueueSpaceRotate({ newGeneration: 1, rotationFrame: rotate1 })
-    expect(s1.outcome).toBe('confirmed')
-    expect(broker.getGeneration(SPACE_ID)).toBe(1)
-    expect(await h.logStore.getPendingSpaceRotate(SPACE_ID)).toBeNull()
-
-    // Now durably persist a STALE pending rotate to gen 1 (broker is ALREADY at 1) —
-    // models a crash that left a pending intent for a rotate the broker already did.
-    await h.logStore.putPendingSpaceRotate({
-      docId: SPACE_ID,
-      newGeneration: 1,
-      rotationFrameJson: JSON.stringify(rotate1),
-      createdAt: Date.now(),
-    })
-    // The broker rejects the re-sent gen-1 rotate (newGeneration !== current+1) as
-    // AUTH_INVALID; the coordinator treats this as already-enforced.
-    const converged = await h.coordinator.retryPendingSpaceRotates()
-    expect(converged).toBe(1) // counted as confirmed (already enforced)
-    // Pending cleared, broker unchanged (NO double rotation to gen 2).
-    expect(await h.logStore.getPendingSpaceRotate(SPACE_ID)).toBeNull()
-    expect(broker.getGeneration(SPACE_ID)).toBe(1)
-
-    // A further retry with nothing pending is a no-op (no endless retry).
-    expect(await h.coordinator.retryPendingSpaceRotates()).toBe(0)
-  })
-
-  it('HAPPY-PATH — a space-rotate with an immediate receipt confirms + clears pending at once; broker advances exactly one generation', async () => {
-    const broker = new InProcessLogBroker()
-    const admin = (await createTestIdentity('admin')).identity
-    const h = await makeHarness(admin, DEVICE_A, broker)
-    await h.coordinator.ensurePublished()
-
-    const rotate = await makeRotateFrame(admin, 1)
-    const status = await h.coordinator.enqueueSpaceRotate({ newGeneration: 1, rotationFrame: rotate })
-
-    expect(status.outcome).toBe('confirmed')
-    expect(status.newGeneration).toBe(1)
-    expect(broker.getGeneration(SPACE_ID)).toBe(1)
-    // Pending was persisted-then-immediately-cleared (no lingering durable intent).
-    expect(await h.logStore.getPendingSpaceRotate(SPACE_ID)).toBeNull()
   })
 })
 

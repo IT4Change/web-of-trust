@@ -67,14 +67,6 @@ interface DocLog {
   entries: Map<string, StoredLogEntry>
   /** broker heads: max seq per deviceId. */
   heads: Map<string, number>
-  /**
-   * VE-10: the broker's registered Space generation. Starts at 0 on space-register
-   * and is advanced by space-rotate (gate: newGeneration === generation + 1). The
-   * present-capability scope is bound to the generation it presented under; a rotate
-   * invalidates every OLDER-generation scope (capability-revoke-über-rotation),
-   * faithfully mirroring the real relay so the removed-member rejection has teeth.
-   */
-  generation: number
 }
 
 /** A pre-armed gate rejection for the next matching frame. */
@@ -116,10 +108,6 @@ export interface InProcessLogBrokerControls {
   forceRegistered(docId: string, adminDids: string[]): void
   /** Seed a broker head for a deviceId+docId (restore-clone scenarios). */
   seedHead(docId: string, deviceId: string, seq: number): void
-  /** The broker's current registered generation for a docId (VE-10 inspection; 0 if unknown). */
-  getGeneration(docId: string): number
-  /** Number of accepted log entries for a docId (VE-10 masking-control inspection; 0 if unknown). */
-  entryCount(docId: string): number
 }
 
 export class InProcessLogBroker implements InProcessLogBrokerControls {
@@ -127,13 +115,8 @@ export class InProcessLogBroker implements InProcessLogBrokerControls {
   private readonly sockets = new Map<string, BrokerSocket>()
   /** docId → DocLog. */
   private readonly docs = new Map<string, DocLog>()
-  /**
-   * scope cache keyed by `${socketId}:${docId}` → the GENERATION the capability was
-   * presented under (VE-10). A rotate drops every entry whose generation is older
-   * than the new one, so a removed member's stale-generation scope no longer
-   * authorizes a write (CAPABILITY_REQUIRED on its next log-entry).
-   */
-  private readonly scopes = new Map<string, number>()
+  /** scope cache keyed by `${socketId}:${docId}` → true once present-capability accepted. */
+  private readonly scopes = new Set<string>()
   private readonly revokedDevices = new Set<string>()
   private readonly armed: ArmedRejection[] = []
 
@@ -146,7 +129,7 @@ export class InProcessLogBroker implements InProcessLogBrokerControls {
 
   unregisterSocket(socketId: string): void {
     this.sockets.delete(socketId)
-    for (const key of [...this.scopes.keys()]) {
+    for (const key of [...this.scopes]) {
       if (key.startsWith(`${socketId}:`)) this.scopes.delete(key)
     }
   }
@@ -170,15 +153,6 @@ export class InProcessLogBroker implements InProcessLogBrokerControls {
   seedHead(docId: string, deviceId: string, seq: number): void {
     const log = this.ensureDoc(docId)
     log.heads.set(deviceId, seq)
-  }
-
-  getGeneration(docId: string): number {
-    return this.docs.get(docId)?.generation ?? 0
-  }
-
-  /** Number of accepted log entries for a docId (VE-10 masking-control inspection; 0 if unknown). */
-  entryCount(docId: string): number {
-    return this.docs.get(docId)?.entries.size ?? 0
   }
 
   // ── Control-frame channel (present-capability / space-register / …) ─────────
@@ -227,27 +201,9 @@ export class InProcessLogBroker implements InProcessLogBrokerControls {
   private async handleSpaceRotate(_socketId: string, frame: ControlFrame): Promise<ControlFrameReceipt> {
     const parsed = parseSpaceRotateMessage(frame)
     const docId = parsed.payload.spaceId
-    const newGeneration = parsed.payload.newGeneration
-    const log = this.ensureDoc(docId)
-    // VE-10 generation gate (mirrors the real relay handleSpaceRotate): a rotate is
-    // authorized ONLY when newGeneration === current + 1. This makes the retry
-    // IDEMPOTENT: a re-sent already-applied rotate has newGeneration === current
-    // (not current+1) → AUTH_INVALID, which the coordinator treats as "already
-    // enforced" and clears the durable pending intent (no endless retry, no double
-    // rotate). A wrong step is an unauthorized rotation → AUTH_INVALID.
-    if (newGeneration !== log.generation + 1) {
-      throw new ControlFrameRejectedError({
-        code: 'AUTH_INVALID',
-        message: 'space-rotate newGeneration must be exactly the current generation plus one',
-      })
-    }
-    log.generation = newGeneration
-    // Cache invalidation on rotation (MUSS, security-critical): drop every scope for
-    // this docId presented under an OLDER generation across ALL sockets. A removed
-    // member's stale-generation scope no longer authorizes a write → its next
-    // log-entry over the open socket is rejected (CAPABILITY_REQUIRED).
-    for (const [key, gen] of [...this.scopes.entries()]) {
-      if (key.endsWith(`:${docId}`) && gen < newGeneration) this.scopes.delete(key)
+    // After a rotate the relay clears the scope cache hard across all sockets.
+    for (const key of [...this.scopes]) {
+      if (key.endsWith(`:${docId}`)) this.scopes.delete(key)
     }
     return this.receipt(docId)
   }
@@ -259,21 +215,7 @@ export class InProcessLogBroker implements InProcessLogBrokerControls {
     if (!docId) {
       throw new ControlFrameRejectedError({ code: 'CAPABILITY_INVALID', message: 'capability has no spaceId' })
     }
-    const log = this.docs.get(docId)
-    // The generation the capability was issued under (Space-Capability carries one;
-    // a Personal-Doc capability has none → treat as the current generation, since a
-    // Personal-Doc never rotates). VE-10: a Space-Capability for an OLDER generation
-    // than the broker's current one is STALE and rejected (capability-revoke-über-
-    // rotation), so a removed member cannot re-present its pre-rotation capability.
-    const capGeneration =
-      typeof parsed.payload.generation === 'number' ? parsed.payload.generation : (log?.generation ?? 0)
-    if (log && capGeneration < log.generation) {
-      throw new ControlFrameRejectedError({
-        code: 'CAPABILITY_GENERATION_STALE',
-        message: 'capability generation is stale (a rotation has since advanced the space)',
-      })
-    }
-    this.scopes.set(`${socketId}:${docId}`, capGeneration)
+    this.scopes.add(`${socketId}:${docId}`)
     return this.receipt(docId)
   }
 
@@ -403,13 +345,7 @@ export class InProcessLogBroker implements InProcessLogBrokerControls {
   private ensureDoc(docId: string): DocLog {
     let log = this.docs.get(docId)
     if (!log) {
-      log = {
-        registered: false,
-        registrationAdminDids: [],
-        entries: new Map(),
-        heads: new Map(),
-        generation: 0,
-      }
+      log = { registered: false, registrationAdminDids: [], entries: new Map(), heads: new Map() }
       this.docs.set(docId, log)
     }
     return log
