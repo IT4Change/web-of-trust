@@ -1489,9 +1489,9 @@ export class RelayServer {
     //
     // Only a STRUCTURALLY VALID log-entry envelope diverts here (parses via
     // parseLogEntryMessage → carries body.entry as a compact JWS). A merely
-    // log-entry-TYPED but malformed envelope falls through to generic routing so
-    // legacy queue + ack/1.0 ownership semantics stay byte-for-byte unchanged
-    // (DidcommInboxRouting: a queued log-sync-typed slot is not ack/1.0-clearable).
+    // log-entry-TYPED but malformed envelope falls through and is rejected
+    // MALFORMED_MESSAGE by the relay-whitelist below (it is not a queue-eligible
+    // Inbox type) — it is never relayed or queued as opaque content.
     if (envelope.typ === DIDCOMM_PLAINTEXT_TYP && envelope.type === LOG_ENTRY_MESSAGE_TYPE) {
       const entryJws = this.tryParseLogEntryJws(envelope)
       if (entryJws !== null) {
@@ -1508,7 +1508,8 @@ export class RelayServer {
     // Slice R / Sync 002: sync-request → sync-response served from the durable
     // log to the requesting authenticated socket only (catch-up / cold
     // reconstruction). Not routed to any recipient. Only a structurally valid
-    // sync-request diverts; a malformed one falls through to generic routing.
+    // sync-request diverts; a malformed one falls through to the relay-whitelist
+    // below and is rejected MALFORMED_MESSAGE (not a queue-eligible Inbox type).
     if (envelope.typ === DIDCOMM_PLAINTEXT_TYP && envelope.type === SYNC_REQUEST_MESSAGE_TYPE) {
       if (this.isParsableSyncRequest(envelope)) {
         this.handleSyncRequest(ws, envelope)
@@ -1516,16 +1517,52 @@ export class RelayServer {
       }
     }
 
-    // Routing: Old-World `toDid`, DIDComm `to[0]` (Sync 003 Transport Envelope).
+    // (VE-R2) Relay-Whitelist (Sync 003 §Relay-Whitelist (MUSS)): the broker
+    // relays/queues EXCLUSIVELY messages of DEFINED types — the WoT Transport
+    // Envelopes in the Nachrichtentypen-Tabelle plus the defined control-frames.
+    // The control-frames + the self-handling transport types each leave handleSend
+    // through their own paths BEFORE this point:
+    //   - control-frames (device-revoke/space-register/space-rotate/admin-add/
+    //     admin-remove/present-capability) via the TOP-LEVEL handleMessage switch,
+    //   - ack/1.0 (1480), log-entry/1.0 (1495 → generations-gated handleLogEntry),
+    //     sync-request/1.0 (1512 → capability-gated handleSyncRequest),
+    //   - the broker's OWN sync-response/1.0 via sendTo in handleSyncRequest.
+    // So the ONLY transport types that may legitimately reach the generic routing
+    // tail are the four ECIES Inbox types (inbox/1.0, space-invite/1.0,
+    // member-update/1.0, key-rotation/1.0 — isEncryptedInboxMessageType). They MUST
+    // stay relay/queueable or a fresh client could never receive its first
+    // capability (Cold-Start; the Inbox channel is intentionally NOT capability-
+    // gated, Sync 003 §Capability-Prüfung).
+    //
+    // EVERYTHING ELSE is rejected MALFORMED_MESSAGE and is NEITHER relayed NOR
+    // queued: an unknown `type`, a CLIENT-originated sync-response/1.0 (only the
+    // broker emits sync-response), a log-entry/1.0|sync-request/1.0 that was too
+    // malformed to divert above, and the deprecated old-world pipe-`content`
+    // MessageEnvelope (`v:1`/`fromDid`/`toDid` — no DIDComm `typ`). Rationale
+    // (security-critical, Sync 003): this closes the un-gated relay channel a
+    // removed member could otherwise use to push old-content-key ciphertext in an
+    // arbitrary-typed envelope LIVE to remaining members — the log-entry ingest
+    // gate (incl. the generations-gate) does not reach that path.
+    if (!(envelope.typ === DIDCOMM_PLAINTEXT_TYP && isEncryptedInboxMessageType(envelope.type as string))) {
+      this.sendTo(ws, {
+        type: 'error',
+        code: 'MALFORMED_MESSAGE',
+        message: 'Message type is not relay/queue-eligible (Sync 003 relay-whitelist)',
+      })
+      return
+    }
+
+    // Routing: DIDComm `to[0]` (Sync 003 Transport Envelope). Only whitelisted
+    // Inbox envelopes reach here and they MUST set `to` (Sync 003 §Nachrichten-
+    // typen — "Inbox- und direkt adressierte Nachrichten MÜSSEN `to` setzen"); the
+    // old-world `toDid` channel is no longer reachable past the relay-whitelist.
     const to = envelope.to
-    const toDid =
-      (envelope.toDid as string | undefined) ??
-      (Array.isArray(to) && typeof to[0] === 'string' ? (to[0] as string) : undefined)
+    const toDid = Array.isArray(to) && typeof to[0] === 'string' ? (to[0] as string) : undefined
     if (!toDid) {
       this.sendTo(ws, {
         type: 'error',
         code: 'MISSING_RECIPIENT',
-        message: 'Envelope must have toDid or to[0] field',
+        message: 'Envelope must have a to[0] recipient field',
       })
       return
     }
@@ -1705,6 +1742,38 @@ export class RelayServer {
         type: 'error',
         code: 'AUTHOR_MISMATCH',
         message: 'Author mismatch: the authorKid DID does not own this deviceId.',
+      })
+      return
+    }
+
+    // (VE-R1) Broker-Ingest-Generations-Gate (Sync 003 §log-entry/1.0 —
+    // "Broker-Ingest-Generations-Gate (MUSS, sicherheitskritisch)"): for a
+    // REGISTERED space-docId (a space-register entry with a generation exists), a
+    // log-entry whose `keyGeneration` is STRICTLY LESS than the durable
+    // `space.generation` is rejected KEY_GENERATION_STALE and is NEITHER stored NOR
+    // relayed — it is a write attempt under a rotated-out content key (e.g. a
+    // just-removed member after rotation). Runs AFTER JWS verification + author-
+    // binding and BEFORE the durable insert/relay (appendEntry).
+    //
+    // The comparison reads the DURABLE generation via getSpace (from
+    // space-register/space-rotate), NOT the capability-scope cache — so it is
+    // race-safe against a concurrent rotateSpace (an atomic UPDATE), and it stays
+    // correct even on a socket whose stale scope was already cache-invalidated.
+    // payload.keyGeneration comes from the VERIFIED JWS (verifyLogEntryJws), so the
+    // gated value is cryptographically anchored.
+    //
+    // keyGeneration GREATER THAN OR EQUAL the current generation MUST be accepted —
+    // including a future generation the broker has not itself seen yet (multi-broker
+    // liveness): such an entry is persisted, NOT buffered. getSpace returns null for
+    // an unregistered docId (Personal-Doc), so the gate is a no-op there. For
+    // generation 0 the test `0 < 0` is false → accepted.
+    const space = this.docLog.getSpace(docId)
+    if (space !== null && payload.keyGeneration < space.generation) {
+      this.sendTo(ws, {
+        type: 'error',
+        code: 'KEY_GENERATION_STALE',
+        message:
+          'Log-entry keyGeneration is older than the current space generation; re-emit under a new seq and the new keyGeneration.',
       })
       return
     }
