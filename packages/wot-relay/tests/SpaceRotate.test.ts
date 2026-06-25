@@ -201,7 +201,9 @@ class TestClient {
           }
           case 'error': {
             const waiter = this.outcomeWaiters.shift()
-            if (waiter) waiter({ error: msg.code, clientHint: msg.clientHint })
+            // Capture `thid` (SR-4 / F1): control-frame error frames carry thid == docId
+            // so the client can correlate a hard reject to its in-flight control-frame waiter.
+            if (waiter) waiter({ error: msg.code, clientHint: msg.clientHint, thid: msg.thid })
             break
           }
         }
@@ -499,7 +501,7 @@ describe('space-rotate + admin-add/remove over the real relay (Slice CG / VE-6 +
         newSpaceCapabilityVerificationKey: gen1.verificationKey,
         newGeneration: 1,
       }),
-    ).toMatchObject({ error: 'AUTH_INVALID' })
+    ).toMatchObject({ error: 'AUTH_INVALID', thid: docId }) // SR-4 / F1: reject carries thid==docId
     // Generation untouched.
     expect(docLogOf(server).getSpace(docId)?.generation).toBe(0)
     expect(docLogOf(server).getSpace(docId)?.verificationKey).toBe(gen0.verificationKey)
@@ -531,7 +533,7 @@ describe('space-rotate + admin-add/remove over the real relay (Slice CG / VE-6 +
         newSpaceCapabilityVerificationKey: skip.verificationKey,
         newGeneration: 2,
       }),
-    ).toMatchObject({ error: 'AUTH_INVALID' })
+    ).toMatchObject({ error: 'AUTH_INVALID', thid: docId }) // SR-4 / F1: thid==docId on the mismatch reject
     expect(docLogOf(server).getSpace(docId)?.generation).toBe(0)
 
     // newGeneration = 0 (== current, not +1) → AUTH_INVALID.
@@ -542,7 +544,7 @@ describe('space-rotate + admin-add/remove over the real relay (Slice CG / VE-6 +
         newSpaceCapabilityVerificationKey: skip.verificationKey,
         newGeneration: 0,
       }),
-    ).toMatchObject({ error: 'AUTH_INVALID' })
+    ).toMatchObject({ error: 'AUTH_INVALID', thid: docId }) // SR-4 / F1: thid==docId on the repeat-gen reject
     expect(docLogOf(server).getSpace(docId)?.generation).toBe(0)
     expect(docLogOf(server).getSpace(docId)?.verificationKey).toBe(gen0.verificationKey)
 

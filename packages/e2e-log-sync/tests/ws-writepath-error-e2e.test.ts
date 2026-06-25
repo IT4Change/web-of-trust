@@ -455,10 +455,11 @@ describe.each([yjsLaggerFixture, automergeLaggerFixture])(
       ).toBe(true)
 
       // No double-effect: exactly one 'lag' item; the pre-write survived; the durable
-      // log grew by exactly the re-emitted entry (the stale write left no trace).
+      // log grew by EXACTLY the one re-emitted entry (the stale write left no trace, and
+      // catch-up adds no log entries — present-capability + sync-request are not writes).
       expect(Object.keys(aliceHandle.getDoc().items).filter((k) => k === 'lag')).toHaveLength(1)
       expect(aliceHandle.getDoc().items['pre']?.title).toBe('bob-pre-rotation')
-      expect(relay.entryCount(spaceId)).toBeGreaterThan(frozen)
+      expect(relay.entryCount(spaceId)).toBe(frozen + 1)
 
       aliceHandle.close()
       bobHandle.close()

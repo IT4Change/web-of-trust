@@ -180,35 +180,74 @@ export async function commitStagedRotation(options: CommitStagedRotationOptions)
   const validityMs = resolveCapabilityValidityMs(options.validityDurationMs)
   const { spaceId, staged } = options
 
-  // B4: read the live generation BEFORE any write and decide normal/idempotent/drift.
-  const current = await options.keyPort.getCurrentGeneration(spaceId)
-  if (current !== staged.newGeneration - 1) {
-    // Not the expected next-generation activation. The ONLY other safe case is an
-    // idempotent re-commit of an ALREADY-activated, byte-identical generation.
-    const idempotent =
-      current === staged.newGeneration &&
-      (await stagedMaterialMatchesStored(options.keyPort, spaceId, staged))
-    if (!idempotent) {
-      throw new Error(
-        `stale staged generation drift: cannot activate staged generation ${staged.newGeneration} ` +
-          `while the live generation is ${current} (expected ${staged.newGeneration - 1}). ` +
-          'A divergent stage must NOT overwrite current key material.',
-      )
-    }
-    // Idempotent no-op: the generation is already active with identical material.
-    // Rebuild the CreateSpaceKeyResult from STORED material (no re-write — preserves
-    // the original capability JWS + avoids any key re-persist / nonce hazard).
-    return rebuildResultFromStored(options.keyPort, spaceId, staged)
+  const provisionOptions = {
+    crypto: options.crypto,
+    keyPort: options.keyPort,
+    spaceId,
+    ownerDid: options.ownerDid,
+    now: options.now,
   }
 
-  // NORMAL activation: persist the content key for this generation FIRST, then the
-  // capability key pair + the owner self-capability (same order as the pre-split
-  // rotateSpaceKey path).
-  await options.keyPort.saveKey(spaceId, staged.newGeneration, staged.contentKey)
-  return provisionCapabilityForGeneration(
-    { crypto: options.crypto, keyPort: options.keyPort, spaceId, ownerDid: options.ownerDid, now: options.now },
-    staged,
-    validityMs,
+  // B4: read the live generation BEFORE any write and decide normal/idempotent/repair/drift.
+  const current = await options.keyPort.getCurrentGeneration(spaceId)
+
+  // NORMAL activation: the expected next-generation step. Persist the content key
+  // FIRST, then the capability key pair + the owner self-capability (same order as the
+  // pre-split rotateSpaceKey path).
+  if (current === staged.newGeneration - 1) {
+    await options.keyPort.saveKey(spaceId, staged.newGeneration, staged.contentKey)
+    return provisionCapabilityForGeneration(provisionOptions, staged, validityMs)
+  }
+
+  // SR-4 / group-key:208 — the live generation is ALREADY staged.newGeneration. The
+  // activation is non-atomic (saveKey → saveCapabilityKeyPair → saveOwnCapability are
+  // separate writes), so a crash can leave the content key persisted but the capability
+  // chain incomplete. Distinguish a fully-idempotent re-commit, a partial-crash REPAIR,
+  // and a genuine drift conflict — instead of wedging the PendingRemoval on a "drift"
+  // error whenever the capability material happens to be missing.
+  if (current === staged.newGeneration) {
+    const storedKey = await options.keyPort.getKeyByGeneration(spaceId, staged.newGeneration)
+    if (!storedKey || !bytesEqual(storedKey, staged.contentKey)) {
+      // Divergent content key at this generation — a different rotation already took it.
+      throw new Error(
+        `stale staged generation drift: generation ${staged.newGeneration} is active with a ` +
+          'DIVERGENT content key; a divergent stage must NOT overwrite current key material.',
+      )
+    }
+    const storedCapVk = await options.keyPort.getCapabilityVerificationKey(spaceId, staged.newGeneration)
+    if (storedCapVk && !bytesEqual(storedCapVk, staged.capabilityVerificationKey)) {
+      // Same content key but divergent capability material — a genuine conflict.
+      throw new Error(
+        `stale staged generation drift: generation ${staged.newGeneration} is active with ` +
+          'DIVERGENT capability material; refusing to overwrite it.',
+      )
+    }
+    const ownCapabilityJws = await options.keyPort.getOwnCapability(spaceId, staged.newGeneration)
+    if (storedCapVk && ownCapabilityJws) {
+      // Fully idempotent: content + capability + own-capability all present + identical.
+      // Return the STORED material with NO re-write (preserves the original JWS, no key
+      // re-persist / nonce hazard).
+      return {
+        contentKey: staged.contentKey,
+        capabilitySigningSeed: staged.capabilitySigningSeed,
+        capabilityVerificationKey: staged.capabilityVerificationKey,
+        ownCapabilityJws,
+      }
+    }
+    // PARTIAL-CRASH REPAIR: the content key is persisted + identical, but the capability
+    // chain (key pair and/or own-capability JWS) is incomplete from a crash between the
+    // separate writes. Complete the activation from the SAME staged material WITHOUT
+    // re-writing the content key (no nonce hazard — saveKey already holds the identical
+    // bytes). saveCapabilityKeyPair is an idempotent same-bytes write; saveOwnCapability
+    // (re)mints the owner self-capability — unwedging a removal stuck mid-commit.
+    return provisionCapabilityForGeneration(provisionOptions, staged, validityMs)
+  }
+
+  // Anything else: the generation moved past the stage (or otherwise unexpected) → drift.
+  throw new Error(
+    `stale staged generation drift: cannot activate staged generation ${staged.newGeneration} ` +
+      `while the live generation is ${current} (expected ${staged.newGeneration - 1}). ` +
+      'A divergent stage must NOT overwrite current key material.',
   )
 }
 
@@ -220,51 +259,6 @@ function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
   return diff === 0
 }
 
-/**
- * B4 idempotency check: is the material ALREADY stored at `staged.newGeneration`
- * byte-identical to the staged content key AND capability verification key? Both
- * must match — a divergent stage at the same generation is a drift hazard, not a
- * no-op.
- */
-async function stagedMaterialMatchesStored(
-  keyPort: KeyManagementPort,
-  spaceId: string,
-  staged: StagedRotationMaterial,
-): Promise<boolean> {
-  const storedKey = await keyPort.getKeyByGeneration(spaceId, staged.newGeneration)
-  if (!storedKey || !bytesEqual(storedKey, staged.contentKey)) return false
-  const storedCapVk = await keyPort.getCapabilityVerificationKey(spaceId, staged.newGeneration)
-  if (!storedCapVk || !bytesEqual(storedCapVk, staged.capabilityVerificationKey)) return false
-  return true
-}
-
-/**
- * B4 idempotent no-op return: assemble a {@link CreateSpaceKeyResult} from the
- * material ALREADY stored at `staged.newGeneration` WITHOUT re-writing anything.
- * Prefers the persisted own-capability JWS; only the verified-identical staged
- * fields are returned for the key bytes.
- */
-async function rebuildResultFromStored(
-  keyPort: KeyManagementPort,
-  spaceId: string,
-  staged: StagedRotationMaterial,
-): Promise<CreateSpaceKeyResult> {
-  const ownCapabilityJws = await keyPort.getOwnCapability(spaceId, staged.newGeneration)
-  if (!ownCapabilityJws) {
-    // The generation is active with identical key material but its own-capability JWS
-    // is missing — an inconsistent store we must not paper over with a silent re-sign.
-    throw new Error(
-      `stale staged generation drift: generation ${staged.newGeneration} is active with identical ` +
-        'key material but no stored own-capability; refusing to re-mint silently.',
-    )
-  }
-  return {
-    contentKey: staged.contentKey,
-    capabilitySigningSeed: staged.capabilitySigningSeed,
-    capabilityVerificationKey: staged.capabilityVerificationKey,
-    ownCapabilityJws,
-  }
-}
 
 /**
  * Persist the Space Capability key pair + the owner's self-capability for a

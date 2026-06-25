@@ -167,6 +167,51 @@ describe('group-key stage/commit split (Slice SR / VE-C1)', () => {
     expect(hex((await keyPort.getKeyByGeneration(SPACE, 2))!)).toBe(liveGen2)
   })
 
+  it('B4/SR-4 PARTIAL-CRASH REPAIR: content key persisted but capability chain missing (crash between writes) → commit COMPLETES the activation, does not wedge', async () => {
+    // commitStagedRotation activation is non-atomic (saveKey → saveCapabilityKeyPair →
+    // saveOwnCapability are separate writes). A crash after saveKey leaves the content
+    // key at generation 1 but NO capability material. On retry the live generation is
+    // already 1, so the old "drift" guard threw — wedging the removal forever. The
+    // repair must instead finish the activation from the SAME staged material.
+    const keyPort = await seedGen0()
+    const staged = await stageRotateSpaceKey({ crypto, keyPort, spaceId: SPACE, ownerDid: OWNER })
+
+    // Simulate the partial crash: ONLY the content key was persisted.
+    await keyPort.saveKey(SPACE, staged.newGeneration, staged.contentKey)
+    expect(await keyPort.getCurrentGeneration(SPACE)).toBe(1)
+    expect(await keyPort.getCapabilityVerificationKey(SPACE, 1)).toBeNull() // capability missing
+
+    // Retry: must NOT throw drift — it repairs by provisioning the capability chain.
+    const r = await commitStagedRotation({ crypto, keyPort, spaceId: SPACE, ownerDid: OWNER, staged })
+
+    expect(hex((await keyPort.getKeyByGeneration(SPACE, 1))!)).toBe(hex(staged.contentKey))
+    expect(hex((await keyPort.getCapabilityVerificationKey(SPACE, 1))!)).toBe(hex(staged.capabilityVerificationKey))
+    expect(await keyPort.getOwnCapability(SPACE, 1)).toBe(r.ownCapabilityJws)
+    const payload = await verifySpaceCapabilityJws(r.ownCapabilityJws, {
+      crypto,
+      publicKey: staged.capabilityVerificationKey,
+      expectedSpaceId: SPACE,
+      expectedAudience: OWNER,
+      expectedGeneration: 1,
+    })
+    expect(payload.audience).toBe(OWNER)
+  })
+
+  it('B4/SR-4 PARTIAL-CRASH REPAIR: capability key pair persisted but own-capability JWS missing → commit completes (re-mints the own-capability)', async () => {
+    const keyPort = await seedGen0()
+    const staged = await stageRotateSpaceKey({ crypto, keyPort, spaceId: SPACE, ownerDid: OWNER })
+
+    // Simulate the later partial-crash window: content key + capability key pair saved,
+    // but the own-capability JWS write did not land.
+    await keyPort.saveKey(SPACE, staged.newGeneration, staged.contentKey)
+    await keyPort.saveCapabilityKeyPair(SPACE, staged.newGeneration, staged.capabilitySigningSeed, staged.capabilityVerificationKey)
+    expect(await keyPort.getOwnCapability(SPACE, 1)).toBeNull() // own-capability missing
+
+    const r = await commitStagedRotation({ crypto, keyPort, spaceId: SPACE, ownerDid: OWNER, staged })
+    expect(await keyPort.getOwnCapability(SPACE, 1)).toBe(r.ownCapabilityJws)
+    expect(hex(r.capabilityVerificationKey)).toBe(hex(staged.capabilityVerificationKey))
+  })
+
   it('stageRotateSpaceKey fails fast on an invalid validityDurationMs and on an unknown space, persisting nothing', async () => {
     const keyPort = await seedGen0()
     for (const bad of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {

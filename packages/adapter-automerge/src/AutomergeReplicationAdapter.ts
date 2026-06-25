@@ -3209,6 +3209,15 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
     if (this.logSyncEnabled) {
       const coordinator = this.coordinators.get(body.spaceId)
       if (coordinator) {
+        // SR-4 / CodeRabbit: mirror the Yjs key-rotation import order — replay the
+        // coordinator's blocked-by-key READ buffer FIRST. A content key for the new
+        // generation is now available, so entries that were buffered blocked-by-key
+        // can finally apply; without this the Automerge peer leaves them stuck after a
+        // rotation → divergence (Yjs already does this, YjsReplicationAdapter key-rotation
+        // import). LOOP-GUARD: read-path replay only, zero new log-entry sends.
+        await coordinator.replayBlockedByKey().catch((err) =>
+          console.debug('[ReplicationAdapter] blocked-by-key replay failed:', err),
+        )
         await coordinator.replayPendingReemits().catch((err) =>
           console.debug('[ReplicationAdapter] pending-reemit replay failed:', err),
         )

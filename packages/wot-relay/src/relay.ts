@@ -886,6 +886,12 @@ export class RelayServer {
     if (!this.docLog.isSpaceRegistered(spaceId)) {
       this.sendTo(ws, {
         type: 'error',
+        // SR-4 / CodeRabbit (F1): control-frame errors carry thid == docId (spaceId)
+        // so the sender's coordinator correlates the reject to the in-flight
+        // control-frame waiter (keyed by docId), matching the receipt's
+        // messageId == docId. Without it a hard space-rotate reject matches no waiter,
+        // times out, and is misclassified pending instead of failing hard.
+        thid: spaceId,
         code: 'DOC_NOT_FOUND',
         message: 'Space is not registered; register it before rotating or changing admins.',
       })
@@ -897,6 +903,7 @@ export class RelayServer {
     if (!this.docLog.getSpaceAdmins(spaceId).includes(signerDid)) {
       this.sendTo(ws, {
         type: 'error',
+        thid: spaceId, // SR-4 / F1: correlate the hard reject to the control-frame waiter
         code: 'AUTH_INVALID',
         message: 'Frame is not signed by a registered admin of this space.',
       })
@@ -981,6 +988,7 @@ export class RelayServer {
     if (result.disposition === 'rejected') {
       this.sendTo(ws, {
         type: 'error',
+        thid: signer.spaceId, // SR-4 / F1: correlate to the control-frame waiter (docId)
         code: result.errorCode,
         message:
           result.errorCode === 'AUTH_INVALID'
@@ -999,6 +1007,7 @@ export class RelayServer {
     if (space === null || newGeneration !== space.generation + 1) {
       this.sendTo(ws, {
         type: 'error',
+        thid: spaceId, // SR-4 / F1: correlate to the control-frame waiter (docId)
         code: 'AUTH_INVALID',
         message: 'space-rotate newGeneration must be exactly the current generation plus one.',
       })

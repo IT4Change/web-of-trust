@@ -246,9 +246,16 @@ export class DocLog {
     contentHash: string
     entryJws: string
     /**
-     * The entry's `keyGeneration` (from the verified JWS payload). Gated in-transaction
-     * against the registered space generation (B2). Defaults to the current generation
-     * when omitted (e.g. Personal-Doc / unregistered docId where the gate is a no-op).
+     * The entry's `keyGeneration` (from the verified JWS payload), gated in-transaction
+     * against the registered space generation (B2).
+     *
+     * SECURITY BOUNDARY: when OMITTED the generation gate is SKIPPED entirely (no-op),
+     * NOT defaulted — there is no implicit "current generation" fallback. Omitting it is
+     * only safe for docIds that are not registered spaces (e.g. a Personal-Doc), where
+     * there is no `spaces.generation` row to gate against. Every registered-space
+     * log-entry ingest MUST pass the verified `keyGeneration`, else a rotated-out (stale)
+     * write would bypass the post-removal gate. The sole caller (handleLogEntry) always
+     * passes it.
      */
     keyGeneration?: number
   }): AppendResult {

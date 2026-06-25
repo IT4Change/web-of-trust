@@ -141,22 +141,35 @@ export class RawRelayClient {
   /** Resolve with the NEXT full outcome frame (receipt or error incl. thid). */
   private nextRawOutcome(): Promise<RawOutcome> {
     return new Promise((resolve, reject) => {
-      const t = setTimeout(() => reject(new Error('Timeout waiting for raw outcome')), 5000)
-      this.rawOutcomeWaiters.push((o) => {
+      // On timeout, REMOVE this waiter from the queue (no leak): otherwise a later
+      // outcome would be consumed by a waiter whose promise already rejected, shifting
+      // every subsequent correlation by one.
+      const waiter = (o: RawOutcome) => {
         clearTimeout(t)
         resolve(o)
-      })
+      }
+      const t = setTimeout(() => {
+        const i = this.rawOutcomeWaiters.indexOf(waiter)
+        if (i >= 0) this.rawOutcomeWaiters.splice(i, 1)
+        reject(new Error('Timeout waiting for raw outcome'))
+      }, 5000)
+      this.rawOutcomeWaiters.push(waiter)
     })
   }
 
   private nextOutcome(): Promise<Record<string, unknown>> {
     return new Promise((resolve, reject) => {
-      const t = setTimeout(() => reject(new Error('Timeout waiting for outcome')), 3000)
-      this.outcomeWaiters.push((o) => {
+      const waiter = (o: Record<string, unknown> | { error: string }) => {
         clearTimeout(t)
         if ('error' in o) reject(new Error(String((o as { error: string }).error)))
         else resolve(o as Record<string, unknown>)
-      })
+      }
+      const t = setTimeout(() => {
+        const i = this.outcomeWaiters.indexOf(waiter)
+        if (i >= 0) this.outcomeWaiters.splice(i, 1)
+        reject(new Error('Timeout waiting for outcome'))
+      }, 3000)
+      this.outcomeWaiters.push(waiter)
     })
   }
 
