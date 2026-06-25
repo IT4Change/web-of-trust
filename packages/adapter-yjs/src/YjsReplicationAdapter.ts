@@ -2924,6 +2924,14 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
         await coordinator.replayBlockedByKey().catch((err) =>
           console.debug('[YjsReplication] blocked-by-key replay failed:', err),
         )
+        // Slice SR / VE-C2: the legitimate lagger just imported the missed rotation —
+        // drain any KEY_GENERATION_STALE re-emit that parked because the new generation
+        // had not arrived yet. Re-emits the SAME update under a NEW seq + the new gen
+        // (never the same seq). LOOP-GUARD-safe: only fires once the rejected gen is
+        // strictly behind the current one.
+        await coordinator.replayPendingReemits().catch((err) =>
+          console.debug('[YjsReplication] pending-reemit replay failed:', err),
+        )
       }
     }
     // VE-6c: future-gepufferte member-updates, deren Generation jetzt erreicht

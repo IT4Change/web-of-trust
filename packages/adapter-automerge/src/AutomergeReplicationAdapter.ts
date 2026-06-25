@@ -3104,6 +3104,20 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
     // VE-6c: future-gepufferte member-updates, deren Generation jetzt erreicht
     // ist, re-verarbeiten (aufsteigend, Sync 002 Z.235).
     await this.replayFutureMemberUpdates(body.spaceId)
+    // Slice SR / VE-C2: the legitimate lagger just imported the missed rotation —
+    // drain any KEY_GENERATION_STALE re-emit that parked because the new generation
+    // had not arrived yet. Re-emits the SAME update under a NEW seq + the new gen
+    // (never the same seq). LOOP-GUARD-safe: only fires once the rejected gen is
+    // strictly behind the current one. Because VE-C2 lives in the engine-neutral
+    // coordinator, this mirrors the Yjs adapter's drain exactly.
+    if (this.logSyncEnabled) {
+      const coordinator = this.coordinators.get(body.spaceId)
+      if (coordinator) {
+        await coordinator.replayPendingReemits().catch((err) =>
+          console.debug('[ReplicationAdapter] pending-reemit replay failed:', err),
+        )
+      }
+    }
     // VE-6d (Sync 002 Z.231 "sync-request ausloesen"): kein expliziter
     // Catch-up-Send noetig — waehrend der Key-Luecke eingetroffene content-
     // Nachrichten lagen im blocked-by-key-Buffer und wurden soeben via

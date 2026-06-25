@@ -237,45 +237,60 @@ export class InProcessLogBroker implements InProcessLogBrokerControls {
   // ── log-entry ingest gate + sync-request (via `send`) ───────────────────────
 
   /**
-   * Returns true if the message was a log-path message (log-entry / sync-request)
-   * the broker handled (so the adapter does NOT also peer-route it). Returns false
-   * for any other envelope (the adapter routes it normally).
+   * Handle a log-path message (log-entry / sync-request).
+   *
+   * Returns `{ handled, accepted }`:
+   *  - `handled=false` ⇒ not a log-path message; the adapter routes it normally.
+   *  - `handled=true, accepted=true`  ⇒ a log-entry the broker durably stored +
+   *    broadcast; the adapter MAY synthesize an `accepted`/`delivered` receipt
+   *    (relay parity: the relay answers an accepted log-entry with a `receipt`).
+   *  - `handled=true, accepted=false` ⇒ the broker REJECTED the log-entry (or a
+   *    sync-request gate failure); it already delivered a routed `error` frame to
+   *    the sender (with `thid == messageId`) and issued NO receipt. The adapter MUST
+   *    NOT synthesize an accept — otherwise the sender's write would be marked acked
+   *    and dropped from its in-flight retention before the routed error correlates
+   *    (the VE-C2 / restore-clone reject would then be silently lost). This mirrors
+   *    the real relay, where a rejected log-entry yields only an `error` frame and
+   *    the WebSocket `send()` promise never resolves to a receipt.
    */
-  async handleSend(socket: BrokerSocket, envelope: WireMessage): Promise<boolean> {
+  async handleSend(socket: BrokerSocket, envelope: WireMessage): Promise<{ handled: boolean; accepted: boolean }> {
     if (isLogEntryEnvelope(envelope)) {
-      await this.ingestLogEntry(socket, envelope as LogEntryMessage)
-      return true
+      const accepted = await this.ingestLogEntry(socket, envelope as LogEntryMessage)
+      return { handled: true, accepted }
     }
     if (isSyncRequestEnvelope(envelope)) {
       await this.answerSyncRequest(socket, envelope)
-      return true
+      // A sync-request never yields a receipt (the relay answers with a
+      // sync-response/1.0 message or an error frame), so it is never an "accept".
+      return { handled: true, accepted: false }
     }
-    return false
+    return { handled: false, accepted: false }
   }
 
-  private async ingestLogEntry(socket: BrokerSocket, envelope: LogEntryMessage): Promise<void> {
+  /** Returns true if the entry was accepted (stored/broadcast); false if rejected. */
+  private async ingestLogEntry(socket: BrokerSocket, envelope: LogEntryMessage): Promise<boolean> {
     const message = parseLogEntryMessage(envelope)
     const payload = await verifyLogEntryJws(message.body.entry, { crypto: this.crypto }).catch(() => null)
-    if (!payload) return // AUTH_INVALID — silently drop (client will time out / not used in tests)
+    if (!payload) return false // AUTH_INVALID — silently drop (client will time out / not used in tests)
 
     const docId = payload.docId
 
     const armed = this.takeArmed('log-entry', docId, undefined, payload.deviceId)
     if (armed) {
-      this.emitError(socket, message.id, armed.code, armed.message ?? armed.code)
-      return
+      await this.emitError(socket, message.id, armed.code, armed.message ?? armed.code)
+      return false
     }
 
     // device-active
     if (this.revokedDevices.has(payload.deviceId)) {
-      this.emitError(socket, message.id, 'DEVICE_REVOKED', 'device revoked')
-      return
+      await this.emitError(socket, message.id, 'DEVICE_REVOKED', 'device revoked')
+      return false
     }
 
     // write-capability for docId on this socket
     if (!this.scopes.has(`${socket.socketId}:${docId}`)) {
-      this.emitError(socket, message.id, 'CAPABILITY_REQUIRED', 'no capability presented for doc')
-      return
+      await this.emitError(socket, message.id, 'CAPABILITY_REQUIRED', 'no capability presented for doc')
+      return false
     }
 
     const log = this.ensureDoc(docId)
@@ -287,8 +302,8 @@ export class InProcessLogBroker implements InProcessLogBrokerControls {
     // capability on a not-yet-rotated client) a no-op once the rotation is enforced.
     // keyGeneration >= generation is accepted (incl. a future gen). 0 < 0 is false.
     if (payload.keyGeneration < log.generation) {
-      this.emitError(socket, message.id, 'KEY_GENERATION_STALE', 'key generation stale (post-rotation)')
-      return
+      await this.emitError(socket, message.id, 'KEY_GENERATION_STALE', 'key generation stale (post-rotation)')
+      return false
     }
     const slot = `${payload.deviceId}:${payload.seq}`
     const contentHash = await this.hash(message.body.entry)
@@ -297,10 +312,10 @@ export class InProcessLogBroker implements InProcessLogBrokerControls {
       if (existing.contentHash === contentHash) {
         // idempotent retransmission — accept, no re-broadcast needed but re-broadcast is harmless.
         this.broadcast(socket, message, payload.deviceId)
-        return
+        return true
       }
-      this.emitError(socket, message.id, 'SEQ_COLLISION_DETECTED', 'seq collision (restore-clone-required)')
-      return
+      await this.emitError(socket, message.id, 'SEQ_COLLISION_DETECTED', 'seq collision (restore-clone-required)')
+      return false
     }
 
     log.entries.set(slot, {
@@ -314,6 +329,7 @@ export class InProcessLogBroker implements InProcessLogBrokerControls {
     if (payload.seq > head) log.heads.set(payload.deviceId, payload.seq)
 
     this.broadcast(socket, message, payload.deviceId)
+    return true
   }
 
   private async answerSyncRequest(socket: BrokerSocket, envelope: WireMessage): Promise<void> {
@@ -322,11 +338,11 @@ export class InProcessLogBroker implements InProcessLogBrokerControls {
 
     const armed = this.takeArmed('sync-request', docId)
     if (armed) {
-      this.emitError(socket, request.id, armed.code, armed.message ?? armed.code)
+      await this.emitError(socket, request.id, armed.code, armed.message ?? armed.code)
       return
     }
     if (!this.scopes.has(`${socket.socketId}:${docId}`)) {
-      this.emitError(socket, request.id, 'CAPABILITY_REQUIRED', 'no read capability presented for doc')
+      await this.emitError(socket, request.id, 'CAPABILITY_REQUIRED', 'no read capability presented for doc')
       return
     }
 
@@ -362,10 +378,20 @@ export class InProcessLogBroker implements InProcessLogBrokerControls {
     }
   }
 
-  private emitError(socket: BrokerSocket, messageId: string, code: BrokerErrorCode, message: string): void {
+  private async emitError(
+    socket: BrokerSocket,
+    messageId: string,
+    code: BrokerErrorCode,
+    message: string,
+  ): Promise<void> {
     // log-entry / sync-request errors travel as a routed `error` frame to the
-    // sender. The adapter surfaces it to the coordinator's onMessage handler.
-    void socket.deliver({ type: 'error', thid: messageId, code, message } as unknown as WireMessage)
+    // sender (with `thid == messageId`, so the coordinator correlates it to the
+    // exact in-flight write). AWAITED — so the error is processed deterministically
+    // WHILE the sender's `send()` is still in flight (its in-flight retention is
+    // still present). The real relay routes the error frame the same way; awaiting
+    // here just removes the in-process scheduling race that would otherwise drop the
+    // error after a (synthetic) accept already cleared the correlation.
+    await socket.deliver({ type: 'error', thid: messageId, code, message } as unknown as WireMessage)
   }
 
   private ensureDoc(docId: string): DocLog {

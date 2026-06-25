@@ -161,6 +161,8 @@ class TestClient {
   private ws: WebSocket | null = null
   /** Every relayed/delivered `message` envelope this socket received. */
   readonly messages: Record<string, unknown>[] = []
+  /** The raw frames of every `error` this socket received (VE-C2: assert `thid`). */
+  readonly errorFrames: Record<string, unknown>[] = []
   private outcomeWaiters: Array<(outcome: SendOutcome) => void> = []
 
   constructor(private identity: RawIdentity) {}
@@ -211,6 +213,7 @@ class TestClient {
             break
           }
           case 'error': {
+            this.errorFrames.push(msg as unknown as Record<string, unknown>)
             const waiter = this.outcomeWaiters.shift()
             if (waiter) waiter({ error: msg.code, clientHint: msg.clientHint })
             break
@@ -407,9 +410,18 @@ describe('Slice SR Phase 1 — RELAY VE-R1 generations-gate + VE-R2 whitelist', 
     // The member writes a STALE keyGeneration-0 entry (old content key). The gate
     // rejects it AFTER the capability gate + author-binding pass.
     const staleJws = await buildLogEntryJws({ identity: member, docId, seq: 5, plaintext: 'stale', keyGeneration: 0 })
-    expect(await memberClient.send(logEntryEnvelope(member.did, [peer.did], staleJws))).toMatchObject({
+    const staleEnvelope = logEntryEnvelope(member.did, [peer.did], staleJws)
+    expect(await memberClient.send(staleEnvelope)).toMatchObject({
       error: 'KEY_GENERATION_STALE',
     })
+
+    // VE-C2 (the load-bearing relay change): the KEY_GENERATION_STALE error frame
+    // MUST carry `thid == the rejected envelope id`, so the legitimate lagger's
+    // LogSyncCoordinator can correlate it back to the in-flight write and run the
+    // catch-up-and-re-emit. Without thid the client drops the error (greenwash trap).
+    const staleError = memberClient.errorFrames.find((f) => f.code === 'KEY_GENERATION_STALE')
+    expect(staleError).toBeDefined()
+    expect(staleError!.thid).toBe(staleEnvelope.id)
 
     // Neither stored nor relayed: the durable log has no entry for this doc and the
     // peer (a recipient in `to`) received no message.

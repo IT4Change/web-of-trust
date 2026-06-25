@@ -1769,8 +1769,15 @@ export class RelayServer {
     // generation 0 the test `0 < 0` is false → accepted.
     const space = this.docLog.getSpace(docId)
     if (space !== null && payload.keyGeneration < space.generation) {
+      // Slice SR / VE-C2 (APPROVAL-GATED relay change): attach `thid == messageId` so
+      // the sender's LogSyncCoordinator can CORRELATE this routed error back to the
+      // exact in-flight write (onWritePathErrorFrame / routeWritePathError require a
+      // string `thid`). Without it the legitimate lagger's KEY_GENERATION_STALE is
+      // dropped client-side and the catch-up-and-re-emit never fires — a greenwash
+      // trap, since the InProcessLogBroker model already sets thid (unit tests pass).
       this.sendTo(ws, {
         type: 'error',
+        thid: messageId,
         code: 'KEY_GENERATION_STALE',
         message:
           'Log-entry keyGeneration is older than the current space generation; re-emit under a new seq and the new keyGeneration.',

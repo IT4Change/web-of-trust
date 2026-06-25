@@ -8,8 +8,42 @@ import {
   InMemoryKeyManagementAdapter,
   InMemoryDocLogStore,
 } from '@web_of_trust/core/adapters'
+import { KEY_ROTATION_MESSAGE_TYPE } from '@web_of_trust/core/protocol'
+import type { WireMessage } from '@web_of_trust/core/ports'
 import { AutomergeReplicationAdapter } from '../src/AutomergeReplicationAdapter'
 import { InMemoryRepoStorageAdapter } from '../src/InMemoryRepoStorageAdapter'
+
+/**
+ * Hold every `key-rotation/1.0` message addressed to this messaging adapter until
+ * {@link MessageHold.release} — makes a still-active member a deterministic LEGITIME
+ * LAGGER (VE-C2). Mirrors the Yjs adapter's secure-removal lagger test.
+ */
+interface MessageHold {
+  release: () => Promise<void>
+  held: number
+}
+function holdKeyRotations(messaging: InMemoryMessagingAdapter): MessageHold {
+  const buffered: WireMessage[] = []
+  const internal = messaging as unknown as { deliverToSelf: (m: WireMessage) => Promise<void> }
+  const original = internal.deliverToSelf.bind(messaging)
+  internal.deliverToSelf = async (envelope: WireMessage) => {
+    if ((envelope as { type?: unknown }).type === KEY_ROTATION_MESSAGE_TYPE) {
+      buffered.push(envelope)
+      return
+    }
+    return original(envelope)
+  }
+  return {
+    get held() {
+      return buffered.length
+    },
+    release: async () => {
+      internal.deliverToSelf = original
+      const toDeliver = buffered.splice(0)
+      for (const m of toDeliver) await original(m)
+    },
+  }
+}
 
 // Slice SR / VE-C1 + VE-C3 — adapter-level wiring of the two-phase secure removal
 // for the Automerge engine (parity with YjsSecureRemoval). The engine-neutral safety
@@ -133,5 +167,71 @@ describe('AutomergeReplicationAdapter — Slice SR secure removal (VE-C1 wiring)
 
     bobHandle.close()
     aliceHandle.close()
+  })
+
+  it('VE-C2 legitimate lagger: a still-active member that missed the rotation gets KEY_GENERATION_STALE, catches up, re-emits, and converges (no SEQ_COLLISION, no double-effect)', async () => {
+    // Parity with the Yjs lagger test. Three members: Alice (admin), Bob (the LAGGER,
+    // stays active), Carol (removed). Alice removes Carol → rotation to gen 1. Bob is
+    // HELD on the key-rotation, writes a stale gen-0 entry → broker rejects
+    // KEY_GENERATION_STALE → the re-emit parks. Then Bob receives the rotation →
+    // imports gen-1 → replayPendingReemits drains → re-emit under a NEW seq + gen 1 →
+    // converges to Alice. Because VE-C2 lives in the engine-neutral coordinator, the
+    // Automerge adapter inherits it once replayPendingReemits is wired on rotation-apply.
+    const carol = (await createTestIdentity('carol-pass')).identity
+    const carolMessaging = new InMemoryMessagingAdapter({ broker, socketId: 'carol-socket' })
+    await carolMessaging.connect(carol.getDid())
+    const carolAdapter = await makeAdapter(carol, carolMessaging, 'cccccccc-cccc-4ccc-8ccc-cccccccccccc')
+    await carolAdapter.start()
+
+    try {
+      const space = await aliceAdapter.createSpace<TestDoc>('shared', { items: {} }, { name: 'Lagger Space' })
+      const spaceId = space.id
+      await wait()
+      await aliceAdapter.addMember(spaceId, bob.getDid(), await bob.getEncryptionPublicKeyBytes())
+      await wait(200)
+      await aliceAdapter.addMember(spaceId, carol.getDid(), await carol.getEncryptionPublicKeyBytes())
+      await wait(250)
+
+      const bobHandle = await bobAdapter.openSpace<TestDoc>(spaceId)
+      const aliceHandle = await aliceAdapter.openSpace<TestDoc>(spaceId)
+      await wait(200)
+
+      // Baseline: a pre-rotation write from Bob replicates to Alice (Bob is active).
+      bobHandle.transact((doc) => { doc.items['pre'] = { title: 'pre-rotation' } })
+      await wait(250)
+      expect(aliceHandle.getDoc().items['pre']?.title).toBe('pre-rotation')
+      expect(await adapterGeneration(bobAdapter, spaceId)).toBe(0)
+
+      // HOLD Bob's key-rotation so he stays the lagger on gen 0.
+      const hold = holdKeyRotations(bobMessaging)
+
+      await aliceAdapter.removeMember(spaceId, carol.getDid())
+      await wait(300)
+      expect(brokerGeneration(broker, spaceId)).toBe(1)
+      expect(await adapterGeneration(aliceAdapter, spaceId)).toBe(1)
+      expect(await adapterGeneration(bobAdapter, spaceId)).toBe(0)
+      expect(hold.held).toBeGreaterThanOrEqual(1)
+
+      // Bob writes under the stale gen-0 key → KEY_GENERATION_STALE → re-emit parks →
+      // not yet at Alice.
+      bobHandle.transact((doc) => { doc.items['lag'] = { title: 'written-while-lagging' } })
+      await wait(300)
+      expect(aliceHandle.getDoc().items['lag']).toBeUndefined()
+
+      // The rotation arrives → Bob imports gen 1 → drains the parked re-emit → converges.
+      await hold.release()
+      await wait(500)
+
+      expect(await adapterGeneration(bobAdapter, spaceId)).toBe(1)
+      expect(aliceHandle.getDoc().items['lag']?.title).toBe('written-while-lagging')
+      expect(Object.keys(aliceHandle.getDoc().items).filter((k) => k === 'lag')).toHaveLength(1)
+      expect(aliceHandle.getDoc().items['pre']?.title).toBe('pre-rotation')
+
+      bobHandle.close()
+      aliceHandle.close()
+    } finally {
+      await carolAdapter.stop()
+      try { await carol.deleteStoredIdentity() } catch {}
+    }
   })
 })
