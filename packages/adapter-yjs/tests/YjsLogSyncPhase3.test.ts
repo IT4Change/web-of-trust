@@ -465,6 +465,55 @@ describe('YjsPersonalLogSyncAdapter — Slice A VE-6 (Personal-Doc on the log co
     doc1.destroy()
     doc2.destroy()
   })
+
+  // ── Slice B / VE-B: Personal-Doc MULTI-PAGE cold-reconstruction (festival-crit) ──
+  it('VE-B Personal-Doc Multi-Page Cold-Reconstruction — device 1 writes >100 personal-doc entries; a cold device 2 (same identity+personalKey) reconstructs ALL via >=2 sync-request rounds', async () => {
+    // Sync 002 requires Personal-Doc catch-up BEFORE Spaces (the Personal-Doc holds
+    // the group keys). If the Personal-Doc pagination broke at >100, the whole Spaces
+    // catch-up would start on an incomplete key basis — so this path MUST page too.
+    const doc1 = new Y.Doc()
+    const sync1 = await makePersonalAdapter(doc1, messaging1, DEVICE_ALICE)
+    sync1.start()
+    await wait(150)
+
+    // Device 1 writes 130 personal-doc entries (each transact = one log-entry) → the
+    // broker holds >100 entries → default page size 100 forces >=2 pages on catch-up.
+    const WRITES = 130
+    for (let i = 0; i < WRITES; i++) {
+      doc1.getMap('profile').set(`k${i}`, `v${i}`)
+      if (i % 25 === 0) await wait(15)
+    }
+    await wait(300)
+
+    // Cold device 2: SAME identity + SAME personalKey, FRESH log store. Catches up the
+    // whole personal log purely via a PAGINATED sync-response sequence.
+    const doc2 = new Y.Doc()
+    const sync2 = await makePersonalAdapter(doc2, messaging2, DEVICE_BOB)
+    const reqTally: number[] = []
+    const baseSend2 = messaging2.send.bind(messaging2)
+    ;(messaging2 as unknown as { send: typeof messaging2.send }).send = async (env: never) => {
+      if ((env as { type?: string }).type === SYNC_REQUEST_MESSAGE_TYPE) {
+        reqTally.push(((env as { body?: { limit?: number } }).body?.limit) ?? -1)
+      }
+      return baseSend2(env)
+    }
+    sync2.start()
+    // Device 2 needs more than one round to drain 130 entries at limit 100.
+    await wait(900)
+
+    // ALL 130 keys reconstructed on the cold device (full multi-page convergence).
+    for (let i = 0; i < WRITES; i++) {
+      expect(doc2.getMap('profile').get(`k${i}`)).toBe(`v${i}`)
+    }
+    // MULTI-PAGE teeth: >=2 sync-request rounds, each carrying the explicit limit 100.
+    expect(reqTally.length).toBeGreaterThanOrEqual(2)
+    for (const limit of reqTally) expect(limit).toBe(100)
+
+    sync1.destroy()
+    sync2.destroy()
+    doc1.destroy()
+    doc2.destroy()
+  })
 })
 
 void SYNC_REQUEST_MESSAGE_TYPE

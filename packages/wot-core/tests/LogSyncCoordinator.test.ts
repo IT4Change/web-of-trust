@@ -72,6 +72,8 @@ function makeHooks(appliedRemote: Uint8Array[]): LogSyncEngineHooks {
       }
       appliedRemote.push(plaintext)
     },
+    // Slice B / VE-B2: the same 0xFF marker is the side-effect-free foreign sniff.
+    isForeignPayload: (plaintext) => plaintext.length > 0 && plaintext[0] === 0xff,
   }
 }
 

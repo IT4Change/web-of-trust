@@ -1326,6 +1326,18 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
         Y.applyUpdate(state.doc, plaintext, 'remote')
         this._scheduleCompactDebounced(state)
       },
+      // Slice B / VE-B2: side-effect-free engine sniff — Y.decodeUpdate parses a Yjs
+      // update without applying it and throws on non-Yjs (engine-foreign) bytes. Lets
+      // the coordinator avoid buffering a cross-engine (e.g. Automerge) payload as a
+      // false seq-gap.
+      isForeignPayload: (plaintext) => {
+        try {
+          Y.decodeUpdate(plaintext)
+          return false
+        } catch {
+          return true
+        }
+      },
     }
   }
 

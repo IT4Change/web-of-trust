@@ -107,9 +107,31 @@ export interface ArmedRejection {
   persistent?: boolean
 }
 
+/**
+ * Slice B / VE-B1 (d) — arm a NO-PROGRESS truncated sync-response. Models the
+ * pathological broker that keeps answering `truncated:true` with entries the
+ * client has ALREADY applied (or none at all), so the broker MAX heads never
+ * advance and no new entry is applied: the terminator's DoS / no-progress class.
+ * `truncated:true` is forced WITHOUT emitting any entry beyond the requester's
+ * heads (the heads stay seiten-invariant broker-MAX). One-shot unless
+ * `persistent`.
+ */
+export interface ArmedSyncTruncation {
+  /** Only affect sync-requests for this docId (optional). */
+  docId?: string
+  /** Re-fire on every matching sync-request instead of one-shot. */
+  persistent?: boolean
+}
+
 export interface InProcessLogBrokerControls {
   /** Arm a one-shot rejection for the next matching frame. */
   armRejection(rejection: ArmedRejection): void
+  /**
+   * Slice B / VE-B1 (d): arm a no-progress `truncated:true` answer for the next
+   * sync-request — the broker replies truncated WITHOUT any entry beyond the
+   * requester's heads, so the head never advances (the no-progress DoS class).
+   */
+  armSyncTruncationNoProgress(arming: ArmedSyncTruncation): void
   /** Mark a deviceId as revoked (DEVICE_REVOKED on its next log-entry). */
   revokeDevice(deviceId: string): void
   /** Pre-register a docId as already registered by another admin (SPACE_ALREADY_REGISTERED test). */
@@ -127,6 +149,8 @@ export class InProcessLogBroker implements InProcessLogBrokerControls {
   private readonly scopes = new Set<string>()
   private readonly revokedDevices = new Set<string>()
   private readonly armed: ArmedRejection[] = []
+  /** Slice B / VE-B1 (d): armed no-progress truncations for sync-requests. */
+  private readonly armedSyncTruncations: ArmedSyncTruncation[] = []
 
   /** Inspection hook: every control frame the broker received, in order. */
   readonly receivedControlFrames: Array<{ socketId: string; frame: ControlFrame }> = []
@@ -146,6 +170,10 @@ export class InProcessLogBroker implements InProcessLogBrokerControls {
 
   armRejection(rejection: ArmedRejection): void {
     this.armed.push(rejection)
+  }
+
+  armSyncTruncationNoProgress(arming: ArmedSyncTruncation): void {
+    this.armedSyncTruncations.push(arming)
   }
 
   revokeDevice(deviceId: string): void {
@@ -347,13 +375,47 @@ export class InProcessLogBroker implements InProcessLogBrokerControls {
     }
 
     const log = this.ensureDoc(docId)
-    const entries: string[] = []
-    for (const stored of [...log.entries.values()].sort(byDeviceThenSeq)) {
-      const since = request.body.heads[stored.deviceId]
-      if (since === undefined || stored.seq > since) entries.push(stored.entryJws)
-    }
+
+    // broker heads = MAX seq per deviceId (Slice B VE-B1: SEITEN-INVARIANT — these
+    // never advance across pages and MUST NOT be used by the client as a progress
+    // signal; getSinceWithTruncation parity, relay.ts getHeads).
     const heads: Record<string, number> = {}
     for (const [deviceId, seq] of log.heads) heads[deviceId] = seq
+
+    // Slice B / VE-B1 (d): a NO-PROGRESS truncation. Reply truncated:true WITHOUT
+    // any entry beyond the requester's heads — the head never advances, so the
+    // client's pagination loop would spin forever without the terminator. The
+    // broker MAX heads stay seiten-invariant (the terminator must NOT read them as
+    // progress). One-shot unless persistent.
+    const truncationArming = this.takeArmedSyncTruncation(docId)
+    if (truncationArming) {
+      const response: SyncResponseMessage = createSyncResponseMessage({
+        id: globalThis.crypto.randomUUID(),
+        from: socket.did,
+        to: [socket.did],
+        createdTime: Math.floor(Date.now() / 1000),
+        thid: request.id,
+        body: { docId, entries: [], heads, truncated: true },
+      })
+      await socket.deliver(response as unknown as WireMessage)
+      return
+    }
+
+    // Slice B / VE-B1: faithful getSinceWithTruncation semantics (relay parity,
+    // wot-relay/log-store.ts getSinceWithTruncation):
+    //  - effectiveLimit = body.limit ?? 100 (matches relay.ts effectiveLimit),
+    //  - the GLOBAL missing list (per-device delta vs request.body.heads), sorted
+    //    (device_id ASC, seq ASC),
+    //  - cut to effectiveLimit + truncated = missing.length > effectiveLimit.
+    // The heads stay broker-MAX (seiten-invariant) on every page.
+    const effectiveLimit = request.body.limit ?? 100
+    const missing: string[] = []
+    for (const stored of [...log.entries.values()].sort(byDeviceThenSeq)) {
+      const since = request.body.heads[stored.deviceId]
+      if (since === undefined || stored.seq > since) missing.push(stored.entryJws)
+    }
+    const truncated = missing.length > effectiveLimit
+    const entries = truncated ? missing.slice(0, effectiveLimit) : missing
 
     const response: SyncResponseMessage = createSyncResponseMessage({
       id: globalThis.crypto.randomUUID(),
@@ -361,10 +423,20 @@ export class InProcessLogBroker implements InProcessLogBrokerControls {
       to: [socket.did],
       createdTime: Math.floor(Date.now() / 1000),
       thid: request.id,
-      body: { docId, entries, heads, truncated: false },
+      body: { docId, entries, heads, truncated },
     })
     // Relay parity: sync-response comes back as a routed message to the requester.
     await socket.deliver(response as unknown as WireMessage)
+  }
+
+  /** Take an armed no-progress truncation matching the docId (one-shot unless persistent). */
+  private takeArmedSyncTruncation(docId: string): ArmedSyncTruncation | null {
+    const idx = this.armedSyncTruncations.findIndex(
+      (a) => a.docId === undefined || a.docId === docId,
+    )
+    if (idx < 0) return null
+    if (this.armedSyncTruncations[idx].persistent) return this.armedSyncTruncations[idx]
+    return this.armedSyncTruncations.splice(idx, 1)[0]
   }
 
   // ── internals ───────────────────────────────────────────────────────────────

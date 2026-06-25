@@ -14,6 +14,7 @@ import {
   parseSyncResponseMessage,
   type SyncResponseMessage,
 } from './sync-messages'
+import { evaluateSyncResponseDisposition } from './heads'
 import { decryptLogPayload, encryptLogPayload } from './encryption'
 import { classifyLocalBrokerSeqConsistency } from './seq-consistency'
 import { classifyLogEntryKeyDisposition } from './log-entry-key-disposition'
@@ -51,6 +52,29 @@ import type { JcsEd25519SignFn } from '../crypto/jws'
  * Engine specifics are injected via {@link LogSyncEngineHooks}; Yjs and the
  * future Automerge adapter reuse this class unchanged.
  */
+
+/**
+ * Slice B / VE-B1: the client-side default sync-request page size. MUST match the
+ * relay default (`effectiveLimit = limit ?? 100`, relay.ts) at the contract level —
+ * the coordinator sends an EXPLICIT `body.limit` (100 by default, never undefined),
+ * so the wire envelope is inspectable and the two defaults are pinned at one value.
+ */
+const DEFAULT_CATCH_UP_PAGE_SIZE = 100
+
+/**
+ * Slice B / VE-B2: per-device cap of the blocked-by-seq ring buffer. A device with
+ * a permanent gap cannot grow the buffer past this; on overflow the HIGHEST seq is
+ * evicted (furthest from the gap), never the lowest (which closes the chain next).
+ */
+const MAX_BLOCKED_BY_SEQ_PER_DEVICE = 256
+
+/**
+ * Slice B / VE-B2: per-device reconnect-cycle retry budget for an unfillable gap.
+ * Once a device's gap survives this many reconnect-driven catch-up cycles without
+ * filling, the gap is surfaced via {@link LogSyncCoordinatorConfig.onGapUnfillable}
+ * (a hook, NOT a throw). Bounded so there is no wallclock thrashing.
+ */
+const MAX_GAP_RECONNECT_RETRIES = 5
 
 /** Disposition the coordinator surfaces to the caller after a reject. */
 export type RejectDisposition =
@@ -183,6 +207,17 @@ export interface LogSyncEngineHooks {
   encodeUpdate(update: Uint8Array): Uint8Array
   /** Apply a decrypted remote update to the CRDT with origin='remote' (LOOP-GUARD). */
   applyRemoteUpdate(plaintext: Uint8Array): void | Promise<void>
+  /**
+   * Slice B / VE-B2 (optional): a SIDE-EFFECT-FREE sniff that returns true if the
+   * decrypted plaintext is NOT this engine's CRDT update (engine-foreign). Used by the
+   * contiguity check to AVOID buffering a foreign payload as a false seq-gap (a foreign
+   * entry never advances the head, so every one past seq 0 would look non-contiguous
+   * and spin the gap catch-up). Implementations decode-only (Yjs: Y.decodeUpdate;
+   * Automerge: unframeChanges) and MUST NOT mutate the CRDT. Omitted ⇒ the coordinator
+   * falls back to the apply attempt (engine-foreign-skip), preserving same-engine
+   * behavior but losing the cross-engine spin protection.
+   */
+  isForeignPayload?(plaintext: Uint8Array): boolean
 }
 
 export interface LogSyncCoordinatorConfig {
@@ -254,6 +289,22 @@ export interface LogSyncCoordinatorConfig {
    * (only safe when the store's pending entries were already re-keyed externally).
    */
   onAfterRestoreClone?: (newDeviceId: string) => Promise<void> | void
+  /**
+   * Slice B / VE-B1: the sync-request page size sent as `body.limit`. Defaults to
+   * {@link DEFAULT_CATCH_UP_PAGE_SIZE} (100, matching the relay default). Config-
+   * driven so the value is set once here rather than threaded through every adapter
+   * call to the arg-less {@link LogSyncCoordinator.catchUp}. Festival perf-tuning
+   * (e.g. 500) is a separate item.
+   */
+  catchUpPageSize?: number
+  /**
+   * Slice B / VE-B2: surfaced when a device's seq-gap survives the bounded
+   * reconnect-cycle retry budget without filling (the relay genuinely lacks the
+   * missing entry = writer-side loss, OUTSIDE Slice B). A HOOK, not a throw —
+   * other devices keep applying; only this device's gap is parked. Mirrors the
+   * `restoreCloneRequired` surfacing pattern.
+   */
+  onGapUnfillable?: (info: { docId: string; deviceId: string; missingSeq: number }) => void | Promise<void>
   /** Clock (testable). */
   now?: () => Date
 }
@@ -263,8 +314,48 @@ export type ReceiveLogEntryResult =
   | { disposition: 'applied'; deviceId: string; seq: number }
   | { disposition: 'idempotent-skip'; deviceId: string; seq: number }
   | { disposition: 'engine-foreign-skip'; reason: string }
-  | { disposition: 'blocked-by-key'; keyGeneration: number }
+  // Slice B / VE-B1: blocked-by-key carries the authoring (deviceId, seq) too, so
+  // the pagination loop's per-page `buffered` count is exact (the terminator must
+  // distinguish a pure-buffer page from a no-progress page).
+  | { disposition: 'blocked-by-key'; deviceId: string; seq: number; keyGeneration: number }
+  // Slice B / VE-B2: decryptable but non-contiguous (seq above a gap) → buffered,
+  // NOT applied, NOT recorded. Replayed once the gap fills contiguously.
+  | { disposition: 'blocked-by-seq'; deviceId: string; seq: number }
   | { disposition: 'rejected'; reason: string }
+
+/**
+ * Slice B / VE-B1: the typed catch-up result. Additive on the pre-B
+ * `{ restoreCloneRequired }` shape (all 8+ adapter call-sites use only
+ * `.catchUp().catch(...)`, none reads the result, so adding fields is safe).
+ *
+ *  - `complete:true`  ⇒ the relay reported `truncated:false` (no more pages).
+ *  - `complete:false` ⇒ the loop stopped EARLY; `incomplete` says why:
+ *    - `'blocked-by-seq'`/`'blocked-by-key'` (b): a page applied nothing new but
+ *      buffered entries (gap / missing key) — NOT an error; retried after a
+ *      reconnect / key-import / gap-fill.
+ *    - `'timeout'` (c): a `truncated:true` page's follow-up response never arrived
+ *      — NOT an error; retried on the next reconnect.
+ *  The no-progress DoS class (d) does NOT surface here — it THROWS (the only throw
+ *  class), so it can never be silently swallowed as "incomplete".
+ */
+export interface CatchUpResult {
+  restoreCloneRequired: boolean
+  complete: boolean
+  incomplete?: 'blocked-by-key' | 'blocked-by-seq' | 'timeout'
+}
+
+/** Slice B / VE-B1: thrown when a `truncated:true` page makes NO progress (no entry applied AND none buffered) — the no-progress DoS guard, the ONLY throw class of the pagination loop. */
+export class SyncNoProgressError extends Error {
+  readonly docId: string
+  constructor(docId: string) {
+    super(
+      `sync pagination made no progress for docId=${docId}: the relay reports truncated:true ` +
+        'but applied no new entry and buffered none — aborting to avoid an unbounded loop (no-progress DoS guard)',
+    )
+    this.name = 'SyncNoProgressError'
+    this.docId = docId
+  }
+}
 
 export class LogSyncCoordinator {
   private readonly config: LogSyncCoordinatorConfig
@@ -313,6 +404,56 @@ export class LogSyncCoordinator {
    * import — NEVER through the local write path (LOOP-GUARD).
    */
   private readonly blockedByKey = new Map<string, LogEntryMessage>()
+
+  /**
+   * Slice B / VE-B2 blocked-by-seq buffer: incoming log-entry envelopes that are
+   * decryptable (key available) but NON-CONTIGUOUS — their seq sits ABOVE a gap in
+   * the authoring device's local log (`seq > contiguousHead + 1`). Nested by
+   * authoring deviceId so each device has its own gap window:
+   * `Map<deviceId, Map<seq, LogEntryMessage>>`.
+   *
+   * A buffered entry is NEVER recorded via recordRemoteApplied and NEVER added to
+   * {@link applied} — so the durable store stays CONTIGUOUS (getKnownHeads = max ==
+   * contiguous-max, the getKnownHeads ↔ computeRestoreDisposition ↔ Broker-getHeads
+   * (=MAX) triad stays invariant) AND a later replay never short-circuits as an
+   * idempotent-skip (the CRDT-data-loss greenwash: an entry in `applied` but missing
+   * from the doc). Volatile (RAM only; no DocLogStore gap-API) — correctness stays
+   * crash-safe because getKnownHeads rests at the contiguous max BEFORE the gap, so a
+   * restart re-requests the gap deterministically. Per-device ring (cap
+   * {@link MAX_BLOCKED_BY_SEQ_PER_DEVICE}); on overflow the HIGHEST buffered seq is
+   * evicted (furthest from the gap, most likely re-deliverable) — never the lowest,
+   * which closes the contiguous chain next.
+   */
+  private readonly blockedBySeq = new Map<string, Map<number, LogEntryMessage>>()
+
+  /**
+   * VE-B2 re-entrancy guard for the iterative blocked-by-seq replay: the replay
+   * calls {@link receiveLogEntry} for each now-contiguous entry, which would itself
+   * try to cascade — this flag makes those nested receives NOT spawn a second
+   * cascade (the iterative replay drains the whole chain in one pass).
+   */
+  private replayingBlockedBySeq = false
+
+  /**
+   * VE-B1 pagination re-entrancy guard, per docId-scoped catch-up. A gap-triggered
+   * catch-up (VE-B2) WHILE a pagination loop is already running MUST NOT start a
+   * second concurrent loop (competing sync-request / recordRemoteApplied on the same
+   * store). A trigger during an in-flight catch-up only sets {@link catchUpAgain}.
+   * Coexists with this.publishing (first-publication), this.restoreCloneInFlight and
+   * this.reemitInFlight — the established SR in-flight-guard pattern.
+   */
+  private catchingUp = false
+  /** VE-B1: a catch-up was requested while one was in flight — run one more after. */
+  private catchUpAgain = false
+
+  /**
+   * VE-B2 bounded gap-fill: per-device reconnect-cycle retry budget for an
+   * unfillable gap. Keyed by authoring deviceId; counts how many reconnect-driven
+   * catch-up cycles have failed to fill the device's gap. Once the budget is
+   * exhausted the gap is surfaced via {@link onGapUnfillable} (a hook, NOT a throw —
+   * unlike the no-progress DoS stop, the only throw class). Reset when the gap fills.
+   */
+  private readonly gapRetryBudget = new Map<string, number>()
 
   /**
    * Sent log-entry messageId → the (deviceId, seq) it carried, so a routed
@@ -379,6 +520,13 @@ export class LogSyncCoordinator {
     this.publishing = null
     this.controlTail = Promise.resolve()
     this.pendingSyncRequests.clear()
+    // VE-B1: a new socket = no in-flight pagination loop (the old socket's waiters
+    // were just cleared). Reset the guard so the reconnect's catch-up is not coalesced
+    // into a stale in-flight flag. The blocked-by-seq buffer + gapRetryBudget SURVIVE
+    // (gap-fill is retried per reconnect cycle; the buffer is volatile RAM, not socket-
+    // scoped) so the reconnect's catch-up re-requests the gap.
+    this.catchingUp = false
+    this.catchUpAgain = false
   }
 
   /**
@@ -715,7 +863,10 @@ export class LogSyncCoordinator {
    * Crucially: NO appendLocalEntry, NO sendLogEntryEnvelope. This is the path
    * that produced the 5000+-outbox loop when it re-broadcast.
    */
-  async receiveLogEntry(message: unknown): Promise<ReceiveLogEntryResult> {
+  async receiveLogEntry(
+    message: unknown,
+    opts?: { skipContiguityCheck?: boolean },
+  ): Promise<ReceiveLogEntryResult> {
     let parsed: LogEntryMessage
     try {
       parsed = parseLogEntryMessage(message)
@@ -759,15 +910,17 @@ export class LogSyncCoordinator {
     const blocked = await this.classifyBlockedByKey(payload.keyGeneration)
     if (blocked) {
       this.bufferBlockedByKey(payload.deviceId, payload.seq, parsed)
-      return { disposition: 'blocked-by-key', keyGeneration: payload.keyGeneration }
+      return { disposition: 'blocked-by-key', deviceId: payload.deviceId, seq: payload.seq, keyGeneration: payload.keyGeneration }
     }
 
     const contentKey = await this.config.getContentKeyByGeneration(payload.keyGeneration)
     if (!contentKey) {
       this.bufferBlockedByKey(payload.deviceId, payload.seq, parsed)
-      return { disposition: 'blocked-by-key', keyGeneration: payload.keyGeneration }
+      return { disposition: 'blocked-by-key', deviceId: payload.deviceId, seq: payload.seq, keyGeneration: payload.keyGeneration }
     }
 
+    // Decrypt BEFORE the contiguity check so the engine-foreign sniff can run on the
+    // plaintext (a decrypt is side-effect-free; only applyRemoteUpdate mutates).
     let plaintext: Uint8Array
     try {
       const blob = decodeBase64Url(payload.data)
@@ -775,7 +928,33 @@ export class LogSyncCoordinator {
     } catch {
       // Cannot decrypt with the available key — treat as blocked-by-key, never crash.
       this.bufferBlockedByKey(payload.deviceId, payload.seq, parsed)
-      return { disposition: 'blocked-by-key', keyGeneration: payload.keyGeneration }
+      return { disposition: 'blocked-by-key', deviceId: payload.deviceId, seq: payload.seq, keyGeneration: payload.keyGeneration }
+    }
+
+    // Slice B / VE-B2 contiguity check (VE-B3 precedence: KEY first — done above —
+    // THEN contiguity). The key IS available here, so a non-contiguous entry is a
+    // genuine seq-gap, not a missing key. A buffered entry NEVER touches `applied` or
+    // the store (else a later replay short-circuits as idempotent-skip and the entry
+    // never reaches the CRDT — the data-loss greenwash). `seq > contiguousHead + 1` ⇒
+    // a gap below it; buffer + trigger a bounded gap-filling catch-up.
+    //
+    // ENGINE-FOREIGN exclusion (VE-3 interplay): an engine-foreign payload NEVER
+    // advances the head (engine-foreign-skip does not record) — so for a foreign device
+    // EVERY entry past seq 0 looks non-contiguous and would falsely buffer + spin the
+    // gap catch-up (cross-engine). A foreign payload can never become applicable by
+    // filling a gap, so it must NOT be buffered. The optional `isForeignPayload` engine
+    // sniff (side-effect-free: Y.decodeUpdate / unframeChanges) lets us skip the
+    // contiguity buffering for foreign bytes; without the hook we fall through to the
+    // apply attempt (which engine-foreign-skips), preserving same-engine behavior.
+    const foreign = this.config.hooks.isForeignPayload?.(plaintext) === true
+    const contiguousHead = await this.contiguousHead(payload.deviceId)
+    if (!opts?.skipContiguityCheck && !foreign && payload.seq > contiguousHead + 1) {
+      this.bufferBlockedBySeq(payload.deviceId, payload.seq, parsed)
+      // A live gap (not a replay): kick a bounded, re-entrancy-guarded catch-up to
+      // fetch the missing seq(s). The replay path suppresses this (it is draining a
+      // gap that is already being filled).
+      if (!this.replayingBlockedBySeq) this.triggerGapCatchUp()
+      return { disposition: 'blocked-by-seq', deviceId: payload.deviceId, seq: payload.seq }
     }
 
     try {
@@ -796,8 +975,19 @@ export class LogSyncCoordinator {
       entryJws: parsed.body.entry,
     })
     this.applied.add(key)
-    // Drop from the blocked-by-key buffer if it was parked there earlier.
+    // Drop from BOTH pending buffers if it was parked there earlier (VE-B3: an entry
+    // lives in at most one, but clear both defensively so a stale reference can never
+    // be replayed twice). The contiguous head just advanced.
     this.blockedByKey.delete(blockedKey(payload.deviceId, payload.seq))
+    this.dropFromBlockedBySeq(payload.deviceId, payload.seq)
+    // A contiguous apply advanced this device's head — clear its gap-retry budget
+    // (the gap, if any, is being closed) and cascade the blocked-by-seq buffer: any
+    // now-contiguous entry below the buffer ceiling is applied in this same pass, so
+    // a gap-filling page heals the whole tail without an extra sync-request round.
+    this.gapRetryBudget.delete(payload.deviceId)
+    if (!this.replayingBlockedBySeq) {
+      await this.replayBlockedBySeq(payload.deviceId)
+    }
     return { disposition: 'applied', deviceId: payload.deviceId, seq: payload.seq }
   }
 
@@ -849,6 +1039,216 @@ export class LogSyncCoordinator {
   }
 
   // ──────────────────────────────────────────────────────────────────────────
+  // VE-B2: blocked-by-seq buffer (gap-handling) + cascading LOOP-GUARDed replay
+  // ──────────────────────────────────────────────────────────────────────────
+
+  /**
+   * The CONTIGUOUS head for an authoring device on this doc — the highest seq below
+   * which there is no gap. Equal to getKnownHeads max because the blocked-by-seq
+   * buffer keeps the store contiguous (a non-contiguous entry never reaches the
+   * store), so max-stored == contiguous-max. Returns -1 if we hold nothing yet.
+   */
+  private async contiguousHead(deviceId: string): Promise<number> {
+    const heads = await this.config.logStore.getKnownHeads(this.config.docId)
+    return Object.prototype.hasOwnProperty.call(heads, deviceId) ? heads[deviceId] : -1
+  }
+
+  /**
+   * Park a decryptable-but-non-contiguous entry (idempotent on (deviceId,seq)).
+   * Per-device ring with a cap; on overflow evict the HIGHEST seq (furthest from the
+   * gap, most likely re-deliverable) — NEVER the lowest, which closes the chain next.
+   */
+  private bufferBlockedBySeq(deviceId: string, seq: number, message: LogEntryMessage): void {
+    // VE-B3 mutual exclusion: an entry lives in at most one buffer. If it was parked
+    // blocked-by-key, that buffer's replay would have re-classified it here; drop the
+    // stale key-buffer reference so it cannot be double-applied.
+    this.blockedByKey.delete(blockedKey(deviceId, seq))
+    let perDevice = this.blockedBySeq.get(deviceId)
+    if (!perDevice) {
+      perDevice = new Map<number, LogEntryMessage>()
+      this.blockedBySeq.set(deviceId, perDevice)
+    }
+    perDevice.set(seq, message)
+    if (perDevice.size > MAX_BLOCKED_BY_SEQ_PER_DEVICE) {
+      // Evict the HIGHEST seq (furthest from the gap). The lowest seq closes the
+      // contiguous chain next; dropping it would make the gap unhealable.
+      let highest = -1
+      for (const s of perDevice.keys()) if (s > highest) highest = s
+      if (highest >= 0) perDevice.delete(highest)
+    }
+  }
+
+  /** Drop a (deviceId,seq) from the blocked-by-seq buffer (on apply); prune empty device maps. */
+  private dropFromBlockedBySeq(deviceId: string, seq: number): void {
+    const perDevice = this.blockedBySeq.get(deviceId)
+    if (!perDevice) return
+    perDevice.delete(seq)
+    if (perDevice.size === 0) this.blockedBySeq.delete(deviceId)
+  }
+
+  /**
+   * VE-B2 cascading replay (MUST be LOOP-GUARDed): after the contiguous head of a
+   * device advanced, apply every now-contiguous buffered entry in order
+   * (contiguousHead+1, +2, …) until the next expected seq is missing. Each apply
+   * re-feeds the READ path ({@link receiveLogEntry}, origin='remote') — a replayed
+   * FOREIGN entry produces NO write-path log-entry, so a gap-fill can never spawn an
+   * outbox loop (the 5000+-outbox regression class). Iterative (not recursive): the
+   * {@link replayingBlockedBySeq} guard makes the nested receiveLogEntry calls NOT
+   * re-cascade, so one call drains the whole tail without extra sync-request rounds.
+   *
+   * Returns the number of entries that became contiguous + applied on this pass.
+   */
+  async replayBlockedBySeq(deviceId: string): Promise<number> {
+    const perDevice = this.blockedBySeq.get(deviceId)
+    if (!perDevice || perDevice.size === 0) return 0
+    if (this.replayingBlockedBySeq) return 0
+    this.replayingBlockedBySeq = true
+    let applied = 0
+    try {
+      // Walk the contiguous chain: next expected = contiguousHead + 1.
+      // contiguousHead advances as each entry applies, so re-read it per step.
+      // Bounded by the buffer size (each iteration removes one entry or breaks).
+      for (;;) {
+        const head = await this.contiguousHead(deviceId)
+        const next = head + 1
+        const message = perDevice.get(next)
+        if (!message) break // the chain is not contiguous past `head` — stop
+        const result = await this.receiveLogEntry(message)
+        if (result.disposition === 'applied' || result.disposition === 'idempotent-skip') {
+          perDevice.delete(next)
+          applied += 1
+        } else {
+          // Still blocked (key vanished / re-buffered) — stop the chain here.
+          break
+        }
+      }
+    } finally {
+      this.replayingBlockedBySeq = false
+      if (perDevice.size === 0) this.blockedBySeq.delete(deviceId)
+    }
+    return applied
+  }
+
+  /**
+   * VE-B2 broker-confirmed-gap resolution (the SR / VE-C2 re-emit case). Called after
+   * a COMPLETE (non-truncated) catch-up, whose response delivered every entry the
+   * broker holds above our head. For each device still holding blocked-by-seq entries:
+   * if the broker's MAX head for that device is >= the LOWEST buffered seq, the seqs
+   * between our contiguous head and that buffered seq are BROKER-CONFIRMED-ABSENT (the
+   * complete page would have delivered any filler) — a published-log hole the relay
+   * genuinely lacks, NOT a network drop. Force-apply the buffered chain over the hole
+   * so the lagger's re-emit converges; the head advances to the confirmed broker max,
+   * which is safe (the next sync-request asks above it and the hole never had data).
+   *
+   * Distinct from a NETWORK gap (broker HAS the seq): there, the complete page WOULD
+   * have delivered the filler, so the buffer would already be drained and this is a
+   * no-op. So this only force-applies seqs the broker positively confirms it lacks.
+   */
+  private async resolveBrokerConfirmedGaps(brokerHeads: Record<string, number>): Promise<void> {
+    for (const [deviceId, perDevice] of [...this.blockedBySeq]) {
+      if (perDevice.size === 0) continue
+      const brokerHead = Object.prototype.hasOwnProperty.call(brokerHeads, deviceId)
+        ? brokerHeads[deviceId]
+        : -1
+      let lowest = Number.MAX_SAFE_INTEGER
+      for (const s of perDevice.keys()) if (s < lowest) lowest = s
+      // Only resolve if the broker confirms it holds AT LEAST the lowest buffered seq
+      // (so everything between our head and that seq that EXISTS was just delivered;
+      // what remains is confirmed-absent). Otherwise the buffered seq is above the
+      // broker's own max → a future entry not yet at the broker → keep buffering.
+      if (brokerHead < lowest) continue
+      await this.forceApplyBlockedBySeq(deviceId)
+    }
+  }
+
+  /**
+   * Force-apply a device's blocked-by-seq buffer OVER a broker-confirmed hole: apply
+   * the buffered entries in ascending seq order even though the seq below the lowest
+   * is absent (the broker confirmed it lacks it). Within the buffered set the chain is
+   * still applied contiguously (so a genuine FURTHER network gap inside the buffer
+   * still stops). LOOP-GUARDed via {@link replayingBlockedBySeq}.
+   */
+  private async forceApplyBlockedBySeq(deviceId: string): Promise<void> {
+    const perDevice = this.blockedBySeq.get(deviceId)
+    if (!perDevice || perDevice.size === 0) return
+    if (this.replayingBlockedBySeq) return
+    this.replayingBlockedBySeq = true
+    try {
+      // Ascending seq order; apply contiguously among the buffered entries starting at
+      // the lowest. Stop at the first internal gap (a real further network hole).
+      const seqs = [...perDevice.keys()].sort((a, b) => a - b)
+      let expected: number | null = null
+      for (const seq of seqs) {
+        if (expected !== null && seq !== expected) break // an internal gap remains
+        const message = perDevice.get(seq)!
+        // skipContiguityCheck: this seq sits above a broker-CONFIRMED-absent hole, so
+        // bypass the contiguity guard for the FIRST entry; subsequent ones are checked
+        // contiguous among the buffered set (the `expected` walk).
+        const result = await this.receiveLogEntry(message, { skipContiguityCheck: true })
+        if (result.disposition === 'applied' || result.disposition === 'idempotent-skip') {
+          perDevice.delete(seq)
+          expected = seq + 1
+        } else {
+          break // still blocked (key vanished) — stop
+        }
+      }
+    } finally {
+      this.replayingBlockedBySeq = false
+      if (perDevice.size === 0) this.blockedBySeq.delete(deviceId)
+    }
+  }
+
+  /** Count of currently buffered blocked-by-seq entries across all devices (test/inspection). */
+  blockedBySeqCount(): number {
+    let total = 0
+    for (const perDevice of this.blockedBySeq.values()) total += perDevice.size
+    return total
+  }
+
+  /** Count of buffered blocked-by-seq entries for one device (test/inspection). */
+  blockedBySeqCountForDevice(deviceId: string): number {
+    return this.blockedBySeq.get(deviceId)?.size ?? 0
+  }
+
+  /** True iff every device currently holding a gap has exhausted its retry budget. */
+  private everyGapBudgetExhausted(): boolean {
+    for (const [deviceId, perDevice] of this.blockedBySeq) {
+      if (perDevice.size === 0) continue
+      if ((this.gapRetryBudget.get(deviceId) ?? 0) < MAX_GAP_RECONNECT_RETRIES) return false
+    }
+    return true
+  }
+
+  /**
+   * VE-B2 gap-triggered catch-up: a live non-contiguous entry kicks a bounded,
+   * re-entrancy-guarded catch-up to fetch the missing seq(s). Re-entrancy: if a
+   * pagination loop is already in flight it only sets {@link catchUpAgain} (no second
+   * concurrent loop); the in-flight loop runs one more pass after it finishes.
+   * Fire-and-forget (the live receive path does not await catch-up); a hard
+   * AUTHOR_MISMATCH is surfaced to audit, transient errors retry on reconnect.
+   */
+  private triggerGapCatchUp(): void {
+    // Bounded: do not re-trigger once EVERY gapped device has exhausted its
+    // reconnect-cycle retry budget (the relay genuinely lacks those entries). The
+    // buffer stays bounded; onGapUnfillable already surfaced. A reconnect (which
+    // resets nothing here but re-drives catchUp via the adapter) still retries, and a
+    // contiguous fill resets the budget. This prevents a live-entry-driven spin on a
+    // permanently unfillable gap.
+    if (this.blockedBySeqCount() > 0 && this.everyGapBudgetExhausted()) return
+    void this.catchUp().catch((err) => {
+      if (err instanceof AuthorMismatchError) {
+        console.error('[LogSyncCoordinator] AUTHOR_MISMATCH during gap catch-up:', err.message)
+        return
+      }
+      if (err instanceof SyncNoProgressError) {
+        console.error('[LogSyncCoordinator] no-progress during gap catch-up:', err.message)
+        return
+      }
+      console.debug('[LogSyncCoordinator] gap catch-up deferred (retry on reconnect):', err)
+    })
+  }
+
+  // ──────────────────────────────────────────────────────────────────────────
   // Catch-up (VE-4)
   // ──────────────────────────────────────────────────────────────────────────
 
@@ -863,10 +1263,60 @@ export class LogSyncCoordinator {
    * write, so a leaked store can never re-enter seq=0 under a broker-known
    * deviceId. The disposition is still returned (callers/tests may inspect it).
    */
-  async catchUp(): Promise<{ restoreCloneRequired: boolean }> {
-    const result = await this.catchUpInternal({ presentCapabilityFirst: true })
-    await this.actOnRestoreDisposition(result)
-    return result
+  async catchUp(): Promise<CatchUpResult> {
+    // VE-B1 re-entrancy guard: never two pagination loops on the same docId. A
+    // gap-trigger (VE-B2) / reconnect that fires while a loop is in flight only
+    // requests one more pass afterwards (catchUpAgain), it does not start a second
+    // concurrent loop racing sync-request / recordRemoteApplied on the same store.
+    if (this.catchingUp) {
+      this.catchUpAgain = true
+      return { restoreCloneRequired: false, complete: false, incomplete: 'blocked-by-seq' }
+    }
+    this.catchingUp = true
+    try {
+      let result: CatchUpResult
+      do {
+        this.catchUpAgain = false
+        result = await this.catchUpInternal({ presentCapabilityFirst: true })
+        await this.actOnRestoreDisposition(result)
+        // A restore-clone re-publishes + re-binds the deviceId; do NOT loop again on
+        // its account (catchUpAgain set during the clone is for a real new gap only).
+      } while (this.catchUpAgain && !result.restoreCloneRequired)
+      // VE-B2 bounded gap-fill: a catch-up that left a device's gap unfilled counts
+      // one reconnect-cycle retry. After the budget is exhausted the gap is surfaced
+      // via onGapUnfillable (a hook, NOT a throw) so it does not thrash; other
+      // devices' entries keep applying (per-device head).
+      await this.accountUnfilledGaps()
+      return result
+    } finally {
+      this.catchingUp = false
+    }
+  }
+
+  /**
+   * VE-B2 bounded gap-fill accounting: for every device still holding a
+   * blocked-by-seq buffer after a catch-up, charge one retry. Once a device's gap
+   * survives {@link MAX_GAP_RECONNECT_RETRIES} catch-up cycles it is surfaced via
+   * {@link LogSyncCoordinatorConfig.onGapUnfillable} (relay genuinely lacks the
+   * entry = writer-side loss, outside Slice B) — a hook, never a throw. The buffer
+   * stays bounded (per-device ring cap) so there is no unbounded growth or wallclock
+   * spin. The budget resets whenever a contiguous apply fills the gap
+   * (gapRetryBudget.delete in {@link receiveLogEntry}).
+   */
+  private async accountUnfilledGaps(): Promise<void> {
+    for (const [deviceId, perDevice] of this.blockedBySeq) {
+      if (perDevice.size === 0) continue
+      const charged = (this.gapRetryBudget.get(deviceId) ?? 0) + 1
+      this.gapRetryBudget.set(deviceId, charged)
+      if (charged >= MAX_GAP_RECONNECT_RETRIES && this.config.onGapUnfillable) {
+        const missingSeq = (await this.contiguousHead(deviceId)) + 1
+        try {
+          await this.config.onGapUnfillable({ docId: this.config.docId, deviceId, missingSeq })
+        } catch {
+          // The hook is advisory; a throwing hook must not break catch-up.
+        }
+      }
+    }
   }
 
   /**
@@ -886,27 +1336,123 @@ export class LogSyncCoordinator {
     })
   }
 
+  /**
+   * VE-B1 pagination loop (Sync 003 §sync-response: on `truncated:true` the
+   * requester MUST send a further sync-request with updated heads). One catch-up:
+   *  - present-capability once (a new socket has an empty scope cache),
+   *  - compute the restore-clone disposition ONCE on the FIRST page's broker heads
+   *    (BLOCKER-1b localSeq-snapshot BEFORE any apply) — NEVER per page, because the
+   *    broker heads are seiten-invariant MAX and a later page would falsely report
+   *    localSeq<brokerSeq and fire a spurious restore-clone,
+   *  - then loop: read localHeads fresh, send sync-request(localHeads, limit), apply
+   *    the page, advance, repeat while the page made progress and is truncated.
+   *
+   * Termination (typed result; the no-progress class THROWS — the only throw class):
+   *  - (a) applied>0  → keep paginating while truncated.
+   *  - (b) applied==0 && buffered>0 → stop, incomplete:'blocked-by-seq'|'blocked-by-key'
+   *        (NOT an error; retried after gap-fill / key-import).
+   *  - (c) !response (timeout) on an open truncated page → incomplete:'timeout'.
+   *  - (d) applied==0 && buffered==0 && truncated:true → THROW SyncNoProgressError.
+   *  Progress is measured by `applied>0` against the PRE-REQUEST localHeads snapshot,
+   *  never against response.body.heads (seiten-invariant broker MAX — see VE-B1 (d)).
+   */
   private async catchUpInternal(
     opts: { presentCapabilityFirst: boolean; timeoutMs?: number },
-  ): Promise<{ restoreCloneRequired: boolean }> {
+  ): Promise<CatchUpResult> {
     if (opts.presentCapabilityFirst) {
       await this.presentCapabilityWithRetry()
     }
 
-    const localHeads = await this.config.logStore.getKnownHeads(this.config.docId)
+    let restoreCloneRequired = false
+    let firstPage = true
+
+    for (;;) {
+      // Snapshot localHeads BEFORE the request, so progress is measured against THIS
+      // snapshot, not against a head a concurrent live log-entry advanced between
+      // pages (which would mask a genuinely non-advancing page).
+      const localHeads = await this.config.logStore.getKnownHeads(this.config.docId)
+      const response = await this.requestSyncPage(localHeads, opts.timeoutMs)
+
+      if (!response) {
+        // (c) timeout: no response for this (possibly truncated) page — incomplete,
+        // not an error; retried on the next reconnect.
+        return { restoreCloneRequired, complete: false, incomplete: 'timeout' }
+      }
+
+      // Restore-clone disposition ONCE, on the first page only (against the broker
+      // MAX heads, which are seiten-invariant). Folge-Seiten dürfen sie NICHT neu
+      // berechnen.
+      if (firstPage) {
+        const disposition = await this.computeRestoreDisposition(response.body.heads)
+        restoreCloneRequired = disposition.restoreCloneRequired
+        firstPage = false
+      }
+
+      const { applied, buffered } = await this.applySyncResponsePage(response)
+      const truncated = evaluateSyncResponseDisposition(response.body) === 'request-next-page'
+
+      if (!truncated) {
+        // (complete) the relay has no more pages — it delivered EVERY entry it holds
+        // above our head. Any entry STILL buffered blocked-by-seq therefore sits above
+        // a BROKER-CONFIRMED-ABSENT seq (the broker would have sent the gap-filler if
+        // it had one). That hole is a published-log gap the relay genuinely lacks —
+        // e.g. a KEY_GENERATION_STALE-rejected seq the author re-emitted under a NEW
+        // seq (Slice SR / VE-C2): the rejected seq was consumed locally but never
+        // stored at the broker, so the same CRDT update lives at the higher re-emit
+        // seq, no DATA is missing. Force-apply over the confirmed hole so the lagger's
+        // re-emit is not blocked forever. (A NETWORK gap — broker HAS the seq — is
+        // distinguished because the complete page WOULD have delivered the filler.)
+        await this.resolveBrokerConfirmedGaps(response.body.heads)
+        return { restoreCloneRequired, complete: true }
+      }
+
+      // truncated:true — classify by what THIS page did relative to the snapshot.
+      if (applied > 0) {
+        // (a) the contiguous head advanced — fetch the next page.
+        continue
+      }
+      if (buffered > 0) {
+        // (b) the page only buffered (gap / missing key): paginating again would
+        // re-fetch the SAME page (heads did not advance) → no progress, but not an
+        // error. Stop; retried after the gap fills / key arrives.
+        return {
+          restoreCloneRequired,
+          complete: false,
+          incomplete: this.blockedBySeqCount() > 0 ? 'blocked-by-seq' : 'blocked-by-key',
+        }
+      }
+      // (d) truncated:true but applied==0 AND buffered==0: the relay claims more
+      // pages yet delivered nothing new and nothing bufferable. Re-requesting with
+      // the unchanged heads would return the same empty page forever — a no-progress
+      // DoS. HARD STOP (the only throw class).
+      throw new SyncNoProgressError(this.config.docId)
+    }
+  }
+
+  /**
+   * Send one sync-request(localHeads, limit) and await its sync-response page, or
+   * null on timeout. The limit is EXPLICIT (Sync 003 §sync-request limit; default
+   * {@link DEFAULT_CATCH_UP_PAGE_SIZE} = 100, matching the relay default) so the wire
+   * envelope carries it (the pre-B coordinator omitted it, so the client never paged).
+   */
+  private async requestSyncPage(
+    localHeads: Record<string, number>,
+    timeoutMs?: number,
+  ): Promise<SyncResponseMessage | null> {
     const requestId = cryptoRandomUuid()
+    const limit = this.config.catchUpPageSize ?? DEFAULT_CATCH_UP_PAGE_SIZE
     const request = createSyncRequestMessage({
       id: requestId,
       from: this.config.ownDid,
       to: [this.config.ownDid],
       createdTime: Math.floor(this.now().getTime() / 1000),
-      body: { docId: this.config.docId, heads: localHeads },
+      body: { docId: this.config.docId, heads: localHeads, limit },
     })
 
     // Register the async waiter BEFORE sending (the relay answers via onMessage →
     // handleIncoming). A mock that returns the response synchronously short-circuits.
     const responsePromise = new Promise<SyncResponseMessage | null>((resolve) => {
-      const timeout = opts.timeoutMs ?? 1000
+      const timeout = timeoutMs ?? 1000
       const timer = setTimeout(() => {
         this.pendingSyncRequests.delete(requestId)
         resolve(null)
@@ -921,31 +1467,25 @@ export class LogSyncCoordinator {
     const synchronous = unwrapSyncResponse(sendResult)
     if (synchronous) {
       this.pendingSyncRequests.delete(requestId)
-      return this.applySyncResponse(synchronous)
+      return synchronous
     }
-
-    const response = await responsePromise
-    if (!response) return { restoreCloneRequired: false }
-    return this.applySyncResponse(response)
+    return responsePromise
   }
 
   /**
-   * Apply a sync-response (VE-4): idempotently apply every entry, then run the
-   * broker head-abgleich via classifyLocalBrokerSeqConsistency against our own
-   * deviceId. A broker_seq>local_seq means restore-clone (the broker saw a higher
-   * seq under our deviceId than we have locally).
+   * Apply ALL entries of one sync-response page through the read path (LOOP-GUARD),
+   * counting the per-entry dispositions for the pagination terminator:
+   *  - `applied` = applied | idempotent-skip (the contiguous head advanced, or the
+   *    entry was already present),
+   *  - `buffered` = blocked-by-key | blocked-by-seq (parked for a later replay).
+   * Does NOT compute the restore-clone disposition (that is done ONCE, per page-1,
+   * in {@link catchUpInternal}) — so a later page cannot fire a spurious restore.
    */
-  async applySyncResponse(response: SyncResponseMessage): Promise<{ restoreCloneRequired: boolean }> {
-    // BLOCKER-1b (disposition-before-apply): compute the broker-vs-local seq
-    // disposition AGAINST response.body.heads BEFORE applying any entry. The apply
-    // loop below records broker entries via recordRemoteApplied — INCLUDING any
-    // entry the broker holds under OUR OWN deviceId (the restore-clone case). If we
-    // read localSeq from getKnownHeads AFTER the loop, that back-fill would have
-    // raised localSeq to brokerSeq and the disposition would be (wrongly) false —
-    // the dead-code bug. Snapshotting localSeq first keeps brokerSeq>localSeq
-    // observable, so the restore-clone actually fires before the first write.
-    const disposition = await this.computeRestoreDisposition(response.body.heads)
-
+  private async applySyncResponsePage(
+    response: SyncResponseMessage,
+  ): Promise<{ applied: number; buffered: number }> {
+    let applied = 0
+    let buffered = 0
     for (const entryJws of response.body.entries) {
       // Re-wrap each entry as a log-entry message so the SAME verify+apply+heads
       // path (and LOOP-GUARD) handles it — no separate decode path.
@@ -956,10 +1496,34 @@ export class LogSyncCoordinator {
         createdTime: Math.floor(this.now().getTime() / 1000),
         entry: entryJws,
       })
-      await this.receiveLogEntry(message)
+      const result = await this.receiveLogEntry(message)
+      if (result.disposition === 'applied' || result.disposition === 'idempotent-skip') applied += 1
+      else if (result.disposition === 'blocked-by-key' || result.disposition === 'blocked-by-seq') buffered += 1
     }
+    return { applied, buffered }
+  }
 
-    return disposition
+  /**
+   * Apply a sync-response that arrived UNSOLICITED / late (no matching in-flight
+   * waiter — {@link handleIncoming}). Idempotently applies the page + runs the
+   * broker head-abgleich (restore-clone). VE-B2: if the page is `truncated:true`,
+   * this path does NOT inherit the pagination loop (it does not go through
+   * catchUpInternal), so it MUST trigger a guarded follow-up catch-up to fetch the
+   * rest — otherwise a truncated unsolicited response leaves silent incompleteness.
+   */
+  async applySyncResponse(response: SyncResponseMessage): Promise<CatchUpResult> {
+    // BLOCKER-1b (disposition-before-apply): compute the broker-vs-local seq
+    // disposition AGAINST response.body.heads BEFORE applying any entry, so a broker
+    // entry under our own deviceId cannot back-fill localSeq and mask a restore-clone.
+    const disposition = await this.computeRestoreDisposition(response.body.heads)
+    await this.applySyncResponsePage(response)
+    const truncated = evaluateSyncResponseDisposition(response.body) === 'request-next-page'
+    if (truncated) {
+      // Late/unsolicited truncated page: drive the rest through the guarded loop.
+      this.triggerGapCatchUp()
+      return { restoreCloneRequired: disposition.restoreCloneRequired, complete: false, incomplete: 'blocked-by-seq' }
+    }
+    return { restoreCloneRequired: disposition.restoreCloneRequired, complete: true }
   }
 
   /**

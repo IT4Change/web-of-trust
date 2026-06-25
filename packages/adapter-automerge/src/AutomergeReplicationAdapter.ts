@@ -2548,6 +2548,19 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
         // Persist the merged state locally (debounced), mirroring the content path.
         this.compactSchedulers.get(space.info.id)?.pushDebounced()
       },
+      // Slice B / VE-B2: side-effect-free engine sniff. A foreign payload (e.g. raw Yjs
+      // bytes) either fails the fixed-width frame parse or yields chunks that are not
+      // valid Automerge changes. Decode-only — never mutates the doc. Lets the
+      // coordinator avoid buffering a cross-engine payload as a false seq-gap.
+      isForeignPayload: (plaintext) => {
+        try {
+          const changes = unframeChanges(plaintext)
+          for (const change of changes) Automerge.decodeChange(change)
+          return false
+        } catch {
+          return true
+        }
+      },
     }
   }
 
