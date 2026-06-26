@@ -696,11 +696,15 @@ describe('LogSyncCoordinator — Slice B VE-B2 soft-skip + GapRepair (permanent 
     }
     docLog.heads.set(DEVICE_A, 8)
 
-    // Drive enough DISTINCT epochs + clock advance to soft-skip BOTH holes in turn.
-    for (let epoch = 0; epoch < 7; epoch++) {
+    // Drive DISTINCT epochs (+40s each, all > 60s after t0) until the wire cursor reaches the
+    // top — poll on the CURSOR (the soft-skip signal), not applied (here the whole tail is
+    // applied out-of-order on epoch 0, long before the soft-skips advance the cursor). Polling
+    // keeps it robust under CPU load (a per-page timeout is a benign retry); the cap fails fast.
+    for (let epoch = 0; epoch < 30; epoch++) {
       b.coordinator.resetForReconnect()
-      clock.now = new Date(t0.getTime() + (epoch + 1) * 40_000) // each epoch +40s, all > 60s after t0
+      clock.now = new Date(t0.getTime() + (epoch + 1) * 40_000)
       await b.coordinator.catchUp()
+      if ((await b.logStore.getSyncRequestHeads(SPACE_ID))[DEVICE_A] === 8) break
     }
 
     // Both holes soft-skipped → the wire cursor reaches the top of the tail (8) and ALL

@@ -181,7 +181,10 @@ export interface PendingRemoval {
 /**
  * Slice B / VE-B2: a reference to a single open seq-gap, returned by the
  * pagination/catch-up loop in {@link CatchUpResult.pendingGaps}. `firstMissing` is
- * the lowest absent seq for the device (= strict-contiguous-head + 1).
+ * the lowest absent seq at the device's EFFECTIVE frontier (= getSyncRequestHeads + 1,
+ * i.e. the wire cursor advanced past already-soft-skipped holes). For a device with no
+ * soft-skipped hole this equals strict-contiguous-head + 1; above stacked soft-skipped
+ * holes it is the next hole above the frontier (Slice B v3).
  */
 export interface GapRef {
   docId: string
