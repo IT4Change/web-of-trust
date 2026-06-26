@@ -72,6 +72,8 @@ function makeHooks(appliedRemote: Uint8Array[]): LogSyncEngineHooks {
       }
       appliedRemote.push(plaintext)
     },
+    // Slice B v2: isForeignPayload removed with the (a)-model — the 0xFF marker now
+    // surfaces purely as an applyRemoteUpdate throw → engine-foreign-skip.
   }
 }
 

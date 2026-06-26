@@ -291,6 +291,7 @@ export class YjsPersonalLogSyncAdapter {
         // so this apply never re-enters the write path / re-broadcasts.
         Y.applyUpdate(this.doc, plaintext, 'remote')
       },
+      // Slice B v2: isForeignPayload removed with the (a)-model (out-of-order apply).
     }
   }
 

@@ -318,6 +318,10 @@ export class AutomergePersonalLogSyncAdapter {
           this.applyingRemote = false
         }
       },
+      // Slice B v2: isForeignPayload removed with the (a)-model. Out-of-order apply —
+      // Automerge.applyChanges buffers missing deps internally (does NOT throw), so a
+      // same-engine entry above a hole converges; a cross-engine payload throws here →
+      // engine-foreign-skip.
     }
   }
 

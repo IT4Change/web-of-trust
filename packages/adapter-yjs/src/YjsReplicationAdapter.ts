@@ -423,6 +423,9 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
   private unsubMessage: (() => void) | null = null
   private unsubStateChange: (() => void) | null = null
   private reconnectFollowupTimer: ReturnType<typeof setTimeout> | null = null
+  /** Slice B v3 (CodeRabbit): pending reconnect debounce, cleared in stop() so a queued tick
+   * cannot resetForReconnect()/requestSync() against a tearing-down adapter. */
+  private reconnectDebounceTimer: ReturnType<typeof setTimeout> | null = null
   private started = false
   private sentMessageIds = new Set<string>()
 
@@ -560,15 +563,30 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
     // Debounce: rapid reconnect cycles (connected→disconnected→connected) should
     // only trigger one sync, not one per state change.
     if ('onStateChange' in this.messaging && typeof (this.messaging as any).onStateChange === 'function') {
-      let reconnectTimer: ReturnType<typeof setTimeout> | null = null
       let reconnectSyncing = false
       this.unsubStateChange = (this.messaging as any).onStateChange((state: string) => {
         if (state === 'connected' && this.started) {
-          if (reconnectTimer) clearTimeout(reconnectTimer)
-          reconnectTimer = setTimeout(() => {
-            reconnectTimer = null
-            if (reconnectSyncing) return
+          if (this.reconnectDebounceTimer) clearTimeout(this.reconnectDebounceTimer)
+          this.reconnectDebounceTimer = setTimeout(() => {
+            this.reconnectDebounceTimer = null
+            // Slice B v3 (CodeRabbit): bail if stopped while the debounce was pending — never
+            // resetForReconnect()/requestSync() against a tearing-down adapter.
+            if (!this.started || reconnectSyncing) return
             reconnectSyncing = true
+            // Slice B v2 / VE-B2 (Scout wiring gap): bump each per-space coordinator's
+            // connectionEpoch on a real reconnect. Unlike the Personal-Doc adapter, the
+            // Space path does NOT call resetForReconnect elsewhere — without this the
+            // Space coordinators' epoch would stay 1 forever and the 3-distinct-epoch
+            // soft-skip gate would NEVER fire for Spaces (the 500-person festival case).
+            for (const coordinator of this.coordinators.values()) coordinator.resetForReconnect()
+            // Slice B v3 (Codex Major 3): drive a real per-space log catch-up on reconnect,
+            // mirroring AutomergeReplicationAdapter. _sendFullStateAllSpaces is a NO-OP under
+            // logSync, so without this the bumped epoch is NEVER recorded against a gap (no
+            // catch-up runs) and the 3-distinct-epoch soft-skip gate is unreachable for Yjs
+            // Spaces. requestSync(spaceId) → coordinator.catchUp() under logSync.
+            for (const spaceId of this.spaces.keys()) {
+              void this.requestSync(spaceId).catch(() => {})
+            }
             Promise.all([
               this._sendFullStateAllSpaces().catch(() => {}),
               this._pullAllFromVault().catch(() => {}),
@@ -593,6 +611,10 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
     if (this.reconnectFollowupTimer) {
       clearTimeout(this.reconnectFollowupTimer)
       this.reconnectFollowupTimer = null
+    }
+    if (this.reconnectDebounceTimer) {
+      clearTimeout(this.reconnectDebounceTimer)
+      this.reconnectDebounceTimer = null
     }
     // In-memory cache only. Durable pending messages remain in CompactStore
     // until they are applied or the space is explicitly deleted.
@@ -1326,6 +1348,9 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
         Y.applyUpdate(state.doc, plaintext, 'remote')
         this._scheduleCompactDebounced(state)
       },
+      // Slice B v2: the isForeignPayload sniff was removed with the (a)-model — out-of-
+      // order apply (Yjs applyUpdate is commutative) handles a same-engine entry above a
+      // hole, and a cross-engine payload throws here → engine-foreign-skip.
     }
   }
 

@@ -321,6 +321,13 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
   private spaceInviteListeners = new Set<(invite: IncomingSpaceInvite) => void>()
   private spacesSubscribers = new Set<(value: SpaceInfo[]) => void>()
   private unsubscribeMessaging: (() => void) | null = null
+  /** Slice B v2 / VE-B2: messaging state-change unsubscribe (per-space epoch bump on reconnect). */
+  private unsubStateChange: (() => void) | null = null
+  /** Slice B v3 (CodeRabbit): pending reconnect debounce, cleared in stop() so a queued tick
+   * cannot resetForReconnect()/requestSync() against a tearing-down adapter. */
+  private reconnectDebounceTimer: ReturnType<typeof setTimeout> | null = null
+  /** True between start() and stop() — the reconnect tick is a no-op once stopped. */
+  private started = false
   /** Local seq counter per doc — avoids a getDocInfo HTTP call (and its 404) on first push */
   private vaultSeqs = new Map<string, number>()
   /** VaultPushScheduler per space — handles immediate/debounced vault pushes */
@@ -443,6 +450,29 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
     // still-pending removal stays staged for the next start.
     await this.recoverPendingRemovalsOnce()
 
+    // Slice B v2 / VE-B2 (Scout wiring gap): on a real reconnect, bump each per-space
+    // coordinator's connectionEpoch + drive a catch-up. Without the epoch bump the
+    // 3-distinct-epoch soft-skip gate would never fire for Automerge Spaces. Debounced
+    // so a rapid connected→disconnected→connected burst counts as one reconnect.
+    const messagingWithState = this.messaging as unknown as {
+      onStateChange?: (cb: (state: string) => void) => () => void
+    }
+    if (typeof messagingWithState.onStateChange === 'function') {
+      this.unsubStateChange = messagingWithState.onStateChange((state: string) => {
+        if (state !== 'connected' || !this.started) return
+        if (this.reconnectDebounceTimer) clearTimeout(this.reconnectDebounceTimer)
+        this.reconnectDebounceTimer = setTimeout(() => {
+          this.reconnectDebounceTimer = null
+          if (!this.started) return // stopped while the debounce was pending — no-op
+          for (const coordinator of this.coordinators.values()) coordinator.resetForReconnect()
+          for (const spaceId of this.spaces.keys()) {
+            void this.requestSync(spaceId).catch(() => {})
+          }
+        }, 2000)
+      })
+    }
+
+    this.started = true
     this.state = 'idle'
     this._notifySpacesSubscribers()
   }
@@ -837,9 +867,18 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
   }
 
   async stop(): Promise<void> {
+    this.started = false
+    if (this.reconnectDebounceTimer) {
+      clearTimeout(this.reconnectDebounceTimer)
+      this.reconnectDebounceTimer = null
+    }
     if (this.unsubscribeMessaging) {
       this.unsubscribeMessaging()
       this.unsubscribeMessaging = null
+    }
+    if (this.unsubStateChange) {
+      this.unsubStateChange()
+      this.unsubStateChange = null
     }
     // Destroy vault schedulers
     for (const scheduler of this.vaultSchedulers.values()) scheduler.destroy()
@@ -2548,6 +2587,10 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
         // Persist the merged state locally (debounced), mirroring the content path.
         this.compactSchedulers.get(space.info.id)?.pushDebounced()
       },
+      // Slice B v2: isForeignPayload removed with the (a)-model. Out-of-order apply —
+      // Automerge.applyChanges buffers missing deps internally (does NOT throw), so a
+      // same-engine entry above a hole converges; a cross-engine payload throws here →
+      // engine-foreign-skip.
     }
   }
 

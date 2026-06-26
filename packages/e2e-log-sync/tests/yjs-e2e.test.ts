@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { randomUUID } from 'node:crypto'
 import { RelayServer } from '@web_of_trust/relay'
-import { startRelay, makeIdentity, wait, waitFor, freePort, type StartedRelay } from './harness'
+import { startRelay, makeIdentity, wait, waitFor, waitForStableCount, freePort, type StartedRelay } from './harness'
 import { makeYjsClient, type YjsClient } from './yjs-client'
 import { RawRelayClient, makeSpaceKeypair, mintSpaceCap } from './raw-client'
 import { InMemoryDocLogStore, InMemoryCompactStore } from '@web_of_trust/core/adapters'
@@ -456,6 +456,67 @@ describe('VE-11 Yjs — real gated relay', () => {
     expect(fresh.probe.syncResponseEntriesApplied).toBeGreaterThan(0)
     expect(fresh.probe.sentLogEntries).toBe(0) // a pure reader never wrote
     expect(relay.entryCount(spaceId)).toBe(N)
+    assertLegacyIsolation(alice, bob, fresh)
+
+    freshHandle.close()
+  })
+
+  // ── Slice B HEADLINE: Multi-page Cold-Reconstruction against the REAL relay ───
+  it('Slice B HEADLINE Multi-page Cold-Reconstruction (Yjs) — >100 log entries (default limit 100) reconstruct FULLY via >=2 sync-request/sync-response rounds against the real relay', async () => {
+    const alice = track(await makeYjsClient({ relay, identity: await newIdentity() }))
+    const bob = track(await makeYjsClient({ relay, identity: await newIdentity() }))
+    const spaceId = await createSharedSpace(alice, [bob])
+
+    const aliceHandle = await alice.adapter.openSpace<TestDoc>(spaceId)
+    // Write enough entries that the default page size (100) forces >=2 pages. Each
+    // transact = one Yjs update = one log-entry. 120 edits + the seed/membership
+    // entries puts the relay's log well over a single 100-entry page.
+    const WRITES = 120
+    for (let i = 0; i < WRITES; i++) {
+      aliceHandle.transact((d: TestDoc) => { d.items[`k${i}`] = { title: `v${i}` } })
+      if (i % 20 === 0) await wait(20) // let the outbox drain in batches
+    }
+    // Drain BARRIER (not a fixed wait): wait until the relay entry count settles, so N is a
+    // stable post-drain snapshot — a fixed wait(400) races Alice's async outbox under load.
+    const N = await waitForStableCount(() => relay.entryCount(spaceId), { stableMs: 400, timeoutMs: 20_000 })
+    expect(N).toBeGreaterThan(100) // multi-page territory (drain complete)
+    const expected = aliceHandle.getDoc()
+    expect(Object.keys(expected.items).length).toBeGreaterThanOrEqual(WRITES)
+    aliceHandle.close()
+
+    // FRESH Bob device: same identity/keys/membership, EMPTY log + compact store, no
+    // vault → MUST reconstruct purely via a PAGINATED sync-response sequence. For Yjs the
+    // reconstruction rides a SINGLE catch-up: the Yjs restore path does NOT itself catch up, so
+    // this explicit requestSync(spaceId) is the ONLY catch-up — its pagination is what fills the
+    // doc (no second catch-up to mask a single-page regression; the greenwash CodeRabbit flagged
+    // is Automerge-specific, where start() ALSO restore-catches-up).
+    const fresh = track(await makeYjsClient({
+      relay,
+      identity: bob.identity,
+      keyManagement: bob.keyManagement,
+      metadataStorage: bob.metadataStorage,
+      docLogStore: new InMemoryDocLogStore(),
+      compactStore: new InMemoryCompactStore(),
+    }))
+    await fresh.adapter.requestSync(spaceId)
+    const freshHandle = await fresh.adapter.openSpace<TestDoc>(spaceId)
+    const reconstructed = await waitFor(() => {
+      const d = freshHandle.getDoc()
+      // ALL keys present — not just the first page's worth.
+      return Object.keys(expected.items).every((k) => d.items[k]?.title === expected.items[k].title)
+    }, { timeoutMs: 20_000 })
+    expect(reconstructed).toBe(true)
+    expect(freshHandle.getDoc()).toEqual(expected) // full doc equality, all 120
+
+    // MULTI-PAGE proof: >=2 sync-request rounds AND >=2 sync-response pages observed
+    // (a single-page catch-up would be exactly 1 each — the pagination teeth).
+    expect(fresh.probe.sentSyncRequests).toBeGreaterThanOrEqual(2)
+    expect(fresh.probe.syncResponseEnvelopes).toBeGreaterThanOrEqual(2)
+    // Total reconstructed entries >= N (every page applied; the initial-sync +
+    // requestSync may both run, so the sum can exceed N, but never fall short).
+    expect(fresh.probe.syncResponseEntriesApplied).toBeGreaterThanOrEqual(N)
+    expect(fresh.probe.sentLogEntries).toBe(0) // pure reader — the real "did not write" invariant
+    expect(relay.entryCount(spaceId)).toBeGreaterThanOrEqual(N) // settled count; read path added nothing
     assertLegacyIsolation(alice, bob, fresh)
 
     freshHandle.close()
