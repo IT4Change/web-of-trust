@@ -954,6 +954,41 @@ describe('LogSyncCoordinator — Slice B re-entrancy + DoS control', () => {
     expect(b.syncRequests.length).toBeLessThan(6)
   })
 
+  it('VE-B1 RE-ENTRANCY (bidirectional FAILURE, loop-review #2) — a catchUp() in flight that FAILS propagates into a coalescing ensurePublished(): it REJECTS and does NOT set published (BLOCKER-1b)', async () => {
+    // The first-publication catch-up does the head-abgleich / restore-clone. If ensurePublished()
+    // coalesces onto an in-flight catchUp() that then FAILS, it must NOT treat that as success:
+    // publishing on an unconfirmed head-abgleich would allow the first write at seq=0 under a
+    // broker-known deviceId (BLOCKER-1b). So the in-flight failure MUST propagate → ensurePublished
+    // rejects and leaves published=false. (TEETH: a swallowed catchUpInFlight resolves → publishes.)
+    const broker = new InProcessLogBroker()
+    const alice = (await createTestIdentity('alice')).identity
+    const registrationJws = await inviterRegistrationJws(alice)
+    const b = await makeHarness(alice, DEVICE_A, broker, { registrationJws })
+
+    // Inject a CONTROLLED catch-up failure: the in-flight catchUp() hangs on a gate, then throws —
+    // so ensurePublished() is guaranteed to coalesce onto it (catchingUp set) before it fails.
+    const coord = b.coordinator as unknown as { catchUpInternal: (opts: unknown) => Promise<unknown> }
+    let releaseCatchUp!: () => void
+    const gate = new Promise<void>((resolve) => { releaseCatchUp = resolve })
+    coord.catchUpInternal = async () => {
+      await gate
+      throw new Error('catch-up failed (injected)')
+    }
+
+    const p1 = b.coordinator.catchUp() // catchingUp = true synchronously; work hangs on the gate
+    p1.catch(() => {}) // the failure is observed by the coalescing ensurePublished(), not here
+    const p2 = b.coordinator.ensurePublished() // register + present, then COALESCE onto the in-flight catchUp
+    let p2Rejected = false
+    p2.catch(() => { p2Rejected = true })
+    await flush() // let ensurePublished() reach the coalesce await (hanging on catchUpInFlight)
+    releaseCatchUp() // the in-flight catch-up now FAILS → catchUpInFlight rejects → ensurePublished must reject
+
+    await expect(p2).rejects.toThrow(/catch-up failed/)
+    expect(p2Rejected).toBe(true)
+    // published was NEVER set — the first write must not be allowed on an unconfirmed head-abgleich.
+    expect((b.coordinator as unknown as { published: boolean }).published).toBe(false)
+  })
+
   it('VE-B2 DoS CONTROL (Opus hang repro) — a MULTI-PAGE truncated:true broker-confirmed-absent gap + ACTIVE live trigger TERMINATES, does NOT spin', async () => {
     // The exact Opus blocker: the old do-while spun because a gap-pending page set catchUpAgain
     // forever. v3 exercises the REAL truncated:true loop e2e: a permanent hole at seq 2 with a

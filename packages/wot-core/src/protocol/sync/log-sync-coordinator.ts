@@ -655,11 +655,14 @@ export class LogSyncCoordinator {
     // VE-B1 (v3): run the first-publication catch-up under the SAME re-entrancy guard, in BOTH
     // directions (Codex): (a) while it runs, catchingUp blocks a competing catchUp(); (b) if a
     // catchUp() is ALREADY in flight when we get here, do NOT start a second parallel pagination
-    // loop — AWAIT the in-flight one (it does the catch-up + acts on the restore disposition;
-    // BLOCKER-1b is preserved because the restore-clone runs before this returns and before the
-    // first write). Check-then-set is atomic here (no await between).
-    if (this.catchingUp) {
-      await this.catchUpInFlight
+    // loop — AWAIT the in-flight one (it does the catch-up + acts on the restore disposition).
+    // Its outcome PROPAGATES (catchUpInFlight rejects on failure): if the in-flight catch-up
+    // FAILED, this await THROWS → ensurePublished() rejects and does NOT set published, so the
+    // first write is never allowed on an unconfirmed head-abgleich / restore-clone (BLOCKER-1b).
+    // Check-then-capture is atomic here (no await between); catchingUp ⇒ catchUpInFlight set.
+    const inFlight = this.catchUpInFlight
+    if (this.catchingUp && inFlight) {
+      await inFlight
       return
     }
     this.catchingUp = true
@@ -667,7 +670,11 @@ export class LogSyncCoordinator {
       const result = await this.catchUpInternal({ presentCapabilityFirst: false })
       await this.actOnRestoreDisposition(result)
     })()
-    this.catchUpInFlight = work.then(() => {}, () => {})
+    // Same non-swallowing handle as catchUp() (rejects on failure; detached no-op guards against
+    // an unhandled rejection if no one coalesces). `await work` below propagates the error here.
+    const ownInFlight = work.then(() => undefined)
+    ownInFlight.catch(() => {})
+    this.catchUpInFlight = ownInFlight
     try {
       await work
     } finally {
@@ -1173,7 +1180,13 @@ export class LogSyncCoordinator {
       await this.actOnRestoreDisposition(result)
       return result
     })()
-    this.catchUpInFlight = work.then(() => {}, () => {})
+    // catchUpInFlight settles WITH the catch-up's outcome — it REJECTS if the catch-up failed,
+    // so a runFirstPublication() coalescing onto it propagates the error and does NOT publish on
+    // an incomplete head-abgleich / restore-clone (BLOCKER-1b). A detached no-op handler prevents
+    // an "unhandled rejection" when nobody coalesces; a real awaiter still observes the rejection.
+    const inFlight = work.then(() => undefined)
+    inFlight.catch(() => {})
+    this.catchUpInFlight = inFlight
     try {
       return await work
     } finally {
