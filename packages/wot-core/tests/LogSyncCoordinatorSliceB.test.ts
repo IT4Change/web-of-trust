@@ -263,6 +263,17 @@ describe('LogSyncCoordinator — Slice B VE-B1 pagination', () => {
     for (const req of a.syncRequests) expect(req.limit).toBe(100)
   })
 
+  it('VE-B1 limit-validation — an INVALID catchUpPageSize (0 / negative / non-integer) is treated as unset → body.limit == 100 (CodeRabbit)', async () => {
+    for (const bad of [0, -5, 3.5, Number.NaN]) {
+      const broker = new InProcessLogBroker()
+      const alice = (await createTestIdentity('alice')).identity
+      const a = await makeHarness(alice, DEVICE_A, broker, { catchUpPageSize: bad })
+      await a.coordinator.catchUp()
+      expect(a.syncRequests.length).toBeGreaterThanOrEqual(1)
+      for (const req of a.syncRequests) expect(req.limit).toBe(100) // bogus config → default, never the bad value
+    }
+  })
+
   it('VE-B1 reconnect catch-up — an offline client that missed >limit entries converges fully on reconnect', async () => {
     const broker = new InProcessLogBroker()
     const alice = (await createTestIdentity('alice')).identity
@@ -914,6 +925,35 @@ describe('LogSyncCoordinator — Slice B re-entrancy + DoS control', () => {
     expect((await b.logStore.getStrictContiguousHeads(SPACE_ID))[DEVICE_A]).toBe(149)
   })
 
+  it('VE-B1 RE-ENTRANCY (bidirectional, Codex) — ensurePublished() while a catchUp() is in flight does NOT start a second loop; converges once, no deadlock', async () => {
+    // The guard must be bidirectional: catchUp() coalesces if a catch-up runs, AND
+    // runFirstPublication (via ensurePublished) must AWAIT an in-flight catchUp() instead of
+    // starting a second parallel pagination loop. catchUp() sets this.catchingUp synchronously,
+    // so the concurrently-started ensurePublished() sees it and coalesces onto catchUpInFlight.
+    const broker = new InProcessLogBroker()
+    const alice = (await createTestIdentity('alice')).identity
+    const bob = (await createTestIdentity('bob')).identity
+    const registrationJws = await inviterRegistrationJws(alice)
+
+    const a = await makeHarness(alice, DEVICE_A, broker, { registrationJws })
+    await a.coordinator.ensurePublished()
+    for (let i = 0; i < 150; i++) await a.coordinator.writeLocalUpdate(new Uint8Array([i & 0xfe, 9]))
+
+    const b = await makeHarness(bob, DEVICE_B, broker, { registrationJws, catchUpPageSize: 50 })
+    // Start a catchUp() (sets catchingUp synchronously) then ensurePublished() in the SAME tick.
+    const p1 = b.coordinator.catchUp()
+    const p2 = b.coordinator.ensurePublished()
+    const settled = await Promise.race([
+      Promise.all([p1, p2]).then(() => 'settled' as const),
+      new Promise<'HANG'>((resolve) => setTimeout(() => resolve('HANG'), 5000)),
+    ])
+    expect(settled).toBe('settled') // no deadlock from the await-coalesce
+    expect(b.applied.length).toBe(150) // converged exactly once, no corruption
+    expect((await b.logStore.getStrictContiguousHeads(SPACE_ID))[DEVICE_A]).toBe(149)
+    // Bounded work: a single coalesced loop (150/50 = 3 pages) — NOT two parallel loops.
+    expect(b.syncRequests.length).toBeLessThan(6)
+  })
+
   it('VE-B2 DoS CONTROL (Opus hang repro) — a MULTI-PAGE truncated:true broker-confirmed-absent gap + ACTIVE live trigger TERMINATES, does NOT spin', async () => {
     // The exact Opus blocker: the old do-while spun because a gap-pending page set catchUpAgain
     // forever. v3 exercises the REAL truncated:true loop e2e: a permanent hole at seq 2 with a
@@ -961,17 +1001,18 @@ describe('LogSyncCoordinator — Slice B re-entrancy + DoS control', () => {
     expect(b.syncRequests.length - reqCountAfterFirst).toBeLessThan(20)
   })
 
-  it('VE-B2 GapRepair OVER-FETCH fix (Codex Major 2) — a repair request holds OTHER devices at their cursor (not absent → full re-fetch); single page', async () => {
-    // driveGapRepairs lowers ONLY the gap device to firstMissing-1 over the CURRENT wire cursor.
-    // A `{[gapDevice]: firstMissing-1}`-only head would leave every other device absent ⇒ the
-    // broker re-sends their entire history and the gap entry can be crowded out of the page limit.
+  it('VE-B2 GapRepair base = knownHeads (Codex Major 2) — other devices held at their MAX (not absent → full re-fetch), gap device lowered; single page when uncrowded', async () => {
+    // driveGapRepairs bases the repair on getKnownHeads (= MAX per device): every OTHER device
+    // sits at its MAX so the broker returns NOTHING for it (no crowding, no re-fetch from 0).
+    // The gap device is lowered to firstMissing-1. A `{[gapDevice]: firstMissing-1}`-only head
+    // would leave all others absent ⇒ full-history re-fetch + the gap crowded out.
     const broker = new InProcessLogBroker()
     const alice = (await createTestIdentity('alice')).identity
     const bob = (await createTestIdentity('bob')).identity
     const registrationJws = await inviterRegistrationJws(alice)
     const b = await makeHarness(bob, DEVICE_B, broker, { registrationJws })
 
-    // DEVICE_C has a healthy contiguous run (cursor must be PRESERVED in the repair request).
+    // DEVICE_C fully caught up (MAX 2) — must NOT be re-fetched in the repair.
     for (const s of [0, 1, 2]) {
       const e = await buildEntryJws(alice, DEVICE_C, s, new Uint8Array([s]))
       await b.logStore.recordRemoteApplied({ docId: SPACE_ID, deviceId: DEVICE_C, seq: s, entryJws: e })
@@ -985,9 +1026,50 @@ describe('LogSyncCoordinator — Slice B re-entrancy + DoS control', () => {
     const before = b.syncRequests.length
     await (b.coordinator as unknown as { driveGapRepairs: () => Promise<void> }).driveGapRepairs()
     const repairReqs = b.syncRequests.slice(before)
-    expect(repairReqs.length).toBe(1) // single page, no pagination
+    expect(repairReqs.length).toBe(1) // single page (broker empty → uncrowded), no pagination
     const heads = repairReqs[0].heads
     expect(heads[DEVICE_A]).toBe(0) // gap device lowered to firstMissing-1 = 0
-    expect(heads[DEVICE_C]).toBe(2) // OTHER device held at its cursor — NOT re-fetched from 0
+    expect(heads[DEVICE_C]).toBe(2) // OTHER device held at its MAX — NOT re-fetched from 0
+  })
+
+  it('VE-B2 GapRepair CROWDING (CodeRabbit Major) — a later-arriving seq behind a flood of another device entries IS still repaired (paginate past the crowder)', async () => {
+    // The crowding case CodeRabbit/Codex flagged: an earlier-sorting device with MANY entries the
+    // client has not fetched can fill the global page (ordered device_id,seq) and push the target
+    // gap's firstMissing past the limit. With the knownHeads base + bounded repair pagination the
+    // repair drains that device until the gap device appears → the later-arriving seq is fetched.
+    // TEETH: a single-page repair (no pagination) leaves DEVICE_C's seq 1 unreachable.
+    const broker = new InProcessLogBroker()
+    const alice = (await createTestIdentity('alice')).identity
+    const bob = (await createTestIdentity('bob')).identity
+    const registrationJws = await inviterRegistrationJws(alice)
+    const b = await makeHarness(bob, DEVICE_B, broker, { registrationJws, catchUpPageSize: 100 })
+    await b.coordinator.ensurePublished()
+    const coordInternal = b.coordinator as unknown as { triggerGapCatchUp: () => void; driveGapRepairs: () => Promise<void> }
+    coordInternal.triggerGapCatchUp = () => {}
+
+    const docLog = (broker as unknown as { docs: Map<string, { entries: Map<string, { docId: string; deviceId: string; seq: number; entryJws: string }>; heads: Map<string, number> }> }).docs.get(SPACE_ID)!
+    // DEVICE_A (sorts before DEVICE_C): 0..150 = a 151-entry flood the client has NOT fetched.
+    for (let s = 0; s <= 150; s++) {
+      const e = await buildEntryJws(alice, DEVICE_A, s, new Uint8Array([s & 0xff]))
+      docLog.entries.set(`${DEVICE_A}:${s}`, { docId: SPACE_ID, deviceId: DEVICE_A, seq: s, entryJws: e })
+    }
+    docLog.heads.set(DEVICE_A, 150)
+    // DEVICE_C: the client holds seq 0; a soft-skipped hole at firstMissing=1; seq 1 ARRIVES later.
+    const c0 = await buildEntryJws(alice, DEVICE_C, 0, new Uint8Array([0]))
+    await b.logStore.recordRemoteApplied({ docId: SPACE_ID, deviceId: DEVICE_C, seq: 0, entryJws: c0 })
+    await b.logStore.recordGapObservation(SPACE_ID, DEVICE_C, 1, 1, 0, Date.now())
+    await b.logStore.markGapSoftSkipped(SPACE_ID, DEVICE_C, 1)
+    const c1 = await buildEntryJws(alice, DEVICE_C, 1, new Uint8Array([0xc1]))
+    docLog.entries.set(`${DEVICE_C}:1`, { docId: SPACE_ID, deviceId: DEVICE_C, seq: 1, entryJws: c1 })
+    docLog.entries.set(`${DEVICE_C}:0`, { docId: SPACE_ID, deviceId: DEVICE_C, seq: 0, entryJws: c0 })
+    docLog.heads.set(DEVICE_C, 1)
+
+    await coordInternal.driveGapRepairs()
+
+    // DEVICE_C seq 1 was fetched despite DEVICE_A's 151-entry flood → the gap self-resolved.
+    expect(b.applied.some((u) => u[0] === 0xc1)).toBe(true)
+    expect((await b.logStore.getStrictContiguousHeads(SPACE_ID))[DEVICE_C]).toBe(1) // hole closed
+    const due = await b.logStore.listDueGapRepairs(Date.now() + 10 * 60_000)
+    expect(due.some((g) => g.device === DEVICE_C && g.firstMissing === 1)).toBe(false) // auto-resolved
   })
 })

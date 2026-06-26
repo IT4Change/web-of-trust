@@ -78,6 +78,15 @@ const GAP_REPAIR_BASE_BACKOFF_MS = 5_000
 /** Slice B / VE-B2 GapRepair: exponential backoff cap (5 min) per the directive. */
 const GAP_REPAIR_MAX_BACKOFF_MS = 5 * 60_000
 
+/**
+ * Slice B v3 GapRepair: max pages a single repair attempt paginates to REACH the target gap
+ * before deferring to the next backoff. Other devices are held at their MAX (getKnownHeads) so
+ * they never crowd the page; this cap only bounds the rare case where an as-yet-UNKNOWN device
+ * (absent from known) sorts before the gap device and floods early pages (CodeRabbit/Codex
+ * crowding finding). A no-progress page also breaks the loop, so the cap is just a backstop.
+ */
+const GAP_REPAIR_MAX_PAGES = 50
+
 /** Disposition the coordinator surfaces to the caller after a reject. */
 export type RejectDisposition =
   | 'capability-re-present'
@@ -413,6 +422,14 @@ export class LogSyncCoordinator {
   private catchingUp = false
 
   /**
+   * Slice B v3: the in-flight catch-up's settle-promise (set whenever `catchingUp` is set, by
+   * BOTH catchUp() and runFirstPublication). Lets runFirstPublication AWAIT an already-running
+   * catch-up instead of starting a second parallel pagination loop (Codex: the guard must be
+   * bidirectional — ensurePublished() starting while a catchUp() is in flight). Never rejects.
+   */
+  private catchUpInFlight: Promise<void> | null = null
+
+  /**
    * Slice B v2 / VE-B2: a monotonically increasing connection-epoch counter, bumped on
    * every resetForReconnect(). Threaded into recordGapObservation so the soft-skip gate
    * counts DISTINCT reconnect epochs, not catch-ups of the same connection (Codex-BLOCKER:
@@ -635,19 +652,28 @@ export class LogSyncCoordinator {
     //     defense-in-depth: a broker_seq>local_seq disposition is no longer dead
     //     code — it is acted on HERE (restore-clone BEFORE the first write), so a
     //     seq=0 is never re-entered under a broker-known deviceId.
-    // VE-B1 (v3, Opus merge-blocker): this catchUpInternal MUST run under the
-    // this.catchingUp re-entrancy guard too — without it a live-gap-trigger arriving
-    // during first-publication's catch-up would start a SECOND concurrent pagination loop
-    // (competing sync-request / recordRemoteApplied on the same store). The guard
-    // coalesces it (the trigger skips while catchingUp is set; the next catchUp() picks up).
+    // VE-B1 (v3): run the first-publication catch-up under the SAME re-entrancy guard, in BOTH
+    // directions (Codex): (a) while it runs, catchingUp blocks a competing catchUp(); (b) if a
+    // catchUp() is ALREADY in flight when we get here, do NOT start a second parallel pagination
+    // loop — AWAIT the in-flight one (it does the catch-up + acts on the restore disposition;
+    // BLOCKER-1b is preserved because the restore-clone runs before this returns and before the
+    // first write). Check-then-set is atomic here (no await between).
+    if (this.catchingUp) {
+      await this.catchUpInFlight
+      return
+    }
     this.catchingUp = true
-    let result: CatchUpResult
+    const work = (async (): Promise<void> => {
+      const result = await this.catchUpInternal({ presentCapabilityFirst: false })
+      await this.actOnRestoreDisposition(result)
+    })()
+    this.catchUpInFlight = work.then(() => {}, () => {})
     try {
-      result = await this.catchUpInternal({ presentCapabilityFirst: false })
+      await work
     } finally {
       this.catchingUp = false
+      this.catchUpInFlight = null
     }
-    await this.actOnRestoreDisposition(result)
   }
 
   /**
@@ -1060,23 +1086,44 @@ export class LogSyncCoordinator {
   async driveGapRepairs(): Promise<void> {
     const now = this.now().getTime()
     const due = await this.config.logStore.listDueGapRepairs(now)
-    // Base the repair request on the CURRENT wire cursor and lower ONLY the gap device to
-    // firstMissing-1 — so every OTHER device stays at its cursor and is NOT re-fetched from
-    // seq 0. A `{[device]: firstMissing-1}`-only head would leave all other devices absent
-    // ⇒ the broker re-sends their entire history and the gap entry could be crowded out of
-    // the global page limit = starvation (Codex Major 2). Single page, no pagination: if
-    // firstMissing is present it is the LOWEST seq for the device ⇒ in this first page.
-    const wireHeads = await this.config.logStore.getSyncRequestHeads(this.config.docId)
+    // Base the repair request on getKnownHeads (= MAX seq per device): every OTHER device is
+    // held at its MAX, so the broker returns NOTHING for it (getSince is seq>head) — it cannot
+    // crowd the global page. A wire-cursor base would let a device with entries ABOVE its wire
+    // cursor flood the page and push the target gap past the limit (CodeRabbit/Codex crowding).
+    // The target gap device is lowered to firstMissing-1 so its firstMissing is returned.
+    const known = await this.config.logStore.getKnownHeads(this.config.docId)
     for (const gap of due) {
       if (gap.docId !== this.config.docId) continue
-      // Repair request: ask the broker for everything above firstMissing-1 for this
-      // device (getSince is seq>head), other devices held at their wire cursor.
-      const repairHeads: Record<string, number> = { ...wireHeads, [gap.device]: gap.firstMissing - 1 }
-      const response = await this.requestSyncPage(repairHeads)
-      if (response) {
-        await this.applySyncResponsePage(response)
+      // ONE page in the common case. With the knownHeads base the gap device's lowest returned
+      // seq is firstMissing (if present) or the next seq above it — i.e. the gap device DOES
+      // appear in the first page, which is our answer (arrived → applied → auto-resolved, or
+      // confirmed-absent → retry next backoff). We only paginate when the gap device is CROWDED
+      // OUT of the page entirely (an as-yet-UNKNOWN device, absent from known, sorting before it
+      // and flooding) — then advance to drain that device. We do NOT drain a permanent gap's
+      // whole tail: once the gap device appears we stop (so a never-arriving seq stays cheap).
+      const repairHeads: Record<string, number> = { ...known, [gap.device]: gap.firstMissing - 1 }
+      for (let page = 0; page < GAP_REPAIR_MAX_PAGES; page++) {
+        const response = await this.requestSyncPage(repairHeads)
+        if (!response) break // timeout — retry on the next backoff
+        const { lowestSeqByDevice, highestSeqByDevice } = await this.applySyncResponsePage(response)
+        // The gap device appeared → we have our answer (firstMissing arrived & auto-resolved if
+        // lowest <= firstMissing, else broker-confirmed-absent). Either way: done this attempt.
+        if (lowestSeqByDevice.get(gap.device) !== undefined) break
+        const truncated = evaluateSyncResponseDisposition(response.body) === 'request-next-page'
+        if (!truncated) break // broker served all it has; the gap device has nothing ≥ firstMissing
+        // Gap device crowded out by other (unknown) devices → advance every delivering device so
+        // the next page makes progress and drains them. No advance ⇒ no-progress ⇒ stop (no spin).
+        let advanced = false
+        for (const [device, hi] of highestSeqByDevice) {
+          if (hi > (repairHeads[device] ?? -1)) {
+            repairHeads[device] = hi
+            advanced = true
+          }
+        }
+        if (!advanced) break
       }
-      // Backoff regardless of outcome (a filled gap is auto-resolved out of the store).
+      // Backoff regardless of outcome (a filled gap is auto-resolved out of the store, so
+      // markGapRepairAttempt is then a no-op).
       const backoff = Math.min(
         GAP_REPAIR_BASE_BACKOFF_MS * 2 ** gap.attempts,
         GAP_REPAIR_MAX_BACKOFF_MS,
@@ -1116,7 +1163,7 @@ export class LogSyncCoordinator {
       return { restoreCloneRequired: false, complete: false, incomplete: 'gap-pending', pendingGaps: [] }
     }
     this.catchingUp = true
-    try {
+    const work = (async (): Promise<CatchUpResult> => {
       // VE-B2 GapRepair driver: re-request any due soft-skipped/pending hole BEFORE the
       // normal catch-up (so a repaired seq is in the store before progress is measured).
       await this.driveGapRepairs().catch((err) => {
@@ -1125,8 +1172,13 @@ export class LogSyncCoordinator {
       const result = await this.catchUpInternal({ presentCapabilityFirst: true })
       await this.actOnRestoreDisposition(result)
       return result
+    })()
+    this.catchUpInFlight = work.then(() => {}, () => {})
+    try {
+      return await work
     } finally {
       this.catchingUp = false
+      this.catchUpInFlight = null
     }
   }
 
@@ -1369,7 +1421,14 @@ export class LogSyncCoordinator {
     timeoutMs?: number,
   ): Promise<SyncResponseMessage | null> {
     const requestId = cryptoRandomUuid()
-    const limit = this.config.catchUpPageSize ?? DEFAULT_CATCH_UP_PAGE_SIZE
+    // Validate catchUpPageSize: an invalid config (0, negative, non-integer, NaN) is treated as
+    // UNSET → the default. A bogus limit on the wire would otherwise make the relay return an
+    // empty/degenerate page (no progress → spurious gap-pending / no-progress throw) — CodeRabbit.
+    const configuredPageSize = this.config.catchUpPageSize
+    const limit =
+      typeof configuredPageSize === 'number' && Number.isInteger(configuredPageSize) && configuredPageSize > 0
+        ? configuredPageSize
+        : DEFAULT_CATCH_UP_PAGE_SIZE
     // Wire-head sanitize: a device whose strict-contiguous head is -1 (nothing
     // contiguous yet, or a GapRepair head = firstMissing-1 = -1 for a hole at seq 0)
     // means "request from seq 0" — the wire format forbids negative heads, and an
@@ -1428,6 +1487,7 @@ export class LogSyncCoordinator {
     idempotentSkips: number
     buffered: number
     lowestSeqByDevice: Map<string, number>
+    highestSeqByDevice: Map<string, number>
   }> {
     let applied = 0
     let idempotentSkips = 0
@@ -1438,10 +1498,15 @@ export class LogSyncCoordinator {
     // the broker served contiguously from our cursor and skipped the hole → confirmed
     // absent (works on truncated:true too). A device crowded out of the page by the
     // global limit is simply ABSENT here → no premature observation (Codex multi-device).
+    // highestSeqByDevice is the per-device page-max — used by driveGapRepairs to advance a
+    // bounded repair pagination past crowding devices toward the target gap.
     const lowestSeqByDevice = new Map<string, number>()
+    const highestSeqByDevice = new Map<string, number>()
     const noteSeq = (deviceId: string, seq: number): void => {
-      const prev = lowestSeqByDevice.get(deviceId)
-      if (prev === undefined || seq < prev) lowestSeqByDevice.set(deviceId, seq)
+      const lo = lowestSeqByDevice.get(deviceId)
+      if (lo === undefined || seq < lo) lowestSeqByDevice.set(deviceId, seq)
+      const hi = highestSeqByDevice.get(deviceId)
+      if (hi === undefined || seq > hi) highestSeqByDevice.set(deviceId, seq)
     }
     for (const entryJws of response.body.entries) {
       // Re-wrap each entry as a log-entry message so the SAME verify+apply+heads
@@ -1465,7 +1530,7 @@ export class LogSyncCoordinator {
         noteSeq(result.deviceId, result.seq)
       }
     }
-    return { applied, idempotentSkips, buffered, lowestSeqByDevice }
+    return { applied, idempotentSkips, buffered, lowestSeqByDevice, highestSeqByDevice }
   }
 
   /**

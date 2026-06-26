@@ -423,6 +423,9 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
   private unsubMessage: (() => void) | null = null
   private unsubStateChange: (() => void) | null = null
   private reconnectFollowupTimer: ReturnType<typeof setTimeout> | null = null
+  /** Slice B v3 (CodeRabbit): pending reconnect debounce, cleared in stop() so a queued tick
+   * cannot resetForReconnect()/requestSync() against a tearing-down adapter. */
+  private reconnectDebounceTimer: ReturnType<typeof setTimeout> | null = null
   private started = false
   private sentMessageIds = new Set<string>()
 
@@ -560,14 +563,15 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
     // Debounce: rapid reconnect cycles (connected→disconnected→connected) should
     // only trigger one sync, not one per state change.
     if ('onStateChange' in this.messaging && typeof (this.messaging as any).onStateChange === 'function') {
-      let reconnectTimer: ReturnType<typeof setTimeout> | null = null
       let reconnectSyncing = false
       this.unsubStateChange = (this.messaging as any).onStateChange((state: string) => {
         if (state === 'connected' && this.started) {
-          if (reconnectTimer) clearTimeout(reconnectTimer)
-          reconnectTimer = setTimeout(() => {
-            reconnectTimer = null
-            if (reconnectSyncing) return
+          if (this.reconnectDebounceTimer) clearTimeout(this.reconnectDebounceTimer)
+          this.reconnectDebounceTimer = setTimeout(() => {
+            this.reconnectDebounceTimer = null
+            // Slice B v3 (CodeRabbit): bail if stopped while the debounce was pending — never
+            // resetForReconnect()/requestSync() against a tearing-down adapter.
+            if (!this.started || reconnectSyncing) return
             reconnectSyncing = true
             // Slice B v2 / VE-B2 (Scout wiring gap): bump each per-space coordinator's
             // connectionEpoch on a real reconnect. Unlike the Personal-Doc adapter, the
@@ -607,6 +611,10 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
     if (this.reconnectFollowupTimer) {
       clearTimeout(this.reconnectFollowupTimer)
       this.reconnectFollowupTimer = null
+    }
+    if (this.reconnectDebounceTimer) {
+      clearTimeout(this.reconnectDebounceTimer)
+      this.reconnectDebounceTimer = null
     }
     // In-memory cache only. Durable pending messages remain in CompactStore
     // until they are applied or the space is explicitly deleted.

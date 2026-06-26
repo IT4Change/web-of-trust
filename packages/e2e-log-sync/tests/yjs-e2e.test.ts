@@ -485,7 +485,11 @@ describe('VE-11 Yjs — real gated relay', () => {
     aliceHandle.close()
 
     // FRESH Bob device: same identity/keys/membership, EMPTY log + compact store, no
-    // vault → MUST reconstruct purely via a PAGINATED sync-response sequence.
+    // vault → MUST reconstruct purely via a PAGINATED sync-response sequence. For Yjs the
+    // reconstruction rides a SINGLE catch-up: the Yjs restore path does NOT itself catch up, so
+    // this explicit requestSync(spaceId) is the ONLY catch-up — its pagination is what fills the
+    // doc (no second catch-up to mask a single-page regression; the greenwash CodeRabbit flagged
+    // is Automerge-specific, where start() ALSO restore-catches-up).
     const fresh = track(await makeYjsClient({
       relay,
       identity: bob.identity,

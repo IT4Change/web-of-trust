@@ -348,8 +348,12 @@ describe('VE-11 Automerge — real gated relay', () => {
     expect(Object.keys(expected.items).length).toBeGreaterThanOrEqual(WRITES)
     aliceHandle.close()
 
-    // FRESH Bob device: same identity/keys/membership, EMPTY log + repo, no vault →
-    // MUST reconstruct purely via a PAGINATED sync-response sequence.
+    // FRESH Bob device: same identity/keys/membership, EMPTY log + repo, no vault → MUST
+    // reconstruct purely via a PAGINATED sync-response sequence. noStart + start() (not an extra
+    // requestSync): the reconstruction rides a SINGLE restore catch-up that MUST paginate. An
+    // auto-start restore catch-up PLUS an explicit requestSync would be TWO catch-ups, so a
+    // single-page-per-catch-up regression would still reconstruct (1 page each) and mask the
+    // pagination break (CodeRabbit greenwash).
     const fresh = track(await makeAutomergeClient({
       relay,
       identity: bob.identity,
@@ -357,8 +361,9 @@ describe('VE-11 Automerge — real gated relay', () => {
       metadataStorage: bob.metadataStorage,
       docLogStore: new InMemoryDocLogStore(),
       repoStorage: new InMemoryRepoStorageAdapter(),
+      noStart: true,
     }))
-    await fresh.adapter.requestSync(spaceId)
+    await fresh.adapter.start()
     const freshHandle = await fresh.adapter.openSpace<TestDoc>(spaceId)
     const reconstructed = await waitFor(() => {
       const d = freshHandle.getDoc()

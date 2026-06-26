@@ -483,7 +483,18 @@ describe('YjsPersonalLogSyncAdapter — Slice A VE-6 (Personal-Doc on the log co
       doc1.getMap('profile').set(`k${i}`, `v${i}`)
       if (i % 25 === 0) await wait(15)
     }
-    await wait(300)
+    // Poll until ALL of device 1's entries have drained to the broker (not a fixed wait): the
+    // cold device 2 must page a broker that already holds >100 entries, else its first catch-up
+    // gets one page and the rest arrive live (no 2nd sync-request round) — masking pagination.
+    const brokerEntriesForAlice = (): number => {
+      let n = 0
+      const docs = (broker as unknown as { docs: Map<string, { entries: Map<string, { deviceId: string }> }> }).docs
+      for (const doc of docs.values()) for (const e of doc.entries.values()) if (e.deviceId === DEVICE_ALICE) n += 1
+      return n
+    }
+    const drainDeadline = Date.now() + 5000
+    while (Date.now() < drainDeadline && brokerEntriesForAlice() < WRITES) await wait(50)
+    expect(brokerEntriesForAlice()).toBeGreaterThanOrEqual(WRITES)
 
     // Cold device 2: SAME identity + SAME personalKey, FRESH log store. Catches up the
     // whole personal log purely via a PAGINATED sync-response sequence.
@@ -498,8 +509,14 @@ describe('YjsPersonalLogSyncAdapter — Slice A VE-6 (Personal-Doc on the log co
       return baseSend2(env)
     }
     sync2.start()
-    // Device 2 needs more than one round to drain 130 entries at limit 100.
-    await wait(900)
+    // Poll to convergence (not a fixed wait): device 2 needs >=2 paginated rounds to drain 130
+    // entries at limit 100. Wait until ALL keys are present AND >=2 sync-request rounds happened.
+    const allKeysPresent = (): boolean => {
+      for (let i = 0; i < WRITES; i++) if (doc2.getMap('profile').get(`k${i}`) !== `v${i}`) return false
+      return true
+    }
+    const convergeDeadline = Date.now() + 6000
+    while (Date.now() < convergeDeadline && !(allKeysPresent() && reqTally.length >= 2)) await wait(50)
 
     // ALL 130 keys reconstructed on the cold device (full multi-page convergence).
     for (let i = 0; i < WRITES; i++) {

@@ -323,6 +323,11 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
   private unsubscribeMessaging: (() => void) | null = null
   /** Slice B v2 / VE-B2: messaging state-change unsubscribe (per-space epoch bump on reconnect). */
   private unsubStateChange: (() => void) | null = null
+  /** Slice B v3 (CodeRabbit): pending reconnect debounce, cleared in stop() so a queued tick
+   * cannot resetForReconnect()/requestSync() against a tearing-down adapter. */
+  private reconnectDebounceTimer: ReturnType<typeof setTimeout> | null = null
+  /** True between start() and stop() — the reconnect tick is a no-op once stopped. */
+  private started = false
   /** Local seq counter per doc — avoids a getDocInfo HTTP call (and its 404) on first push */
   private vaultSeqs = new Map<string, number>()
   /** VaultPushScheduler per space — handles immediate/debounced vault pushes */
@@ -453,12 +458,12 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
       onStateChange?: (cb: (state: string) => void) => () => void
     }
     if (typeof messagingWithState.onStateChange === 'function') {
-      let reconnectTimer: ReturnType<typeof setTimeout> | null = null
       this.unsubStateChange = messagingWithState.onStateChange((state: string) => {
-        if (state !== 'connected') return
-        if (reconnectTimer) clearTimeout(reconnectTimer)
-        reconnectTimer = setTimeout(() => {
-          reconnectTimer = null
+        if (state !== 'connected' || !this.started) return
+        if (this.reconnectDebounceTimer) clearTimeout(this.reconnectDebounceTimer)
+        this.reconnectDebounceTimer = setTimeout(() => {
+          this.reconnectDebounceTimer = null
+          if (!this.started) return // stopped while the debounce was pending — no-op
           for (const coordinator of this.coordinators.values()) coordinator.resetForReconnect()
           for (const spaceId of this.spaces.keys()) {
             void this.requestSync(spaceId).catch(() => {})
@@ -467,6 +472,7 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
       })
     }
 
+    this.started = true
     this.state = 'idle'
     this._notifySpacesSubscribers()
   }
@@ -861,6 +867,11 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
   }
 
   async stop(): Promise<void> {
+    this.started = false
+    if (this.reconnectDebounceTimer) {
+      clearTimeout(this.reconnectDebounceTimer)
+      this.reconnectDebounceTimer = null
+    }
     if (this.unsubscribeMessaging) {
       this.unsubscribeMessaging()
       this.unsubscribeMessaging = null
