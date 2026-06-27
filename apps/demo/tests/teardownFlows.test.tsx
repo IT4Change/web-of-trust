@@ -18,6 +18,7 @@ const h = vi.hoisted(() => {
     isAvailable: vi.fn(async () => false),
     isSupported: vi.fn(() => false),
     isEnrolled: vi.fn(async () => state.enrolled),
+    isEnrolledStrict: vi.fn(async () => state.enrolled),
     enroll: vi.fn(async () => {}),
     unenroll: vi.fn(async () => {
       state.enrolled = false
@@ -41,6 +42,7 @@ vi.mock('../src/services/BiometricService', () => ({
     isSupported: () => h.isSupported(),
     isAvailable: () => h.isAvailable(),
     isEnrolled: () => h.isEnrolled(),
+    isEnrolledStrict: () => h.isEnrolledStrict(),
     authenticate: () => h.authenticate(),
     enroll: (p: string) => h.enroll(p),
     unenroll: () => h.unenroll(),
@@ -73,6 +75,7 @@ beforeEach(() => {
   h.isAvailable.mockImplementation(async () => false)
   h.isSupported.mockImplementation(() => false)
   h.isEnrolled.mockImplementation(async () => h.state.enrolled)
+  h.isEnrolledStrict.mockImplementation(async () => h.state.enrolled)
   h.enroll.mockImplementation(async () => {})
   h.unenroll.mockImplementation(async () => {
     h.state.enrolled = false
@@ -114,22 +117,37 @@ describe('W5 — UnlockFlow create-new fails closed when a tier survives', () =>
     h.resetLocalAppData.mockResolvedValue(undefined)
     h.findSurvivingWipeTier.mockResolvedValue('stored identity seed survived the wipe')
 
-    render(
-      <LanguageProvider>
-        <UnlockFlow onComplete={vi.fn()} onRecover={vi.fn()} />
-      </LanguageProvider>,
-    )
+    // Intercept any redirect attempt without navigating happy-dom. Override ONLY the
+    // href accessor on the location instance (a Proxy over the whole object breaks
+    // happy-dom's private #url fields); search/pathname still use the real accessors.
+    const hrefSpy = vi.fn()
+    Object.defineProperty(window.location, 'href', {
+      configurable: true,
+      get: () => 'http://localhost:3000/',
+      set: (v: string) => hrefSpy(v),
+    })
 
-    fireEvent.change(screen.getByPlaceholderText('Dein Passwort'), { target: { value: 'pw-123456' } })
-    fireEvent.click(screen.getByRole('button', { name: 'Entsperren' }))
+    try {
+      render(
+        <LanguageProvider>
+          <UnlockFlow onComplete={vi.fn()} onRecover={vi.fn()} />
+        </LanguageProvider>,
+      )
 
-    const createBtn = await screen.findByRole('button', { name: 'Neue ID erstellen' })
-    fireEvent.click(createBtn)
+      fireEvent.change(screen.getByPlaceholderText('Dein Passwort'), { target: { value: 'pw-123456' } })
+      fireEvent.click(screen.getByRole('button', { name: 'Entsperren' }))
 
-    await waitFor(() => expect(h.findSurvivingWipeTier).toHaveBeenCalled())
-    await waitFor(() =>
-      expect(screen.getByText(/Zurücksetzen unvollständig/)).toBeInTheDocument(),
-    )
+      const createBtn = await screen.findByRole('button', { name: 'Neue ID erstellen' })
+      fireEvent.click(createBtn)
+
+      await waitFor(() => expect(h.findSurvivingWipeTier).toHaveBeenCalled())
+      await waitFor(() =>
+        expect(screen.getByText(/Zurücksetzen unvollständig/)).toBeInTheDocument(),
+      )
+      expect(hrefSpy).not.toHaveBeenCalled() // failed closed → no redirect
+    } finally {
+      delete (window.location as unknown as { href?: string }).href // revert to the real accessor
+    }
   })
 })
 

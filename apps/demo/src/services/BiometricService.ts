@@ -52,4 +52,17 @@ export class BiometricService {
       return false
     }
   }
+
+  /**
+   * Strict enrollment check for SECURITY verification (W5 fail-closed). Unlike
+   * isEnrolled() — a UI convenience that swallows native errors to false so the
+   * unlock screen degrades safely — this PROPAGATES native errors: a keystore check
+   * that fails or cannot be verified must NOT be mistaken for "no enrollment / clean".
+   * No-op safe on web (isSupported guard, returns false without a native call).
+   */
+  static async isEnrolledStrict(): Promise<boolean> {
+    if (!this.isSupported()) return false
+    const { stored } = await BiometricKeystore.hasStoredPassphrase()
+    return stored
+  }
 }

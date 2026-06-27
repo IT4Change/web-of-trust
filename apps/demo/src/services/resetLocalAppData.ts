@@ -58,13 +58,22 @@ export async function resetLocalAppData(): Promise<void> {
  */
 export async function findSurvivingWipeTier(): Promise<string | null> {
   // Fail closed: if the seed check itself errors we cannot confirm the seed is gone,
-  // so treat it as surviving (no redirect, surface the error) rather than assuming
-  // clean. isEnrolled already guards isSupported + swallows its own errors to false.
+  // so treat it as surviving (no redirect, surface the error) rather than assuming clean.
   if (await createIdentityWorkflow().hasStoredIdentity().catch(() => true)) {
     return 'stored identity seed survived the wipe (or could not be verified)'
   }
-  if (BiometricService.isSupported() && (await BiometricService.isEnrolled())) {
-    return 'biometric keystore enrollment survived the wipe'
+  // Keystore tier — fail closed too: use the STRICT check that PROPAGATES native
+  // errors. isEnrolled() swallows them to false, which would read an unverifiable /
+  // failed native keystore cleanup as "clean" and let the redirect proceed — the exact
+  // tier failure this slice closes. A throw here = could-not-verify = surviving.
+  if (BiometricService.isSupported()) {
+    try {
+      if (await BiometricService.isEnrolledStrict()) {
+        return 'biometric keystore enrollment survived the wipe'
+      }
+    } catch {
+      return 'biometric keystore state could not be verified after the wipe'
+    }
   }
   return null
 }

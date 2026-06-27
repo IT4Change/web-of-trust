@@ -109,17 +109,27 @@ describe('W5 — findSurvivingWipeTier (interactive post-wipe recheck)', () => {
     expect(await findSurvivingWipeTier()).toMatch(/seed/i)
   })
 
-  it('flags a surviving native keystore enrollment', async () => {
+  it('flags a surviving native keystore enrollment (via the STRICT check)', async () => {
     idState.hasStored = false
     vi.spyOn(BiometricService, 'isSupported').mockReturnValue(true)
-    vi.spyOn(BiometricService, 'isEnrolled').mockResolvedValue(true)
+    vi.spyOn(BiometricService, 'isEnrolledStrict').mockResolvedValue(true)
+    expect(await findSurvivingWipeTier()).toMatch(/keystore/i)
+  })
+
+  it('fails CLOSED when the native keystore check throws (unverifiable ≠ clean)', async () => {
+    // The blocker: isEnrolled() swallows native errors to false, which would read a
+    // failed/unverifiable keystore cleanup as clean. The strict check propagates, and
+    // findSurvivingWipeTier must report a survivor (not null) so the caller does NOT redirect.
+    idState.hasStored = false
+    vi.spyOn(BiometricService, 'isSupported').mockReturnValue(true)
+    vi.spyOn(BiometricService, 'isEnrolledStrict').mockRejectedValue(new Error('native keystore unavailable'))
     expect(await findSurvivingWipeTier()).toMatch(/keystore/i)
   })
 
   it('reports the seed tier first when BOTH survive', async () => {
     idState.hasStored = true
     vi.spyOn(BiometricService, 'isSupported').mockReturnValue(true)
-    vi.spyOn(BiometricService, 'isEnrolled').mockResolvedValue(true)
+    vi.spyOn(BiometricService, 'isEnrolledStrict').mockResolvedValue(true)
     expect(await findSurvivingWipeTier()).toMatch(/seed/i)
   })
 })

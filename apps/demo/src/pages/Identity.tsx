@@ -161,8 +161,8 @@ export function Identity() {
         setIsDeleting(false)
         return
       }
-      // Hard redirect — don't wait for React state cleanup
-      window.location.href = '/'
+      // Hard redirect — don't wait for React state cleanup (respect the deploy base path)
+      window.location.href = import.meta.env.BASE_URL || '/'
     } catch (error) {
       console.error('Failed to delete identity:', error)
       // Keep the confirm panel OPEN so the error (rendered only inside it) stays

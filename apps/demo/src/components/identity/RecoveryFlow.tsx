@@ -243,10 +243,18 @@ export function RecoveryFlow({ onComplete, onCancel }: RecoveryFlowProps) {
         await BiometricService.unenroll().catch(() => {})
       }
       await refreshBiometricStatus()
-      // Don't silently claim clean: if a stale entry survived the clear, the W3 password
-      // fallback catches it next launch, but surface it rather than asserting clean.
-      if (!keystoreBoundToNewSeed && (await BiometricService.isEnrolled())) {
-        console.error('Recovery: stale biometric enrollment survived unenroll')
+      // Don't silently claim clean: verify the clear with the STRICT check (propagates
+      // native errors; isEnrolled() would swallow a failed verification to "clean").
+      // A surviving entry OR an unverifiable check is surfaced — the W3 password fallback
+      // still catches it next launch, but it is never silently asserted as clean.
+      if (!keystoreBoundToNewSeed) {
+        try {
+          if (await BiometricService.isEnrolledStrict()) {
+            console.error('Recovery: stale biometric enrollment survived unenroll')
+          }
+        } catch (verifyErr) {
+          console.error('Recovery: biometric keystore state could not be verified after unenroll', verifyErr)
+        }
       }
 
       finishRecovery(identity, identity.getDid())
