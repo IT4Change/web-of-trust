@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { randomUUID } from 'node:crypto'
-import { startRelay, makeIdentity, wait, waitFor, type StartedRelay } from './harness'
+import { startRelay, makeIdentity, wait, waitFor, testMode, type StartedRelay } from './harness'
 import { RawRelayClient, makeSpaceKeypair, mintSpaceCap, helperCrypto } from './raw-client'
 import { makeYjsClient, type YjsClient } from './yjs-client'
 import { makeAutomergeClient, type AutomergeClient } from './automerge-client'
@@ -84,7 +84,12 @@ async function buildStaleLogEntryEnvelope(params: {
   }) as unknown as WireMessage
 }
 
-describe('Slice SR P5.5 — WS write-path-error routing (Test A) — real gated relay', () => {
+// TC5: both suites in this file are remote-DESTRUCTIVE — each performs an admin
+// space-rotate (permanent generation advance) to provoke the KEY_GENERATION_STALE
+// write-path error under test. Remote ONLY with REMOTE_ALLOW_DESTRUCTIVE; else skipped.
+const describeDestructive = testMode.skipDestructiveRemote ? describe.skip : describe
+
+describeDestructive('Slice SR P5.5 — WS write-path-error routing (Test A) — real gated relay', () => {
   let relay: StartedRelay
   const rawClients: RawRelayClient[] = []
   const adapters: WebSocketMessagingAdapter[] = []
@@ -140,7 +145,7 @@ describe('Slice SR P5.5 — WS write-path-error routing (Test A) — real gated 
     expect((await setup.presentCapability(cap0)).status).toBe('delivered')
     const baseline = await setup.sendLogEntryRaw({ spaceId, seq: 0, plaintext: 'baseline', keyGeneration: 0 })
     expect(baseline.outcome.kind).toBe('receipt')
-    expect(relay.entryCount(spaceId)).toBe(1)
+    expect(await relay.entryCount(spaceId)).toBe(1)
 
     // (2) Rotate the durable space to gen 1 (the removal mechanism).
     const gen1 = await makeSpaceKeypair()
@@ -155,7 +160,7 @@ describe('Slice SR P5.5 — WS write-path-error routing (Test A) — real gated 
     })
     const rotateOutcome = await rotateClient.sendControlFrameRaw(rotateFrame as unknown as Record<string, unknown>)
     expect(rotateOutcome.kind).toBe('receipt')
-    expect(relay.getSpace(spaceId)?.generation).toBe(1)
+    expect((await relay.getSpace(spaceId))?.generation).toBe(1)
 
     // (3) Build the REAL WebSocketMessagingAdapter UNDER TEST (no replication adapter —
     //     the onMessage spy is the only observer). It authenticates with `admin`'s DID
@@ -230,7 +235,7 @@ describe('Slice SR P5.5 — WS write-path-error routing (Test A) — real gated 
     expect(errorFrame?.code).toBe('KEY_GENERATION_STALE')
     expect(errorFrame?.thid).toBe(sentMessageId)
     // The stale write left no durable trace (still just the baseline).
-    expect(relay.entryCount(spaceId)).toBe(1)
+    expect(await relay.entryCount(spaceId)).toBe(1)
   })
 })
 
@@ -373,7 +378,7 @@ const adapterGeneration = (c: LaggerClient, spaceId: string): Promise<number> =>
 // ENABLED (Slice SR-2 / Symptom A): see the block comment above. The post-rotation
 // catchUp() + resendPending() client-lagger-fix makes the real-wire re-emit cycle
 // reachable, so the deferred scenario now asserts the full end-to-end convergence.
-describe.each([yjsLaggerFixture, automergeLaggerFixture])(
+describeDestructive.each([yjsLaggerFixture, automergeLaggerFixture])(
   'Slice SR-2 — Criterion 5 legitimate-lagger re-emit over real WS ($name)',
   (engine) => {
     let relay: StartedRelay
@@ -432,7 +437,7 @@ describe.each([yjsLaggerFixture, automergeLaggerFixture])(
       // Alice removes Carol → durable rotation to gen 1. Bob's key-rotation is HELD,
       // so he stays the lagger on gen 0; his member-update (Carol-removed) still passes.
       await alice.adapter.removeMember(spaceId, carol.identity.getDid())
-      expect(await waitFor(() => relay.getSpace(spaceId)?.generation === 1, { timeoutMs: 10_000 })).toBe(true)
+      expect(await waitFor(async () => (await relay.getSpace(spaceId))?.generation === 1, { timeoutMs: 10_000 })).toBe(true)
       expect(await waitFor(() => hold.held >= 1, { timeoutMs: 10_000 })).toBe(true)
       // Bob is still the lagger (rotation held → gen 0).
       expect(await adapterGeneration(bob, spaceId)).toBe(0)
@@ -440,7 +445,7 @@ describe.each([yjsLaggerFixture, automergeLaggerFixture])(
       // Bob writes under the stale gen-0 key → relay rejects KEY_GENERATION_STALE →
       // the error frame is FANNED OUT (P5.5 fix) to Bob's coordinator → the re-emit
       // PARKS (rotation not yet imported), so Alice does NOT see it yet.
-      const frozen = relay.entryCount(spaceId)
+      const frozen = await relay.entryCount(spaceId)
       bobHandle.transact((d) => { d.items['lag'] = { title: 'written-while-lagging' } })
       // Give the stale write + reject round-trip time, then assert it did NOT land.
       await wait(600)
@@ -459,7 +464,7 @@ describe.each([yjsLaggerFixture, automergeLaggerFixture])(
       // catch-up adds no log entries — present-capability + sync-request are not writes).
       expect(Object.keys(aliceHandle.getDoc().items).filter((k) => k === 'lag')).toHaveLength(1)
       expect(aliceHandle.getDoc().items['pre']?.title).toBe('bob-pre-rotation')
-      expect(relay.entryCount(spaceId)).toBe(frozen + 1)
+      expect(await relay.entryCount(spaceId)).toBe(frozen + 1)
 
       aliceHandle.close()
       bobHandle.close()

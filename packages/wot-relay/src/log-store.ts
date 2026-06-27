@@ -718,6 +718,45 @@ export class DocLog {
     return result
   }
 
+  /**
+   * Entries per (docId, deviceId). The aggregate-map sibling of {@link entryCountForDevice}
+   * (one GROUP BY instead of N point reads), mirroring {@link entriesByDoc}. Used by the
+   * Dashboard / remote-observation path (D1 Spur-C): a removed member's deviceId MUST show
+   * ZERO durable entries after rotation, observable from outside via /dashboard/data.
+   */
+  entriesByDocAndDevice(): Record<string, Record<string, number>> {
+    const rows = this.db
+      .prepare('SELECT doc_id, device_id, COUNT(*) as count FROM doc_log GROUP BY doc_id, device_id')
+      .all() as Array<{ doc_id: string; device_id: string; count: number }>
+    const result: Record<string, Record<string, number>> = {}
+    for (const row of rows) (result[row.doc_id] ??= {})[row.device_id] = row.count
+    return result
+  }
+
+  /**
+   * Every registered space keyed by spaceId, with its current generation + admin set.
+   * The aggregate-map sibling of {@link getSpace}/{@link getSpaceAdmins}/{@link isSpaceRegistered}
+   * (one query instead of N), for the Dashboard / remote-observation path (D1 Spur-C).
+   * `registered` is always true for a present key — absence of the key means "not registered"
+   * for the reader. NOTE: the verificationKey is intentionally NOT exposed here (minimal
+   * read-only stats); admins is mildly sensitive (see getStats auth note).
+   */
+  spacesByDoc(): Record<string, { registered: boolean; generation: number; admins: string[] }> {
+    const spaces = this.db
+      .prepare('SELECT space_id, generation FROM spaces')
+      .all() as Array<{ space_id: string; generation: number }>
+    const adminRows = this.db
+      .prepare('SELECT space_id, admin_did FROM space_admins ORDER BY admin_did ASC')
+      .all() as Array<{ space_id: string; admin_did: string }>
+    const adminsBySpace: Record<string, string[]> = {}
+    for (const row of adminRows) (adminsBySpace[row.space_id] ??= []).push(row.admin_did)
+    const result: Record<string, { registered: boolean; generation: number; admins: string[] }> = {}
+    for (const s of spaces) {
+      result[s.space_id] = { registered: true, generation: s.generation, admins: adminsBySpace[s.space_id] ?? [] }
+    }
+    return result
+  }
+
   /** Total bytes of all retained JWS strings (UTF-8 length sum). */
   totalLogBytes(): number {
     const row = this.db

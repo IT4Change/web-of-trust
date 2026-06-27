@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { randomUUID } from 'node:crypto'
-import { startRelay, makeIdentity, wait, waitFor, type StartedRelay } from './harness'
+import { startRelay, makeIdentity, wait, waitFor, testMode, type StartedRelay } from './harness'
 import { makeYjsClient, type YjsClient } from './yjs-client'
 import { makeAutomergeClient, type AutomergeClient } from './automerge-client'
 import { RawRelayClient, makeSpaceKeypair, mintSpaceCap } from './raw-client'
@@ -101,7 +101,11 @@ const automergeFixture: EngineFixture = {
   },
 }
 
-describe.each([yjsFixture, automergeFixture])(
+// TC5: member-removal is remote-DESTRUCTIVE (real space-rotate → permanent generation
+// advance on the shared relay). Remote ONLY with REMOTE_ALLOW_DESTRUCTIVE; else skipped.
+const describeDestructive = testMode.skipDestructiveRemote ? describe.skip : describe
+
+describeDestructive.each([yjsFixture, automergeFixture])(
   'VE-T HEADLINE removal-negative ($name) — real gated relay',
   (engine) => {
     let relay: StartedRelay
@@ -146,25 +150,25 @@ describe.each([yjsFixture, automergeFixture])(
       await wait(150)
 
       // The space is at generation 0 before any removal.
-      expect(relay.getSpace(spaceId)?.generation ?? 0).toBe(0)
+      expect((await relay.getSpace(spaceId))?.generation ?? 0).toBe(0)
 
       // (a) POSITIVE CONTROL — Bob writes BEFORE the removal: it is a legitimate
       // pre-enforcement write that MUST converge to Alice and grow the durable log.
-      const beforePre = relay.entryCount(spaceId)
+      const beforePre = await relay.entryCount(spaceId)
       bobHandle.transact((d) => { d.items['pre'] = { title: 'bob-pre-removal' } })
       const preConverged = await waitFor(
         () => aliceHandle.getDoc().items['pre']?.title === 'bob-pre-removal',
         { timeoutMs: 10_000 },
       )
       expect(preConverged).toBe(true)
-      expect(relay.entryCount(spaceId)).toBeGreaterThan(beforePre)
+      expect(await relay.entryCount(spaceId)).toBeGreaterThan(beforePre)
 
       // (b) Alice removes Bob: the two-phase, single-home-broker secure removal drives
       // a real space-rotate over the actual WS. Re-enable proof (Criterion 6): this
       // removeMember does NOT throw "not yet supported" — it runs to completion and the
       // durable generation advances to 1.
       await aliceAdapter.removeMember(spaceId, bob.identity.getDid())
-      const rotated = await waitFor(() => relay.getSpace(spaceId)?.generation === 1, { timeoutMs: 10_000 })
+      const rotated = await waitFor(async () => (await relay.getSpace(spaceId))?.generation === 1, { timeoutMs: 10_000 })
       expect(rotated).toBe(true)
 
       // (c) Bob writes AFTER the confirmed rotation over his STILL-OPEN old socket.
@@ -182,7 +186,7 @@ describe.each([yjsFixture, automergeFixture])(
       // the REMOVED member's device must leave ZERO durable trace. (Pre-SR-2 the global
       // count happened to stay frozen only because the admin's recovery write was lost —
       // a liveness bug, not a security property.)
-      const bobFrozen = relay.entryCountForDevice(spaceId, bob.deviceId)
+      const bobFrozen = await relay.entryCountForDevice(spaceId, bob.deviceId)
       // Non-vacuous teeth: Bob's PRE-removal write DID land under his deviceId, so the
       // frozen baseline is a real (>0) count — the equality below is not 0===0.
       expect(bobFrozen).toBeGreaterThanOrEqual(1)
@@ -191,7 +195,7 @@ describe.each([yjsFixture, automergeFixture])(
 
       // The removed member's post-removal write left NO new durable trace under his
       // deviceId and did not reach Alice.
-      expect(relay.entryCountForDevice(spaceId, bob.deviceId)).toBe(bobFrozen)
+      expect(await relay.entryCountForDevice(spaceId, bob.deviceId)).toBe(bobFrozen)
       expect(aliceHandle.getDoc().items['post']).toBeUndefined()
       // The pre-removal write survived (no state loss across the rotation).
       expect(aliceHandle.getDoc().items['pre']?.title).toBe('bob-pre-removal')
@@ -235,7 +239,8 @@ describe('VE-T raw-socket — real gated relay', () => {
   })
 
   // ── Criterion 2: thid==messageId on KEY_GENERATION_STALE over a REAL socket ──
-  it('Criterion 2 — a stale-generation log-entry to the rotated real relay is rejected KEY_GENERATION_STALE with thid == the rejected envelope id (validates the P4 relay change on the wire)', async () => {
+  // TC5: remote-destructive (admin space-rotate → permanent gen advance). Criteria 3/4 below are remote-capable.
+  it.skipIf(testMode.skipDestructiveRemote)('Criterion 2 — a stale-generation log-entry to the rotated real relay is rejected KEY_GENERATION_STALE with thid == the rejected envelope id (validates the P4 relay change on the wire)', async () => {
     const admin = await newIdentity()
     const spaceId = randomUUID()
     const gen0 = await makeSpaceKeypair()
@@ -250,14 +255,14 @@ describe('VE-T raw-socket — real gated relay', () => {
     expect((await c.presentCapability(cap0)).status).toBe('delivered')
     const baseline = await c.sendLogEntryRaw({ spaceId, seq: 0, plaintext: 'baseline', keyGeneration: 0 })
     expect(baseline.outcome.kind).toBe('receipt')
-    expect(relay.entryCount(spaceId)).toBe(1)
+    expect(await relay.entryCount(spaceId)).toBe(1)
 
     // Rotate the space to gen 1 (the removal mechanism) via an admin space-rotate.
     const gen1 = await makeSpaceKeypair()
     const rotateClient = track(new RawRelayClient(relay.url, admin))
     await rotateClient.connect()
     await sendAdminRotate(rotateClient, { spaceId, admin, newVerificationKey: gen1.verificationKey, newGeneration: 1 })
-    expect(relay.getSpace(spaceId)?.generation).toBe(1)
+    expect((await relay.getSpace(spaceId))?.generation).toBe(1)
 
     // The rotation invalidated `c`'s cached gen-0 write scope across ALL sockets, so a
     // raw write would now hit the capability gate FIRST. To ISOLATE the durable
@@ -271,7 +276,7 @@ describe('VE-T raw-socket — real gated relay', () => {
     // keyGeneration-0 entry (an old-content-key write). The durable generations-gate
     // reads the durable generation (1), sees 0 < 1, and rejects KEY_GENERATION_STALE.
     // The returned error frame MUST carry thid == the rejected envelope id (P4).
-    const frozen = relay.entryCount(spaceId)
+    const frozen = await relay.entryCount(spaceId)
     const stale = await c.sendLogEntryRaw({ spaceId, seq: 1, plaintext: 'stale', keyGeneration: 0 })
     expect(stale.outcome.kind).toBe('error')
     if (stale.outcome.kind === 'error') {
@@ -280,7 +285,7 @@ describe('VE-T raw-socket — real gated relay', () => {
       expect(stale.outcome.error.thid).toBe(stale.sentMessageId)
     }
     // Not stored: the stale write left no durable trace.
-    expect(relay.entryCount(spaceId)).toBe(frozen)
+    expect(await relay.entryCount(spaceId)).toBe(frozen)
   })
 
   // ── Criterion 3: keyGeneration >= space.generation is accepted (not buffered) ─
@@ -293,19 +298,19 @@ describe('VE-T raw-socket — real gated relay', () => {
     await c.connect()
     expect((await c.sendSpaceRegister({ spaceId, verificationKey: gen0.verificationKey, adminDids: [admin.getDid()] })).status).toBe('delivered')
     // The space stays at generation 0 (never rotated).
-    expect(relay.getSpace(spaceId)?.generation).toBe(0)
+    expect((await relay.getSpace(spaceId))?.generation).toBe(0)
 
     const cap0 = await mintSpaceCap({ signingSeed: gen0.signingSeed, spaceId, audience: admin.getDid(), permissions: ['read', 'write'], generation: 0 })
     expect((await c.presentCapability(cap0)).status).toBe('delivered')
 
     // A FUTURE generation (1) against a gen-0 space: 1 < 0 is false → accepted +
     // PERSISTED immediately (multi-broker liveness), not buffered.
-    const before = relay.entryCount(spaceId)
+    const before = await relay.entryCount(spaceId)
     const future = await c.sendLogEntryRaw({ spaceId, seq: 0, plaintext: 'future-gen', keyGeneration: 1 })
     expect(future.outcome.kind).toBe('receipt')
-    expect(relay.entryCount(spaceId)).toBe(before + 1)
+    expect(await relay.entryCount(spaceId)).toBe(before + 1)
     // The space generation did NOT change (the entry was stored, not a rotation).
-    expect(relay.getSpace(spaceId)?.generation).toBe(0)
+    expect((await relay.getSpace(spaceId))?.generation).toBe(0)
   })
 
   // ── Criterion 4: relay-whitelist + sync-response bypass ─────────────────────

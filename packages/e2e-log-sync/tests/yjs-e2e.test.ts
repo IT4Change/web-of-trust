@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { randomUUID } from 'node:crypto'
 import { RelayServer } from '@web_of_trust/relay'
-import { startRelay, makeIdentity, wait, waitFor, waitForStableCount, freePort, type StartedRelay } from './harness'
+import { startRelay, makeIdentity, wait, waitFor, waitForStableCount, freePort, testMode, type StartedRelay } from './harness'
 import { makeYjsClient, type YjsClient } from './yjs-client'
 import { RawRelayClient, makeSpaceKeypair, mintSpaceCap } from './raw-client'
 import { InMemoryDocLogStore, InMemoryCompactStore } from '@web_of_trust/core/adapters'
@@ -28,6 +28,11 @@ const assertLegacyIsolation = (...clients: YjsClient[]): void => {
   }
 }
 
+// TC5 test-mode matrix: every `it` below is remote-CAPABLE (runs in-process AND remote
+// against Staging with random docId/DID) UNLESS wrapped. `it.skipIf(testMode.skipDestructiveRemote)`
+// = remote-destructive (restore-clone / key-rotation create global-reserved relay state →
+// remote ONLY with REMOTE_ALLOW_DESTRUCTIVE). `it.skipIf(testMode.skipLocalOnlyRemote)` =
+// local-only (relay clock-injection — not expressible against a real remote relay).
 describe('VE-11 Yjs — real gated relay', () => {
   let relay: StartedRelay
   const tracked: YjsClient[] = []
@@ -98,7 +103,7 @@ describe('VE-11 Yjs — real gated relay', () => {
     expect(bob.probe.sentLogEntries - bobBaseSent).toBe(0)
 
     // Positive proof + legacy isolation.
-    expect(relay.entryCount(spaceId)).toBeGreaterThanOrEqual(N)
+    expect(await relay.entryCount(spaceId)).toBeGreaterThanOrEqual(N)
     assertLegacyIsolation(alice, bob)
     expect(alice.probe.sentTypes).not.toContain('content')
 
@@ -118,7 +123,7 @@ describe('VE-11 Yjs — real gated relay', () => {
 
     expect(alice.probe.sentTypes).not.toContain('content')
     expect(alice.probe.sentLogEntries).toBeGreaterThanOrEqual(2)
-    expect(relay.entryCount(spaceId)).toBeGreaterThanOrEqual(2)
+    expect(await relay.entryCount(spaceId)).toBeGreaterThanOrEqual(2)
     assertLegacyIsolation(alice)
     handle.close()
   })
@@ -193,7 +198,7 @@ describe('VE-11 Yjs — real gated relay', () => {
     expect(aliceHandle.getDoc()).toEqual(bobHandle.getDoc())
     // Distinct device namespaces (no nonce-reuse across devices): the relay tracks
     // both devices' entries for the doc.
-    expect(relay.entryCount(spaceId)).toBeGreaterThanOrEqual(6)
+    expect(await relay.entryCount(spaceId)).toBeGreaterThanOrEqual(6)
     assertLegacyIsolation(alice, bob)
 
     aliceHandle.close()
@@ -201,7 +206,7 @@ describe('VE-11 Yjs — real gated relay', () => {
   })
 
   // ── Restore/Clone: new deviceId joins cleanly (no seq collision) ─────────────
-  it('Restore/Clone — a fresh deviceId of the same identity joins and converges cleanly (new namespace)', async () => {
+  it.skipIf(testMode.skipDestructiveRemote)('Restore/Clone — a fresh deviceId of the same identity joins and converges cleanly (new namespace)', async () => {
     const alice = track(await makeYjsClient({ relay, identity: await newIdentity() }))
     const bob = track(await makeYjsClient({ relay, identity: await newIdentity() }))
     const spaceId = await createSharedSpace(alice, [bob])
@@ -234,7 +239,7 @@ describe('VE-11 Yjs — real gated relay', () => {
   })
 
   // ── VE-11 HEADLINE: in-session restore-clone re-binds + re-registers at the relay ─
-  it('VE-11 HEADLINE — an in-session restore-clone (brokerSeq>localSeq) re-binds a FRESH deviceId, re-registers it on a fresh socket, then writes converge under the new namespace (N0 + write-pause)', async () => {
+  it.skipIf(testMode.skipDestructiveRemote)('VE-11 HEADLINE — an in-session restore-clone (brokerSeq>localSeq) re-binds a FRESH deviceId, re-registers it on a fresh socket, then writes converge under the new namespace (N0 + write-pause)', async () => {
     const alice = track(await makeYjsClient({ relay, identity: await newIdentity() }))
     const bob = track(await makeYjsClient({ relay, identity: await newIdentity() }))
     const spaceId = await createSharedSpace(alice, [bob])
@@ -249,7 +254,7 @@ describe('VE-11 Yjs — real gated relay', () => {
     }
     await wait(200)
     const oldDeviceId = alice.deviceId
-    expect(relay.entryCountForDevice(spaceId, oldDeviceId)).toBeGreaterThanOrEqual(3)
+    expect(await relay.entryCountForDevice(spaceId, oldDeviceId)).toBeGreaterThanOrEqual(3)
 
     // RELOAD (the recoverable Trigger-1 case): end Alice's session, then a fresh
     // client with the SAME identity + keys + metadata, the SAME pinned deviceId, but
@@ -286,7 +291,7 @@ describe('VE-11 Yjs — real gated relay', () => {
     reloadHandle.transact((d: TestDoc) => { d.items['post-clone'] = { title: 'post' } })
     const bobHandle = await bob.adapter.openSpace<TestDoc>(spaceId)
     expect(await waitFor(() => bobHandle.getDoc().items['post-clone']?.title === 'post')).toBe(true)
-    expect(relay.entryCountForDevice(spaceId, newDeviceId)).toBeGreaterThanOrEqual(1)
+    expect(await relay.entryCountForDevice(spaceId, newDeviceId)).toBeGreaterThanOrEqual(1)
 
     assertLegacyIsolation(reload, bob)
     reloadHandle.close()
@@ -294,7 +299,7 @@ describe('VE-11 Yjs — real gated relay', () => {
   })
 
   // ── Key-rotation: blocked-by-key buffer + replay converges, loop-free ────────
-  it('Key-rotation — an entry under a not-yet-available generation is buffered, then replays loop-free after the key arrives', async () => {
+  it.skipIf(testMode.skipDestructiveRemote)('Key-rotation — an entry under a not-yet-available generation is buffered, then replays loop-free after the key arrives', async () => {
     const alice = track(await makeYjsClient({ relay, identity: await newIdentity() }))
     const bob = track(await makeYjsClient({ relay, identity: await newIdentity() }))
     const spaceId = await createSharedSpace(alice, [bob])
@@ -334,13 +339,13 @@ describe('VE-11 Yjs — real gated relay', () => {
     const alice = track(await makeYjsClient({ relay, identity: await newIdentity() }))
     const spaceId = await createSharedSpace(alice, [])
 
-    expect(relay.isSpaceRegistered(spaceId)).toBe(true)
-    expect(relay.getSpaceAdmins(spaceId)).toContain(alice.identity.getDid())
+    expect(await relay.isSpaceRegistered(spaceId)).toBe(true)
+    expect(await relay.getSpaceAdmins(spaceId)).toContain(alice.identity.getDid())
     // The creator already presented a Space capability + wrote → entries exist.
     const handle = await alice.adapter.openSpace<TestDoc>(spaceId)
     handle.transact((d: TestDoc) => { d.items['x'] = { title: 'x' } })
     await wait(150)
-    expect(relay.entryCount(spaceId)).toBeGreaterThanOrEqual(1)
+    expect(await relay.entryCount(spaceId)).toBeGreaterThanOrEqual(1)
     assertLegacyIsolation(alice)
     handle.close()
   })
@@ -357,7 +362,7 @@ describe('VE-11 Yjs — real gated relay', () => {
 
     // Register the space (admin), so it is governed by the Space path.
     expect((await c.sendSpaceRegister({ spaceId, verificationKey, adminDids: [admin.getDid()] })).status).toBe('delivered')
-    expect(relay.isSpaceRegistered(spaceId)).toBe(true)
+    expect(await relay.isSpaceRegistered(spaceId)).toBe(true)
 
     // (1) No capability presented yet → log-entry AND sync-request rejected CAPABILITY_REQUIRED.
     await expect(c.sendLogEntry({ spaceId, seq: 0, plaintext: 'blocked' }))
@@ -376,7 +381,7 @@ describe('VE-11 Yjs — real gated relay', () => {
     const rwCap = await mintSpaceCap({ signingSeed, spaceId, audience: admin.getDid(), permissions: ['read', 'write'] })
     expect((await c.presentCapability(rwCap)).status).toBe('delivered')
     expect((await c.sendLogEntry({ spaceId, seq: 0, plaintext: 'ok' })).status).toBe('delivered')
-    expect(relay.entryCount(spaceId)).toBe(1)
+    expect(await relay.entryCount(spaceId)).toBe(1)
 
     await c.disconnect()
   })
@@ -426,7 +431,7 @@ describe('VE-11 Yjs — real gated relay', () => {
   })
 
   // ── validUntil expiry (client-side clock advance) → CAPABILITY_EXPIRED → re-present converges ─
-  it('validUntil expiry — a short-lived capability stops authorizing once now >= validUntil (CAPABILITY_EXPIRED); a re-presented capability converges', async () => {
+  it.skipIf(testMode.skipLocalOnlyRemote)('validUntil expiry — a short-lived capability stops authorizing once now >= validUntil (CAPABILITY_EXPIRED); a re-presented capability converges', async () => {
     // Inject the relay clock so we can advance past validUntil deterministically.
     await relay.stop()
     const validUntil = '2026-06-23T12:00:00Z'
@@ -453,13 +458,13 @@ describe('VE-11 Yjs — real gated relay', () => {
     await expect(c.sendLogEntry({ spaceId, seq: 1, plaintext: 'after' }))
       .rejects.toThrow(/CAPABILITY_EXPIRED/)
     // The post-expiry write was NOT stored.
-    expect(relay.entryCount(spaceId)).toBe(1)
+    expect(await relay.entryCount(spaceId)).toBe(1)
 
     // Re-present (rewind so the freshly-minted cap is valid) → write converges again.
     clock = expiryMs - 60_000
     expect((await c.presentCapability(await mintShortLived())).status).toBe('delivered')
     expect((await c.sendLogEntry({ spaceId, seq: 1, plaintext: 'after-renew' })).status).toBe('delivered')
-    expect(relay.entryCount(spaceId)).toBe(2)
+    expect(await relay.entryCount(spaceId)).toBe(2)
 
     await c.disconnect()
   })
@@ -481,7 +486,7 @@ describe('VE-11 Yjs — real gated relay', () => {
     await wait(200)
 
     // Positive proof BEFORE the fresh client: the relay holds exactly N entries.
-    const N = relay.entryCount(spaceId)
+    const N = await relay.entryCount(spaceId)
     expect(N).toBeGreaterThanOrEqual(5) // seed + bob-membership + 3 edits
     // Expected reconstructed plaintext (the convergence target).
     const expected = aliceHandle.getDoc()
@@ -515,7 +520,7 @@ describe('VE-11 Yjs — real gated relay', () => {
     // count is still N (the read path did not write).
     expect(fresh.probe.syncResponseEntriesApplied).toBeGreaterThan(0)
     expect(fresh.probe.sentLogEntries).toBe(0) // a pure reader never wrote
-    expect(relay.entryCount(spaceId)).toBe(N)
+    expect(await relay.entryCount(spaceId)).toBe(N)
     assertLegacyIsolation(alice, bob, fresh)
 
     freshHandle.close()
@@ -576,7 +581,7 @@ describe('VE-11 Yjs — real gated relay', () => {
     // requestSync may both run, so the sum can exceed N, but never fall short).
     expect(fresh.probe.syncResponseEntriesApplied).toBeGreaterThanOrEqual(N)
     expect(fresh.probe.sentLogEntries).toBe(0) // pure reader — the real "did not write" invariant
-    expect(relay.entryCount(spaceId)).toBeGreaterThanOrEqual(N) // settled count; read path added nothing
+    expect(await relay.entryCount(spaceId)).toBeGreaterThanOrEqual(N) // settled count; read path added nothing
     assertLegacyIsolation(alice, bob, fresh)
 
     freshHandle.close()
@@ -588,7 +593,15 @@ describe('VE-11 Yjs — real gated relay', () => {
 // gate / capability-origin tests present EXACTLY the capability under test).
 // ════════════════════════════════════════════════════════════════════════════
 
+// LOCAL-ONLY (clock-inject): returns `mode: 'local'` (clock injection has no remote
+// equivalent, TC5 local-only). Because this helper news up a LOCAL relay unconditionally,
+// the discriminated union alone can't stop it from running while the operator believes the
+// run is remote — so it HARD-FAILS when REMOTE_RELAY_URL is set (defense-in-depth alongside
+// the `it.skipIf` guard at the call site). Accessors are async (uniform RelayObservation, TC1).
 async function startRelayWithClock(now: () => number): Promise<StartedRelay> {
+  if (testMode.isRemote) {
+    throw new Error('startRelayWithClock is local-only (clock injection); it cannot run with REMOTE_RELAY_URL set')
+  }
   const port = await freePort()
   const server = new RelayServer({ port, dbPath: ':memory:', now })
   await server.start()
@@ -602,14 +615,15 @@ async function startRelayWithClock(now: () => number): Promise<StartedRelay> {
     }
   }).docLog
   return {
+    mode: 'local',
     server,
     url: `ws://localhost:${port}`,
     port,
-    entryCount: (id) => docLog.entryCount(id),
-    entryCountForDevice: (docId, deviceId) => docLog.entryCountForDevice(docId, deviceId),
-    isSpaceRegistered: (id) => docLog.isSpaceRegistered(id),
-    getSpace: (id) => docLog.getSpace(id),
-    getSpaceAdmins: (id) => docLog.getSpaceAdmins(id),
+    entryCount: async (id) => docLog.entryCount(id),
+    entryCountForDevice: async (docId, deviceId) => docLog.entryCountForDevice(docId, deviceId),
+    isSpaceRegistered: async (id) => docLog.isSpaceRegistered(id),
+    getSpace: async (id) => docLog.getSpace(id),
+    getSpaceAdmins: async (id) => docLog.getSpaceAdmins(id),
     stop: () => server.stop(),
   }
 }

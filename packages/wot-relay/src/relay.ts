@@ -240,11 +240,19 @@ export class RelayServer {
         byDid: this.queue.countByDid(),
       },
       // Slice R durable-log stats (retained append-only content/sync channel).
+      //
+      // D1 / Spur-C remote-observation fields (entriesByDocAndDevice, spacesByDoc) use
+      // FIXED key names — the e2e remote harness binds to exactly these. AUTH NOTE:
+      // spacesByDoc.admins is mildly sensitive; on STAGING this is acceptable, but before
+      // /dashboard/data exposes these fields in PRODUCTION it needs an auth/redaction layer
+      // (that hardening is the D3 Festival-Dashboard, a separate PR).
       logStats: {
         totalEntries: this.docLog.entryCount(),
         docCount: this.docLog.docCount(),
         entriesByDoc: this.docLog.entriesByDoc(),
         devicesByDoc: this.docLog.devicesByDoc(),
+        entriesByDocAndDevice: this.docLog.entriesByDocAndDevice(),
+        spacesByDoc: this.docLog.spacesByDoc(),
         totalLogBytes: this.docLog.totalLogBytes(),
       },
       memoryMB: process.memoryUsage().rss / (1024 * 1024),

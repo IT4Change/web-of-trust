@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { startRelay, makeIdentity, wait, waitFor, type StartedRelay } from './harness'
+import { startRelay, makeIdentity, wait, waitFor, testMode, type StartedRelay } from './harness'
 import { makeYjsClient, type YjsClient } from './yjs-client'
 import { makeAutomergeClient, type AutomergeClient } from './automerge-client'
 import { InMemoryDocLogStore } from '@web_of_trust/core/adapters'
@@ -45,7 +45,10 @@ describe('VE-11 cross-engine protocol conformance — real gated relay', () => {
     for (const id of identities.splice(0)) await id.deleteStoredIdentity().catch(() => {})
   })
 
-  it('a Yjs client at the same relay processes Automerge-authored log-entry frames protocol-conformantly: it verifies+decrypts them but does NOT apply the Automerge payload as Yjs state (engine-foreign skip), without crash or loop; its own Yjs convergence keeps working', async () => {
+  // TC5: remote-destructive — amBob is a FRESH-deviceId clone of Bob's identity that joins
+  // and writes (the same restore-clone op-class gated in yjs/automerge). Remote ONLY with
+  // REMOTE_ALLOW_DESTRUCTIVE; else skipped (don't reserve a fresh device on a shared relay).
+  it.skipIf(testMode.skipDestructiveRemote)('a Yjs client at the same relay processes Automerge-authored log-entry frames protocol-conformantly: it verifies+decrypts them but does NOT apply the Automerge payload as Yjs state (engine-foreign skip), without crash or loop; its own Yjs convergence keeps working', async () => {
     // A Yjs creator creates + registers the Space and invites a second Yjs member.
     const aliceId = await newIdentity()
     const bobId = await newIdentity()
@@ -148,7 +151,7 @@ describe('VE-11 cross-engine protocol conformance — real gated relay', () => {
     expect(amBob.probe.contentMessagesApplied).toBe(0)
 
     // The relay treated the docId as ONE Space for BOTH engines (single registry entry).
-    expect(relay.isSpaceRegistered(spaceId)).toBe(true)
+    expect(await relay.isSpaceRegistered(spaceId)).toBe(true)
 
     aliceHandle.close()
     bobHandle.close()

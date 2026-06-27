@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { startRelay, makeIdentity, wait, waitFor, waitForStableCount, type StartedRelay } from './harness'
+import { startRelay, makeIdentity, wait, waitFor, waitForStableCount, testMode, type StartedRelay } from './harness'
 import { makeAutomergeClient, type AutomergeClient } from './automerge-client'
 import { isCanonicalUuidV4, spaceIdToDocumentId, InMemoryRepoStorageAdapter } from '@web_of_trust/adapter-automerge'
 import { InMemoryDocLogStore } from '@web_of_trust/core/adapters'
@@ -29,6 +29,9 @@ function logEntryDocId(entryJws: string): string {
   return (JSON.parse(new TextDecoder().decode(decodeBase64Url(payloadSegment))) as { docId: string }).docId
 }
 
+// TC5 test-mode matrix: every `it` below is remote-CAPABLE (in-process AND remote vs
+// Staging, random docId/DID) UNLESS wrapped. `it.skipIf(testMode.skipDestructiveRemote)`
+// = remote-destructive (restore-clone / key-rotation → remote only with REMOTE_ALLOW_DESTRUCTIVE).
 describe('VE-11 Automerge — real gated relay', () => {
   let relay: StartedRelay
   const tracked: AutomergeClient[] = []
@@ -96,7 +99,7 @@ describe('VE-11 Automerge — real gated relay', () => {
     expect(converged).toBe(true)
     expect(alice.probe.sentLogEntries - aliceBase).toBe(N)
     expect(bob.probe.sentLogEntries - bobBase).toBe(0) // LOOP-GUARD
-    expect(relay.entryCount(spaceId)).toBeGreaterThanOrEqual(N)
+    expect(await relay.entryCount(spaceId)).toBeGreaterThanOrEqual(N)
     assertLegacyIsolation(alice, bob)
     // Steady-state: no content sent during the edit storm (only log-entry).
     expect(alice.probe.sentTypes.slice(aliceSentBaseline)).not.toContain('content')
@@ -117,7 +120,7 @@ describe('VE-11 Automerge — real gated relay', () => {
     await wait(250)
     expect(alice.probe.sentTypes.slice(baseline)).not.toContain('content')
     expect(alice.probe.sentLogEntries).toBeGreaterThanOrEqual(2)
-    expect(relay.entryCount(spaceId)).toBeGreaterThanOrEqual(2)
+    expect(await relay.entryCount(spaceId)).toBeGreaterThanOrEqual(2)
     assertLegacyIsolation(alice)
     handle.close()
   })
@@ -142,7 +145,7 @@ describe('VE-11 Automerge — real gated relay', () => {
       return all(aliceHandle.getDoc()) && all(bobHandle.getDoc())
     })
     expect(both).toBe(true)
-    expect(relay.entryCount(spaceId)).toBeGreaterThanOrEqual(6)
+    expect(await relay.entryCount(spaceId)).toBeGreaterThanOrEqual(6)
     assertLegacyIsolation(alice, bob)
 
     aliceHandle.close()
@@ -150,7 +153,7 @@ describe('VE-11 Automerge — real gated relay', () => {
   })
 
   // ── Restore/Clone: fresh deviceId joins cleanly ────────────────────────────
-  it('Restore/Clone — a fresh deviceId of the same identity joins and converges cleanly', async () => {
+  it.skipIf(testMode.skipDestructiveRemote)('Restore/Clone — a fresh deviceId of the same identity joins and converges cleanly', async () => {
     const alice = track(await makeAutomergeClient({ relay, identity: await newIdentity() }))
     const bob = track(await makeAutomergeClient({ relay, identity: await newIdentity() }))
     const spaceId = await createSharedSpace(alice, [bob])
@@ -180,7 +183,7 @@ describe('VE-11 Automerge — real gated relay', () => {
   })
 
   // ── Key-rotation blocked-by-key buffer + replay ────────────────────────────
-  it('Key-rotation — an entry under a not-yet-available generation is buffered, then replays loop-free after the key arrives', async () => {
+  it.skipIf(testMode.skipDestructiveRemote)('Key-rotation — an entry under a not-yet-available generation is buffered, then replays loop-free after the key arrives', async () => {
     const alice = track(await makeAutomergeClient({ relay, identity: await newIdentity() }))
     const bob = track(await makeAutomergeClient({ relay, identity: await newIdentity() }))
     const spaceId = await createSharedSpace(alice, [bob])
@@ -216,8 +219,8 @@ describe('VE-11 Automerge — real gated relay', () => {
   it('space-register detection — after createSpace the relay marks the docId (UUID) as a registered Space', async () => {
     const alice = track(await makeAutomergeClient({ relay, identity: await newIdentity() }))
     const spaceId = await createSharedSpace(alice, [])
-    expect(relay.isSpaceRegistered(spaceId)).toBe(true)
-    expect(relay.getSpaceAdmins(spaceId)).toContain(alice.identity.getDid())
+    expect(await relay.isSpaceRegistered(spaceId)).toBe(true)
+    expect(await relay.getSpaceAdmins(spaceId)).toContain(alice.identity.getDid())
     assertLegacyIsolation(alice)
   })
 
@@ -250,8 +253,8 @@ describe('VE-11 Automerge — real gated relay', () => {
 
     // (c) present-capability carried the UUID docId: the relay registered the space
     // under the UUID, and a capability minted for the UUID was accepted (entries exist).
-    expect(relay.isSpaceRegistered(spaceId)).toBe(true)
-    expect(relay.entryCount(spaceId)).toBeGreaterThan(0)
+    expect(await relay.isSpaceRegistered(spaceId)).toBe(true)
+    expect(await relay.entryCount(spaceId)).toBeGreaterThan(0)
 
     aliceHandle.close()
     bobHandle.close()
@@ -291,7 +294,7 @@ describe('VE-11 Automerge — real gated relay', () => {
     bobHandle.transact((d: TestDoc) => { d.items['b1'] = { title: 'B1' } })
     await wait(250)
 
-    const N = relay.entryCount(spaceId)
+    const N = await relay.entryCount(spaceId)
     expect(N).toBeGreaterThanOrEqual(5)
     const expected = aliceHandle.getDoc()
     expect(expected.items['a1']?.title).toBe('A1')
@@ -320,7 +323,7 @@ describe('VE-11 Automerge — real gated relay', () => {
     // POSITIVE proofs.
     expect(fresh.probe.syncResponseEntriesApplied).toBeGreaterThan(0)
     expect(fresh.probe.sentLogEntries).toBe(0)
-    expect(relay.entryCount(spaceId)).toBe(N)
+    expect(await relay.entryCount(spaceId)).toBe(N)
     assertLegacyIsolation(alice, bob, fresh)
 
     freshHandle.close()
@@ -377,7 +380,7 @@ describe('VE-11 Automerge — real gated relay', () => {
     expect(fresh.probe.syncResponseEnvelopes).toBeGreaterThanOrEqual(2)
     expect(fresh.probe.syncResponseEntriesApplied).toBeGreaterThanOrEqual(N)
     expect(fresh.probe.sentLogEntries).toBe(0) // pure reader — the real "did not write" invariant
-    expect(relay.entryCount(spaceId)).toBeGreaterThanOrEqual(N) // settled count; read path added nothing
+    expect(await relay.entryCount(spaceId)).toBeGreaterThanOrEqual(N) // settled count; read path added nothing
     assertLegacyIsolation(alice, bob, fresh)
 
     freshHandle.close()
