@@ -4,9 +4,14 @@ import {
   OfflineFirstDiscoveryAdapter,
   OutboxMessagingAdapter,
   PersonalDocSpaceMetadataStorage,
-  InMemoryKeyManagementAdapter,
 } from '@web_of_trust/core/adapters'
 import { WebSocketMessagingAdapter } from '@web_of_trust/core/adapters/messaging/websocket'
+import {
+  IndexedDBDocLogStore,
+  IndexedDBKeyManagementAdapter,
+  IndexedDBMemberUpdatePendingStore,
+  IndexedDBMessageIdHistory,
+} from '@web_of_trust/core/adapters/storage/indexeddb'
 import { HttpDiscoveryAdapter } from '@web_of_trust/core/adapters/discovery/http'
 import {
   CompactStorageManager,
@@ -40,7 +45,7 @@ import { AutomergePublishStateStore } from '../adapters/AutomergePublishStateSto
 import { AutomergeGraphCacheStore } from '../adapters/AutomergeGraphCacheStore'
 import { LocalCacheStore } from '../adapters/LocalCacheStore'
 import { LocalOutboxStore } from '../adapters/LocalOutboxStore'
-import { appRuntimeConfig, createHttpDiscoveryAdapter, getOrCreateBrowserDeviceId, protocolCrypto } from '../runtime/appRuntime'
+import { appRuntimeConfig, createHttpDiscoveryAdapter, protocolCrypto } from '../runtime/appRuntime'
 import { useIdentity } from './IdentityContext'
 import { splitAcceptedAttestations } from '../lib/publish-split'
 // Yjs and Automerge adapters are dynamically imported to keep WASM out of the default bundle
@@ -150,13 +155,41 @@ export function AdapterProvider({ children, identity }: AdapterProviderProps) {
               req.onerror = () => reject(req.error)
             }) } catch { /* best effort */ }
           }
+          // Durable Wiring fresh-start (N0/N1/K1, no CompactStore migration): a DID
+          // switch MUST wipe the PREVIOUS identity's durable log + key/store DBs AND its
+          // localStorage deviceId key, so no old deviceId, key material, or log survives
+          // under a different identity (else a stale deviceId could re-enter a seq=0
+          // nonce namespace, or dead keys linger). The DB names are DID-aware.
+          if (previousDid) {
+            for (const dbName of [`wot-doc-log:${previousDid}`, `wot-key-management:${previousDid}`, `wot-member-update-pending:${previousDid}`, `wot-message-id-history:${previousDid}`]) {
+              try { await new Promise<void>((resolve, reject) => {
+                const req = indexedDB.deleteDatabase(dbName)
+                req.onsuccess = () => resolve()
+                req.onerror = () => reject(req.error)
+              }) } catch { /* best effort */ }
+            }
+            localStorage.removeItem(`wot-device-id:${previousDid}`)
+          }
         }
         localStorage.setItem('wot-active-did', did)
         lap('identity-check')
 
+        // Durable Wiring (N0): ONE store-resolved deviceId for BOTH the broker register
+        // AND the log author. The durable log store owns the deviceId, resolved BEFORE
+        // the messaging adapter is constructed (so the relay author-binding holds:
+        // registered deviceId == log-author deviceId). resolveConnectDeviceId reconciles
+        // any partial-store state (rotate-on-eviction / orphaned-log repair). DID-aware
+        // DB names so an identity switch wipes them together with the log (N1/K1).
+        const docLogStore = new IndexedDBDocLogStore(`wot-doc-log:${did}`)
+        await docLogStore.init()
+        const deviceId = await docLogStore.resolveConnectDeviceId()
+        const keyManagement = new IndexedDBKeyManagementAdapter(`wot-key-management:${did}`)
+        const memberUpdateStore = new IndexedDBMemberUpdatePendingStore(`wot-member-update-pending:${did}`)
+        const messageIdHistory = new IndexedDBMessageIdHistory(`wot-message-id-history:${did}`)
+
         // Create WebSocket adapter — try to connect quickly, but don't block init
         const wsAdapter = new WebSocketMessagingAdapter(appRuntimeConfig.relayUrl, {
-          deviceId: getOrCreateBrowserDeviceId(did),
+          deviceId,
           signBrokerAuthTranscript: (bytes: Uint8Array) => identity.signEd25519(bytes),
         })
 
@@ -181,6 +214,9 @@ export function AdapterProvider({ children, identity }: AdapterProviderProps) {
           messaging: outboxAdapter,
           identity,
           crypto: protocolCrypto,
+          // Durable Wiring (D1): durable inbox replay-protection so a reload cannot
+          // be replayed (else the in-memory default forgets every processed id).
+          messageIdHistory,
         })
         inboxReception.start()
 
@@ -261,7 +297,6 @@ export function AdapterProvider({ children, identity }: AdapterProviderProps) {
         attestationService.initFromOutbox(outboxStore)
 
         lap('attestation-service')
-        const keyManagement = new InMemoryKeyManagementAdapter()
         const spaceMetadataStorage = new PersonalDocSpaceMetadataStorage(docFns)
         spaceCompactStore = new CompactStorageManager('wot-space-compact-store')
         await spaceCompactStore.open()
@@ -271,12 +306,22 @@ export function AdapterProvider({ children, identity }: AdapterProviderProps) {
             identity,
             messaging: outboxAdapter,
             keyManagement,
+            memberUpdateStore,
+            messageIdHistory,
             metadataStorage: spaceMetadataStorage,
             compactStore: spaceCompactStore,
             vaultUrl: appRuntimeConfig.vaultUrl,
             brokerUrls: [appRuntimeConfig.relayUrl],
             flushPersonalDoc: flushYjsPersonalDoc,
             refreshPersonalDocFromVault: refreshYjsPersonalDocFromVault,
+            // Durable Wiring GATE-FLIP (the very last step): activate the durable
+            // log-sync stack. docLogStore + the store-resolved deviceId give the relay
+            // author-binding (N0); enableLogSync turns on the R/CG/A/SR/B log path. The
+            // L1 gate also needs messaging.sendControlFrame, which OutboxMessagingAdapter
+            // now forwards from the WebSocket adapter (VE-DW8).
+            docLogStore,
+            deviceId,
+            enableLogSync: true,
           })
         } else {
           const { AutomergeReplicationAdapter, SyncOnlyStorageAdapter } = await import('@web_of_trust/adapter-automerge')
@@ -285,11 +330,17 @@ export function AdapterProvider({ children, identity }: AdapterProviderProps) {
             identity,
             messaging: outboxAdapter,
             keyManagement,
+            memberUpdateStore,
+            messageIdHistory,
             metadataStorage: spaceMetadataStorage,
             repoStorage: spaceSyncStorage,
             compactStore: spaceCompactStore,
             vaultUrl: appRuntimeConfig.vaultUrl,
             brokerUrls: [appRuntimeConfig.relayUrl],
+            // Durable Wiring GATE-FLIP (mirror of the Yjs path).
+            docLogStore,
+            deviceId,
+            enableLogSync: true,
           })
         }
 
