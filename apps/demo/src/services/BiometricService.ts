@@ -35,6 +35,11 @@ export class BiometricService {
   }
 
   static async unenroll(): Promise<void> {
+    // W4 — web-build-safe: no Capacitor plugin on web, so guard like isEnrolled /
+    // isAvailable. A no-op on web lets the cross-tier wipe orchestrator call this
+    // without the web platform being a throw site (native runtime errors are still
+    // tolerated with .catch at the call site).
+    if (!this.isSupported()) return
     await BiometricKeystore.deletePassphrase()
   }
 

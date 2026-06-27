@@ -223,11 +223,30 @@ export function RecoveryFlow({ onComplete, onCancel }: RecoveryFlowProps) {
       await workflow.deleteStoredIdentity()
       const { identity } = await workflow.recoverIdentity({ mnemonic, passphrase, storeSeed: true })
 
+      // W1b — the seed was just replaced (deleteStoredIdentity + recoverIdentity
+      // storeSeed:true above), so the keystore MUST end bound to the NEW passphrase or
+      // empty; a stale OLD entry (↔ replaced seed) is the forbidden orphan-unlock trap.
+      // Reconcile UNCONDITIONALLY: enroll only when biometrics are usable, otherwise (or
+      // on enroll failure) clear any surviving entry. isEnrolled() (a stored passphrase)
+      // can be true while isAvailable()/biometricAvailable is false (e.g. fingerprints
+      // removed), so the clear must NOT be gated on biometricAvailable. unenroll is
+      // idempotent + web-build-safe. Mirrors the biometric-first paths (handleValidate /
+      // handleBiometricProtect).
+      let keystoreBoundToNewSeed = false
       if (biometricAvailable) {
         try {
           await BiometricService.enroll(passphrase)
-          await refreshBiometricStatus()
-        } catch { /* biometric optional */ }
+          keystoreBoundToNewSeed = true
+        } catch { /* fall through to clear any stale entry */ }
+      }
+      if (!keystoreBoundToNewSeed) {
+        await BiometricService.unenroll().catch(() => {})
+      }
+      await refreshBiometricStatus()
+      // Don't silently claim clean: if a stale entry survived the clear, the W3 password
+      // fallback catches it next launch, but surface it rather than asserting clean.
+      if (!keystoreBoundToNewSeed && (await BiometricService.isEnrolled())) {
+        console.error('Recovery: stale biometric enrollment survived unenroll')
       }
 
       finishRecovery(identity, identity.getDid())
