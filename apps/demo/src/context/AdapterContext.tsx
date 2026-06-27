@@ -4,9 +4,14 @@ import {
   OfflineFirstDiscoveryAdapter,
   OutboxMessagingAdapter,
   PersonalDocSpaceMetadataStorage,
-  InMemoryKeyManagementAdapter,
 } from '@web_of_trust/core/adapters'
 import { WebSocketMessagingAdapter } from '@web_of_trust/core/adapters/messaging/websocket'
+import {
+  IndexedDBDocLogStore,
+  IndexedDBKeyManagementAdapter,
+  IndexedDBMemberUpdatePendingStore,
+  IndexedDBMessageIdHistory,
+} from '@web_of_trust/core/adapters/storage/indexeddb'
 import { HttpDiscoveryAdapter } from '@web_of_trust/core/adapters/discovery/http'
 import {
   CompactStorageManager,
@@ -40,7 +45,8 @@ import { AutomergePublishStateStore } from '../adapters/AutomergePublishStateSto
 import { AutomergeGraphCacheStore } from '../adapters/AutomergeGraphCacheStore'
 import { LocalCacheStore } from '../adapters/LocalCacheStore'
 import { LocalOutboxStore } from '../adapters/LocalOutboxStore'
-import { appRuntimeConfig, createHttpDiscoveryAdapter, getOrCreateBrowserDeviceId, protocolCrypto } from '../runtime/appRuntime'
+import { appRuntimeConfig, createHttpDiscoveryAdapter, protocolCrypto } from '../runtime/appRuntime'
+import { LEGACY_DB_NAMES, deleteDatabase, wipeOrphanDurableStores } from '../services/durableStoreWipe'
 import { useIdentity } from './IdentityContext'
 import { splitAcceptedAttestations } from '../lib/publish-split'
 // Yjs and Automerge adapters are dynamically imported to keep WASM out of the default bundle
@@ -125,6 +131,7 @@ export function AdapterProvider({ children, identity }: AdapterProviderProps) {
     let spaceCompactStore: CompactStorageManager | null = null
     let offlineHandler: (() => void) | null = null
     let unsubRemoteSync: (() => void) | null = null
+    let durableStores: Array<{ close(): Promise<void> }> = []
 
     async function initAdapters() {
       try {
@@ -143,20 +150,47 @@ export function AdapterProvider({ children, identity }: AdapterProviderProps) {
             const { deletePersonalDocDB } = await import('@web_of_trust/adapter-automerge')
             await deletePersonalDocDB()
           }
-          for (const dbName of ['wot-space-metadata', 'automerge-repo', 'wot-local-cache', 'wot-space-compact-store', 'wot-space-sync-states', 'wot-yjs-compact-store', 'wot-personal-doc', 'automerge-personal', 'web-of-trust']) {
-            try { await new Promise<void>((resolve, reject) => {
-              const req = indexedDB.deleteDatabase(dbName)
-              req.onsuccess = () => resolve()
-              req.onerror = () => reject(req.error)
-            }) } catch { /* best effort */ }
-          }
+          for (const dbName of LEGACY_DB_NAMES) await deleteDatabase(dbName)
         }
+        // Durable Wiring fresh-start orphan cleanup (N0/N1/K1, no CompactStore
+        // migration): on EVERY init, remove every DID-aware durable store + deviceId
+        // key that does NOT belong to the current identity — the departing identity on
+        // a switch AND any orphan left after a logout that cleared wot-active-did
+        // (previousDid === null, the case the old previousDid-only branch missed). No
+        // stale deviceId / key material / log survives under a different identity (else a
+        // stale deviceId could re-enter a seq=0 nonce namespace, or dead keys linger).
+        // The current identity's stores are KEPT (continuity; resolveConnectDeviceId
+        // keeps them nonce-safe). Centralized in durableStoreWipe so reset / delete /
+        // fresh-start cannot drift.
+        await wipeOrphanDurableStores(did, previousDid)
         localStorage.setItem('wot-active-did', did)
         lap('identity-check')
 
+        // Durable Wiring (N0): ONE store-resolved deviceId for BOTH the broker register
+        // AND the log author. The durable log store owns the deviceId, resolved BEFORE
+        // the messaging adapter is constructed (so the relay author-binding holds:
+        // registered deviceId == log-author deviceId). resolveConnectDeviceId reconciles
+        // any partial-store state (rotate-on-eviction / orphaned-log repair). DID-aware
+        // DB names so an identity switch wipes them together with the log (N1/K1).
+        const docLogStore = new IndexedDBDocLogStore(`wot-doc-log:${did}`)
+        await docLogStore.init()
+        const deviceId = await docLogStore.resolveConnectDeviceId()
+        const keyManagement = new IndexedDBKeyManagementAdapter(`wot-key-management:${did}`)
+        const memberUpdateStore = new IndexedDBMemberUpdatePendingStore(`wot-member-update-pending:${did}`)
+        const messageIdHistory = new IndexedDBMessageIdHistory(`wot-message-id-history:${did}`)
+        // Close these IndexedDB connections on unmount (identity switch) — see cleanup.
+        durableStores = [docLogStore, keyManagement, memberUpdateStore, messageIdHistory]
+
+        // VE-11 Trigger 2: a hard security detector (SeqCollisionError = nonce-reuse-
+        // imminent / DeviceRevokedError) fired. Surface loudly; a richer UI halt /
+        // re-auth banner is a follow-up.
+        const onSecurityError = (error: Error): void => {
+          console.error('[SECURITY] log-sync security detector fired:', error)
+        }
+
         // Create WebSocket adapter — try to connect quickly, but don't block init
         const wsAdapter = new WebSocketMessagingAdapter(appRuntimeConfig.relayUrl, {
-          deviceId: getOrCreateBrowserDeviceId(did),
+          deviceId,
           signBrokerAuthTranscript: (bytes: Uint8Array) => identity.signEd25519(bytes),
         })
 
@@ -181,6 +215,9 @@ export function AdapterProvider({ children, identity }: AdapterProviderProps) {
           messaging: outboxAdapter,
           identity,
           crypto: protocolCrypto,
+          // Durable Wiring (D1): durable inbox replay-protection so a reload cannot
+          // be replayed (else the in-memory default forgets every processed id).
+          messageIdHistory,
         })
         inboxReception.start()
 
@@ -261,7 +298,6 @@ export function AdapterProvider({ children, identity }: AdapterProviderProps) {
         attestationService.initFromOutbox(outboxStore)
 
         lap('attestation-service')
-        const keyManagement = new InMemoryKeyManagementAdapter()
         const spaceMetadataStorage = new PersonalDocSpaceMetadataStorage(docFns)
         spaceCompactStore = new CompactStorageManager('wot-space-compact-store')
         await spaceCompactStore.open()
@@ -271,12 +307,23 @@ export function AdapterProvider({ children, identity }: AdapterProviderProps) {
             identity,
             messaging: outboxAdapter,
             keyManagement,
+            memberUpdateStore,
+            messageIdHistory,
             metadataStorage: spaceMetadataStorage,
             compactStore: spaceCompactStore,
             vaultUrl: appRuntimeConfig.vaultUrl,
             brokerUrls: [appRuntimeConfig.relayUrl],
             flushPersonalDoc: flushYjsPersonalDoc,
             refreshPersonalDocFromVault: refreshYjsPersonalDocFromVault,
+            // Durable Wiring GATE-FLIP (the very last step): activate the durable
+            // log-sync stack. docLogStore + the store-resolved deviceId give the relay
+            // author-binding (N0); enableLogSync turns on the R/CG/A/SR/B log path. The
+            // L1 gate also needs messaging.sendControlFrame, which OutboxMessagingAdapter
+            // now forwards from the WebSocket adapter (VE-DW8).
+            docLogStore,
+            deviceId,
+            enableLogSync: true,
+            onSecurityError,
           })
         } else {
           const { AutomergeReplicationAdapter, SyncOnlyStorageAdapter } = await import('@web_of_trust/adapter-automerge')
@@ -285,11 +332,18 @@ export function AdapterProvider({ children, identity }: AdapterProviderProps) {
             identity,
             messaging: outboxAdapter,
             keyManagement,
+            memberUpdateStore,
+            messageIdHistory,
             metadataStorage: spaceMetadataStorage,
             repoStorage: spaceSyncStorage,
             compactStore: spaceCompactStore,
             vaultUrl: appRuntimeConfig.vaultUrl,
             brokerUrls: [appRuntimeConfig.relayUrl],
+            // Durable Wiring GATE-FLIP (mirror of the Yjs path).
+            docLogStore,
+            deviceId,
+            enableLogSync: true,
+            onSecurityError,
           })
         }
 
@@ -602,6 +656,8 @@ export function AdapterProvider({ children, identity }: AdapterProviderProps) {
       outboxAdapter?.disconnect()
       localCacheStore?.close()
       spaceCompactStore?.close()
+      // Close the durable log-sync IndexedDB connections (no leak across identity switch).
+      for (const store of durableStores) void store.close().catch(() => {})
     }
   }, [identity])
 

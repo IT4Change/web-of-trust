@@ -25,7 +25,7 @@ import {
   createAckMessage, evaluateInboxAckDisposition, createDidKeyResolver,
   formatMembershipEventKey, parseMembershipEventKey, resolveActiveMembers, resolveMembershipWinner, assertMembershipEvent,
   resolveActiveAdmins, assertAdminEntry,
-  LogSyncCoordinator, AuthorMismatchError, createSpaceCapabilityJws,
+  LogSyncCoordinator, AuthorMismatchError, LocalAppendFailedError, createSpaceCapabilityJws,
   createSpaceRegisterMessageWithSigner, createSpaceRotateMessageWithSigner,
   LOG_ENTRY_MESSAGE_TYPE, SYNC_RESPONSE_MESSAGE_TYPE,
 } from '@web_of_trust/core/protocol'
@@ -207,6 +207,12 @@ export interface AutomergeReplicationAdapterConfig {
    * adapter registers with the broker.
    */
   deviceId?: string
+  /**
+   * VE-11 Trigger 2: programmatic surface for the HARD security detectors
+   * (SeqCollisionError / DeviceRevokedError), forwarded to every space coordinator
+   * so the composition root can halt / alert / re-auth.
+   */
+  onSecurityError?: (error: Error) => void
 }
 
 class AutomergeSpaceHandle<T> implements SpaceHandle<T> {
@@ -351,6 +357,7 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
   private readonly logSyncEnabled: boolean
   /** Active per-device UUID (re-bound process-wide by a restore-clone, VE-4/VE-5). */
   private deviceId: string
+  private readonly onSecurityError?: (error: Error) => void
   /** True once the store-bound deviceId has been resolved (BLOCKER-1b). */
   private deviceIdResolved = false
   /** Per-space LogSyncCoordinator (engine-neutral orchestration), keyed by spaceId UUID. */
@@ -373,6 +380,7 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
     this.spaceFilter = config.spaceFilter ?? null
     this.docLogStore = config.docLogStore
     this.deviceId = config.deviceId ?? crypto.randomUUID()
+    this.onSecurityError = config.onSecurityError
     // The log path is the primary steady-state path only when both a durable log
     // store and a control-frame-capable messaging adapter are present (VE-9/VE-11).
     this.logSyncEnabled =
@@ -635,9 +643,17 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
         this.attachLogChangeObserver(spaceState)
         const coordinator = await this.getOrCreateCoordinator(spaceState)
         if (coordinator) {
-          await coordinator.catchUp().catch((err) =>
-            console.warn('[ReplicationAdapter] restore log catch-up failed:', err),
-          )
+          await coordinator.catchUp().catch((err) => {
+            // E1: surface a non-transient append failure loudly, never a silent defer.
+            if (err instanceof LocalAppendFailedError) {
+              console.error(
+                '[ReplicationAdapter] non-transient local-append failure during restore catch-up (durable state NOT advanced):',
+                err,
+              )
+              return
+            }
+            console.warn('[ReplicationAdapter] restore log catch-up failed:', err)
+          })
         }
       }
     }
@@ -1036,6 +1052,10 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
         await coordinator.ensurePublished().catch((err) => {
           if (err instanceof AuthorMismatchError) {
             console.error('[ReplicationAdapter] AUTHOR_MISMATCH during createSpace publish:', err.message)
+          } else if (err instanceof LocalAppendFailedError) {
+            // E1: a non-transient durable-append failure (e.g. a restore-clone
+            // re-write during first-publication) must surface, not silently defer.
+            throw err
           } else {
             console.debug('[ReplicationAdapter] first-publication deferred (will retry):', err)
           }
@@ -2257,9 +2277,17 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
       if (space) {
         const coordinator = await this.getOrCreateCoordinator(space)
         if (coordinator) {
-          await coordinator.catchUp().catch((err) =>
-            console.warn(`[ReplicationAdapter] log catch-up failed for ${spaceId}:`, err),
-          )
+          await coordinator.catchUp().catch((err) => {
+            // E1: surface a non-transient append failure loudly, never a silent defer.
+            if (err instanceof LocalAppendFailedError) {
+              console.error(
+                `[ReplicationAdapter] non-transient local-append failure during catch-up for ${spaceId} (durable state NOT advanced):`,
+                err,
+              )
+              return
+            }
+            console.warn(`[ReplicationAdapter] log catch-up failed for ${spaceId}:`, err)
+          })
         }
       }
       return
@@ -2677,6 +2705,7 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
       onAfterRestoreClone: async () => {
         await this.writeFullStateViaLog(space)
       },
+      onSecurityError: this.onSecurityError,
     })
     this.coordinators.set(spaceId, coordinator)
     // VE-7: the log path now owns this space's steady-state sync — disable the
@@ -2728,6 +2757,11 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
         console.error('[ReplicationAdapter] AUTHOR_MISMATCH during restore-clone re-write:', err.message)
         return
       }
+      // E1: writeFullStateViaLog is BOTH the createSpace seed (no outer catch) and
+      // the restore-clone re-write — a non-transient append failure here means the
+      // (deviceId,seq=0) namespace stays empty while the doc claims it was logged.
+      // Propagate instead of degrading to a deferred-retry log line.
+      if (err instanceof LocalAppendFailedError) throw err
       console.debug('[ReplicationAdapter] restore-clone re-write failed (retry on reconnect):', err)
     })
   }
@@ -2746,6 +2780,13 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
     } catch (err) {
       if (err instanceof AuthorMismatchError) {
         console.error('[ReplicationAdapter] AUTHOR_MISMATCH on log write — hard stop:', err.message)
+        return
+      }
+      // E1: this per-edit log-write is fire-and-forget (no caller to propagate to) —
+      // surface a non-transient append failure loudly (durable state NOT advanced)
+      // instead of degrading it to a deferred-retry log line.
+      if (err instanceof LocalAppendFailedError) {
+        console.error('[ReplicationAdapter] non-transient local-append failure on log write (durable state NOT advanced):', err)
         return
       }
       console.debug('[ReplicationAdapter] log write failed (will retry on reconnect):', err)
@@ -3107,13 +3148,24 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
           await coordinator.ensurePublished().catch((err) => {
             if (err instanceof AuthorMismatchError) {
               console.error('[ReplicationAdapter] AUTHOR_MISMATCH during join publish:', err.message)
+            } else if (err instanceof LocalAppendFailedError) {
+              // E1: a non-transient durable-append failure must surface, not defer.
+              throw err
             } else {
               console.debug('[ReplicationAdapter] join first-publication deferred (will retry):', err)
             }
           })
-          await coordinator.catchUp().catch((err) =>
-            console.warn('[ReplicationAdapter] join log catch-up failed:', err),
-          )
+          await coordinator.catchUp().catch((err) => {
+            // E1: surface a non-transient append failure loudly, never a silent defer.
+            if (err instanceof LocalAppendFailedError) {
+              console.error(
+                '[ReplicationAdapter] non-transient local-append failure during join catch-up (durable state NOT advanced):',
+                err,
+              )
+              return
+            }
+            console.warn('[ReplicationAdapter] join log catch-up failed:', err)
+          })
         }
       }
 
@@ -3261,9 +3313,18 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
         await coordinator.replayBlockedByKey().catch((err) =>
           console.debug('[ReplicationAdapter] blocked-by-key replay failed:', err),
         )
-        await coordinator.replayPendingReemits().catch((err) =>
-          console.debug('[ReplicationAdapter] pending-reemit replay failed:', err),
-        )
+        await coordinator.replayPendingReemits().catch((err) => {
+          // E1: a re-emit advances CRDT state via a new log-append — surface a
+          // non-transient failure loudly, never a silent defer.
+          if (err instanceof LocalAppendFailedError) {
+            console.error(
+              '[ReplicationAdapter] non-transient local-append failure during pending-reemit replay (durable state NOT advanced):',
+              err,
+            )
+            return
+          }
+          console.debug('[ReplicationAdapter] pending-reemit replay failed:', err)
+        })
         // Slice SR-2 / Symptom A (real-WS lagger liveness): a lagger that wrote during
         // the rotation window may have had its stale gen-0 write rejected on the REAL
         // relay by the CAPABILITY gate (the rotation deleted its gen-0 scope atomically
@@ -3283,9 +3344,17 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
         // sync-request per rotation import (never a write loop). catchUp() MUST run BEFORE
         // resendPending() so the gen-N capability is presented before the re-send. Mirrors
         // the Yjs adapter exactly (VE-C2 lives in the engine-neutral coordinator).
-        await coordinator.catchUp().catch((err) =>
-          console.debug('[ReplicationAdapter] post-rotation catch-up failed:', err),
-        )
+        await coordinator.catchUp().catch((err) => {
+          // E1: surface a non-transient append failure loudly, never a silent defer.
+          if (err instanceof LocalAppendFailedError) {
+            console.error(
+              '[ReplicationAdapter] non-transient local-append failure during post-rotation catch-up (durable state NOT advanced):',
+              err,
+            )
+            return
+          }
+          console.debug('[ReplicationAdapter] post-rotation catch-up failed:', err)
+        })
         await coordinator.resendPending().catch((err) =>
           console.debug('[ReplicationAdapter] post-rotation resend-pending failed:', err),
         )

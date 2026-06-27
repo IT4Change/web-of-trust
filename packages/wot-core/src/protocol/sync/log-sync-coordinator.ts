@@ -152,6 +152,80 @@ export class AuthorMismatchError extends Error {
 }
 
 /**
+ * Durable Wiring / E1: a NON-TRANSIENT failure of the durable local log-append
+ * ({@link DocLogStore.appendLocalEntry}) — exhausted seq-reservation retries, an
+ * IndexedDB quota/abort/corruption, or a build()/crypto failure. Distinct from a
+ * transient SEND failure (offline / no connection), which is retried on reconnect.
+ *
+ * The CRDT state MUST NOT be reported as advanced when this is thrown: the
+ * seed/update is not durably logged, so swallowing it to console.debug would let
+ * "the space exists locally but was never logged" drift in (partial-durability).
+ * The adapters' first-publication / write / restore-clone-rewrite catches surface
+ * (rethrow) this instead of degrading it to a deferred-retry log line.
+ */
+export class LocalAppendFailedError extends Error {
+  readonly docId: string
+  readonly deviceId: string
+  readonly reason: unknown
+  constructor(docId: string, deviceId: string, reason: unknown) {
+    super(
+      `local log-append failed for docId=${docId} deviceId=${deviceId}: ` +
+        `${reason instanceof Error ? reason.message : String(reason)}`,
+    )
+    this.name = 'LocalAppendFailedError'
+    this.docId = docId
+    this.deviceId = deviceId
+    this.reason = reason
+  }
+}
+
+/**
+ * VE-11 Trigger 2 (Durable Wiring): a WRITE-PATH SEQ_COLLISION_DETECTED — the relay
+ * saw a DIFFERENT contentHash at an already-stored (docId, deviceId, seq), i.e.
+ * seq-REUSE = deterministic-nonce-reuse-imminent. This signals a VIOLATED invariant
+ * (bug / corruption / attack); a smooth auto-recover would MASK a potential AES-GCM
+ * break, so it is thrown HARD and NEVER auto-recovered. The recoverable mid-session
+ * case (catch-up brokerSeq>localSeq) is the SEPARATE Trigger-1 restore-clone+rebind
+ * path — it never reaches this error.
+ */
+export class SeqCollisionError extends Error {
+  readonly docId: string
+  readonly deviceId: string
+  readonly seq?: number
+  constructor(docId: string, deviceId: string, seq?: number) {
+    super(
+      `SEQ_COLLISION_DETECTED (write-path) for docId=${docId} deviceId=${deviceId} ` +
+        `seq=${seq ?? '?'}: seq-reuse = nonce-reuse-imminent — hard stop, never auto-recover`,
+    )
+    this.name = 'SeqCollisionError'
+    this.docId = docId
+    this.deviceId = deviceId
+    this.seq = seq
+  }
+}
+
+/**
+ * VE-11 (Durable Wiring): our CURRENT device was DEVICE_REVOKED mid-session on a
+ * write. A revoked device MUST NOT silently re-clone itself back in (that would let
+ * a revoked device re-admit itself), so this is surfaced for re-auth / re-join
+ * rather than auto-recovered. A straggler write under an OLD / already-rotated
+ * deviceId is instead dropped silently (a benign late reject, no surface).
+ */
+export class DeviceRevokedError extends Error {
+  readonly docId: string
+  readonly deviceId: string
+  constructor(docId: string, deviceId: string) {
+    super(
+      `DEVICE_REVOKED for docId=${docId} deviceId=${deviceId}: the current device was ` +
+        'revoked — re-auth/re-join required, no silent re-clone',
+    )
+    this.name = 'DeviceRevokedError'
+    this.docId = docId
+    this.deviceId = deviceId
+  }
+}
+
+/**
  * A write-path reject the relay routed back as `{ type:'error', thid, code }`
  * after a SENT log-entry (P2-NIT-1, VE-4/VE-5). The coordinator classifies the
  * code and, for the actions whose *mechanism* is an adapter/runtime concern
@@ -296,6 +370,16 @@ export interface LogSyncCoordinatorConfig {
    */
   onAfterRestoreClone?: (newDeviceId: string) => Promise<void> | void
   /**
+   * VE-11 Trigger 2: a programmatic surface for the HARD security detectors
+   * ({@link SeqCollisionError} = write-path seq-reuse = nonce-reuse-imminent, and
+   * {@link DeviceRevokedError} = our current device was revoked). handleWriteReject
+   * still THROWS these, but the throw propagates through the messaging onMessage
+   * dispatch which only console.error-logs callback errors — so the application
+   * cannot reliably react. This hook gives the composition root a reliable callback
+   * to halt / alert / re-auth. Invoked BEFORE the throw; must not itself throw.
+   */
+  onSecurityError?: (error: Error) => void
+  /**
    * Slice B / VE-B1: the sync-request page size sent as `body.limit`. Defaults to
    * {@link DEFAULT_CATCH_UP_PAGE_SIZE} (100, matching the relay default). Config-
    * driven so the value is set once here rather than threaded through every adapter
@@ -425,7 +509,11 @@ export class LogSyncCoordinator {
    * Slice B v3: the in-flight catch-up's settle-promise (set whenever `catchingUp` is set, by
    * BOTH catchUp() and runFirstPublication). Lets runFirstPublication AWAIT an already-running
    * catch-up instead of starting a second parallel pagination loop (Codex: the guard must be
-   * bidirectional — ensurePublished() starting while a catchUp() is in flight). Never rejects.
+   * bidirectional — ensurePublished() starting while a catchUp() is in flight). SETTLES WITH the
+   * catch-up outcome and REJECTS on failure (since #214 / loop-review #2): a coalescing awaiter
+   * (runFirstPublication / catchUp) propagates that rejection so the first write is never allowed
+   * on an unconfirmed head-abgleich / restore-clone (BLOCKER-1b). The detached no-op `.catch` on
+   * the stored handle only guards against an unhandled rejection when nobody is coalescing.
    */
   private catchUpInFlight: Promise<void> | null = null
 
@@ -458,6 +546,16 @@ export class LogSyncCoordinator {
 
   /** Re-entrancy guard so a single reject triggers exactly one restore-clone. */
   private restoreCloneInFlight = false
+
+  /**
+   * VE-11 write-pause gate. While a restore-clone is re-binding the deviceId
+   * (mint → persist → fresh-socket re-register), this is a PENDING promise that
+   * every log-entry send (sendLogEntryEnvelope) awaits, so NO envelope goes out
+   * under the new deviceId before it is `registered` at the broker (which would
+   * race a DEVICE_NOT_REGISTERED window). null = open (steady state); resolved +
+   * nulled the instant the new deviceId is registered.
+   */
+  private rebinding: Promise<void> | null = null
 
   /**
    * VE-C2 re-entrancy guard, keyed by the rejected (deviceId,seq): a single
@@ -648,6 +746,14 @@ export class LogSyncCoordinator {
     }
     // (2) present-capability (VE-9), with the reject-disposition retry loop.
     await this.presentCapabilityWithRetry()
+    // VE-11: a restore-clone re-publish (restoreClone set published=false then called
+    // ensurePublished) must do (1) space-register + (2) present-capability under the NEW
+    // deviceId, but MUST NOT re-run the catch-up (3)+(4): (a) it is ALREADY acting on the
+    // catch-up disposition that triggered it, so re-running is redundant — the fresh
+    // deviceId has no broker history to reconcile; (b) it runs INSIDE the outer catch-up
+    // (catchingUp=true, catchUpInFlight=the outer work), so the re-entrancy guard below
+    // would await the outer work — which is awaiting THIS restore-clone → deadlock.
+    if (this.restoreCloneInFlight) return
     // (3)+(4) sync-request head-abgleich + seq-consistency (VE-4). BLOCKER-1b
     //     defense-in-depth: a broker_seq>local_seq disposition is no longer dead
     //     code — it is acted on HERE (restore-clone BEFORE the first write), so a
@@ -734,32 +840,42 @@ export class LogSyncCoordinator {
     const deviceId = this.deviceId
     const authorKid = this.config.authorKid
 
-    const entry = await this.config.logStore.appendLocalEntry({
-      deviceId,
-      docId,
-      // build(seq) runs INSIDE the store's seq lock; the nonce binds (deviceId,seq)
-      // and carries NO keyGeneration, so a generation switch can never collide a
-      // seq (VE-2 invariant). Re-emission of a pending entry sends this exact JWS.
-      build: async (seq: number) => {
-        const payloadEncryption = await encryptLogPayload({
-          crypto: this.config.crypto,
-          spaceContentKey: content.key,
-          deviceId,
-          seq,
-          plaintext: encoded,
-        })
-        const payload: LogEntryPayload = {
-          seq,
-          deviceId,
-          docId,
-          authorKid,
-          keyGeneration: content.generation,
-          data: payloadEncryption.blobBase64Url,
-          timestamp: this.now().toISOString(),
-        }
-        return createLogEntryJwsWithSigner({ payload, sign: this.config.signLogEntry })
-      },
-    })
+    let entry: LocalLogEntry
+    try {
+      entry = await this.config.logStore.appendLocalEntry({
+        deviceId,
+        docId,
+        // build(seq) runs INSIDE the store's seq lock; the nonce binds (deviceId,seq)
+        // and carries NO keyGeneration, so a generation switch can never collide a
+        // seq (VE-2 invariant). Re-emission of a pending entry sends this exact JWS.
+        build: async (seq: number) => {
+          const payloadEncryption = await encryptLogPayload({
+            crypto: this.config.crypto,
+            spaceContentKey: content.key,
+            deviceId,
+            seq,
+            plaintext: encoded,
+          })
+          const payload: LogEntryPayload = {
+            seq,
+            deviceId,
+            docId,
+            authorKid,
+            keyGeneration: content.generation,
+            data: payloadEncryption.blobBase64Url,
+            timestamp: this.now().toISOString(),
+          }
+          return createLogEntryJwsWithSigner({ payload, sign: this.config.signLogEntry })
+        },
+      })
+    } catch (err) {
+      // E1: a durable local-append failure is NON-TRANSIENT (exhausted seq retries,
+      // IDB quota/abort, or a build/crypto failure). Surface it as a typed error so
+      // the adapter does NOT advance/announce CRDT state for a write that was never
+      // logged — instead of letting the raw error fall into a console.debug-deferred
+      // swallow. A transient SEND failure happens AFTER this point and stays retryable.
+      throw new LocalAppendFailedError(docId, deviceId, err)
+    }
 
     // VE-C2 retention: keep the plaintext `encoded` update IN-MEMORY (never durable)
     // bound to this send, so a KEY_GENERATION_STALE reject re-emits the SAME update
@@ -800,6 +916,11 @@ export class LogSyncCoordinator {
     seq: number,
     encoded?: Uint8Array,
   ): Promise<void> {
+    // VE-11 write-pause: while a restore-clone re-binds the deviceId (mint → persist
+    // → fresh-socket re-register), hold every log-entry send until the new deviceId
+    // is `registered` — otherwise a concurrent write races a DEVICE_NOT_REGISTERED
+    // window. An open (null) or already-resolved gate is a no-op.
+    if (this.rebinding) await this.rebinding
     const recipients = await this.resolveRecipients()
     const messageId = cryptoRandomUuid()
     this.rememberInFlight(messageId, deviceId, seq, encoded)
@@ -1666,8 +1787,11 @@ export class LogSyncCoordinator {
    * Drive the VE-4/VE-5 action for a write-path reject code (P2-NIT-1). The
    * disposition table:
    *  - AUTHOR_MISMATCH → HARD STOP: throw {@link AuthorMismatchError}, NO retry.
-   *  - SEQ_COLLISION_DETECTED / DEVICE_REVOKED → restore-clone (mint new deviceId
-   *    via {@link WriteRejectHandler}, restart at seq=0, re-write pending).
+   *  - SEQ_COLLISION_DETECTED (write-path) → HARD STOP: throw {@link SeqCollisionError}
+   *    (VE-11 Trigger 2 — seq-reuse = nonce-reuse-imminent, NEVER auto-recover). The
+   *    recoverable mid-session case is the SEPARATE Trigger-1 catch-up restore-clone.
+   *  - DEVICE_REVOKED → a straggler under an OLD deviceId is dropped; a revoke of the
+   *    CURRENT device throws {@link DeviceRevokedError} (re-auth/re-join, no re-clone).
    *  - DEVICE_NOT_REGISTERED / DEVICE_ID_CONFLICT → device-re-register.
    *  - CAPABILITY_* → re-present capability + resend pending.
    *  - KEY_GENERATION_STALE → VE-C2: catch up the missed rotation, then re-emit the
@@ -1692,8 +1816,45 @@ export class LogSyncCoordinator {
         // AUTHOR_MISMATCH: authorKid<->deviceId binding bug. Hard stop, never retry.
         throw new AuthorMismatchError(this.config.docId, rejectedDeviceId ?? this.deviceId, this.config.authorKid)
       case 'restore-clone':
-        await this.restoreClone({ code, rejectedDeviceId, rejectedSeq })
-        return disposition
+        // VE-11 Trigger split — a WRITE-PATH reject is NEVER the recoverable case:
+        //  - SEQ_COLLISION_DETECTED = seq-REUSE at an already-stored (docId,deviceId,
+        //    seq) = deterministic-nonce-reuse-imminent. HARD STOP (Trigger 2), never
+        //    auto-recover: a smooth re-clone would MASK a potential AES-GCM break. The
+        //    recoverable mid-session case is the SEPARATE Trigger-1 catch-up path
+        //    (brokerSeq>localSeq → restoreClone), which never reaches here.
+        if (code === 'SEQ_COLLISION_DETECTED') {
+          const seqCollision = new SeqCollisionError(
+            this.config.docId,
+            rejectedDeviceId ?? this.deviceId,
+            rejectedSeq,
+          )
+          // Surface to the app BEFORE throwing — the throw propagates through the
+          // messaging onMessage dispatch, which only console.error-logs callback
+          // errors, so a security detector would otherwise be unobservable.
+          this.config.onSecurityError?.(seqCollision)
+          throw seqCollision
+        }
+        //  - DEVICE_REVOKED: a revoked device must NOT silently re-clone itself back in
+        //    (that would let a revoked device re-admit itself). A straggler write under
+        //    an OLD / already-rotated deviceId is a benign late reject → drop (the
+        //    active-deviceId filter already stops its re-sends). A revoke of our CURRENT
+        //    device is surfaced for re-auth / re-join.
+        if (rejectedDeviceId !== undefined && rejectedDeviceId !== this.deviceId) {
+          return disposition
+        }
+        if (rejectedDeviceId === undefined) {
+          // A DEVICE_REVOKED reject SHOULD always carry the rejected deviceId; a
+          // missing one is a malformed broker frame. We conservatively treat it as a
+          // current-device revoke (safe), but flag the protocol violation.
+          console.warn(
+            '[LogSyncCoordinator] DEVICE_REVOKED without a deviceId (malformed broker frame); treating as current-device revoke',
+          )
+        }
+        {
+          const revoked = new DeviceRevokedError(this.config.docId, this.deviceId)
+          this.config.onSecurityError?.(revoked)
+          throw revoked
+        }
       case 'device-re-register':
         await this.deviceReRegister(code, rejectedDeviceId)
         return disposition
@@ -1920,6 +2081,25 @@ export class LogSyncCoordinator {
   }): Promise<void> {
     if (this.restoreCloneInFlight) return
     this.restoreCloneInFlight = true
+    // VE-11 write-pause: hold every log-entry send from the moment the restore-clone
+    // begins until the NEW deviceId is BOTH re-registered AND has its capability
+    // re-presented. The gate must NOT open merely on the rebind (registered): a
+    // log-entry sent after register but BEFORE present-capability is acked is
+    // rejected CAPABILITY_REQUIRED. So the gate opens only AFTER ensurePublished
+    // (space-register + present-capability under the new deviceId) completes.
+    let gateOpened = false
+    let resolveGate: () => void = () => {}
+    this.rebinding = new Promise<void>((resolve) => {
+      resolveGate = resolve
+    })
+    // Idempotent: opening the gate resolves the promise AND nulls it so steady-state
+    // sends short-circuit. Safe to call from both the success path and the backstop.
+    const openWritePauseGate = (): void => {
+      if (gateOpened) return
+      gateOpened = true
+      resolveGate()
+      this.rebinding = null
+    }
     try {
       const handler = this.config.onWriteRejected
       if (!handler) {
@@ -1945,12 +2125,17 @@ export class LogSyncCoordinator {
       // the authoring device), but the in-flight correlation for the old device is
       // stale — drop it.
       this.inFlightWrites.clear()
-      // The clone re-publishes on this connection (present-capability + space
-      // register idempotent) and re-writes the still-pending entries (which the
-      // adapter re-built under the new deviceId from seq=0).
+      // Re-publish under the NEW deviceId (space-register + present-capability). The
+      // gate stays CLOSED through this: ensurePublished sends only CONTROL frames
+      // (never log-entries, so the gate does not block it — and the restore-clone
+      // skips the re-entrant catch-up step), and a log-entry must NOT race ahead of
+      // present-capability.
       this.published = false
       this.publishing = null
       await this.ensurePublished()
+      // NOW the new deviceId is BOTH registered AND capability-presented → OPEN the
+      // gate so the re-write below + any parked concurrent write send under it.
+      openWritePauseGate()
       // Re-write the current CRDT state under the NEW deviceId from seq=0. The
       // colliding seq under the OLD deviceId is abandoned (never re-used with
       // divergent plaintext — a new deviceId is a fresh nonce namespace). When the
@@ -1962,6 +2147,13 @@ export class LogSyncCoordinator {
         await this.resendPending()
       }
     } finally {
+      // Backstop: ALWAYS open the gate (no-handler / no-new-deviceId / any-error path)
+      // so a failed restore can never wedge writes forever. On the error path the
+      // active deviceId is the OLD one (the handler threw before this.deviceId was set,
+      // or rebindDeviceId rolled it back), so parked writes resume under the still-
+      // registered old deviceId; their ensurePublished re-triggers the catch-up restore
+      // on the next attempt (or the broker rejects them, surfacing the failure).
+      openWritePauseGate()
       this.restoreCloneInFlight = false
     }
   }
