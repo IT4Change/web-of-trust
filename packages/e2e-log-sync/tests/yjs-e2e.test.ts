@@ -233,6 +233,66 @@ describe('VE-11 Yjs — real gated relay', () => {
     bob2Handle.close()
   })
 
+  // ── VE-11 HEADLINE: in-session restore-clone re-binds + re-registers at the relay ─
+  it('VE-11 HEADLINE — an in-session restore-clone (brokerSeq>localSeq) re-binds a FRESH deviceId, re-registers it on a fresh socket, then writes converge under the new namespace (N0 + write-pause)', async () => {
+    const alice = track(await makeYjsClient({ relay, identity: await newIdentity() }))
+    const bob = track(await makeYjsClient({ relay, identity: await newIdentity() }))
+    const spaceId = await createSharedSpace(alice, [bob])
+
+    // Alice writes under her store-resolved deviceId D. N0: the entries the relay
+    // ACCEPTED are durably keyed under D — proof that the registered deviceId == the
+    // log-author deviceId == the store deviceId (else the relay would reject).
+    const aliceHandle = await alice.adapter.openSpace<TestDoc>(spaceId)
+    for (let i = 0; i < 3; i++) {
+      aliceHandle.transact((d: TestDoc) => { d.items[`pre-${i}`] = { title: `pre-${i}` } })
+      await wait(40)
+    }
+    await wait(200)
+    const oldDeviceId = alice.deviceId
+    expect(relay.entryCountForDevice(spaceId, oldDeviceId)).toBeGreaterThanOrEqual(3)
+
+    // RELOAD (the recoverable Trigger-1 case): end Alice's session, then a fresh
+    // client with the SAME identity + keys + metadata, the SAME pinned deviceId, but
+    // an EMPTY docLogStore (local head -1). On catch-up the relay reports D at head>=3
+    // > local -1 → brokerSeq>localSeq → an IN-SESSION restore-clone mints a fresh
+    // deviceId D', re-registers it on a FRESH socket (rebindDeviceId), and re-writes.
+    aliceHandle.close()
+    await alice.stop()
+
+    const reload = track(await makeYjsClient({
+      relay,
+      identity: alice.identity,
+      keyManagement: alice.keyManagement,
+      metadataStorage: alice.metadataStorage,
+      deviceId: oldDeviceId,
+      docLogStore: new InMemoryDocLogStore(),
+      compactStore: new InMemoryCompactStore(),
+    }))
+    await reload.adapter.requestSync(spaceId)
+
+    // The restore-clone re-bound the REAL messaging adapter to a fresh deviceId D'
+    // (≠ the old one) via a fresh-socket re-register at the relay (no relay change).
+    const rebound = await waitFor(
+      () => (reload.messaging as unknown as { deviceId: string }).deviceId !== oldDeviceId,
+    )
+    expect(rebound).toBe(true)
+    const newDeviceId = (reload.messaging as unknown as { deviceId: string }).deviceId
+    expect(newDeviceId).not.toBe(oldDeviceId)
+
+    // Write-pause held: a post-clone write LANDS at the relay under the NEW deviceId
+    // (it was accepted → D' was registered first; never DEVICE_NOT_REGISTERED), and
+    // Bob converges. The colliding old (deviceId,seq) namespace is abandoned.
+    const reloadHandle = await reload.adapter.openSpace<TestDoc>(spaceId)
+    reloadHandle.transact((d: TestDoc) => { d.items['post-clone'] = { title: 'post' } })
+    const bobHandle = await bob.adapter.openSpace<TestDoc>(spaceId)
+    expect(await waitFor(() => bobHandle.getDoc().items['post-clone']?.title === 'post')).toBe(true)
+    expect(relay.entryCountForDevice(spaceId, newDeviceId)).toBeGreaterThanOrEqual(1)
+
+    assertLegacyIsolation(reload, bob)
+    reloadHandle.close()
+    bobHandle.close()
+  })
+
   // ── Key-rotation: blocked-by-key buffer + replay converges, loop-free ────────
   it('Key-rotation — an entry under a not-yet-available generation is buffered, then replays loop-free after the key arrives', async () => {
     const alice = track(await makeYjsClient({ relay, identity: await newIdentity() }))

@@ -5,7 +5,10 @@ import { InMemoryKeyManagementAdapter } from '../src/adapters/key-management/InM
 import { IndexedDBMessageIdHistory } from '../src/adapters/message-id-history/IndexedDBMessageIdHistory'
 import { IndexedDBMemberUpdatePendingStore } from '../src/adapters/member-update/IndexedDBMemberUpdatePendingStore'
 import type { SeenMemberUpdateSignal } from '../src/protocol/sync/member-update-disposition'
-import { decodeBase64Url } from '../src/protocol'
+import { decodeBase64Url, encryptLogPayload, decryptLogPayload } from '../src/protocol'
+import { WebCryptoProtocolCryptoAdapter } from '../src/adapters/protocol-crypto'
+
+const cryptoAdapter = new WebCryptoProtocolCryptoAdapter()
 
 let counter = 0
 function freshDbName(prefix: string): string {
@@ -38,6 +41,42 @@ describe('IndexedDBKeyManagementAdapter — D1/K1 durability', () => {
     await mem.saveKey(spaceId, 0, key0)
     const memFresh = new InMemoryKeyManagementAdapter()
     expect(await memFresh.getCurrentKey(spaceId)).toBeNull()
+  })
+
+  it('K1 reload-decrypt — a payload encrypted under a saved content key DECRYPTS after a reload (the festival reload property)', async () => {
+    const dbName = freshDbName('km')
+    const spaceId = uuid()
+    const deviceId = uuid()
+    const contentKey = crypto.getRandomValues(new Uint8Array(32))
+
+    const a = new IndexedDBKeyManagementAdapter(dbName)
+    await a.init()
+    await a.saveKey(spaceId, 0, contentKey)
+    // Encrypt a payload under the saved key (the real log-payload encryption path).
+    const { blobBase64Url } = await encryptLogPayload({
+      crypto: cryptoAdapter,
+      spaceContentKey: contentKey,
+      deviceId,
+      seq: 0,
+      plaintext: new TextEncoder().encode('festival-secret'),
+    })
+
+    // RELOAD: a fresh adapter on the SAME db restores the group key → decrypt succeeds.
+    const b = new IndexedDBKeyManagementAdapter(dbName)
+    await b.init()
+    const reloadedKey = (await b.getKeyByGeneration(spaceId, 0))!
+    const decrypted = await decryptLogPayload({
+      crypto: cryptoAdapter,
+      spaceContentKey: reloadedKey,
+      blob: decodeBase64Url(blobBase64Url),
+    })
+    expect(new TextDecoder().decode(decrypted)).toBe('festival-secret')
+
+    // CONTROL: the in-memory default loses the key on a fresh instance → no decrypt.
+    const mem = new InMemoryKeyManagementAdapter()
+    await mem.saveKey(spaceId, 0, contentKey)
+    const memFresh = new InMemoryKeyManagementAdapter()
+    expect(await memFresh.getKeyByGeneration(spaceId, 0)).toBeNull()
   })
 
   it('a generation gap reads back as a gap (getCurrentGeneration = max saved, missing gen = null)', async () => {

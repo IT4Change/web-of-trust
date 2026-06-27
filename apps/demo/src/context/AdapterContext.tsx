@@ -187,6 +187,13 @@ export function AdapterProvider({ children, identity }: AdapterProviderProps) {
         const memberUpdateStore = new IndexedDBMemberUpdatePendingStore(`wot-member-update-pending:${did}`)
         const messageIdHistory = new IndexedDBMessageIdHistory(`wot-message-id-history:${did}`)
 
+        // VE-11 Trigger 2: a hard security detector (SeqCollisionError = nonce-reuse-
+        // imminent / DeviceRevokedError) fired. Surface loudly; a richer UI halt /
+        // re-auth banner is a follow-up.
+        const onSecurityError = (error: Error): void => {
+          console.error('[SECURITY] log-sync security detector fired:', error)
+        }
+
         // Create WebSocket adapter — try to connect quickly, but don't block init
         const wsAdapter = new WebSocketMessagingAdapter(appRuntimeConfig.relayUrl, {
           deviceId,
@@ -322,6 +329,7 @@ export function AdapterProvider({ children, identity }: AdapterProviderProps) {
             docLogStore,
             deviceId,
             enableLogSync: true,
+            onSecurityError,
           })
         } else {
           const { AutomergeReplicationAdapter, SyncOnlyStorageAdapter } = await import('@web_of_trust/adapter-automerge')
@@ -341,6 +349,7 @@ export function AdapterProvider({ children, identity }: AdapterProviderProps) {
             docLogStore,
             deviceId,
             enableLogSync: true,
+            onSecurityError,
           })
         }
 

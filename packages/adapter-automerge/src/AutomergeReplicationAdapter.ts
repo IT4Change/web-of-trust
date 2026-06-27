@@ -207,6 +207,12 @@ export interface AutomergeReplicationAdapterConfig {
    * adapter registers with the broker.
    */
   deviceId?: string
+  /**
+   * VE-11 Trigger 2: programmatic surface for the HARD security detectors
+   * (SeqCollisionError / DeviceRevokedError), forwarded to every space coordinator
+   * so the composition root can halt / alert / re-auth.
+   */
+  onSecurityError?: (error: Error) => void
 }
 
 class AutomergeSpaceHandle<T> implements SpaceHandle<T> {
@@ -351,6 +357,7 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
   private readonly logSyncEnabled: boolean
   /** Active per-device UUID (re-bound process-wide by a restore-clone, VE-4/VE-5). */
   private deviceId: string
+  private readonly onSecurityError?: (error: Error) => void
   /** True once the store-bound deviceId has been resolved (BLOCKER-1b). */
   private deviceIdResolved = false
   /** Per-space LogSyncCoordinator (engine-neutral orchestration), keyed by spaceId UUID. */
@@ -373,6 +380,7 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
     this.spaceFilter = config.spaceFilter ?? null
     this.docLogStore = config.docLogStore
     this.deviceId = config.deviceId ?? crypto.randomUUID()
+    this.onSecurityError = config.onSecurityError
     // The log path is the primary steady-state path only when both a durable log
     // store and a control-frame-capable messaging adapter are present (VE-9/VE-11).
     this.logSyncEnabled =
@@ -2697,6 +2705,7 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
       onAfterRestoreClone: async () => {
         await this.writeFullStateViaLog(space)
       },
+      onSecurityError: this.onSecurityError,
     })
     this.coordinators.set(spaceId, coordinator)
     // VE-7: the log path now owns this space's steady-state sync — disable the

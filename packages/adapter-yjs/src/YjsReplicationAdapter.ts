@@ -209,6 +209,13 @@ interface YjsReplicationConfig {
    * adapter registers with the broker.
    */
   deviceId?: string
+  /**
+   * VE-11 Trigger 2: programmatic surface for the HARD security detectors
+   * (SeqCollisionError = nonce-reuse-imminent, DeviceRevokedError). Forwarded to
+   * every space coordinator so the composition root can halt / alert / re-auth
+   * (the throw otherwise only console.error-logs in the messaging dispatch).
+   */
+  onSecurityError?: (error: Error) => void
 }
 
 // --- YjsSpaceHandle ---
@@ -442,6 +449,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
   private readonly logSyncEnabled: boolean
   /** Active per-device UUID (re-bound process-wide by a restore-clone, VE-4/VE-5). */
   private deviceId: string
+  private readonly onSecurityError?: (error: Error) => void
   /** True once the store-bound deviceId has been resolved (BLOCKER-1b). */
   private deviceIdResolved = false
   /** Per-space LogSyncCoordinator (engine-neutral orchestration). */
@@ -465,6 +473,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
     this.crypto = config.crypto ?? new WebCryptoProtocolCryptoAdapter()
     this.docLogStore = config.docLogStore
     this.deviceId = config.deviceId ?? crypto.randomUUID()
+    this.onSecurityError = config.onSecurityError
     // The log path is the primary steady-state path only when both a durable log
     // store and a control-frame-capable messaging adapter are present (VE-9/VE-11).
     this.logSyncEnabled =
@@ -1466,6 +1475,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
       onAfterRestoreClone: async () => {
         await this.writeFullStateViaLog(state)
       },
+      onSecurityError: this.onSecurityError,
     })
     this.coordinators.set(spaceId, coordinator)
     return coordinator
