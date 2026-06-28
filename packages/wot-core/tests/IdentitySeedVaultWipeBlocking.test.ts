@@ -1,6 +1,6 @@
 import 'fake-indexeddb/auto'
 import { IDBFactory } from 'fake-indexeddb'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   IndexedDbIdentitySeedVault,
   closeOpenIdentitySeedVaultConnections,
@@ -101,10 +101,31 @@ describe('IndexedDbIdentitySeedVault — wipe-blocking connection lifecycle', ()
 
   it('onversionchange backstop: an open vault connection yields so a competing delete completes even without closeOpen', async () => {
     const vault = new IndexedDbIdentitySeedVault({ crypto: cryptoAdapter })
-    await vault.saveSeed(SEED(), PW) // open; openIdentityDb set db.onversionchange = () => db.close()
+    await vault.saveSeed(SEED(), PW) // open; ensureDb bound db.onversionchange to this concrete handle
 
     // Deliberately do NOT call closeOpen — rely solely on the hygiene handler.
     const result = await deleteDb('wot-identity')
     expect(result.settled).toBe('success') // the vault's onversionchange closed it → delete completes
+  })
+
+  it('SINGLE-FLIGHT: concurrent first operations share ONE open (no orphan connection for closeOpen to miss)', async () => {
+    const vault = new IndexedDbIdentitySeedVault({ crypto: cryptoAdapter })
+    const openSpy = vi.spyOn(indexedDB, 'open')
+
+    // Two concurrent FIRST operations race ensureDb(). Without single-flight each opens its own
+    // connection (TWO opens); this.db then tracks only the last, so closeOpen() — which closes
+    // the instance's this.db — would leave the OTHER connection open: an orphan that keeps
+    // blocking deleteDatabase('wot-identity') (Anton's blocker). Counting opens isolates the
+    // single-flight guarantee from the onversionchange backstop (which would mask an orphan by
+    // closing it on the delete's versionchange).
+    await Promise.all([vault.hasSeed(), vault.hasActiveSession()])
+    expect(openSpy.mock.calls.filter((c) => c[0] === 'wot-identity').length).toBe(1)
+
+    // ...and closeOpen() then fully clears the single connection, so the delete is unblocked.
+    closeOpenIdentitySeedVaultConnections()
+    const result = await deleteDb('wot-identity')
+    expect(result.settled).toBe('success')
+
+    openSpy.mockRestore()
   })
 })

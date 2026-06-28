@@ -63,6 +63,8 @@ const openIdentitySeedVaults = new Set<IndexedDbIdentitySeedVault>()
 export class IndexedDbIdentitySeedVault implements IdentitySeedVault {
   private readonly crypto: ProtocolCryptoAdapter
   private db: IDBDatabase | null = null
+  /** In-flight open, shared by concurrent ensureDb() callers (single-flight — see ensureDb). */
+  private dbPromise: Promise<IDBDatabase> | null = null
 
   constructor(options: IndexedDbIdentitySeedVaultOptions = {}) {
     this.crypto = options.crypto ?? new WebCryptoProtocolCryptoAdapter()
@@ -173,6 +175,9 @@ export class IndexedDbIdentitySeedVault implements IdentitySeedVault {
    */
   close(): void {
     openIdentitySeedVaults.delete(this)
+    // Drop any in-flight/settled open so a later ensureDb() reopens a FRESH connection (a
+    // stale promise would otherwise hand back the connection we just closed).
+    this.dbPromise = null
     if (this.db) {
       this.db.close()
       this.db = null
@@ -181,18 +186,39 @@ export class IndexedDbIdentitySeedVault implements IdentitySeedVault {
 
   private async ensureDb(): Promise<void> {
     if (this.db) return
-    const db = await openIdentityDb()
-    // Hygiene backstop: if another connection requests a version change (e.g. the full-wipe
-    // deleteDatabase), YIELD by closing. Routed through this.close() — not a bare db.close() —
-    // so this.db is nulled and the instance unregisters, keeping its state consistent for a
-    // later transparent reopen (a bare close would leave a CLOSED this.db that ensureDb still
-    // treats as live → InvalidStateError). The deterministic fix is still
-    // closeOpenIdentitySeedVaultConnections(); this only covers connections it did not close.
-    db.onversionchange = () => this.close()
-    this.db = db
-    // Register the OPEN connection so the full-wipe path can close it (TC2). Done after a
-    // successful open so a failed open never leaves a phantom registry entry.
-    openIdentitySeedVaults.add(this)
+    // SINGLE-FLIGHT: concurrent first operations MUST share ONE open. Without this, two racing
+    // ensureDb() calls each open a connection; this.db then tracks only the LAST, and
+    // close()/closeOpenIdentitySeedVaultConnections() leaves the other connection OPEN — still
+    // blocking deleteDatabase('wot-identity'). The shared app singleton makes this race real.
+    if (!this.dbPromise) {
+      const opening = openIdentityDb().then((db) => {
+        // close() ran while we were opening (dbPromise was reset): adopt nothing — shut this
+        // orphan so it cannot block a delete, and leave the instance closed.
+        if (this.dbPromise !== opening) {
+          db.close()
+          return db
+        }
+        // Hygiene backstop bound to THIS concrete handle (the one that receives versionchange),
+        // NOT to whatever this.db happens to be. Yield to a competing version change (the
+        // full-wipe deleteDatabase); route through this.close() when it is the current handle so
+        // this.db/dbPromise are reset (a bare close would leave a CLOSED this.db that ensureDb
+        // still treats as live → InvalidStateError). The deterministic fix is still closeOpen.
+        db.onversionchange = () => {
+          if (this.db === db) this.close()
+          else db.close()
+        }
+        this.db = db
+        // Register the OPEN connection so the full-wipe path can close it (TC2).
+        openIdentitySeedVaults.add(this)
+        return db
+      })
+      // A failed open must not pin a rejected promise — allow a later retry.
+      opening.catch(() => {
+        if (this.dbPromise === opening) this.dbPromise = null
+      })
+      this.dbPromise = opening
+    }
+    await this.dbPromise
   }
 
   private storeSessionKey(key: CryptoKey, ttlMs: number = DEFAULT_SESSION_TTL_MS): Promise<void> {
