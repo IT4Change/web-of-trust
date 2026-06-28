@@ -19,7 +19,6 @@
  *    `syncResponseEntriesApplied > 0` (the positive catch-up proof), and the
  *    outgoing types so a test can assert `sentTypes` never contains `content`.
  */
-import { createServer, type AddressInfo } from 'node:net'
 import { RelayServer } from '@web_of_trust/relay'
 import { WebSocketMessagingAdapter } from '@web_of_trust/core/adapters/messaging/websocket'
 import type { WireMessage } from '@web_of_trust/core/ports'
@@ -36,10 +35,53 @@ export const sharedCrypto = new WebCryptoProtocolCryptoAdapter()
 
 export const wait = (ms = 150): Promise<void> => new Promise((r) => setTimeout(r, ms))
 
+// ── D1 / Spur-C — remote-relay mode + three-way test-mode matrix (TC1/TC5) ──────
+//
+/**
+ * Remote-relay mode. When `REMOTE_RELAY_URL` is set (e.g. a Staging relay
+ * `wss://relay-staging.web-of-trust.de`), {@link startRelay} OBSERVES that shared
+ * relay from outside over HTTP instead of booting an in-process `:memory:` server.
+ * Unset (the CI default) → unchanged in-process behavior (fast + green).
+ */
+export const REMOTE_RELAY_URL = process.env.REMOTE_RELAY_URL?.trim() || undefined
+// Explicit truthy parse: `REMOTE_ALLOW_DESTRUCTIVE=false`/`0` must NOT enable destructive
+// remote suites (a bare `!!process.env...` is true for any non-empty string).
+const ALLOW_DESTRUCTIVE_REMOTE = /^(1|true|yes)$/i.test(process.env.REMOTE_ALLOW_DESTRUCTIVE ?? '')
+
+/**
+ * Three-way test-mode matrix (TC5). Every e2e suite/test is EXPLICITLY one class:
+ *  - **remote-capable** — runs in-process (default) AND remote. No guard needed.
+ *  - **remote-destructive** — creates permanent/global-reserved relay state
+ *    (device-revoke, key-rotation, member-removal, restore-clone, deliberate
+ *    stale-write). Remote ONLY with `REMOTE_ALLOW_DESTRUCTIVE` set; otherwise the
+ *    suite is SKIPPED remote (guard against pointing this at a non-disposable relay).
+ *  - **local-only** — needs relay-internal mechanics (injected clock, deterministic
+ *    interna). Can NEVER run remote → SKIPPED remote (never green-washed).
+ * Usage (vitest): `describe.skipIf(testMode.skipLocalOnlyRemote)(…)`.
+ */
+export const testMode = {
+  /** True when running against a remote relay (REMOTE_RELAY_URL set). */
+  isRemote: REMOTE_RELAY_URL !== undefined,
+  /** remote-destructive suites: skip when remote and destructive runs are not explicitly allowed. */
+  skipDestructiveRemote: REMOTE_RELAY_URL !== undefined && !ALLOW_DESTRUCTIVE_REMOTE,
+  /** local-only suites: skip whenever remote (relay-internal mechanics can't be remote). */
+  skipLocalOnlyRemote: REMOTE_RELAY_URL !== undefined,
+} as const
+
+/**
+ * Mode-derived polling defaults — the SINGLE switch the directive asks for (not N
+ * scattered timeout edits). In-process convergence is ~ms; a remote relay observed
+ * over HTTPS needs a larger budget AND a gentler poll interval (≥200 ms — don't
+ * hammer the shared endpoint).
+ */
+const WAIT_DEFAULTS = testMode.isRemote
+  ? { waitTimeoutMs: 30_000, waitStepMs: 250, stableMs: 800, stableTimeoutMs: 40_000, stableStepMs: 250 }
+  : { waitTimeoutMs: 8_000, waitStepMs: 40, stableMs: 300, stableTimeoutMs: 15_000, stableStepMs: 50 }
+
 /** Poll `fn` until it returns true or `timeoutMs` elapses (real-socket convergence). */
 export async function waitFor(
   fn: () => boolean | Promise<boolean>,
-  { timeoutMs = 8_000, stepMs = 40 }: { timeoutMs?: number; stepMs?: number } = {},
+  { timeoutMs = WAIT_DEFAULTS.waitTimeoutMs, stepMs = WAIT_DEFAULTS.waitStepMs }: { timeoutMs?: number; stepMs?: number } = {},
 ): Promise<boolean> {
   const deadline = Date.now() + timeoutMs
   for (;;) {
@@ -54,17 +96,25 @@ export async function waitFor(
  * then return the settled value. Replaces a fixed `wait(N)` after an async outbox write burst —
  * a fixed wait races the drain (the count can still be climbing or not yet reached), making
  * `entryCount` snapshot assertions flaky under CPU load (Slice B v3, Opus merge-blocker).
+ *
+ * `read` may be async (Promise-capable) so it composes with the async accessor contract
+ * (TC1): `waitForStableCount(() => relay.entryCount(d))` stays formgleich — the lambda now
+ * just yields a Promise.
  */
 export async function waitForStableCount(
-  read: () => number,
-  { stableMs = 300, timeoutMs = 15_000, stepMs = 50 }: { stableMs?: number; timeoutMs?: number; stepMs?: number } = {},
+  read: () => number | Promise<number>,
+  {
+    stableMs = WAIT_DEFAULTS.stableMs,
+    timeoutMs = WAIT_DEFAULTS.stableTimeoutMs,
+    stepMs = WAIT_DEFAULTS.stableStepMs,
+  }: { stableMs?: number; timeoutMs?: number; stepMs?: number } = {},
 ): Promise<number> {
   const deadline = Date.now() + timeoutMs
-  let last = read()
+  let last = await read()
   let lastChangeAt = Date.now()
   for (;;) {
     await wait(stepMs)
-    const cur = read()
+    const cur = await read()
     if (cur !== last) {
       last = cur
       lastChangeAt = Date.now()
@@ -75,25 +125,16 @@ export async function waitForStableCount(
   }
 }
 
-/** Allocate a concrete free TCP port (RelayServer.port returns options.port — never pass 0). */
-export async function freePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const srv = createServer()
-    srv.unref()
-    srv.on('error', reject)
-    srv.listen(0, () => {
-      const { port } = srv.address() as AddressInfo
-      srv.close(() => resolve(port))
-    })
-  })
-}
-
-export interface StartedRelay {
-  server: RelayServer
+/**
+ * Relay observation accessors present in BOTH modes. ALL async (TC1 async-accessor
+ * contract): local-mode impls are trivial wrappers over the in-process docLog; remote
+ * impls read GET /dashboard/data. No sync-over-async, no stale-snapshot refresh muster.
+ */
+export interface RelayObservation {
+  /** WS URL clients dial (`ws://localhost:…` in-process, `wss://…` for a remote relay). */
   url: string
-  port: number
   /** Total retained entries for a docId (positive-proof: == N before disconnect). */
-  entryCount(docId: string): number
+  entryCount(docId: string): Promise<number>
   /**
    * Retained entries for one (docId, deviceId) — the durable trace a SPECIFIC device
    * left. A precise security assertion for the removal-negative test: a removed
@@ -101,12 +142,31 @@ export interface StartedRelay {
    * of any legitimate in-session recovery write a STILL-active admin makes (whose
    * write-path reject now routes + recovers, Slice SR-2 / Symptom B).
    */
-  entryCountForDevice(docId: string, deviceId: string): number
-  isSpaceRegistered(docId: string): boolean
-  getSpace(docId: string): { verificationKey: string; generation: number } | null
-  getSpaceAdmins(docId: string): string[]
+  entryCountForDevice(docId: string, deviceId: string): Promise<number>
+  isSpaceRegistered(docId: string): Promise<boolean>
+  /**
+   * The durable space record. `verificationKey` is local-only — it is intentionally
+   * NOT exposed via /dashboard/data (minimal D1 stats), so in remote mode it is
+   * `undefined` (no remote-capable test reads it; all read `.generation`).
+   */
+  getSpace(docId: string): Promise<{ generation: number; verificationKey?: string } | null>
+  getSpaceAdmins(docId: string): Promise<string[]>
+  /** Local: stop the in-process server. Remote: NO-OP (a shared relay is NEVER stopped). */
   stop(): Promise<void>
 }
+
+/**
+ * Discriminated union (TC1, Codex-BLOCKER-2): in `remote` mode there is NO in-process
+ * `server`/`port`. Any test that DIRECTLY reads `relay.server`/`relay.port` must narrow to
+ * `mode === 'local'` first — the COMPILER enforces that (a bare `relay.server` is a type
+ * error). Helpers that ENCAPSULATE server construction (e.g. `startRelayWithClock`) bypass
+ * that type surface, so they additionally hard-guard on `REMOTE_RELAY_URL` at runtime;
+ * together the two stop a local-only (clock-inject) test from ever silently running — and
+ * green-washing — against a remote relay.
+ */
+export type StartedRelay =
+  | (RelayObservation & { mode: 'local'; server: RelayServer; port: number })
+  | (RelayObservation & { mode: 'remote' })
 
 /** Reach into the server's durable registry (the SAME accessor the relay's own tests use). */
 function relayDocLog(server: RelayServer): {
@@ -119,20 +179,99 @@ function relayDocLog(server: RelayServer): {
   return (server as unknown as { docLog: ReturnType<typeof relayDocLog> }).docLog
 }
 
+/**
+ * `ws(s)://host[:port]` → `http(s)://host[:port]`. Normalizes via URL so a trailing slash
+ * or path on REMOTE_RELAY_URL (`wss://relay-staging…/`) still resolves to `…/dashboard/data`
+ * instead of `…//dashboard/data` (operator footgun). The relay serves /dashboard/data at the
+ * SAME host/port as the WS endpoint.
+ */
+export function httpBaseFromWsUrl(wsUrl: string): string {
+  const u = new URL(wsUrl)
+  const httpProtocol = u.protocol === 'wss:' ? 'https:' : 'http:'
+  return `${httpProtocol}//${u.host}`
+}
+
+interface RemoteLogStats {
+  entriesByDoc?: Record<string, number>
+  entriesByDocAndDevice?: Record<string, Record<string, number>>
+  spacesByDoc?: Record<string, { registered: boolean; generation: number; admins: string[] }>
+}
+
+/** Per-request timeout for the remote /dashboard/data poll — a hung TCP/TLS/HTTP call must
+ * fail fast into the waitFor/waitForStableCount budget instead of blocking indefinitely. */
+const REMOTE_FETCH_TIMEOUT_MS = 10_000
+
+/** Observe the shared relay from OUTSIDE: GET {httpBase}/dashboard/data → logStats. */
+async function fetchRemoteLogStats(httpBase: string): Promise<RemoteLogStats> {
+  const res = await fetch(`${httpBase}/dashboard/data`, { signal: AbortSignal.timeout(REMOTE_FETCH_TIMEOUT_MS) })
+  if (!res.ok) throw new Error(`remote relay GET /dashboard/data → HTTP ${res.status}`)
+  const json = (await res.json()) as { logStats?: RemoteLogStats }
+  const logStats = json.logStats
+  // Fail LOUD when the sensitive observation fields are absent. A missing field must NEVER be
+  // read as "real zero/empty": that would green-wash the NEGATIVE security assertions this
+  // remote path exists to prove (e.g. "a removed device left 0 durable entries"). Empty maps
+  // ({}) are fine on a fresh relay; an ABSENT entriesByDocAndDevice/spacesByDoc means the relay
+  // has debug stats OFF (default-redacted prod) or predates the D1 stats — set RELAY_DEBUG_STATS
+  // on the (staging/local) target relay.
+  if (
+    !logStats ||
+    typeof logStats.entriesByDoc !== 'object' ||
+    typeof logStats.entriesByDocAndDevice !== 'object' ||
+    typeof logStats.spacesByDoc !== 'object'
+  ) {
+    throw new Error(
+      'remote relay /dashboard/data is missing logStats.entriesByDocAndDevice / spacesByDoc — ' +
+        'enable RELAY_DEBUG_STATS on the target relay (these sensitive fields are redacted by ' +
+        'default). Refusing to observe: a missing field would silently green-wash negative assertions.',
+    )
+  }
+  return logStats
+}
+
+/**
+ * Remote mode (TC1/TC2): observe a SHARED relay over HTTP. NEVER reaches into an
+ * in-process docLog (there is none). `stop()` is a no-op so a test teardown can never
+ * kill the shared/staging relay. Each accessor re-fetches /dashboard/data, so a poll
+ * loop (waitFor/waitForStableCount) sees fresh state every iteration.
+ */
+function startRemoteRelay(wsUrl: string): StartedRelay {
+  const httpBase = httpBaseFromWsUrl(wsUrl)
+  return {
+    mode: 'remote',
+    url: wsUrl,
+    entryCount: async (docId) => (await fetchRemoteLogStats(httpBase)).entriesByDoc?.[docId] ?? 0,
+    entryCountForDevice: async (docId, deviceId) =>
+      (await fetchRemoteLogStats(httpBase)).entriesByDocAndDevice?.[docId]?.[deviceId] ?? 0,
+    isSpaceRegistered: async (docId) => (await fetchRemoteLogStats(httpBase)).spacesByDoc?.[docId]?.registered === true,
+    getSpace: async (docId) => {
+      const space = (await fetchRemoteLogStats(httpBase)).spacesByDoc?.[docId]
+      return space ? { generation: space.generation } : null
+    },
+    getSpaceAdmins: async (docId) => (await fetchRemoteLogStats(httpBase)).spacesByDoc?.[docId]?.admins ?? [],
+    stop: async () => {
+      /* shared/staging relay — a test must NEVER stop it. */
+    },
+  }
+}
+
 export async function startRelay(): Promise<StartedRelay> {
-  const port = await freePort()
-  const server = new RelayServer({ port, dbPath: ':memory:' })
+  if (REMOTE_RELAY_URL) return startRemoteRelay(REMOTE_RELAY_URL)
+  // port:0 → OS-assigned ephemeral port, read back AFTER bind via server.port (no
+  // free-port-then-reuse TOCTOU race).
+  const server = new RelayServer({ port: 0, dbPath: ':memory:' })
   await server.start()
+  const port = server.port
   const docLog = relayDocLog(server)
   return {
+    mode: 'local',
     server,
     url: `ws://localhost:${port}`,
     port,
-    entryCount: (docId: string) => docLog.entryCount(docId),
-    entryCountForDevice: (docId: string, deviceId: string) => docLog.entryCountForDevice(docId, deviceId),
-    isSpaceRegistered: (id: string) => docLog.isSpaceRegistered(id),
-    getSpace: (id: string) => docLog.getSpace(id),
-    getSpaceAdmins: (id: string) => docLog.getSpaceAdmins(id),
+    entryCount: async (docId: string) => docLog.entryCount(docId),
+    entryCountForDevice: async (docId: string, deviceId: string) => docLog.entryCountForDevice(docId, deviceId),
+    isSpaceRegistered: async (id: string) => docLog.isSpaceRegistered(id),
+    getSpace: async (id: string) => docLog.getSpace(id),
+    getSpaceAdmins: async (id: string) => docLog.getSpaceAdmins(id),
     stop: () => server.stop(),
   }
 }
