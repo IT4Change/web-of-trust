@@ -13,6 +13,11 @@ services:
     environment:
       - PORT=8787
       - DB_PATH=/data/relay-queue.db
+      # STAGING-ONLY: expose the sensitive extended /dashboard/data fields
+      # (entriesByDocAndDevice, spacesByDoc) that the D1 Spur-C remote-observation
+      # harness REQUIRES. Default-redacted on prod (relay.web-of-trust.de) — NEVER
+      # set this on the prod relay. Full auth/redaction layer is D3.
+      - RELAY_DEBUG_STATS=1
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.wot-relay-staging.rule=Host(`relay-staging.web-of-trust.de`)"
