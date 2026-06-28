@@ -7,6 +7,7 @@ import type { PublicIdentitySession } from '../src/application/identity'
 import {
   LogSyncCoordinator,
   AuthorMismatchError,
+  PersonalDocOwnerMismatchError,
   LocalAppendFailedError,
   classifyRejectDisposition,
   createSpaceCapabilityJws,
@@ -106,6 +107,8 @@ async function makeHarness(
     keyState?: KeyState
     /** VE-C2: a bounded awaitKeyGenerationAdvance hook (defaults: immediate check). */
     awaitKeyGenerationAdvance?: (rejectedGeneration: number) => Promise<boolean>
+    /** Security-error surface (SeqCollision / DeviceRevoked / PersonalDocOwnerMismatch). */
+    onSecurityError?: (err: Error) => void
   },
 ): Promise<Harness> {
   const messaging = new InMemoryMessagingAdapter({ broker })
@@ -168,6 +171,7 @@ async function makeHarness(
       return [...ks.keys.keys()].sort((a, b) => a - b)
     },
     awaitKeyGenerationAdvance: opts?.awaitKeyGenerationAdvance,
+    onSecurityError: opts?.onSecurityError,
     sendSpaceRegister:
       opts?.sendSpaceRegister === false
         ? undefined
@@ -474,6 +478,8 @@ describe('LogSyncCoordinator — VE-2/3/4/8/9', () => {
     expect(classifyRejectDisposition('DEVICE_REVOKED')).toBe('restore-clone')
     expect(classifyRejectDisposition('SEQ_COLLISION_DETECTED')).toBe('restore-clone')
     expect(classifyRejectDisposition('AUTHOR_MISMATCH')).toBe('hard-stop')
+    // A2 Teil B (TOFU): owner-mismatch is a hard stop, not retry/unknown (silently ignored).
+    expect(classifyRejectDisposition('PERSONAL_DOC_OWNER_MISMATCH')).toBe('hard-stop')
   })
 
   it('Test 5b — CAPABILITY_REQUIRED on present-capability → coordinator re-presents (re-sources capability)', async () => {
@@ -547,6 +553,51 @@ describe('LogSyncCoordinator — VE-2/3/4/8/9', () => {
     await h.coordinator.writeLocalUpdate(new Uint8Array([1]))
     await flush()
     expect(rejectionCode).toBe('SEQ_COLLISION_DETECTED')
+  })
+
+  // ── A2 Teil B (TOFU owner-binding): PERSONAL_DOC_OWNER_MISMATCH is a HARD STOP ─────
+  it('Test 5f — PERSONAL_DOC_OWNER_MISMATCH on a routed write-path reject is NOT silently ignored (hard stop, surfaced)', async () => {
+    const broker = new InProcessLogBroker()
+    const alice = (await createTestIdentity('alice')).identity
+    const securityErrors: Error[] = []
+    const h = await makeHarness(alice, DEVICE_A, broker, { onSecurityError: (err) => securityErrors.push(err) })
+
+    // Feed the routed write-path reject code directly to the coordinator's reject handler
+    // (the API the adapter wiring calls on a `{ type:'error', thid, code }` frame). A code
+    // absent from the closed catalog would fall to 'unknown' and be silently dropped; this
+    // asserts the owner-mismatch is instead classified as a hard stop and surfaced.
+    await expect(
+      h.coordinator.handleWriteReject('PERSONAL_DOC_OWNER_MISMATCH', DEVICE_A, 0),
+    ).rejects.toBeInstanceOf(PersonalDocOwnerMismatchError)
+    // Surfaced via onSecurityError (the throw alone is only console-logged by the dispatch).
+    expect(securityErrors).toHaveLength(1)
+    expect(securityErrors[0]).toBeInstanceOf(PersonalDocOwnerMismatchError)
+    // NOT an AUTHOR_MISMATCH masquerade — the typed error must be honest.
+    expect(securityErrors[0]).not.toBeInstanceOf(AuthorMismatchError)
+  })
+
+  it('Test 5g — PERSONAL_DOC_OWNER_MISMATCH on present-capability → hard stop, no retry, throws PersonalDocOwnerMismatchError', async () => {
+    const broker = new InProcessLogBroker()
+    const alice = (await createTestIdentity('alice')).identity
+    const securityErrors: Error[] = []
+    const h = await makeHarness(alice, DEVICE_A, broker, { onSecurityError: (err) => securityErrors.push(err) })
+
+    broker.armRejection({ code: 'PERSONAL_DOC_OWNER_MISMATCH', target: 'control', frameType: PRESENT_CAPABILITY_CONTROL_FRAME_TYPE })
+
+    let presentAttempts = 0
+    const originalHandle = broker.handleControlFrame.bind(broker)
+    ;(broker as unknown as { handleControlFrame: typeof broker.handleControlFrame }).handleControlFrame = async (
+      socketId,
+      frame,
+    ) => {
+      if (frame.type === PRESENT_CAPABILITY_CONTROL_FRAME_TYPE) presentAttempts += 1
+      return originalHandle(socketId, frame)
+    }
+
+    await expect(h.coordinator.ensurePublished()).rejects.toBeInstanceOf(PersonalDocOwnerMismatchError)
+    // HARD STOP: present-capability was attempted exactly once (no retry loop).
+    expect(presentAttempts).toBe(1)
+    expect(securityErrors).toHaveLength(1)
   })
 
   it('Test 5e — restore-clone: brokerSeq > localSeq → applySyncResponse reports restoreCloneRequired', async () => {
