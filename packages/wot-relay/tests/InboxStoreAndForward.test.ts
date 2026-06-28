@@ -169,6 +169,28 @@ describe('Multi-device inbox store-and-forward', () => {
     expect(db.prepare('SELECT COUNT(*) AS c FROM inbox_entry').get()).toEqual({ c: 0 })
   })
 
+  it('enqueueFanout: idempotent on identical re-send, but a divergent messageId reuse is a collision (no write)', () => {
+    const { docLog, queue } = makeStore()
+    docLog.registerDevice(BOB, D1)
+
+    const env = envelope('dup')
+    expect(queue.enqueueFanout({ messageId: 'dup', toDid: BOB, envelope: env, deliveryTargetDeviceIds: [D1], nowMs: T0 }).disposition).toBe('inserted')
+
+    // Identical content → idempotent (no duplicate, entries unchanged).
+    expect(queue.enqueueFanout({ messageId: 'dup', toDid: BOB, envelope: env, deliveryTargetDeviceIds: [D1], nowMs: T0 }).disposition).toBe('idempotent')
+    expect(queue.messageCount(BOB)).toBe(1)
+    expect(queue.count(BOB)).toBe(1)
+
+    // Same id, DIFFERENT payload → collision: NO write, stored row untouched.
+    const divergent = { ...envelope('dup'), body: { ciphertext: 'DIFFERENT' } }
+    expect(queue.enqueueFanout({ messageId: 'dup', toDid: BOB, envelope: divergent, deliveryTargetDeviceIds: [D1, D2], nowMs: T0 }).disposition).toBe('collision')
+    expect(queue.getByMessageId('dup')?.envelope).toEqual(env) // original content retained
+    expect(queue.count(BOB)).toBe(1) // no new entry for D2
+
+    // Same id, DIFFERENT recipient → also a collision.
+    expect(queue.enqueueFanout({ messageId: 'dup', toDid: 'did:key:zOther', envelope: env, deliveryTargetDeviceIds: [], nowMs: T0 }).disposition).toBe('collision')
+  })
+
   it('effectiveActiveDeviceIdsForDid excludes a long-inactive device — fan-out set == completeness set', () => {
     const { db, docLog } = makeStore()
     docLog.registerDevice(BOB, D1)

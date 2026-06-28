@@ -48,6 +48,7 @@ interface RelayInternals {
   connections: Map<string, Set<unknown>>
   docLog: {
     registerDevice(did: string, deviceId: string): unknown
+    revokeDevice(did: string, deviceId: string, revokedAt: string): unknown
     activeDeviceIdsForDid(did: string): string[]
   }
   queue: {
@@ -215,6 +216,39 @@ describe('Relay DIDComm inbox routing + per-device ack/1.0', () => {
     expect(ctx.alice.frames).toEqual([
       expect.objectContaining({ type: 'error', code: 'MISSING_RECIPIENT' }),
     ])
+  })
+
+  it('rejects an inbox send from a MID-SESSION REVOKED device (no fan-out bypass)', () => {
+    // Alice's device is revoked while her socket stays open. The inbox path must gate on
+    // docLog.isActive like log-entry/sync-request do — else a revoked device keeps an
+    // open inbox-send channel for the four ECIES types.
+    ctx.server.docLog.revokeDevice(ALICE, ALICE_DEVICE, '2026-06-28T00:00:00.000Z')
+
+    ctx.server.handleSend(ctx.alice, didcommEnvelope())
+
+    expect(ctx.alice.frames.at(-1)).toEqual(
+      expect.objectContaining({ type: 'error', code: 'DEVICE_REVOKED' }),
+    )
+    // Not relayed, not queued.
+    expect(ctx.bob.frames).toEqual([])
+    expect(ctx.server.queue.messageCount(BOB)).toBe(0)
+  })
+
+  it('rejects a divergent messageId reuse and does NOT live-deliver it (durable store stays consistent)', () => {
+    const env = didcommEnvelope()
+    ctx.server.handleSend(ctx.alice, env)
+    expect(ctx.bob.frames).toEqual([{ type: 'message', envelope: env }])
+    const bobFramesBefore = ctx.bob.frames.length
+
+    // Same id, DIFFERENT payload → rejected MALFORMED, NOT live-delivered to Bob.
+    const divergent = didcommEnvelope({ body: { epk: 'ZZ', nonce: 'ZZ', ciphertext: 'DIFFERENT' } })
+    ctx.server.handleSend(ctx.alice, divergent)
+    expect(ctx.alice.frames.at(-1)).toEqual(
+      expect.objectContaining({ type: 'error', code: 'MALFORMED_MESSAGE' }),
+    )
+    expect(ctx.bob.frames.length).toBe(bobFramesBefore) // Bob got no second frame
+    // Durable store still holds the ORIGINAL envelope.
+    expect(ctx.server.queue.getByMessageId(env.id as string)?.envelope).toEqual(env)
   })
 
   it('rejects an ack/1.0 whose body.messageId is not a canonical lowercase UUID v4', () => {

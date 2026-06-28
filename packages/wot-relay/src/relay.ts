@@ -170,7 +170,7 @@ export class RelayServer {
   }
 
   async start(): Promise<void> {
-    return new Promise((resolve) => {
+    await new Promise<void>((resolve) => {
       // Create HTTP server for dashboard + health endpoints
       this.httpServer = createServer((req, res) => {
         // CORS
@@ -1689,6 +1689,22 @@ export class RelayServer {
       return
     }
 
+    // Mid-session revocation gate (Sync 003 §Device-Deaktivierung): a whitelisted Inbox
+    // envelope may only be fanned out / live-relayed by a sender whose device is STILL
+    // registered AND active. The log-entry and sync-request paths already gate on
+    // docLog.isActive (see handleLogEntry / handleSyncRequest); without the same gate
+    // here a device revoked DURING the open session keeps an open inbox-send path for the
+    // four ECIES Inbox types — a revocation bypass. Reject before any enqueue or live send.
+    const senderDeviceId = this.socketToDeviceId.get(ws)
+    if (senderDeviceId === undefined || !this.docLog.isActive(senderDid, senderDeviceId)) {
+      this.sendTo(ws, {
+        type: 'error',
+        code: 'DEVICE_REVOKED',
+        message: 'This device is not active (revoked or not registered).',
+      })
+      return
+    }
+
     // Routing: DIDComm `to[0]` (Sync 003 Transport Envelope). Only whitelisted
     // Inbox envelopes reach here and they MUST set `to` (Sync 003 §Nachrichten-
     // typen — "Inbox- und direkt adressierte Nachrichten MÜSSEN `to` setzen"); the
@@ -1725,12 +1741,11 @@ export class RelayServer {
     // INVARIANT (load-bearing): this active-device read and the enqueueFanout persist below
     // run with NO `await` between them. better-sqlite3 + JS run-to-completion keeps read +
     // persist atomic against a concurrent register/deliverOnConnect. Do NOT introduce an
-    // await here.
-    const senderDeviceId = this.socketToDeviceId.get(ws)
+    // await here. (senderDeviceId is the active-gated value from above.)
     const activeDeviceIds = this.docLog.effectiveActiveDeviceIdsForDid(toDid, nowMs, DEFAULT_INACTIVE_MS)
     const disposition = computeBrokerInboxDeliveryTargets({
       messageId,
-      sender: { did: senderDid, deviceId: senderDeviceId ?? '' },
+      sender: { did: senderDid, deviceId: senderDeviceId },
       recipientDid: toDid,
       recipientDevices: activeDeviceIds.map((deviceId) => ({ did: toDid, deviceId, status: 'active' as const })),
     })
@@ -1739,8 +1754,10 @@ export class RelayServer {
     )
 
     // Persist (message once + per-device entries) BEFORE any send — the durable
-    // state must be committed before the WebSocket side effect.
-    this.queue.enqueueFanout({
+    // state must be committed before the WebSocket side effect. A divergent
+    // messageId reuse (same id, different recipient/payload) is rejected here and
+    // NOT live-delivered, so live delivery can never diverge from the durable row.
+    const fanout = this.queue.enqueueFanout({
       messageId,
       toDid,
       envelope,
@@ -1748,6 +1765,14 @@ export class RelayServer {
       excludedSenderDeviceId: disposition.excludedSenderTarget?.deviceId,
       nowMs,
     })
+    if (fanout.disposition === 'collision') {
+      this.sendTo(ws, {
+        type: 'error',
+        code: 'MALFORMED_MESSAGE',
+        message: 'messageId already in use for a different recipient or payload (no reuse with divergent content)',
+      })
+      return
+    }
 
     // Live-deliver to the CONNECTED sockets of the delivery-target devices only.
     // An active-but-offline target gets no live send — its 'pending' entry is

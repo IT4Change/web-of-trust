@@ -75,28 +75,18 @@ export interface GarbageCollectionResult {
 
 export class OfflineQueue {
   private db: Database.Database
-  /**
-   * Whether this instance owns the SQLite connection. When the relay shares one
-   * better-sqlite3 handle between OfflineQueue and DocLog (single prod file /
-   * single ':memory:' DB in tests), the queue does not own the lifecycle and
-   * `close()` is a no-op — the owner (RelayServer) closes the handle.
-   */
-  private ownsDb: boolean
 
   /**
-   * Accepts a path (default ':memory:', owns the connection) or an existing
-   * better-sqlite3 Database handle (shared with DocLog). OfflineQueue is
-   * constructed only in relay.ts (with the shared handle).
+   * REQUIRES the better-sqlite3 handle SHARED with DocLog. The inbox completeness /
+   * GC methods (`isFullyDelivered`, `collectGarbage`) JOIN the `devices` table owned by
+   * DocLog, so a standalone connection without `devices` would throw at runtime — the
+   * constructor therefore takes the handle explicitly rather than a path (no misleading
+   * standalone `new OfflineQueue()`). The owner (RelayServer / the test that created the
+   * handle) closes it; `close()` here is a borrow no-op. Callers MUST construct DocLog on
+   * the same handle.
    */
-  constructor(db: string | Database.Database = ':memory:') {
-    if (typeof db === 'string') {
-      this.db = new Database(db)
-      this.db.pragma('journal_mode = WAL')
-      this.ownsDb = true
-    } else {
-      this.db = db
-      this.ownsDb = false
-    }
+  constructor(db: Database.Database) {
+    this.db = db
     this.migrate()
   }
 
@@ -150,13 +140,24 @@ export class OfflineQueue {
 
     const tx = this.db.transaction(() => {
       const rows = this.db
-        .prepare('SELECT message_id, to_did, envelope, created_at FROM offline_queue')
-        .all() as Array<{ message_id: string; to_did: string; envelope: string; created_at: string }>
+        .prepare('SELECT id, message_id, to_did, envelope, created_at FROM offline_queue')
+        .all() as Array<{ id: number; message_id: string; to_did: string; envelope: string; created_at: string }>
+      const lookup = this.db.prepare('SELECT to_did, envelope FROM inbox_message WHERE message_id = ?')
       const insert = this.db.prepare(
-        'INSERT OR IGNORE INTO inbox_message (message_id, to_did, envelope, created_at) VALUES (?, ?, ?, ?)',
+        'INSERT INTO inbox_message (message_id, to_did, envelope, created_at) VALUES (?, ?, ?, ?)',
       )
       for (const row of rows) {
-        insert.run(row.message_id, row.to_did, row.envelope, row.created_at)
+        const existing = lookup.get(row.message_id) as { to_did: string; envelope: string } | undefined
+        if (!existing) {
+          insert.run(row.message_id, row.to_did, row.envelope, row.created_at)
+        } else if (existing.to_did !== row.to_did || existing.envelope !== row.envelope) {
+          // Divergent message_id collision (the legacy table had UNIQUE(message_id),
+          // so this is structurally unexpected — but NEVER silently drop a legacy row).
+          // Preserve it under a synthetic, collision-free key; it is retained until TTL
+          // (it can't be acked under the synthetic key, but no data is lost).
+          insert.run(`${row.message_id}#legacy-${row.id}`, row.to_did, row.envelope, row.created_at)
+        }
+        // else identical content already present → idempotent, skip.
       }
       this.db.exec('DROP TABLE offline_queue')
     })
@@ -175,22 +176,41 @@ export class OfflineQueue {
   /**
    * Persist a message once and fan out per-device delivery state (R1 + Z.204).
    * In ONE transaction: insert `inbox_message`, a 'pending' entry per delivery
-   * target, and — for a self-addressed sender — a durable 'sender-excluded'
-   * entry. Idempotent on re-enqueue of the same messageId (INSERT OR IGNORE never
-   * resets an already-'acked' entry back to 'pending'). The relay does the live
-   * WebSocket delivery + sender receipt AFTER this returns (post-commit).
+   * target, and — for a self-addressed sender — a durable 'sender-excluded' entry.
+   *
+   * Idempotency is content-bound (Sync 003): a re-enqueue of the same `messageId`
+   * is treated as idempotent ONLY when the already-stored row carries the SAME
+   * `to_did` AND the SAME envelope bytes. A `messageId` reused with a DIFFERENT
+   * recipient or payload is a `'collision'` — NO write happens and the caller MUST
+   * reject the send (else live-delivery of the new envelope would diverge from the
+   * old durable row, and later catch-up would serve stale content). The
+   * `INSERT OR IGNORE` on entries never resets an already-'acked' entry to 'pending'.
+   * The relay does the live WebSocket delivery + sender receipt AFTER this returns
+   * (post-commit) — and only when the disposition is not `'collision'`.
    *
    * Cold-Start: with zero delivery targets the `inbox_message` is still written
    * and retained — the first device to register picks it up via TC5.
    */
-  enqueueFanout(input: InboxFanoutInput): void {
+  enqueueFanout(input: InboxFanoutInput): { disposition: 'inserted' | 'idempotent' | 'collision' } {
     const createdAt = this.isoAt(input.nowMs ?? Date.now())
-    const tx = this.db.transaction(() => {
-      this.db
-        .prepare(
-          'INSERT OR IGNORE INTO inbox_message (message_id, to_did, envelope, created_at) VALUES (?, ?, ?, ?)',
-        )
-        .run(input.messageId, input.toDid, JSON.stringify(input.envelope), createdAt)
+    const envelopeJson = JSON.stringify(input.envelope)
+    const tx = this.db.transaction((): { disposition: 'inserted' | 'idempotent' | 'collision' } => {
+      const existing = this.db
+        .prepare('SELECT to_did, envelope FROM inbox_message WHERE message_id = ?')
+        .get(input.messageId) as { to_did: string; envelope: string } | undefined
+
+      if (existing && (existing.to_did !== input.toDid || existing.envelope !== envelopeJson)) {
+        // Same id, different recipient or payload → divergent collision. Leave the
+        // stored row untouched, mint NO entries (they would point at the wrong
+        // envelope), and signal the caller to reject. No durable mutation.
+        return { disposition: 'collision' }
+      }
+
+      if (!existing) {
+        this.db
+          .prepare('INSERT INTO inbox_message (message_id, to_did, envelope, created_at) VALUES (?, ?, ?, ?)')
+          .run(input.messageId, input.toDid, envelopeJson, createdAt)
+      }
 
       const insertEntry = this.db.prepare(
         'INSERT OR IGNORE INTO inbox_entry (message_id, device_id, status) VALUES (?, ?, ?)',
@@ -201,8 +221,9 @@ export class OfflineQueue {
       if (input.excludedSenderDeviceId) {
         insertEntry.run(input.messageId, input.excludedSenderDeviceId, 'sender-excluded' satisfies InboxEntryStatus)
       }
+      return { disposition: existing ? 'idempotent' : 'inserted' }
     })
-    tx()
+    return tx()
   }
 
   // ── TC5 — on-connect delivery (Cold-Start + Late-Joiner + Redelivery) ────────
@@ -454,7 +475,6 @@ export class OfflineQueue {
     return row.count
   }
 
-  close(): void {
-    if (this.ownsDb) this.db.close()
-  }
+  /** No-op: the SQLite handle is borrowed (shared with DocLog); the owner closes it. */
+  close(): void {}
 }
