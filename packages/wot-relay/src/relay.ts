@@ -1388,6 +1388,11 @@ export class RelayServer {
     // doc is owned already at init/catch-up, closing the unowned window. Same-DID reconnects
     // and the owner's other devices (shared seed) re-claim idempotently; a DIFFERENT DID is a
     // conflict (the foreign-leaked-docId attack) → rejected, no scope cached, no receipt.
+    //
+    // PERSONAL-PATH ONLY: handlePresentCapability routes here ONLY when !isSpaceRegistered(docId)
+    // (the space path is presentSpaceCapability), so this never claims a space docId. Even a
+    // stray claim from a concurrent space-register race is INERT: the T-CHECK write/read gates
+    // short-circuit on isSpaceRegistered, so a personal owner row on a space docId is never read.
     const ownerClaim = this.docLog.claimPersonalDocOwner(docId, socketDid)
     if (ownerClaim.disposition === 'conflict') {
       this.sendTo(ws, {
