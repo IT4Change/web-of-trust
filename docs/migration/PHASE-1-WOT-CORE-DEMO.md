@@ -24,6 +24,17 @@ Am Ende dieser drei Wochen ist `@web_of_trust/core` eine stand-alone publizierba
 
 **FESTIVAL-PIVOT (Anton-Entscheid 2026-06-16, ~3 Wochen bis erstem Festival-Workshop):** Die reine Referenz-Migration ist mit #201 (admin-management = letzter Referenz-Slice) fertig. `1.B.3-device-keys` ist **übersprungen** — Identity 004 ist explizit ein geplantes **Phase-2**-Erweiterungsprofil (`wot-device-delegation@0.1`, nicht Teil von `wot-identity@0.1`); Phase 1 nutzt Shared-Seed (Multi-Device läuft). Restliche Slices (`1.E Test-Migration`, `1.C Standalone-Publikation`) sind NICHT festival-kritisch und rücken nach hinten. **Neue Priorität:** (1) **durable Persistence** (InMemory-Ports an durable Stores — feld-kritisch), (2) **E2E** auf echten Geräten + Relay (bestehende Demo-Tests erweitern), (3) **Docker-Deploy** (relay-first; wot-profiles erzwingt jetzt spec-konforme Payloads), (4) **reale User-Tests** mit Shared-Seed — Messlatte = Stabilitäts-Parität zur alten Demo. **Device-Keys-Migrations-Naht** bleibt als Nicht-Ziel-Constraint in allen Direktiven (keine neuen `#sig-0`/`issuer==signer`-Hardcodings), damit die Phase-2-Migration ein Drop-in bleibt.
 
+**Festival-Pfad-Status (2026-06-28):**
+
+| Prio | Stand |
+|---|---|
+| (1) durable Persistence | ✅ Slices R/CG/A/SR/B + **Durable Wiring (#215)** gemergt + im Demo aktiv; nativer Cross-Tier-**Teardown-Fix (#216)**. |
+| (2) E2E auf echten Geräten + Relay | **läuft** — drei Spuren: **A** Browser-Remote (Playwright, noch nicht remote-fähig, nicht in CI), **B** native Geräte-Dry-Run + In-App-Debug, **C** Protocol-Remote. **Spur C ✅ feld-verifiziert** (30/1 gegen `relay-staging` über echtes WSS, inkl. Secure-Removal-Negativ-Beweis, #221). Staging-Triplet live (#220). **Offen:** D2 In-App-Debug-Screen → Spur B (S1/S8/S9 nativ), D3 Festival-Relay-Dashboard, Spur A Browser-Remote, Festival-Skala-Stress. |
+| (3) Docker-Deploy | ✅ relay/profiles/vault-vnext live + Staging-Triplet; CI-Trigger gefixt (#218, baut auf `[main, spec-vnext]` + `wot-core`); volles Deploy-Hardening offen. |
+| (4) reale User-Tests (Shared-Seed) | Festival. **Skala: 100 User / 120 Devices / 10 Spaces** (geräte-schwer, space-arm → Stress = per-Space-Concurrency + großer per-Space-Catch-up, nicht viele Spaces). |
+
+**Messlatte-Korrektur:** „Stabilitäts-Parität zur alten Demo" ist **gestrichen** — sowohl die alte utopia-lab-Demo als auch ein vnext-Smoke sind nur Zwischenstände **ohne echte Nutzer**, kein brauchbarer Vergleich. Akzeptanz ist **absolut**: (a) Korrektheits-Invarianten binär (0 verlorene Writes · 0 Nonce-Reuse · 0 doppelte Effekte · kein Re-Onboard-Lockout · Catch-up konvergiert), (b) UX-Schwellen aus dem Festival-Use-Case (Join→Inhalt < 5–10 s, Post→Peer < 2–5 s, voller Catch-up < 30 s, Reconnect < 10 s/0 Verlust).
+
 **Reihenfolge-Korrektur 2026-06-09 (Anton-Entscheid):** `1.B.2-verification` rutscht aus W2 nach W3 hinter den Adapter-Audit. Befund: Demo-Sende-Pfade (`useVerification.ts`, `AttestationService.ts`) UND Empfangs-Pfade (`App.tsx` Z.45 + Z.343) sind Old-World `MessageEnvelope` mit `type: 'attestation'` / `'space-invite'` und `payload: JSON.stringify(...)`. Spec-konformer Sende-Pfad (Inner-JWS + ECIES + `inbox/1.0`-Plaintext-Envelope nach Sync 003 Z.420-466) würde alle anderen Inbox-Konsumenten brechen, weil `EncryptedMessagingNetworkAdapter` und die Demo-Listener Old-World-zentrisch sind. Wire-Format-Migration ist Adapter-Audit-Arbeit, nicht Verification-spezifisch. Die INNEN-Schicht (Trust 002 VC-JWS via `attestationService.verifyAttestationVcJws`, `application/verification/verification-workflow.ts:createVerificationAttestation`) ist bereits spec-konform.
 
 **Reihenfolge-Korrektur 2026-06-09 (Anton-Entscheid nach W2-Abschluss):** W3 wird **sequenziell** durchgezogen, keine Worktree-Parallelisierung. Ziel ist **production-ready** Standalone — die drei #188-Folge-Slices (`canonical-removal-cleanup` integriert in `1.B.3-sync-recovery`, `discovery-attestations` integriert in `1.B.3-discovery-recovery`, neuer `1.B.3-admin-management` löst `members[0]`-SPEC-APPROX auf) werden Teil von W3, nicht "post-Phase-1". Adapter-Audit wird **atomar für alle 4 Inbox-Typen** (member-update, space-invite, key-rotation, attestation) durchgeführt — kein Compat-Shim ([[feedback_no_quick_fixes]]).
@@ -94,6 +105,19 @@ Bei Konflikt zwischen alter Implementation und Spec gewinnt die Spec. Ohne Ausna
 4. **Tests aus Spec-Test-Vektoren** (falls vorhanden) + Application-Use-Case-Tests gegen Fake-Ports.
 5. **Konsumenten umhängen** auf neue API. Konsumenten-Verhalten wird gegen eigene Spec-Domäne geprüft (Demo-UX, CLI-Output), nicht gegen alte Implementation.
 6. **Alte Datei löschen.** Re-Exports + `exports`-Map cleanup. Keine Bridge-Module, kein `@deprecated`-Anker, keine Shims.
+
+### Invarianten-first für Sicherheits-/Sync-/Distributed-State-Slices (ab Slice R/CG/SR/B, verbindlich)
+
+Für sync, removal, capability-gates, nonce/seq, durable logs, Teardown und alles, was eine **deploybare Surface** berührt, gilt ZUSÄTZLICH zur Spec-Lese — die teuersten Bugs sind nicht-modellierte Zustandsübergänge, nicht Crypto-Primitive:
+
+1. **Halbseitiges Invarianten-/State-Machine-Modell VOR Code:** knappe Invarianten-Liste („eine seq ist verloren gdw…", „der Wire-Cursor rückt vor gdw…") + **Übergangstabelle** (State · erlaubter Übergang · nötiger Beweis · Fehlerverhalten).
+2. **Modell durch Dual-Review (Codex + Opus) VOR Implementierung.** Hier ist der billigste Fix-Punkt — eine falsche Tabellenzeile ist ein Edit, eine falsche Code-Zeile eine Review-Runde.
+3. Erst danach implementieren; **adversariale Tests gegen die Übergangstabelle** (nicht gegen die Fälle, die der Implementierer sich vorstellte).
+
+**Harte Regeln (nicht verhandelbar):**
+- **Error-Propagation ist eine Sicherheitsinvariante:** ein nicht-transienter Gate-Fehler (Publish/Removal/Restore/Capability/ACK/Persist) DARF den sichtbaren State NICHT vorrücken lassen und MUSS propagieren — kein stiller `console.debug`-Schluck.
+- **Claim-Disziplin:** für diese Code-Klasse keine „GO/grün"-Claims, sondern „verifiziert gegen X/Y/Z — nicht abgedeckt: …". „Grün" ist hier Szenario-Evidenz, kein Korrektheitsurteil.
+- **Review-Surface ist breiter als der Diff:** Teardown-/Wipe-Pfade, die Composition Root, und der **Deploy-/Runtime-Pfad jedes neuen Outputs** (CI/Compose/Domain — auch Dateien außerhalb des Diffs) gehören dazu. Default = prod-safe auf einem Continuous-Deploy-Pfad; „später" ist keine Kontrolle. Test-/Debug-Observability, die in Server-Code landet, ist Prod-Security-Surface (fail-loud + default-redacted).
 
 ### Hygiene-Regel: Workflows produzieren keine Legacy-Form
 
@@ -188,6 +212,12 @@ Roter Status bei einem dieser Gates blockiert den Merge bis zur Behebung — kei
 - Kein UI-Redesign.
 - Keine DIDComm-Mediator-/JWE-Erweiterung außerhalb existierender Spec.
 - Keine Mobile-Release-Pipeline-Änderungen (Phase 4).
+
+### Post-Festival bewusst geparkt (nicht weiter inkrementell patchen)
+
+- **seq↔Nonce-Entkopplung (Grundsatz-Redesign):** `seq` doppelt als AES-256-GCM-Nonce-Input UND Sync-Cursor. Diese Kopplung macht den seq-Raum starr → SR-VE-C2 re-emittiert unter neuer seq → permanente Gaps → die ganze Soft-Skip/GapRepair-Maschinerie (Slice B) existiert nur deshalb. Frage post-Festival: eigener durabler Nonce-Zähler / random-mit-Storage, ohne andere Risiken einzukaufen. Kein Blunder, aber ein Trade, der auf der falschen Seite teuer wurde.
+- **Spec-Härtungs-Track:** die in den Slices geernteten Invarianten sind als Draft in `wot-spec` PR #112 (deviceId↔Log-Lifecycle, kontiger Cursor, broker-confirmed-absent/Soft-Skip, Pagination-Terminierung, SEQ_COLLISION≠Restore-Clone, Restore-Clone-Re-Register, Error-Propagation) — gemergt; weitere Härtung normativ + knapp.
+- Mutual-Transkript (#103), Broker-Conformance, weitere Sync-Slices, **#7 Main-Cutover** (angehalten bis Sync konform+zuverlässig).
 
 ---
 
