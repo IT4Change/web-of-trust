@@ -113,6 +113,11 @@ export function classifyRejectDisposition(code: BrokerErrorCode): RejectDisposit
       return 'restore-clone'
     case 'AUTHOR_MISMATCH':
       return 'hard-stop'
+    // A2 Teil B (TOFU): the personal doc is owner-bound to a DIFFERENT DID. Like
+    // AUTHOR_MISMATCH this is a HARD STOP, no retry — but it throws its own typed
+    // PersonalDocOwnerMismatchError (see throwHardStop), not the author-binding error.
+    case 'PERSONAL_DOC_OWNER_MISMATCH':
+      return 'hard-stop'
     case 'DEVICE_ID_CONFLICT':
       return 'device-re-register'
     // Slice SR / VE-C2: the LEGITIME LAGGER — a still-active member that authored a
@@ -148,6 +153,32 @@ export class AuthorMismatchError extends Error {
     this.docId = docId
     this.deviceId = deviceId
     this.authorKid = authorKid
+  }
+}
+
+/**
+ * A2 Teil B (TOFU personal-doc owner-binding): the relay rejected a personal-doc
+ * operation (present-capability / log-entry / sync-request) with
+ * PERSONAL_DOC_OWNER_MISMATCH because the doc is owner-bound to a DIFFERENT DID than
+ * ours (Sync 003). HARD STOP, no retry, never auto-recovered: either a leaked
+ * personalDocId is being driven by a foreign DID (an attack — silently retrying would
+ * spin a loop), or our own DID lost the TOFU first-claim race for this docId. Surfaced
+ * via {@link LogSyncCoordinatorConfig.onSecurityError} (the throw otherwise only reaches
+ * the messaging dispatch, which console.error-logs callback errors and would swallow it)
+ * and re-thrown so it cannot be degraded into a retry. Parallels {@link AuthorMismatchError}
+ * (the other identity-binding hard stop) and {@link SeqCollisionError}.
+ */
+export class PersonalDocOwnerMismatchError extends Error {
+  readonly docId: string
+  readonly deviceId: string
+  constructor(docId: string, deviceId: string) {
+    super(
+      `PERSONAL_DOC_OWNER_MISMATCH for docId=${docId} deviceId=${deviceId}: the personal ` +
+        'doc is owner-bound to a different DID — hard stop, no retry',
+    )
+    this.name = 'PersonalDocOwnerMismatchError'
+    this.docId = docId
+    this.deviceId = deviceId
   }
 }
 
@@ -1753,16 +1784,40 @@ export class LogSyncCoordinator {
   // ──────────────────────────────────────────────────────────────────────────
 
   /**
+   * Build the typed HARD-STOP error for a no-retry reject `code`, branching by code so the
+   * surfaced error type is honest:
+   *  - PERSONAL_DOC_OWNER_MISMATCH (A2 Teil B) → {@link PersonalDocOwnerMismatchError}, also
+   *    surfaced via `onSecurityError` here BEFORE the caller throws (the throw alone is only
+   *    console-logged by the messaging dispatch, so a security detector would otherwise miss
+   *    it — same pattern as {@link SeqCollisionError}).
+   *  - AUTHOR_MISMATCH (and any other 'hard-stop') → {@link AuthorMismatchError}.
+   * The caller `throw`s the result, so neither hard-stop path degrades into a retry. Shared
+   * by the control-frame path ({@link dispositionForError}) and the write-path reject
+   * ({@link handleWriteReject}).
+   */
+  private hardStopError(code: BrokerErrorCode, rejectedDeviceId?: string): Error {
+    const deviceId = rejectedDeviceId ?? this.deviceId
+    if (code === 'PERSONAL_DOC_OWNER_MISMATCH') {
+      const mismatch = new PersonalDocOwnerMismatchError(this.config.docId, deviceId)
+      this.config.onSecurityError?.(mismatch)
+      return mismatch
+    }
+    // AUTHOR_MISMATCH: authorKid<->deviceId binding bug. Hard stop, never retry.
+    return new AuthorMismatchError(this.config.docId, deviceId, this.config.authorKid)
+  }
+
+  /**
    * Maps an error thrown by the control/envelope transport to a VE-4 disposition.
-   * AUTHOR_MISMATCH is a HARD STOP (no retry) and re-thrown as
-   * {@link AuthorMismatchError} so it cannot be swallowed into a retry loop.
+   * AUTHOR_MISMATCH / PERSONAL_DOC_OWNER_MISMATCH are HARD STOPs (no retry) and re-thrown
+   * as their typed errors (see {@link hardStopError}) so they cannot be swallowed into a
+   * retry loop.
    */
   dispositionForError(err: unknown): RejectDisposition {
     const code = brokerErrorCodeOf(err)
     if (!code) return 'unknown'
     const disposition = classifyRejectDisposition(code)
     if (disposition === 'hard-stop') {
-      throw new AuthorMismatchError(this.config.docId, this.deviceId, this.config.authorKid)
+      throw this.hardStopError(code)
     }
     return disposition
   }
@@ -1822,8 +1877,11 @@ export class LogSyncCoordinator {
     const disposition = classifyRejectDisposition(code)
     switch (disposition) {
       case 'hard-stop':
-        // AUTHOR_MISMATCH: authorKid<->deviceId binding bug. Hard stop, never retry.
-        throw new AuthorMismatchError(this.config.docId, rejectedDeviceId ?? this.deviceId, this.config.authorKid)
+        // AUTHOR_MISMATCH (authorKid<->deviceId binding bug) or, A2 Teil B,
+        // PERSONAL_DOC_OWNER_MISMATCH (this docId is owner-bound to a different DID).
+        // Both are hard stops, never retried; hardStopError picks the typed error and
+        // surfaces the owner mismatch via onSecurityError before we throw it.
+        throw this.hardStopError(code, rejectedDeviceId)
       case 'restore-clone':
         // VE-11 Trigger split — a WRITE-PATH reject is NEVER the recoverable case:
         //  - SEQ_COLLISION_DETECTED = seq-REUSE at an already-stored (docId,deviceId,

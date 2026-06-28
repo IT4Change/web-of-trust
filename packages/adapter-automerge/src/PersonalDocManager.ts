@@ -14,16 +14,18 @@ import { Repo, stringifyAutomergeUrl, parseAutomergeUrl } from '@automerge/autom
 import type { DocHandle, DocumentId, AutomergeUrl, BinaryDocumentId } from '@automerge/automerge-repo'
 import * as Automerge from '@automerge/automerge'
 import type { IdentitySession } from '@web_of_trust/core/types'
-import type { MessagingAdapter } from '@web_of_trust/core/ports'
+import type { MessagingAdapter, DocLogStore } from '@web_of_trust/core/ports'
 // Deep subpath (not the package root) so this module resolves under vitest's
 // runtime resolver too — the `@web_of_trust/core` "." entry isn't resolved there,
 // while subpaths (`/storage`, `/ports`, `/protocol`, …) are. Same symbols.
 import { CompactStorageManager, getMetrics, registerDebugApi } from '@web_of_trust/core/storage'
 import type { ProtocolCryptoAdapter } from '@web_of_trust/core/protocol'
-import { decryptOneShot, encryptOneShot } from '@web_of_trust/core/protocol'
+import { decryptOneShot, encryptOneShot, personalDocIdFromKey } from '@web_of_trust/core/protocol'
 import { WebCryptoProtocolCryptoAdapter } from '@web_of_trust/core/protocol-adapters'
 import { VaultClient, base64ToUint8, VaultPushScheduler } from '@web_of_trust/core/adapters'
-import { PersonalNetworkAdapter } from './PersonalNetworkAdapter'
+// A2: the legacy PersonalNetworkAdapter (personal-sync Repo network adapter) is UN-WIRED —
+// replaced by the durable-log adapter. Its class file stays dormant (post-festival cleanup).
+import { AutomergePersonalLogSyncAdapter } from './AutomergePersonalLogSyncAdapter'
 import { SyncOnlyStorageAdapter } from './SyncOnlyStorageAdapter'
 import { CompactionService } from './CompactionService'
 
@@ -240,7 +242,7 @@ async function deleteOldIDB(): Promise<void> {
 
 let docHandle: DocHandle<PersonalDoc> | null = null
 let personalRepo: Repo | null = null
-let networkAdapter: PersonalNetworkAdapter | null = null
+let logSyncAdapter: AutomergePersonalLogSyncAdapter | null = null
 let changeListeners = new Set<() => void>()
 /** Flag to suppress handle.on('change') during local changePersonalDoc() calls */
 let localChangeInProgress = false
@@ -481,7 +483,7 @@ async function pushToVault(): Promise<void> {
  * - Migrates data from old plain-object IndexedDB if present
  * - Starts encrypted sync to other devices via wot-relay
  */
-export async function initPersonalDoc(identity: IdentitySession, messaging?: MessagingAdapter, vaultUrl?: string): Promise<PersonalDoc> {
+export async function initPersonalDoc(identity: IdentitySession, messaging?: MessagingAdapter, vaultUrl?: string, logSync?: { docLogStore: DocLogStore; deviceId: string }): Promise<PersonalDoc> {
   // Idempotent — if already initialized with this identity, return existing doc
   if (docHandle && personalRepo) {
     const doc = docHandle.doc()
@@ -727,14 +729,21 @@ export async function initPersonalDoc(identity: IdentitySession, messaging?: Mes
 
   docHandle = handle
 
-  // Add network adapter AFTER doc is loaded from local storage —
-  // adding it before find() causes Automerge to wait for peer sync (~20s)
-  if (messaging) {
-    networkAdapter = new PersonalNetworkAdapter(messaging, personalKey, did)
-    networkAdapter.setDocumentId(documentId)
-    networkAdapter.setDocHandle(handle)
-    personalRepo.networkSubsystem.addNetworkAdapter(networkAdapter)
-    networkAdapter.setDocReady()
+  // A2 TC-A1/A3: the durable-log personal-sync adapter (replaces the legacy Repo network adapter).
+  // Reuses the SAME LogSyncCoordinator as Spaces over the OutboxMessagingAdapter, keyed by the
+  // canonical UUID personalDocIdFromKey(personalKey) — NOT the base58 Repo documentId (VE-9) —
+  // with the shared per-DID docLogStore + the composition-root-resolved deviceId (nonce-safe).
+  if (messaging && logSync) {
+    logSyncAdapter = new AutomergePersonalLogSyncAdapter({
+      docHandle: handle,
+      messaging,
+      identity,
+      personalKey,
+      docId: personalDocIdFromKey(personalKey),
+      docLogStore: logSync.docLogStore,
+      deviceId: logSync.deviceId,
+    })
+    logSyncAdapter.start()
   }
 
   // Listen for all changes — notify on remote changes only
@@ -749,14 +758,8 @@ export async function initPersonalDoc(identity: IdentitySession, messaging?: Mes
     }
   })
 
-  // Emit peer-candidate for self (other devices use the same DID)
-  if (networkAdapter) {
-    // Tell the repo about our "peer" (our other devices)
-    networkAdapter.emit('peer-candidate', {
-      peerId: did as any,
-      peerMetadata: { isEphemeral: true },
-    })
-  }
+  // A2: no Repo peer-candidate emission — the durable-log adapter syncs via log entries, not the
+  // Automerge Repo's networkSubsystem (the legacy peer-candidate self-emit is gone with it).
 
   const doc = handle.doc()
   if (!doc) throw new Error('Failed to initialize personal doc')
@@ -839,10 +842,10 @@ export async function flushPersonalDoc(): Promise<void> {
  */
 export async function resetPersonalDoc(): Promise<void> {
   const repo = personalRepo
-  const adapter = networkAdapter
+  const adapter = logSyncAdapter
   docHandle = null
   personalRepo = null
-  networkAdapter = null
+  logSyncAdapter = null
   vaultClient = null
   vaultPersonalKey = null
   vaultSeq = 0
@@ -852,7 +855,7 @@ export async function resetPersonalDoc(): Promise<void> {
   changeListeners.clear()
   // Shutdown after clearing refs (so nothing retries during shutdown)
   try {
-    adapter?.disconnect()
+    adapter?.destroy()
     repo?.shutdown()
   } catch { /* best effort */ }
 }

@@ -3,6 +3,14 @@
 // Order mirrors the Sync 003 `Fehler-Responses` table (003-transport-und-broker.md
 // Normative Error-Codes) one-to-one so this catalog stays an honest closed set:
 // `parseBrokerErrorBody`/`isKnownBrokerErrorCode` reject any code outside it.
+//
+// `PERSONAL_DOC_OWNER_MISMATCH` (A2 Teil B, TOFU personal-doc owner-binding) is the one entry
+// whose normative Sync 003 row is still PENDING the spec harvest (Anton-Abnahme). It is carried
+// here already because the relay EMITS it today (present-capability / log-entry / sync-request /
+// space-register on a personally-owned docId): without it in the closed set the client would
+// degrade the typed code to a generic Error and silently ignore a routed write-path hard stop.
+// Placed adjacent to AUTHOR_MISMATCH (both are identity-binding rejections) so the eventual
+// spec-table row can mirror this position.
 export const KNOWN_BROKER_ERROR_CODES = Object.freeze([
   'DOC_NOT_FOUND',
   'CAPABILITY_REQUIRED',
@@ -11,6 +19,7 @@ export const KNOWN_BROKER_ERROR_CODES = Object.freeze([
   'CAPABILITY_GENERATION_STALE',
   'SPACE_ALREADY_REGISTERED',
   'AUTHOR_MISMATCH',
+  'PERSONAL_DOC_OWNER_MISMATCH',
   'DEVICE_NOT_REGISTERED',
   'DEVICE_REVOKED',
   'DEVICE_ID_CONFLICT',

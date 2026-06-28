@@ -16,9 +16,9 @@
  */
 import * as Y from 'yjs'
 import type { IdentitySession } from '@web_of_trust/core/types'
-import type { MessagingAdapter } from '@web_of_trust/core/ports'
+import type { MessagingAdapter, DocLogStore } from '@web_of_trust/core/ports'
 import type { ProtocolCryptoAdapter } from '@web_of_trust/core/protocol'
-import { decryptOneShot, encryptOneShot } from '@web_of_trust/core/protocol'
+import { decryptOneShot, encryptOneShot, personalDocIdFromKey } from '@web_of_trust/core/protocol'
 import { WebCryptoProtocolCryptoAdapter } from '@web_of_trust/core/protocol-adapters'
 import {
   VaultPushScheduler,
@@ -30,7 +30,9 @@ import {
   getMetrics,
   registerDebugApi,
 } from '@web_of_trust/core/storage'
-import { YjsPersonalSyncAdapter } from './YjsPersonalSyncAdapter'
+// A2: the legacy YjsPersonalSyncAdapter (personal-sync broadcast) is UN-WIRED — replaced by the
+// durable-log adapter. Its class file stays dormant (post-festival cleanup), no longer imported.
+import { YjsPersonalLogSyncAdapter } from './YjsPersonalLogSyncAdapter'
 
 import type {
   PersonalDoc,
@@ -53,7 +55,7 @@ let vaultScheduler: VaultPushScheduler | null = null
 let vaultClient: VaultClient | null = null
 let vaultPersonalKey: Uint8Array | null = null
 let vaultSeq = 0
-let syncAdapter: YjsPersonalSyncAdapter | null = null
+let logSyncAdapter: YjsPersonalLogSyncAdapter | null = null
 let changeListeners = new Set<() => void>()
 let protocolCrypto: ProtocolCryptoAdapter | null = null
 
@@ -442,7 +444,7 @@ function notifyListeners(): void {
  * @param messaging - Optional MessagingAdapter for multi-device sync via relay
  * @param vaultUrl - Optional vault URL for encrypted backup
  */
-export async function initYjsPersonalDoc(identity: IdentitySession, messaging?: MessagingAdapter, vaultUrl?: string, externalCompactStore?: { open(): Promise<void>; save(id: string, data: Uint8Array): Promise<void>; load(id: string): Promise<Uint8Array | null>; delete(id: string): Promise<void>; list(): Promise<string[]>; close(): void }): Promise<PersonalDoc> {
+export async function initYjsPersonalDoc(identity: IdentitySession, messaging?: MessagingAdapter, vaultUrl?: string, externalCompactStore?: { open(): Promise<void>; save(id: string, data: Uint8Array): Promise<void>; load(id: string): Promise<Uint8Array | null>; delete(id: string): Promise<void>; list(): Promise<string[]>; close(): void }, logSync?: { docLogStore: DocLogStore; deviceId: string }): Promise<PersonalDoc> {
   // Idempotent
   if (ydoc) return snapshotDoc()
 
@@ -602,11 +604,24 @@ export async function initYjsPersonalDoc(identity: IdentitySession, messaging?: 
     }
   }
 
-  const startPersonalSyncAdapter = () => {
-    if (!messaging || !vaultPersonalKey || syncAdapter) return
-    const did = identity.getDid()
-    syncAdapter = new YjsPersonalSyncAdapter(ydoc!, messaging, vaultPersonalKey, did, (data: string) => identity.sign(data))
-    syncAdapter.start()
+  // A2 TC-A1/A3: the durable-log personal-sync adapter (replaces the legacy broadcast). Reuses
+  // the SAME LogSyncCoordinator as Spaces over the OutboxMessagingAdapter, keyed by the canonical
+  // UUID personalDocIdFromKey(personalKey), with the shared per-DID docLogStore + the
+  // composition-root-resolved deviceId (nonce-safe, TC-A2). Started only with the log-sync wiring
+  // (multi-device); the single-device path keeps a purely local doc.
+  const startPersonalLogSyncAdapter = async () => {
+    if (!messaging || !logSync || logSyncAdapter) return
+    vaultPersonalKey ??= await identity.deriveFrameworkKey('personal-doc-v1')
+    logSyncAdapter = new YjsPersonalLogSyncAdapter({
+      doc: ydoc!,
+      messaging,
+      identity,
+      personalKey: vaultPersonalKey,
+      docId: personalDocIdFromKey(vaultPersonalKey),
+      docLogStore: logSync.docLogStore,
+      deviceId: logSync.deviceId,
+    })
+    logSyncAdapter.start()
   }
 
   const attachRemoteLegacyCleanupListener = () => {
@@ -617,12 +632,14 @@ export async function initYjsPersonalDoc(identity: IdentitySession, messaging?: 
         const verificationsMap = getExistingRootMap(ydoc!, 'verifications')
         if (verificationsMap !== null) {
           const oldDoc = ydoc!
-          syncAdapter?.destroy()
-          syncAdapter = null
+          logSyncAdapter?.destroy()
+          logSyncAdapter = null
           ydoc = rebuildPersonalDocWithoutLegacyMaps(oldDoc)
           oldDoc.destroy()
           attachRemoteLegacyCleanupListener()
-          startPersonalSyncAdapter()
+          // Re-bind the log adapter to the freshly rebuilt doc (fire-and-forget — the rebuild
+          // path is a legacy-map migration trigger; the new adapter re-presents + catches up).
+          void startPersonalLogSyncAdapter()
         } else if (outboxMap.size > 0) {
           ydoc!.transact(() => {
             for (const key of Array.from(outboxMap.keys())) {
@@ -639,9 +656,9 @@ export async function initYjsPersonalDoc(identity: IdentitySession, messaging?: 
   // Listen for remote changes (from multi-device sync)
   attachRemoteLegacyCleanupListener()
 
-  // Multi-device sync via relay
-  if (messaging && vaultPersonalKey) {
-    startPersonalSyncAdapter()
+  // Multi-device sync via relay (A2: durable-log path).
+  if (messaging && logSync) {
+    await startPersonalLogSyncAdapter()
   }
 
   if (loadedFrom === 'new') {
@@ -716,7 +733,7 @@ export async function refreshYjsPersonalDocFromVault(): Promise<boolean> {
  * Reset — shut down and clear all state.
  */
 export async function resetYjsPersonalDoc(): Promise<void> {
-  if (syncAdapter) { syncAdapter.destroy(); syncAdapter = null }
+  if (logSyncAdapter) { logSyncAdapter.destroy(); logSyncAdapter = null }
   ydoc?.destroy()
   ydoc = null
   if (compactScheduler) { compactScheduler.destroy(); compactScheduler = null }
