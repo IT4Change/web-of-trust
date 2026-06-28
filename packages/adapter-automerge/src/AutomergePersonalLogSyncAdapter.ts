@@ -117,7 +117,14 @@ export class AutomergePersonalLogSyncAdapter {
   private async ensureCoordinator(): Promise<LogSyncCoordinator> {
     if (this.coordinator) return this.coordinator
     await this.docLogStore.init()
-    this.deviceId = await this.docLogStore.getOrCreateDeviceId()
+    // TC-A2 (P-DEVICEID, nonce safety): use the caller-resolved deviceId (config.deviceId) —
+    // the SAME per-device id Spaces use, resolved ONCE by the composition root via
+    // resolveConnectDeviceId(), which performs the partial-meta-only ROTATION a raw
+    // getOrCreateDeviceId() would MISS (→ seq-0 nonce reuse). The shared docLogStore is already
+    // resolve-connected; calling getOrCreateDeviceId()/resolveConnectDeviceId() HERE would miss
+    // the rotation or DOUBLE-rotate the shared store. So do NOT overwrite this.deviceId — it
+    // stays the resolved id (restore-clone re-binds it in onWriteRejected). Tests seed the store
+    // via setDeviceId() with the same id, so this is behavior-preserving there.
 
     this.coordinator = new LogSyncCoordinator({
       docId: this.docId, // VE-9: canonical UUID, never the base58 documentId.

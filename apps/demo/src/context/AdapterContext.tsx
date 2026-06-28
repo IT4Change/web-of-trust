@@ -234,16 +234,19 @@ export function AdapterProvider({ children, identity }: AdapterProviderProps) {
         // Initialize personal doc — loads from local IndexedDB first, syncs later via relay
         // Dynamic imports keep Automerge WASM (~2.6MB) out of the Yjs bundle
         let storage: DemoRuntimeStore
+        // A2: the personal doc now syncs over the durable-LOG path (like Spaces) — pass the
+        // SAME outboxAdapter (reconnect + control-frame semantics, not raw wsAdapter), the shared
+        // per-DID docLogStore, and the resolveConnectDeviceId-resolved deviceId (nonce-safe).
         if (USE_YJS) {
           const { initYjsPersonalDoc } = await import('@web_of_trust/adapter-yjs')
-          await initYjsPersonalDoc(identity, wsAdapter, appRuntimeConfig.vaultUrl)
+          await initYjsPersonalDoc(identity, outboxAdapter, appRuntimeConfig.vaultUrl, undefined, { docLogStore, deviceId })
           console.debug('[init] Using Yjs PersonalDocManager')
           const { YjsStorageAdapter } = await import('../adapters/YjsStorageAdapter')
           storage = new YjsStorageAdapter(did)
         } else {
           const { isPersonalDocInitialized, initPersonalDoc } = await import('@web_of_trust/adapter-automerge')
           if (!isPersonalDocInitialized()) {
-            await initPersonalDoc(identity, wsAdapter, appRuntimeConfig.vaultUrl)
+            await initPersonalDoc(identity, outboxAdapter, appRuntimeConfig.vaultUrl, { docLogStore, deviceId })
           }
           console.debug('[init] Using Automerge PersonalDocManager')
           const { AutomergeStorageAdapter } = await import('../adapters/AutomergeStorageAdapter')
