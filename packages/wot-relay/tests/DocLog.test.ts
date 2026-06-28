@@ -384,7 +384,7 @@ describe('DocLog (durable append-only log store)', () => {
     expect(log.getSpace(spaceId)).toBeNull()
     expect(log.getSpaceAdmins(spaceId)).toEqual([])
 
-    const result = log.registerSpace({ spaceId, verificationKey, adminDids: [adminB, adminA] })
+    const result = log.registerSpace({ spaceId, verificationKey, adminDids: [adminB, adminA], signerDid: adminA })
     expect(result).toEqual({ disposition: 'registered' })
     expect(log.isSpaceRegistered(spaceId)).toBe(true)
     expect(log.getSpace(spaceId)).toEqual({ verificationKey, generation: 0 })
@@ -398,11 +398,11 @@ describe('DocLog (durable append-only log store)', () => {
     const adminA = `did:key:z6Mk${'c'.repeat(40)}`
     const adminB = `did:key:z6Mk${'d'.repeat(40)}`
 
-    expect(log.registerSpace({ spaceId, verificationKey, adminDids: [adminA, adminB] })).toEqual({
+    expect(log.registerSpace({ spaceId, verificationKey, adminDids: [adminA, adminB], signerDid: adminA })).toEqual({
       disposition: 'registered',
     })
     // Same verificationKey, same admin SET but reversed order → idempotent recovery.
-    expect(log.registerSpace({ spaceId, verificationKey, adminDids: [adminB, adminA] })).toEqual({
+    expect(log.registerSpace({ spaceId, verificationKey, adminDids: [adminB, adminA], signerDid: adminA })).toEqual({
       disposition: 'idempotent',
     })
     // No mutation: still generation 0, same admins.
@@ -415,11 +415,11 @@ describe('DocLog (durable append-only log store)', () => {
     const adminA = `did:key:z6Mk${'e'.repeat(40)}`
 
     expect(
-      log.registerSpace({ spaceId, verificationKey: 'vk-original', adminDids: [adminA] }),
+      log.registerSpace({ spaceId, verificationKey: 'vk-original', adminDids: [adminA], signerDid: adminA }),
     ).toEqual({ disposition: 'registered' })
     // Same admins, DIFFERENT key → conflict (first-writer-wins).
     expect(
-      log.registerSpace({ spaceId, verificationKey: 'vk-DIFFERENT', adminDids: [adminA] }),
+      log.registerSpace({ spaceId, verificationKey: 'vk-DIFFERENT', adminDids: [adminA], signerDid: adminA }),
     ).toEqual({ disposition: 'conflict' })
     // Binding unchanged.
     expect(log.getSpace(spaceId)).toEqual({ verificationKey: 'vk-original', generation: 0 })
@@ -434,15 +434,15 @@ describe('DocLog (durable append-only log store)', () => {
     const adminC = `did:key:z6Mk${'c'.repeat(40)}`
 
     expect(
-      log.registerSpace({ spaceId, verificationKey, adminDids: [adminA, adminB] }),
+      log.registerSpace({ spaceId, verificationKey, adminDids: [adminA, adminB], signerDid: adminA }),
     ).toEqual({ disposition: 'registered' })
     // Same key, DIFFERENT admin set (adminC added, adminB dropped) → conflict.
     expect(
-      log.registerSpace({ spaceId, verificationKey, adminDids: [adminA, adminC] }),
+      log.registerSpace({ spaceId, verificationKey, adminDids: [adminA, adminC], signerDid: adminA }),
     ).toEqual({ disposition: 'conflict' })
     // A subset is also a divergent set → conflict.
     expect(
-      log.registerSpace({ spaceId, verificationKey, adminDids: [adminA] }),
+      log.registerSpace({ spaceId, verificationKey, adminDids: [adminA], signerDid: adminA }),
     ).toEqual({ disposition: 'conflict' })
     // Original admin set untouched.
     expect(log.getSpaceAdmins(spaceId)).toEqual([adminA, adminB])
@@ -463,7 +463,7 @@ describe('DocLog (durable append-only log store)', () => {
 
     // The space MUST be registered so getSpace returns a generation (the gate is a
     // no-op for an unregistered Personal-Doc).
-    log.registerSpace({ spaceId: docId, verificationKey: 'vk-b2', adminDids: [author.did] })
+    log.registerSpace({ spaceId: docId, verificationKey: 'vk-b2', adminDids: [author.did], signerDid: author.did })
     expect(log.getSpace(docId)).toEqual({ verificationKey: 'vk-b2', generation: 0 })
 
     // seq0 @ gen0 lands while the space is at generation 0.
@@ -549,8 +549,8 @@ describe('DocLog (durable append-only log store)', () => {
     const spaceB = randomUUID()
     const admin = `did:key:z6Mk${'f'.repeat(40)}`
 
-    log.registerSpace({ spaceId: spaceA, verificationKey: 'vk-a', adminDids: [admin] })
-    log.registerSpace({ spaceId: spaceB, verificationKey: 'vk-b', adminDids: [admin] })
+    log.registerSpace({ spaceId: spaceA, verificationKey: 'vk-a', adminDids: [admin], signerDid: admin })
+    log.registerSpace({ spaceId: spaceB, verificationKey: 'vk-b', adminDids: [admin], signerDid: admin })
 
     expect(log.getSpace(spaceA)).toEqual({ verificationKey: 'vk-a', generation: 0 })
     expect(log.getSpace(spaceB)).toEqual({ verificationKey: 'vk-b', generation: 0 })
@@ -611,23 +611,32 @@ describe('DocLog (durable append-only log store)', () => {
     db.close()
   })
 
-  it('registerSpace respects personal-doc ownership (A2 Teil B anti-escalation): foreign admin set rejected; owner upgrade clears the personal binding', async () => {
+  it('registerSpace respects personal-doc ownership (A2 Teil B anti-escalation): only an OWNER-SIGNED upgrade passes; a foreign signer — even with the owner listed as a decoy admin — is rejected', async () => {
     const docId = randomUUID()
     const owner = (await makeAuthor('po-owner')).did
     const foreigner = (await makeAuthor('po-foreign')).did
     log.claimPersonalDocOwner(docId, owner)
 
-    // A foreigner promoting the personal doc to a space (owner NOT among adminDids) is rejected
-    // atomically — the docId stays personal and the owner binding is intact.
-    expect(log.registerSpace({ spaceId: docId, verificationKey: 'vk-f', adminDids: [foreigner] })).toEqual({
+    // A foreigner promoting the personal doc to a space (signer != owner) is rejected atomically —
+    // the docId stays personal and the owner binding is intact.
+    expect(log.registerSpace({ spaceId: docId, verificationKey: 'vk-f', adminDids: [foreigner], signerDid: foreigner })).toEqual({
       disposition: 'personal-owner-conflict',
     })
     expect(log.isSpaceRegistered(docId)).toBe(false)
     expect(log.getPersonalDocOwner(docId)).toBe(owner)
 
-    // The OWNER upgrading their own doc (their DID ∈ adminDids) → registered, and the personal
+    // DECOY-ADMIN VECTOR (the reason the gate binds on the SIGNER, not adminDids membership): a
+    // foreigner lists the owner as a co-admin and signs as themselves. An owner∈adminDids check
+    // would WRONGLY pass; binding on the proven signer (foreigner != owner) still rejects it.
+    expect(
+      log.registerSpace({ spaceId: docId, verificationKey: 'vk-decoy', adminDids: [foreigner, owner], signerDid: foreigner }),
+    ).toEqual({ disposition: 'personal-owner-conflict' })
+    expect(log.isSpaceRegistered(docId)).toBe(false)
+    expect(log.getPersonalDocOwner(docId)).toBe(owner)
+
+    // The OWNER upgrading their own doc (signerDid == owner) → registered, and the personal
     // binding is cleared so the docId is never simultaneously space-registered AND personal-owned.
-    expect(log.registerSpace({ spaceId: docId, verificationKey: 'vk-o', adminDids: [owner] })).toEqual({
+    expect(log.registerSpace({ spaceId: docId, verificationKey: 'vk-o', adminDids: [owner], signerDid: owner })).toEqual({
       disposition: 'registered',
     })
     expect(log.isSpaceRegistered(docId)).toBe(true)
