@@ -48,7 +48,10 @@ test.describe('Multi-Device Sync', () => {
 
       // Personal-doc sync: Bob should appear in contacts on Device 2
       await navigateTo(alice2Page, '/contacts')
-      await expect(alice2Page.getByText('Bob')).toBeVisible({ timeout: 60_000 })
+      // Target the contact LINK specifically — the loose getByText('Bob') also matches the
+      // "Du und Bob seid verbunden!" verification dialog that Device 2 shows when it syncs the
+      // verification (strict-mode 2-element flake). The link is the actual personal-doc sync result.
+      await expect(alice2Page.getByRole('link', { name: 'Bob' })).toBeVisible({ timeout: 60_000 })
 
       // --- Phase B: Incoming attestation — both devices receive ---
 

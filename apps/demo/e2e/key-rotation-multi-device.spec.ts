@@ -37,7 +37,9 @@ test.describe('Key Rotation Multi-Device', () => {
 
       // Wait for contacts to sync to Device 2
       await navigateTo(alice2Page, '/contacts')
-      await expect(alice2Page.getByText('Bob')).toBeVisible({ timeout: 60_000 })
+      // Contact LINK specifically (the loose getByText('Bob') also matches Device 2's
+      // "Du und Bob seid verbunden!" verification dialog → strict-mode 2-element flake).
+      await expect(alice2Page.getByRole('link', { name: 'Bob' })).toBeVisible({ timeout: 60_000 })
 
       // --- Alice Device 1: create space and invite Bob ---
 
@@ -119,7 +121,9 @@ test.describe('Key Rotation Multi-Device', () => {
       })
       await waitForRelayConnected(alice2Page)
       await navigateTo(alice2Page, '/contacts')
-      await expect(alice2Page.getByText('Bob')).toBeVisible({ timeout: 60_000 })
+      // Contact LINK specifically (the loose getByText('Bob') also matches Device 2's
+      // "Du und Bob seid verbunden!" verification dialog → strict-mode 2-element flake).
+      await expect(alice2Page.getByRole('link', { name: 'Bob' })).toBeVisible({ timeout: 60_000 })
 
       // Create space + invite Bob + write initial content
       await createSpace(alice1Page, 'Offline-Rotation')
