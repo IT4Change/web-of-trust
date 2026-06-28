@@ -17,7 +17,7 @@ function seedKnownState(docLog: DocLog): { spaceId: string; dev1: string; dev2: 
   const dev2 = randomUUID()
   const adminA = 'did:key:zAdminA'
   const adminB = 'did:key:zAdminB'
-  docLog.registerSpace({ spaceId, verificationKey: 'vk-base64url', adminDids: [adminB, adminA] })
+  docLog.registerSpace({ spaceId, verificationKey: 'vk-base64url', adminDids: [adminB, adminA], signerDid: adminA })
   // dev1 leaves 2 entries, dev2 leaves 1 — distinct (docId,deviceId,seq) so no VE-3 collision.
   docLog.appendEntry({ docId: spaceId, deviceId: dev1, seq: 0, contentHash: 'h-d1-0', entryJws: 'jws-d1-0' })
   docLog.appendEntry({ docId: spaceId, deviceId: dev1, seq: 1, contentHash: 'h-d1-1', entryJws: 'jws-d1-1' })

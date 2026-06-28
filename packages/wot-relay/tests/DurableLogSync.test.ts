@@ -954,7 +954,7 @@ describe('Durable log sync over the real relay (Slice R / Sync 002)', () => {
     await foreignClient.disconnect()
   })
 
-  it('A2 anti-escalation: a FOREIGN DID cannot space-register a personally-owned docId to escape the owner gate; the owner keeps exclusive access', async () => {
+  it('A2 anti-escalation: a FOREIGN DID cannot space-register a personally-owned docId to escape the owner gate — neither as sole admin NOR with the owner as a decoy co-admin (#224); the owner keeps exclusive access', async () => {
     const docId = randomUUID()
     const owner = await makeRawIdentity('a2-esc-owner')
     const foreigner = await makeRawIdentity('a2-esc-foreign')
@@ -981,7 +981,22 @@ describe('Durable log sync over the real relay (Slice R / Sync 002)', () => {
       }),
     ).toMatchObject({ error: 'PERSONAL_DOC_OWNER_MISMATCH' })
 
-    // The doc stays PERSONAL: the owner still reads their entry; the foreigner still cannot.
+    // DECOY-CO-ADMIN VARIANT (the #224 hardening, over the REAL wire): the foreigner lists the
+    // OWNER as a co-admin and SIGNS AS THEMSELVES. An owner∈adminDids check would WRONGLY pass;
+    // binding on the cryptographically-proven inner-JWS signer (foreigner != owner) still rejects
+    // it. This exercises the full path verifySpaceRegisterMessage → header.kid → didOrKidToDid →
+    // registerSpace({ signerDid }), which the DocLog store-level test cannot.
+    expect(
+      await foreignClient.sendSpaceRegister({
+        signer: foreigner,
+        spaceId: docId,
+        spaceCapabilityVerificationKey: keypair.verificationKey,
+        adminDids: [foreigner.did, owner.did],
+      }),
+    ).toMatchObject({ error: 'PERSONAL_DOC_OWNER_MISMATCH' })
+
+    // The doc stays PERSONAL (never space-registered by either attempt): the owner still reads
+    // their entry; the foreigner still cannot.
     const resp = await ownerClient.syncRequest(syncRequestEnvelope(owner.did, docId, {}))
     expect((resp.body as { entries: string[] }).entries).toHaveLength(1)
     expect(await foreignClient.send(syncRequestEnvelope(foreigner.did, docId, {}))).toMatchObject({

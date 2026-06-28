@@ -608,47 +608,52 @@ describe('Broker capability gate over the real relay (Slice CG / VE-4 + VE-5 + V
     const keypair = await makeSpaceCapabilityKeypair()
 
     const aliceClient = new TestClient(alice)
-    const adminClient = new TestClient(admin)
+    // A SECOND socket of the SAME owner DID, used to drive the upgrade — so the scope drop on
+    // aliceClient's socket below is genuinely cross-socket (the VE-8 property), while the register
+    // is OWNER-SIGNED (the A2 Teil B anti-escalation requirement).
+    const aliceClient2 = new TestClient(alice)
     await aliceClient.connect()
-    await adminClient.connect()
+    await aliceClient2.connect()
 
     // (1) docId not yet registered → PERSONAL path. Alice caches a personal WRITE
-    // scope and a write succeeds.
+    // scope on socket 1 and a write succeeds.
     const personalCap = await mintPersonalDocCapability({ owner: alice, docId, permissions: ['read', 'write'] })
     expect(((await aliceClient.presentCapability(personalCap)) as Record<string, unknown>).status).toBe('delivered')
     const jws0 = await buildLogEntryJws({ identity: alice, docId, seq: 0, plaintext: 've8-before' })
     expect(((await aliceClient.send(logEntryEnvelope(alice.did, [alice.did], jws0))) as Record<string, unknown>).status).toBe('delivered')
 
-    // (2) The INITIAL space-register for the SAME docId. A2 Teil B: presenting a personal
-    // capability (step 1) CLAIMS personal ownership (TOFU), so promoting that docId to a space
-    // now requires the owner's CONSENT — alice (the owner) MUST be among adminDids, else the
-    // register is rejected PERSONAL_DOC_OWNER_MISMATCH (a foreigner can't hijack via space-register).
-    // The legitimate owner-consented upgrade clears the personal binding and still drops the scope.
+    // (2) The INITIAL space-register for the SAME docId, OWNER-SIGNED. A2 Teil B anti-escalation:
+    // presenting a personal capability (step 1) CLAIMS personal ownership (TOFU), so promoting that
+    // docId to a space requires the owner's CRYPTOGRAPHIC consent — the space-register MUST be
+    // SIGNED BY the owner (signerDid == alice), NOT merely list alice among adminDids. A foreign
+    // signer is rejected PERSONAL_DOC_OWNER_MISMATCH even with the owner as a decoy co-admin (see
+    // DocLog.test.ts). Sent from alice's SECOND socket; the owner-consented upgrade clears the
+    // personal binding and drops the scope cached on socket 1.
     expect(
       (
-        (await adminClient.sendSpaceRegister({
-          signer: admin,
+        (await aliceClient2.sendSpaceRegister({
+          signer: alice,
           spaceId: docId,
           spaceCapabilityVerificationKey: keypair.verificationKey,
-          adminDids: [admin.did, alice.did],
+          adminDids: [alice.did, admin.did],
         })) as Record<string, unknown>
       ).status,
     ).toBe('delivered')
     expect(docLogOf(server).isSpaceRegistered(docId)).toBe(true)
 
-    // (3) Alice's previously-cached personal scope was dropped → her next write on
-    // the SAME open socket is rejected with CAPABILITY_REQUIRED.
+    // (3) Alice's previously-cached personal scope on socket 1 was dropped (cross-socket) → her
+    // next write on the SAME open socket is rejected with CAPABILITY_REQUIRED.
     const jws1 = await buildLogEntryJws({ identity: alice, docId, seq: 1, plaintext: 've8-after' })
     expect(await aliceClient.send(logEntryEnvelope(alice.did, [alice.did], jws1))).toMatchObject({ error: 'CAPABILITY_REQUIRED' })
 
-    // (4) Once Alice presents a SPACE capability (minted by the admin's space
-    // keypair) she can write again — the Space path now governs the docId.
+    // (4) Once Alice presents a SPACE capability (minted by the space keypair she registered) she
+    // can write again — the Space path now governs the docId.
     const spaceCap = await mintSpaceCapability({ keypair, spaceId: docId, audience: alice.did, permissions: ['read', 'write'] })
     expect(((await aliceClient.presentCapability(spaceCap)) as Record<string, unknown>).status).toBe('delivered')
     expect(((await aliceClient.send(logEntryEnvelope(alice.did, [alice.did], jws1))) as Record<string, unknown>).status).toBe('delivered')
 
     await aliceClient.disconnect()
-    await adminClient.disconnect()
+    await aliceClient2.disconnect()
   })
 
   it('inbox cold-start is UNGATED: a space-invite flows + is ackable without any presented capability', async () => {

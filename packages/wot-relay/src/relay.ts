@@ -834,14 +834,19 @@ export class RelayServer {
     // First-writer-wins binding against the DURABLE registry (atomic). The frame is
     // verified; only a divergent prior binding is a conflict.
     const { spaceId, spaceCapabilityVerificationKey, adminDids } = result.payload
+    // A2 Teil B anti-escalation: bind the upgrade on the CRYPTOGRAPHICALLY-PROVEN signer (the
+    // verified inner-JWS kid-DID), not on mere adminDids membership — a Personal→Space upgrade of
+    // an owned docId is only legitimate when the OWNER signed it (closes the decoy-co-admin vector).
+    const signerKid = typeof result.header.kid === 'string' ? result.header.kid : ''
     const disposition = this.docLog.registerSpace({
       spaceId,
       verificationKey: spaceCapabilityVerificationKey,
       adminDids,
+      signerDid: didOrKidToDid(signerKid),
     })
 
-    // A2 Teil B: the docId is a personal doc owned by a DID that is NOT among adminDids — a
-    // foreigner cannot promote a personal doc to a space to escape the personal owner gate.
+    // A2 Teil B: the docId is a personal doc owned by a DID OTHER than the space-register signer —
+    // a foreigner cannot promote a personal doc to a space to escape the personal owner gate.
     if (disposition.disposition === 'personal-owner-conflict') {
       this.sendTo(ws, {
         type: 'error',

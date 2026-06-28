@@ -526,21 +526,31 @@ export class DocLog {
     spaceId: string
     verificationKey: string
     adminDids: string[]
+    /**
+     * The authenticated signer DID of the `space-register` inner JWS (kid-DID, verified ∈
+     * adminDids by {@link verifySpaceRegisterMessage}). Bound here so a Personal→Space upgrade
+     * MUST be SIGNED BY the owner — not merely list the owner among adminDids (see below).
+     */
+    signerDid: string
   }): SpaceRegistrationDisposition {
     const incomingAdmins = new Set(params.adminDids)
     const tx = this.db.transaction((): SpaceRegistrationDisposition => {
       // A2 Teil B (atomic with the space insert below): a personalDocId already bound to an
-      // owner can only be promoted to a space by THAT owner (their DID ∈ adminDids). Without
-      // this, a foreigner who learned the bearer-secret personalDocId could space-register it,
-      // flip isSpaceRegistered(docId)→true, disable the personal owner gate (keyed on
-      // !isSpaceRegistered), drop the owner's cached scope (VE-8), then read/poison/lock-out the
-      // owner via the space path — defeating T-CHECK for an already-claimed personal doc.
+      // owner can only be promoted to a space by THAT owner — i.e. the space-register MUST be
+      // SIGNED BY the owner (signerDid == owner), NOT merely list the owner among adminDids.
+      // adminDids is self-asserted and the inner JWS only proves the signer is SOME admin: a
+      // foreigner who learned the bearer-secret personalDocId could otherwise list the owner as a
+      // decoy co-admin, sign as themselves, pass an owner∈adminDids check, flip
+      // isSpaceRegistered(docId)→true, disable the personal owner gate (keyed on
+      // !isSpaceRegistered), drop the owner's cached scope (VE-8), then DoS/poison the owner via
+      // the space path — defeating T-CHECK for an already-claimed personal doc. Binding on the
+      // cryptographically-proven signer closes that decoy vector.
       const personalOwner = (
         this.db
           .prepare('SELECT owner_did FROM personal_doc_owners WHERE doc_id = ?')
           .get(params.spaceId) as { owner_did: string } | undefined
       )?.owner_did
-      if (personalOwner !== undefined && !incomingAdmins.has(personalOwner)) {
+      if (personalOwner !== undefined && personalOwner !== params.signerDid) {
         return { disposition: 'personal-owner-conflict' }
       }
 
@@ -578,9 +588,9 @@ export class DocLog {
         'INSERT INTO space_admins (space_id, admin_did) VALUES (?, ?)',
       )
       for (const adminDid of incomingAdmins) insertAdmin.run(params.spaceId, adminDid)
-      // Legitimate Personal→Space upgrade by the owner (owner ∈ adminDids): drop the now-
-      // superseded personal owner binding so a docId is NEVER simultaneously space-registered
-      // AND personal-owned (else personalDocCount over-reports + a stale row could re-gate it).
+      // Legitimate Personal→Space upgrade by the owner (signerDid == owner, checked above): drop
+      // the now-superseded personal owner binding so a docId is NEVER simultaneously space-
+      // registered AND personal-owned (else personalDocCount over-reports + a stale row re-gates it).
       if (personalOwner !== undefined) {
         this.db.prepare('DELETE FROM personal_doc_owners WHERE doc_id = ?').run(params.spaceId)
       }
