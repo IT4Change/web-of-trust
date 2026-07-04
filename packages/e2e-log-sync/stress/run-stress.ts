@@ -309,11 +309,9 @@ async function main(): Promise<void> {
     // COUNT-based selection (the old `i % 100 < pct` picked ALL devices offline on any run with
     // ≤100 devices → NO online cohort → the offline storm was never actually exercised). Guarantee a
     // NON-EMPTY online cohort (min with len-1) so there ARE online writes during the offline window;
-    // seeded spread keeps it deterministic + distributed across users.
-    const offlineCount =
-      cfg.offlineCohortPct >= 100
-        ? devices.length
-        : Math.min(devices.length - 1, Math.round((devices.length * cfg.offlineCohortPct) / 100))
+    // seeded spread keeps it deterministic + distributed across users. pct is 0..99 by config
+    // validation (boundedPctEnv) — a 100% cohort would silently test nothing.
+    const offlineCount = Math.min(devices.length - 1, Math.round((devices.length * cfg.offlineCohortPct) / 100))
     const offlineIdx = new Set(
       [...devices.keys()]
         .map((i) => ({ i, r: rng() }))
@@ -490,7 +488,7 @@ async function main(): Promise<void> {
     if (clientSaturationSuspected) {
       notes.push(`client event-loop lag peaked at ${maxLagMs.toFixed(0)}ms > ${SATURATION_LAG_MS}ms — latencies are CLIENT-limited, not a relay measurement.`)
     }
-    notes.push('120 in-process Node clients ≠ 120 handsets (no radio/doze/NAT — that is Spur B).')
+    notes.push(`${devices.length} in-process Node clients ≠ ${devices.length} handsets (no radio/doze/NAT — that is Spur B).`)
 
     const resourcesEnd = await fetchResources(cfg.relayUrl)
     const report: StressReport = {

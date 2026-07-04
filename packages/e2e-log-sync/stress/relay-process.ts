@@ -69,7 +69,13 @@ export async function spawnRelay(opts: SpawnRelayOptions): Promise<RelayProcess>
   }
   process.once('exit', killOnParentExit)
 
+  // The child's stdout/stderr can still emit AFTER the log is closed (late flush
+  // between SIGTERM and 'exit', or after the ready-timeout kill) — a write() on a
+  // closed FileHandle would reject unhandled. Gate every write on this flag and
+  // swallow per-write races; the in-memory outputTail keeps collecting regardless.
+  let logClosed = false
   const closeLog = (fh: FileHandle) => {
+    logClosed = true
     void fh.close().catch(() => {})
   }
 
@@ -79,7 +85,7 @@ export async function spawnRelay(opts: SpawnRelayOptions): Promise<RelayProcess>
     let outputTail = '' // last chunk of combined stdout+stderr for diagnostics
 
     const record = (text: string) => {
-      void logFile.write(text)
+      if (!logClosed) void logFile.write(text).catch(() => {})
       outputTail = (outputTail + text).slice(-2_000)
     }
 

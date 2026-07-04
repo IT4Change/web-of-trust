@@ -20,8 +20,10 @@ vitest's timeouts/isolation). It reuses the e2e-log-sync harness building blocks
 # Mode L (local, full scale) — spawns a real relay subprocess with file-backed SQLite:
 pnpm --filter @web_of_trust/e2e-log-sync stress
 
-# Smoke variant (fast, for a sanity check / PR artifact):
-USERS=10 SPACES=2 DUAL_DEVICE_USERS=2 BURST_MSGS_PER_DEVICE=5 \
+# Smoke variant (fast, for a sanity check / PR artifact).
+# DUAL_DEVICE_USERS=0 matches the committed smoke artifact: dual-device convergence is a
+# surfaced observation (see below) and stays env-opt-in until the follow-up slice lands.
+USERS=10 SPACES=2 DUAL_DEVICE_USERS=0 BURST_MSGS_PER_DEVICE=5 \
   pnpm --filter @web_of_trust/e2e-log-sync stress
 ```
 

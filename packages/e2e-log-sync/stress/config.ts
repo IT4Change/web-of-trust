@@ -47,6 +47,13 @@ function intEnv(name: string, def: number): number {
   return n
 }
 
+/** Like intEnv, but additionally bounded to 0..99 (a percentage that must leave a remainder). */
+function boundedPctEnv(name: string, def: number): number {
+  const n = intEnv(name, def)
+  if (n > 99) throw new Error(`env ${name} must be 0..99 (an offline storm needs a non-empty ONLINE cohort), got ${n}`)
+  return n
+}
+
 /** A tsx-runner-safe timestamp token (colons/dots replaced for filesystem safety). */
 export function makeStamp(now: Date): string {
   return now.toISOString().replace(/[:.]/g, '-')
@@ -83,7 +90,10 @@ export function loadConfig(env: NodeJS.ProcessEnv, now: Date): StressConfig {
     spaces: intEnv('SPACES', scaleDefaults.spaces),
     bigSpaceMembers: intEnv('BIG_SPACE_MEMBERS', scaleDefaults.bigSpaceMembers),
     burstMsgsPerDevice: intEnv('BURST_MSGS_PER_DEVICE', 20),
-    offlineCohortPct: intEnv('OFFLINE_COHORT_PCT', 30),
+    // 0..99: the offline storm NEEDS a non-empty online cohort writing during the
+    // window — at 100% nobody writes and the catch-up phase silently tests nothing.
+    // Fail-fast here instead of quietly running a meaningless storm.
+    offlineCohortPct: boundedPctEnv('OFFLINE_COHORT_PCT', 30),
     seed: intEnv('SEED', 42),
     allowDestructiveRemote,
   }
