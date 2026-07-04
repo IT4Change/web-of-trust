@@ -304,19 +304,34 @@ export class RawRelayClient {
       body: { docId: spaceId, heads, limit },
     })
     const env = await new Promise<Record<string, unknown>>((resolve, reject) => {
-      const t = setTimeout(() => reject(new Error('Timeout waiting for audit sync-response')), 10_000)
-      const outcome = (o: Record<string, unknown> | { error: string }) => {
+      let settled = false
+      // Remove BOTH waiters from their queues on every exit path (timeout included) — a leaked
+      // waiter would shift the shift()-based correlation of a later frame by one.
+      const cleanup = () => {
         clearTimeout(t)
-        const i = this.messageWaiters.indexOf(message)
-        if (i >= 0) this.messageWaiters.splice(i, 1)
+        const oi = this.outcomeWaiters.indexOf(outcome)
+        if (oi >= 0) this.outcomeWaiters.splice(oi, 1)
+        const mi = this.messageWaiters.indexOf(message)
+        if (mi >= 0) this.messageWaiters.splice(mi, 1)
+      }
+      const outcome = (o: Record<string, unknown> | { error: string }) => {
+        if (settled) return
+        settled = true
+        cleanup()
         reject(new Error('error' in o ? `audit sync-request rejected: ${String((o as { error: string }).error)}` : 'unexpected receipt'))
       }
       const message = (e: Record<string, unknown>) => {
-        clearTimeout(t)
-        const i = this.outcomeWaiters.indexOf(outcome)
-        if (i >= 0) this.outcomeWaiters.splice(i, 1)
+        if (settled) return
+        settled = true
+        cleanup()
         resolve(e)
       }
+      const t = setTimeout(() => {
+        if (settled) return
+        settled = true
+        cleanup()
+        reject(new Error('Timeout waiting for audit sync-response'))
+      }, 10_000)
       this.outcomeWaiters.push(outcome)
       this.messageWaiters.push(message)
       this.rawSend({ type: 'send', envelope: req as unknown as Record<string, unknown> })

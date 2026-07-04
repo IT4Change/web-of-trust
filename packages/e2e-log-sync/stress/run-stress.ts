@@ -43,6 +43,12 @@ interface Device {
   /** rebuildable identity/store refs so an "offline" device can cold-reconnect. */
   makeReconnect: () => Promise<YjsClient>
   offline: boolean
+  /**
+   * Error frames from PRIOR client instances of this device (folded in before each reconnect),
+   * so the zero-error tally survives an offline reconnect that swaps `client` for a fresh probe.
+   * The live tally is `errorFramesAccum` + `client.probe.errorFramesByCode`.
+   */
+  errorFramesAccum: Record<string, number>
 }
 
 interface SpacePlan {
@@ -295,6 +301,9 @@ async function main(): Promise<void> {
     log(`phase 4: offline cohort ${cfg.offlineCohortPct}% disconnect…`)
     const offlineCohort = devices.filter((_, i) => i % 100 < cfg.offlineCohortPct)
     for (const dev of offlineCohort) {
+      // Fold this client's error tally into the durable accumulator BEFORE stop() swaps the probe —
+      // otherwise the cohort's warm-up/burst error frames vanish from the zero-error gate.
+      foldErrorsIntoAccum(dev)
       await dev.client.stop()
       dev.offline = true
     }
@@ -508,6 +517,7 @@ async function buildDevice(
     userIndex,
     isSecond: shareFrom !== undefined,
     offline: false,
+    errorFramesAccum: {},
     makeReconnect: async () => {
       // cold reconnect: reuse identity + all stores (retains deviceId + heads) → forces catch-up.
       return makeYjsClient({
@@ -594,10 +604,24 @@ async function tallyConvergence(
   return { checked, converged }
 }
 
-/** Sum every client's error-frame tally (offline clients' probes are already stopped but retained). */
+/** Fold the current client's error tally into the device's durable accumulator (survives reconnect). */
+function foldErrorsIntoAccum(dev: Device): void {
+  for (const [code, n] of Object.entries(dev.client.probe.errorFramesByCode)) {
+    dev.errorFramesAccum[code] = (dev.errorFramesAccum[code] ?? 0) + n
+  }
+}
+
+/**
+ * Sum every device's error-frame tally = the durable accumulator (folded-in prior client instances)
+ * PLUS the current client's live probe. This is reconnect-safe: an offline device that swapped its
+ * client for a fresh probe still contributes its pre-disconnect errors via the accumulator.
+ */
 function sumErrorFrames(devs: Device[]): Record<string, number> {
   const byCode: Record<string, number> = {}
   for (const dev of devs) {
+    for (const [code, n] of Object.entries(dev.errorFramesAccum)) {
+      byCode[code] = (byCode[code] ?? 0) + n
+    }
     for (const [code, n] of Object.entries(dev.client.probe.errorFramesByCode)) {
       byCode[code] = (byCode[code] ?? 0) + n
     }
