@@ -149,20 +149,41 @@ interface DebugWindow {
   __wotDebug?: WotDebugCollector
 }
 
+/** Notified SYNCHRONOUSLY whenever the collector is (un)registered — the DebugPanel subscribes so
+ *  the hidden `data-testid` DOM channel clears immediately on unregister, not on the next poll. */
+type CollectorChangeListener = (collect: WotDebugCollector | null) => void
+const listeners = new Set<CollectorChangeListener>()
+
 /**
  * Register (or, with `null`, UNREGISTER) the app observability collector. No-op unless the flag is
- * set. Unregistering deletes `window.__wotDebug` + drops the collector reference so a stale closure
- * can never leak the PREVIOUS identity's deviceId/store-names/keystore-status after logout /
- * identity-switch / adapter-reinit (teardown = security surface). MUST be called with `null` in the
- * AdapterContext cleanup.
+ * set. Unregistering deletes `window.__wotDebug`, drops the collector reference, AND synchronously
+ * notifies subscribers so no stale closure OR retained DOM snapshot can leak the PREVIOUS identity's
+ * deviceId/DID/store-names/keystore-status after logout / identity-switch / adapter-reinit
+ * (teardown = security surface — BOTH the window channel and the `data-testid` DOM channel). MUST
+ * be called with `null` in the AdapterContext cleanup.
  */
 export function setDebugObservabilityCollector(collect: WotDebugCollector | null): void {
   if (!DEBUG_OBSERVABILITY_ENABLED) return
   currentCollector = collect
-  if (typeof window === 'undefined') return
-  const w = window as unknown as DebugWindow
-  if (collect) w.__wotDebug = collect
-  else delete w.__wotDebug
+  if (typeof window !== 'undefined') {
+    const w = window as unknown as DebugWindow
+    if (collect) w.__wotDebug = collect
+    else delete w.__wotDebug
+  }
+  // Synchronous notify — the DebugPanel drops the retained snapshot in the SAME tick on unregister.
+  for (const listener of listeners) listener(collect)
+}
+
+/**
+ * Subscribe to collector (un)registration. Fires immediately with the current state, then on every
+ * change. No-op (returns a no-op unsubscribe) when the flag is off. Used by the DebugPanel to clear
+ * its snapshot synchronously the instant the collector is unregistered.
+ */
+export function subscribeDebugObservability(listener: CollectorChangeListener): () => void {
+  if (!DEBUG_OBSERVABILITY_ENABLED) return () => {}
+  listeners.add(listener)
+  listener(currentCollector)
+  return () => { listeners.delete(listener) }
 }
 
 /** The current collector (for the DebugPanel), or null when the flag is off / not registered. */

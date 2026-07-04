@@ -4,8 +4,10 @@ import type { DebugSnapshot } from '@web_of_trust/core/storage'
 import {
   DEBUG_OBSERVABILITY_ENABLED,
   getDebugObservabilityCollector,
+  subscribeDebugObservability,
   WOT_DEBUG_JSON_TESTID,
   type WotDebugSnapshot,
+  type WotDebugCollector,
 } from '../../debug/debugObservability'
 
 function StatusDot({ status }: { status: 'green' | 'yellow' | 'red' }) {
@@ -92,16 +94,18 @@ export function DebugPanel() {
   useEffect(() => {
     if (!DEBUG_OBSERVABILITY_ENABLED) return
     let alive = true
-    const pull = () => {
-      const collect = getDebugObservabilityCollector()
+    const pull = (collect: WotDebugCollector | null) => {
       // No collector (unregistered on identity-switch/logout) → drop any retained snapshot so the
-      // data-testid element never shows the PREVIOUS identity's data even transiently in the gap.
+      // hidden data-testid channel never shows the PREVIOUS identity's data, even transiently.
       if (!collect) { if (alive) setAppSnapshot(null); return }
       collect().then((s) => { if (alive) setAppSnapshot(s) }).catch(() => {})
     }
-    pull()
-    const interval = setInterval(pull, 2000)
-    return () => { alive = false; clearInterval(interval) }
+    // Subscribe: fires immediately with the current collector AND synchronously on every
+    // (un)register — an unregister clears the snapshot in the SAME tick (no 2s stale-identity gap).
+    const unsub = subscribeDebugObservability(pull)
+    // Periodic refresh for live head/outbox/gen updates while a collector is registered.
+    const interval = setInterval(() => pull(getDebugObservabilityCollector()), 2000)
+    return () => { alive = false; unsub(); clearInterval(interval) }
   }, [])
 
   const copyAppSnapshot = useCallback(() => {

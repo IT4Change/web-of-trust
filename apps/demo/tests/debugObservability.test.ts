@@ -146,6 +146,35 @@ describe('gated channel (window.__wotDebug) + cleanup', () => {
     expect(mod.getDebugObservabilityCollector()).toBeNull()
   })
 
+  it('SYNC-NOTIFY: subscribe fires with the current collector immediately, then synchronously on every (un)register', async () => {
+    const mod = await loadModule('1')
+    const events: Array<'set' | 'clear'> = []
+    const c1: () => Promise<never> = async () => ({} as never)
+
+    mod.setDebugObservabilityCollector(c1)
+    const unsub = mod.subscribeDebugObservability((collect) => events.push(collect ? 'set' : 'clear'))
+    expect(events).toEqual(['set']) // immediate current-state fire (collector already registered)
+
+    mod.setDebugObservabilityCollector(null) // unregister → SYNCHRONOUS notify (no async gap)
+    expect(events).toEqual(['set', 'clear'])
+
+    mod.setDebugObservabilityCollector(async () => ({} as never))
+    expect(events).toEqual(['set', 'clear', 'set'])
+
+    unsub()
+    mod.setDebugObservabilityCollector(null)
+    expect(events).toEqual(['set', 'clear', 'set']) // no notifications after unsubscribe
+  })
+
+  it('SYNC-NOTIFY default-off: subscribe is a no-op that never fires', async () => {
+    const mod = await loadModule(undefined)
+    const events: unknown[] = []
+    const unsub = mod.subscribeDebugObservability(() => events.push(1))
+    mod.setDebugObservabilityCollector(async () => ({} as never))
+    expect(events).toEqual([])
+    unsub()
+  })
+
   it('STALE-CLOSURE: after identity switch the channel exposes ONLY the new identity (no predecessor leak)', async () => {
     const mod = await loadModule('1')
     type W = { __wotDebug?: () => Promise<{ did: string; deviceId: string }> }
