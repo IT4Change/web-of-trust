@@ -10,7 +10,7 @@
  *
  *   - seq never appeared (getKnownHeads never bumped)  → `never-local-logged`
  *   - seq appeared, still in getPending() at run end   → `local-logged-pending`
- *   - seq appeared, acked (not pending), broker-absent  → `acked-but-broker-absent`
+ *   - seq appeared, acked (not pending), broker-absent  → `broker-received-absent`
  *
  * Events are appended as JSONL to `stress-artifacts/<ts>/trace.jsonl`.
  */

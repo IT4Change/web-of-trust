@@ -159,12 +159,12 @@ async function main(): Promise<void> {
       const identity = await makeIdentity()
       const isDual = u < cfg.dualDeviceUsers
       // primary device
-      const primary = await buildDevice(relay, identity, u, undefined)
+      const primary = await buildDevice(relay, identity, u, undefined, cfg.dualShareMeta)
       devices.push(primary)
       users.push({ identity, primaryDevice: primary })
       if (isDual) {
         // second device: SAME identity + shared keyManagement/metadata, fresh log/compact.
-        const second = await buildDevice(relay, identity, u, primary.client)
+        const second = await buildDevice(relay, identity, u, primary.client, cfg.dualShareMeta)
         devices.push(second)
       }
       // staggered connect: small backoff every batch to avoid client-side WS dial saturation.
@@ -597,6 +597,8 @@ async function main(): Promise<void> {
     process.exit(gates.passed ? 0 : 1)
   } catch (err) {
     log(`FATAL: ${(err as Error).stack ?? String(err)}`)
+    // The trace is the investigation's payload — persist it even (especially) on a crash.
+    if (tracer) await tracer.flush().catch(() => {})
     await teardown(devices, relayProc).catch(() => {})
     clearInterval(lagTimer)
     process.exit(2)
@@ -610,10 +612,11 @@ async function buildDevice(
   identity: Awaited<ReturnType<typeof makeIdentity>>,
   userIndex: number,
   shareFrom: YjsClient | undefined,
+  shareMeta: boolean,
 ): Promise<Device> {
-  // A/B (investigation): STRESS_DUAL_SHARE_META=0 gives the second device its OWN metadata
-  // store (still shares keyManagement) to test whether the shared metadataStorage is the loss cause.
-  const shareMeta = process.env.STRESS_DUAL_SHARE_META !== '0'
+  // A/B (investigation): shareMeta=false gives the second device its OWN metadata store (still
+  // shares keyManagement) to test whether the shared metadataStorage is the loss cause. Comes from
+  // cfg.dualShareMeta (STRESS_DUAL_SHARE_META) so the report's config echo records the A/B state.
   const build = async (): Promise<YjsClient> =>
     makeYjsClient({
       relay,
