@@ -203,6 +203,51 @@ describe('Generic dialog lifecycle (ConfettiProvider + synced resolution)', () =
     expect(result.current.incomingSpaceInvite?.spaceId).toBe('s1')
   })
 
+  it('event-id-scoped dismiss: a stale dismiss for A must not resolve the next same-type notification B (async-handler vs. remote-close race)', () => {
+    const { result } = renderHook(() => useConfetti(), { wrapper })
+
+    // Two same-type notifications: A is shown, B waits in the queue.
+    act(() => {
+      result.current.triggerAttestationDialog({
+        attestationId: 'urn:uuid:a', senderName: 'Alice', senderDid: 'did:key:alice', claim: 'A',
+      })
+      result.current.triggerAttestationDialog({
+        attestationId: 'urn:uuid:b', senderName: 'Bob', senderDid: 'did:key:bob', claim: 'B',
+      })
+    })
+    expect(result.current.incomingAttestation?.attestationId).toBe('urn:uuid:a')
+
+    // An async handler (e.g. handlePublish awaiting the domain action) captured
+    // the dismiss callback while A was visible…
+    const staleDismiss = result.current.dismissAttestationDialog
+
+    // …then a synced CLOSE from another device removes A; B becomes the head.
+    act(() => { store.resolveRemotely('att-urn:uuid:a') })
+    expect(result.current.incomingAttestation?.attestationId).toBe('urn:uuid:b')
+
+    // The stale dismiss fires now. It must target A (already gone → no-op),
+    // NEVER resolve B — B was never handled by the user.
+    act(() => { staleDismiss() })
+
+    expect(store.storage.markNotificationResolved).not.toHaveBeenCalled()
+    expect(result.current.incomingAttestation?.attestationId).toBe('urn:uuid:b')
+  })
+
+  it('dismiss of an already remotely-resolved id writes no echo marker (GC-TTL not extended)', () => {
+    const { result } = renderHook(() => useConfetti(), { wrapper })
+
+    act(() => {
+      result.current.triggerAttestationDialog({
+        attestationId: 'urn:uuid:a', senderName: 'Alice', senderDid: 'did:key:alice', claim: 'A',
+      })
+    })
+    const staleDismiss = result.current.dismissAttestationDialog
+    act(() => { store.resolveRemotely('att-urn:uuid:a') })
+    act(() => { staleDismiss() })
+
+    expect(store.storage.markNotificationResolved).not.toHaveBeenCalled()
+  })
+
   it('without an AdapterProvider the queue degrades to local-only behavior (tests / standalone)', () => {
     mockAdapters.current = null
     const { result } = renderHook(() => useConfetti(), { wrapper })

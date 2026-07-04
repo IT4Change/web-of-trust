@@ -112,20 +112,25 @@ export function ConfettiProvider({ children }: { children: ReactNode }) {
   }, [isResolved])
 
   /**
-   * Type-scoped dismiss: resolves + removes the head only when it matches the
-   * caller's dialog type. Callers like useVerification.reset() fire
-   * setPendingIncoming(null) unconditionally — without the type check that
-   * would resolve (synced, permanently) whatever unrelated dialog is at the
-   * head of the queue.
+   * Event-id-scoped dismiss: resolves + removes EXACTLY the notification the
+   * caller saw, never "whatever is at the head now". A type-only scope races
+   * async dialog handlers: while a handler awaits, a synced CLOSE can remove
+   * the visible dialog A — a later head-based dismiss would then permanently
+   * resolve the NEXT same-type notification B the user never handled. If the
+   * id is already gone from the queue (remote close won the race) this is a
+   * no-op; if it is already resolved, only the local removal runs (no echo
+   * write that would extend the marker's GC-TTL).
    */
-  const dismiss = useCallback((type: NotificationType) => {
-    const current = queueRef.current[0]
-    if (!current || current.type !== type) return
-    storageRef.current?.markNotificationResolved(current.id).catch((error) => {
-      console.warn('Failed to persist notification resolution:', error)
-    })
-    setQueue(prev => (prev[0] && prev[0].id === current.id) ? prev.slice(1) : prev)
-  }, [])
+  const dismiss = useCallback((type: NotificationType, id: string) => {
+    const target = queueRef.current.find(n => n.id === id)
+    if (!target || target.type !== type) return
+    if (!isResolved(id)) {
+      storageRef.current?.markNotificationResolved(id).catch((error) => {
+        console.warn('Failed to persist notification resolution:', error)
+      })
+    }
+    setQueue(prev => prev.filter(n => n.id !== id))
+  }, [isResolved])
 
   // CLOSE observe: a resolve synced from ANY device removes matching items.
   useEffect(() => {
@@ -156,6 +161,14 @@ export function ConfettiProvider({ children }: { children: ReactNode }) {
     [current],
   )
 
+  // Render-scoped identity of the currently shown notification: the dismiss
+  // wrappers close over THESE values, so an async handler that clicked on
+  // dialog A keeps resolving A even if the queue head moved to B meanwhile.
+  // Deliberately NOT a ref — a ref would read the latest head and reintroduce
+  // the wrong-item race.
+  const currentId = current?.id ?? null
+  const currentType = current?.type ?? null
+
   // Wrapper functions — keep existing API stable for consumers
 
   const triggerConfetti = useCallback((message?: string) => {
@@ -173,34 +186,36 @@ export function ConfettiProvider({ children }: { children: ReactNode }) {
   }, [enqueue])
 
   const dismissMutualDialog = useCallback(() => {
-    dismiss('mutual-verification')
-  }, [dismiss])
+    if (currentType === 'mutual-verification' && currentId !== null) dismiss('mutual-verification', currentId)
+  }, [dismiss, currentType, currentId])
 
   const triggerAttestationDialog = useCallback((info: IncomingAttestationInfo) => {
     enqueue({ id: 'att-' + info.attestationId, type: 'incoming-attestation', data: info })
   }, [enqueue])
 
   const dismissAttestationDialog = useCallback(() => {
-    dismiss('incoming-attestation')
-  }, [dismiss])
+    if (currentType === 'incoming-attestation' && currentId !== null) dismiss('incoming-attestation', currentId)
+  }, [dismiss, currentType, currentId])
 
   const triggerSpaceInviteDialog = useCallback((info: IncomingSpaceInviteInfo) => {
     enqueue({ id: 'space-' + info.inviteMessageId, type: 'space-invite', data: info })
   }, [enqueue])
 
   const dismissSpaceInviteDialog = useCallback(() => {
-    dismiss('space-invite')
-  }, [dismiss])
+    if (currentType === 'space-invite' && currentId !== null) dismiss('space-invite', currentId)
+  }, [dismiss, currentType, currentId])
 
   const setPendingIncoming = useCallback((pending: PendingIncoming | null) => {
     if (pending) {
       // Per-event id (attestation id) — a per-DID key would block every
       // future verification from the same contact after one resolve.
       enqueue({ id: 'ver-' + pending.attestation.id, type: 'incoming-verification', data: pending })
-    } else {
-      dismiss('incoming-verification')
+    } else if (currentType === 'incoming-verification' && currentId !== null) {
+      // Callers like useVerification.reset() fire this unconditionally — the
+      // type + id scope keeps them from resolving an unrelated dialog.
+      dismiss('incoming-verification', currentId)
     }
-  }, [enqueue, dismiss])
+  }, [enqueue, dismiss, currentType, currentId])
 
   return (
     <ConfettiContext.Provider value={{
