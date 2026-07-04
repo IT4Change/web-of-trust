@@ -36,8 +36,8 @@ VITE_BASE_PATH=/ pnpm --filter demo exec vite build --mode staging-debug
 pnpm --filter demo exec cap sync android
 
 # 3. Debug-APK bauen + auf das Gerät bringen (side-load / manuell — NICHT über OTA):
-#    z.B. via android-deploy-Skill oder:
-cd apps/demo && npx cap run android --flavor fdroid
+#    z.B. via android-deploy-Skill oder (aus dem Repo-Root, konsistent mit Schritt 2):
+pnpm --filter demo exec cap run android --flavor fdroid
 #    (--flavor fdroid wählt den Debug-Flavor ohne interaktiven Prompt; playstore ist die Release-Spur.)
 ```
 
@@ -132,26 +132,42 @@ eine Diagnose-Nebenbedingung, kein Pass-Kriterium.
 
 ## S8 — Teardown / Keystore
 
-**Frage:** Hinterlässt „Identität löschen" einen Keystore-Rest, der ein Re-Onboarding aussperrt?
+**Frage:** Hinterlässt „Identität löschen" einen **geräte-globalen** Keystore-Rest, der ein
+Re-Onboarding aussperrt (Soft-Lockout)?
+
+> **D2-Lifecycle — wichtig:** Der D2-App-Snapshot ist an eine **aktive Identität** gebunden (der
+> Collector wird beim Identity-Teardown by-design abgemeldet — Teardown = Security-Surface).
+> **Direkt nach dem Löschen gibt es keine aktive Identität → der D2-Snapshot ist erwartbar NICHT
+> mehr abrufbar** (`window.__wotDebug` weg, kein `wot-debug-json`-Element). Das ist kein Fehler.
+> Der `keystore.enrolled`-Nachweis wird daher **nicht** direkt nach dem Delete gelesen, sondern am
+> frischen Re-Onboarding (siehe unten).
+>
+> **Warum das der richtige Nachweis ist:** Der native Keystore-Eintrag (`hasStoredPassphrase`) ist
+> **geräte-global**, nicht pro-Identität. Überlebt er das Löschen, findet die frische Identität einen
+> **fremden** Eintrag → genau der Soft-Lockout. `keystore.enrolled` auf der frisch onboardeten
+> Identität **vor** einem neuen Enroll zeigt also direkt, ob der Delete sauber war.
 
 **Setup:** 1 Gerät mit Identität aus S1 (oder frisch), Biometrie verfügbar.
 
 **Schritte:**
-1. Biometrie/Passkey für die Identität **enrollen** (App-Flow „Biometrie aktivieren").
+1. Biometrie/Passkey für die (bestehende) Identität **enrollen** (App-Flow „Biometrie aktivieren").
 2. D2 → `keystore.enrolled` prüfen: erwartet **`true`**. Als `S8-deviceA-enrolled.json` ablegen.
-3. Identität **am Gerät löschen** (App-Flow „Identität löschen / zurücksetzen").
-4. D2 (bzw. nach Reset auf dem frischen Onboarding-Screen, sofern D2 erreichbar) →
-   `keystore.enrolled` prüfen. Als `S8-deviceA-afterdelete.json` ablegen.
-5. Frisches Onboarding starten (neue Identität) — darf **nicht** durch einen alten Keystore-Eintrag
-   blockiert werden (kein Soft-Lockout).
+3. Identität **am Gerät löschen** (App-Flow „Identität löschen / zurücksetzen"). Der D2-Snapshot ist
+   danach erwartbar nicht mehr abrufbar — **nicht daran hängenbleiben**, weiter zu Schritt 4.
+4. **Frisches Re-Onboarding** (neue Identität) starten — muss **ohne Lockout** anlaufen.
+5. **Vor** dem neuen Biometrie-Enroll auf der frischen Identität: D2 → `keystore.enrolled` lesen. Als
+   `S8-deviceA-afteronboard.json` ablegen.
+6. Danach neuen Biometrie-Enroll auf der frischen Identität durchführen — muss gelingen.
 
 **Pass-Kriterien (absolut):**
-- ✅ Nach dem Löschen ist der JSON-Pfad **`keystore.enrolled === false`** (echter Export-Feldname).
+- ✅ Nach Enroll (Schritt 2): **`keystore.enrolled === true`**.
+- ✅ Auf der frischen Identität **vor** neuem Enroll (Schritt 5): **`keystore.enrolled === false`** —
+  der geräte-globale Eintrag hat das Löschen **nicht** überlebt.
 - ✅ **`keystore.enrolled === "error"` ist ein FAIL**, nicht pass — fail-closed: ein Fehler beim
   Auslesen zählt als „Rest möglicherweise vorhanden".
-- ✅ Das frische Onboarding gelingt **ohne Lockout** (Biometrie neu enrollbar).
+- ✅ Das frische Re-Onboarding gelingt **ohne Lockout**; der neue Enroll (Schritt 6) gelingt.
 
-**Bei Fail exportieren:** `enrolled`/`afterdelete`-JSONs + kurze Notiz, ob das Re-Onboarding
+**Bei Fail exportieren:** `enrolled`/`afteronboard`-JSONs + kurze Notiz, ob das Re-Onboarding
 blockiert war (Fehlermeldung wörtlich).
 
 ---

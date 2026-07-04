@@ -22,7 +22,7 @@
 | Szenario | Geräte | Pass/Fail | D2-JSON-Anhänge | Notizen |
 |---|---|---|---|---|
 | S1 — Durable Persistence über App-Kill | A | ⬜ Pass / ⬜ Fail | `S1-deviceA-before.json`, `S1-deviceA-after.json` | deviceId gleich? Heads gap-frei + monoton? SEQ_COLLISION? |
-| S8 — Teardown / Keystore | A | ⬜ Pass / ⬜ Fail | `S8-deviceA-enrolled.json`, `S8-deviceA-afterdelete.json` | `keystore.enrolled` nach Delete = `false`? (`"error"` = Fail) Re-Onboarding ohne Lockout? |
+| S8 — Teardown / Keystore | A | ⬜ Pass / ⬜ Fail | `S8-deviceA-enrolled.json`, `S8-deviceA-afteronboard.json` | Nach Enroll `true`? Auf frischer Identität vor neuem Enroll `keystore.enrolled === false`? (`"error"` = Fail) Re-Onboarding ohne Lockout? |
 | S9 — Multi-Device Shared-Seed | A + B | ⬜ Pass / ⬜ Fail | `S9-deviceA.json`, `S9-deviceB.json`, `logStats`-Ausschnitt | distinkte deviceIds? Heads konvergent? `devicesByDoc[docId]===2` + beide deviceIds als Keys? |
 | S11 — Android-Lifecycle | A | ⬜ Pass / ⬜ Fail | `S11-deviceA-before.json`, `S11-deviceA-after.json`, Logcat-Auszug | deviceId/Heads stabil? Reconnect greift? `outboxDepth` zurück auf 0 (keine Schleife)? |
 | S12 — Keepalive-Idle (optional) | A | ⬜ Pass / ⬜ Fail / ⬜ n/a | ggf. JSON + Logcat | sauberer Reconnect nach Idle? |
