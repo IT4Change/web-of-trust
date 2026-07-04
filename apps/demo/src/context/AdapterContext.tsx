@@ -45,6 +45,7 @@ import { AutomergePublishStateStore } from '../adapters/AutomergePublishStateSto
 import { AutomergeGraphCacheStore } from '../adapters/AutomergeGraphCacheStore'
 import { LocalCacheStore } from '../adapters/LocalCacheStore'
 import { LocalOutboxStore } from '../adapters/LocalOutboxStore'
+import { setDebugObservabilityCollector, collectDebugObservabilitySnapshot } from '../debug/debugObservability'
 import { appRuntimeConfig, createHttpDiscoveryAdapter, protocolCrypto } from '../runtime/appRuntime'
 import { LEGACY_DB_NAMES, deleteDatabase, wipeOrphanDurableStores } from '../services/durableStoreWipe'
 import { useIdentity } from './IdentityContext'
@@ -601,6 +602,19 @@ export function AdapterProvider({ children, identity }: AdapterProviderProps) {
           })
           setIsInitialized(true)
 
+          // D2 test-observability (Spur-B enabler) — GATED (default-off, VITE_WOT_DEBUG_OBSERVABILITY).
+          // Built HERE where the live sync instances (docLogStore/deviceId/replication/outbox) are in
+          // scope; UNREGISTERED in the cleanup below so no stale closure leaks the previous identity's
+          // deviceId/store-names/keystore-status across logout / identity-switch / adapter-reinit.
+          setDebugObservabilityCollector(() => collectDebugObservabilitySnapshot({
+            metrics,
+            deviceId,
+            did,
+            docLogStore,
+            replication: replicationAdapter!,
+            outboxStore,
+          }))
+
           // Connect to relay after adapters are set
           if (did && !cancelled) {
             // Track adapter state changes (disconnect, reconnect)
@@ -678,6 +692,9 @@ export function AdapterProvider({ children, identity }: AdapterProviderProps) {
       spaceCompactStore?.close()
       // Close the durable log-sync IndexedDB connections (no leak across identity switch).
       for (const store of durableStores) void store.close().catch(() => {})
+      // Teardown = security surface: drop the gated debug-observability collector + window channel
+      // so a stale closure never exposes the previous identity's deviceId/store-names/keystore.
+      setDebugObservabilityCollector(null)
     }
   }, [identity])
 

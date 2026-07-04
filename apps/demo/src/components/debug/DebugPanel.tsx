@@ -1,6 +1,12 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { Activity } from 'lucide-react'
 import type { DebugSnapshot } from '@web_of_trust/core/storage'
+import {
+  DEBUG_OBSERVABILITY_ENABLED,
+  getDebugObservabilityCollector,
+  WOT_DEBUG_JSON_TESTID,
+  type WotDebugSnapshot,
+} from '../../debug/debugObservability'
 
 function StatusDot({ status }: { status: 'green' | 'yellow' | 'red' }) {
   const colors = {
@@ -72,12 +78,36 @@ function Row({ label, value, status }: { label: string; value: string; status?: 
 export function DebugPanel() {
   const [open, setOpen] = useState(false)
   const [snapshot, setSnapshot] = useState<DebugSnapshot | null>(null)
+  const [appSnapshot, setAppSnapshot] = useState<WotDebugSnapshot | null>(null)
 
   const refresh = useCallback(() => {
     if (typeof window !== 'undefined' && (window as any).wotDebug) {
       setSnapshot((window as any).wotDebug())
     }
   }, [])
+
+  // D2 test-observability (GATED): poll the app collector so window.__wotDebug + the data-testid
+  // JSON stay fresh even while the panel is closed (a Spur-B operator reads it without opening).
+  // Only runs when the flag registered a collector; entirely tree-shaken/dormant when off.
+  useEffect(() => {
+    if (!DEBUG_OBSERVABILITY_ENABLED) return
+    let alive = true
+    const pull = () => {
+      const collect = getDebugObservabilityCollector()
+      // No collector (unregistered on identity-switch/logout) → drop any retained snapshot so the
+      // data-testid element never shows the PREVIOUS identity's data even transiently in the gap.
+      if (!collect) { if (alive) setAppSnapshot(null); return }
+      collect().then((s) => { if (alive) setAppSnapshot(s) }).catch(() => {})
+    }
+    pull()
+    const interval = setInterval(pull, 2000)
+    return () => { alive = false; clearInterval(interval) }
+  }, [])
+
+  const copyAppSnapshot = useCallback(() => {
+    if (!appSnapshot) return
+    void navigator.clipboard?.writeText(JSON.stringify(appSnapshot, null, 2)).catch(() => {})
+  }, [appSnapshot])
 
   // Refresh every 2s when open
   useEffect(() => {
@@ -133,6 +163,15 @@ export function DebugPanel() {
           overallStatus === 'yellow' ? 'bg-warning' : 'bg-destructive'
         }`} />
       </button>
+
+      {/* D2 machine-readable observable (GATED): always in the DOM when the flag registered a
+          collector, so a Spur-B / Playwright operator reads the full snapshot WITHOUT opening the
+          panel. Absent from the DOM entirely when the flag is off (default, prod-safe). */}
+      {DEBUG_OBSERVABILITY_ENABLED && appSnapshot && (
+        <div data-testid={WOT_DEBUG_JSON_TESTID} hidden style={{ display: 'none' }}>
+          {JSON.stringify(appSnapshot)}
+        </div>
+      )}
 
       {/* Panel */}
       {open && snapshot && (
@@ -250,6 +289,36 @@ export function DebugPanel() {
                   {err.operation}: {err.error}
                 </div>
               ))}
+            </Section>
+          )}
+
+          {/* D2 — Test Observability (GATED). deviceId / 3 heads per space / gen / outbox /
+              keystore status / durable-store presence. No key material, ever. */}
+          {DEBUG_OBSERVABILITY_ENABLED && appSnapshot && (
+            <Section title="Test Observability (D2)">
+              <Row label="deviceId" value={appSnapshot.deviceId} />
+              <Row label="Outbox depth" value={String(appSnapshot.outboxDepth)} />
+              <Row label="Keystore enrolled" value={String(appSnapshot.keystore.enrolled)} />
+              {appSnapshot.spaces.map((sp) => (
+                <div key={sp.spaceId} className="text-xs py-0.5 font-mono">
+                  <div className="text-muted-foreground truncate" title={sp.spaceId}>
+                    {(sp.name ?? sp.spaceId.slice(0, 8))} · gen {sp.generation}
+                  </div>
+                  <div className="pl-2 text-[10px] truncate">strict {JSON.stringify(sp.heads.strictContiguous)}</div>
+                  <div className="pl-2 text-[10px] truncate">sync {JSON.stringify(sp.heads.syncRequest)}</div>
+                  <div className="pl-2 text-[10px] truncate">known {JSON.stringify(sp.heads.known)}</div>
+                </div>
+              ))}
+              {appSnapshot.durableStores.map((st) => (
+                <Row key={st.name} label={st.name.replace(/:.*$/, '')} value={String(st.present)} />
+              ))}
+              <button
+                onClick={copyAppSnapshot}
+                className="mt-1 text-xs px-2 py-1 rounded bg-muted hover:bg-muted/70 border border-border"
+                aria-label="Copy debug snapshot JSON"
+              >
+                Copy JSON
+              </button>
             </Section>
           )}
         </div>
