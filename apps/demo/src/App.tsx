@@ -11,6 +11,7 @@ import { useVerificationStatus, getVerificationStatus } from './hooks/useVerific
 import type { PublicProfile as PublicProfileType } from '@web_of_trust/core/types'
 import { LanguageProvider, useLanguage } from './i18n'
 import { DebugPanel } from './components/debug/DebugPanel'
+import { DEBUG_OBSERVABILITY_ENABLED } from './debug/debugObservability'
 import { verificationWorkflow } from './services/verificationWorkflow'
 import { createAttestationListener } from './services/attestationListener'
 
@@ -470,7 +471,10 @@ function RequireIdentity({ children }: { children: React.ReactNode }) {
         <IncomingAttestationDialog />
         <IncomingSpaceInviteDialog />
         {children}
-        {import.meta.env.DEV && <DebugPanel />}
+        {/* Mount matrix: DEV keeps the existing panel; the flag additionally mounts it in
+            non-DEV (native/staging) builds so D2 observability is reachable there. The D2 parts
+            inside are flag-gated; without the flag the panel behaves exactly as before. */}
+        {(import.meta.env.DEV || DEBUG_OBSERVABILITY_ENABLED) && <DebugPanel />}
       </ConfettiProvider>
     </AdapterProvider>
   )
