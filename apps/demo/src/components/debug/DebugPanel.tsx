@@ -91,14 +91,21 @@ export function DebugPanel() {
   // D2 test-observability (GATED): poll the app collector so window.__wotDebug + the data-testid
   // JSON stay fresh even while the panel is closed (a Spur-B operator reads it without opening).
   // Only runs when the flag registered a collector; entirely tree-shaken/dormant when off.
+  const pullGenRef = useRef(0)
   useEffect(() => {
     if (!DEBUG_OBSERVABILITY_ENABLED) return
     let alive = true
     const pull = (collect: WotDebugCollector | null) => {
-      // No collector (unregistered on identity-switch/logout) → drop any retained snapshot so the
-      // hidden data-testid channel never shows the PREVIOUS identity's data, even transiently.
+      // Bump the generation on EVERY pull. A collector promise is bound to the generation at its
+      // start; a LATE resolution (a still-in-flight collect() from the PREVIOUS identity that
+      // resolves after an unregister or after a newer collector was registered) is dropped because
+      // its generation is stale — so a slow A().then() can never re-populate the DOM channel with
+      // A's deviceId/DID/store-names after A was unregistered/superseded.
+      const gen = ++pullGenRef.current
       if (!collect) { if (alive) setAppSnapshot(null); return }
-      collect().then((s) => { if (alive) setAppSnapshot(s) }).catch(() => {})
+      collect()
+        .then((s) => { if (alive && pullGenRef.current === gen) setAppSnapshot(s) })
+        .catch(() => {})
     }
     // Subscribe: fires immediately with the current collector AND synchronously on every
     // (un)register — an unregister clears the snapshot in the SAME tick (no 2s stale-identity gap).

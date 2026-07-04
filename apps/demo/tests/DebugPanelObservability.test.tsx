@@ -29,6 +29,16 @@ const SNAP = {
   durableStores: [],
 }
 
+const SNAP_B = { ...SNAP, deviceId: 'device-B-id', did: 'did:key:zBBB' }
+
+/** A collector whose promise resolves only when `resolve()` is called (models a slow in-flight read). */
+function deferredCollector(snapshot: unknown) {
+  let resolve!: () => void
+  const gate = new Promise<void>((r) => { resolve = r })
+  const collector = async () => { await gate; return snapshot as never }
+  return { collector, resolve }
+}
+
 describe('DebugPanel D2 observability — DOM gating', () => {
   it('DEFAULT-OFF: the data-testid JSON element is NOT in the DOM without the flag', async () => {
     const { obs, DebugPanel } = await loadPanel(undefined)
@@ -57,6 +67,38 @@ describe('DebugPanel D2 observability — DOM gating', () => {
     // in the SAME tick (synchronous notify), NOT on the next 2s poll. Assert immediately (no waitFor).
     act(() => { obs.setDebugObservabilityCollector(null) })
     expect(screen.queryByTestId('wot-debug-json')).toBeNull()
+  })
+
+  it('a still-in-flight collector that resolves AFTER unregister must NOT re-populate the DOM channel', async () => {
+    const { obs, DebugPanel } = await loadPanel('1')
+    // Identity A's collect() is slow (in-flight when the switch happens).
+    const a = deferredCollector(SNAP)
+    obs.setDebugObservabilityCollector(a.collector)
+    render(<DebugPanel />)
+    // Unregister (identity-switch/logout) BEFORE A's read resolves → DOM channel empty.
+    act(() => { obs.setDebugObservabilityCollector(null) })
+    expect(screen.queryByTestId('wot-debug-json')).toBeNull()
+
+    // A's read now resolves late — its generation is stale, so it must be dropped: DOM stays empty.
+    await act(async () => { a.resolve(); await a.collector() })
+    expect(screen.queryByTestId('wot-debug-json')).toBeNull()
+  })
+
+  it('a still-in-flight collector A must NOT overwrite a newer collector B that resolved first', async () => {
+    const { obs, DebugPanel } = await loadPanel('1')
+    const a = deferredCollector(SNAP) // A: deviceId 'test-device-id-xyz'
+    obs.setDebugObservabilityCollector(a.collector)
+    render(<DebugPanel />)
+
+    // B registers (fresh identity) and resolves immediately → DOM shows B.
+    await act(async () => { obs.setDebugObservabilityCollector(async () => SNAP_B as never) })
+    expect((await screen.findByTestId('wot-debug-json', {}, { timeout: 3000 })).textContent).toContain('device-B-id')
+
+    // A finally resolves — stale generation → dropped: DOM must still show B, never A.
+    await act(async () => { a.resolve(); await a.collector() })
+    const el = screen.getByTestId('wot-debug-json')
+    expect(el.textContent).toContain('device-B-id')
+    expect(el.textContent).not.toContain('test-device-id-xyz')
   })
 
   it('DEBUG-ON but no collector registered: no data-testid (channel gated on an actual collector)', async () => {
