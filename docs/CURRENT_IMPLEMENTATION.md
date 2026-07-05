@@ -5,14 +5,32 @@
 
 ## Last Updated
 
-**Date:** 2026-04-06
-**Phase:** Native Apps + OTA + Biometric
-**Demo:** https://web-of-trust.de/demo/
-**Relay:** wss://relay.utopia-lab.org
-**Profiles:** https://profiles.utopia-lab.org
+**Date:** 2026-07-04
+**Phase:** Festival-Readiness (spec-vnext) — Log-Sync durable + Multi-Device + Observability
+**Demo:** https://web-of-trust.de/demo/ (vNext: https://web-of-trust-vnext.pages.dev)
+**Relay:** wss://relay.web-of-trust.de (vNext, Staging: relay-staging.web-of-trust.de) · Legacy: wss://relay.utopia-lab.org
+**Profiles:** https://profiles.web-of-trust.de · Legacy: https://profiles.utopia-lab.org
 **Benchmark:** <https://web-of-trust.de/benchmark>
 **F-Droid:** <https://fdroid.utopia-lab.org/fdroid/repo> (Web of Trust + Real Life Stack)
 **OTA Updates:** <https://web-of-trust.de/updates/> (android, android-foss, ios channels)
+
+---
+
+## Festival-Phase Delta (Juni/Juli 2026, spec-vnext — #215-#232)
+
+> Kompakter Änderungs-Index seit dem letzten Voll-Refresh; die Abschnitte darunter beschreiben
+> teilweise den Stand davor. Details je Slice im verlinkten PR.
+
+- **Durable Log-Sync + Teardown:** zentraler `durableStoreWipe` (#215), Teardown-Vollständigkeit (#216), IndexedDB-blocked-delete-Fix — Logout/Delete wipen vollständig via Connection-Registry close-all (#222).
+- **Personal-Doc Log-Sync + TOFU (A2):** Personal-Doc läuft über den Log-Pfad; Owner-Binding-TOFU am Relay, `PERSONAL_DOC_OWNER_MISMATCH` (#223, Spec-Harvest wot-spec#113); Anti-Escalation owner-signed via `signerDid` (#224).
+- **Per-Device Inbox (Store-and-Forward):** Zustellung pro Device statt pro DID — `inbox_message` + `inbox_entry(status pending|acked|sender-excluded)`, fully-delivered-Terminal-Delete, Late-Joiner-Retained-Delivery, deterministische Migration (#225).
+- **Key-Rotation Multi-Device komplett:** I-READ „Key-available ⇒ replayBlockedByKey" auf allen Key-Pfaden beider Engines (#226) + I-CAP content-gebundener Capability-Import auf dem duplicate-Pfad (#227) → Zweitgerät liest UND schreibt nach Rotation; beide key-rotation-E2E dauerhaft grün.
+- **Generischer Dialog-Lifecycle:** synced `dismissedNotifications: Record<id,{resolvedAt}>` im Personal-Doc, OPEN-Gate + CLOSE-Observe, event-id-scoped dismiss, 60d-TTL-GC — Dialoge öffnen/schließen konsistent über Geräte, kein Re-Show aus CRDT-History (#228).
+- **D2 Debug-Observability (Spur-B-Enabler):** gegateter Kanal `window.__wotDebug` + `data-testid="wot-debug-json"` (nur mit `VITE_WOT_DEBUG_OBSERVABILITY=1`; Cleanup bei Logout/Identity-Switch): deviceId, Heads (strictContiguous/syncRequest/known), generation, outboxDepth, `keystore.enrolled` fail-closed, Store-Präsenz (#229).
+- **Spur B (native Dry-Runs):** Operator-Runbook S1/S8/S9/S11 + `.env.staging-debug`-Build + adb-Helfer; Deploy-Path-Guard: Debug-Flag nie im Release-/OTA-Pfad (#230).
+- **Festival-Scale-Stress:** protokoll-level Load-Runner (`packages/e2e-log-sync/stress/`, Modus L/S, PROD-GUARD) mit Wire-Level-Zero-Loss-Audit (Expected-Ledger + Decrypt statt seq-Contiguity — VE-C2-Re-emits erzeugen legitime seq-Gaps) (#231).
+- **Silent-Loss-Investigation:** der Dual-Device-Verlust im Stress war ein **Harness-Modell-Artefakt** (geteilte mutable Stores zwischen same-DID-Adaptern — keine reale Konfiguration); kein Broker-/Log-Sync-Produktbug; `STRESS_TRACE=1`-Klassifikation committet, Report `docs/investigations/multidevice-silent-loss.md` (#232). Realer Multi-Device-Beweis: Spur B S9 auf echten Geräten.
+- **E2E-Infra:** `E2E_CHROME_PATH`-Override; drei Strecken (multi-device, offline, key-rotation) grün als Regressions-Schutz.
 
 ---
 
