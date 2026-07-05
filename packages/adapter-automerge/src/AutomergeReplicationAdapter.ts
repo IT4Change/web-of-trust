@@ -2565,7 +2565,15 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
    */
   private async _backfillCapabilitySeed(spaceId: string): Promise<void> {
     if (!this.metadataStorage) return
-    const currentGen = await this.keyManagement.getCurrentGeneration(spaceId)
+    // getCurrentGeneration returns -1 for an unknown/keyless space; guard before
+    // getCapabilitySigningSeed(-1) hits the generation validation.
+    let currentGen: number
+    try {
+      currentGen = await this.keyManagement.getCurrentGeneration(spaceId)
+    } catch {
+      return
+    }
+    if (currentGen < 0) return
     const seed = await this.keyManagement.getCapabilitySigningSeed(spaceId, currentGen)
     if (seed) {
       await this.metadataStorage.saveCapabilitySigningSeed({ spaceId, generation: currentGen, seed })
@@ -3165,6 +3173,11 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
         // I-READ: applySpaceInviteBody imported the current-generation key → replay the
         // existing space's blocked-by-key buffer (read-only, zero-send).
         await this.replayBlockedByKeyForSpace(spaceId)
+        // #234: an invited member whose space already exists (discovered via metadata
+        // sync) must ALSO persist the just-imported group key + signing seed — else a
+        // recovery device of this member stays read-only. The new-space branch persists
+        // via _persistSpaceMetadata below; mirror it here.
+        await this._persistSpaceMetadata(existing)
         this.emitSpaceInvite({ spaceId, spaceName: existing.info.name, fromDid: decoded.senderDid, inviteMessageId: decoded.outerId })
         return { kind: 'applied', durable: true }
       }

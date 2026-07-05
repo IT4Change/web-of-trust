@@ -67,7 +67,11 @@ describe('#234 recovery capability signing seed', () => {
     expect(await km1.getCapabilitySigningSeed(space.id, 0)).not.toBeNull()
   })
 
-  it('a recovery device (fresh keyManagement) imports the seed on restore → can WRITE', async () => {
+  // Proves the WRITE PREREQUISITE: the write path (spaceCapabilitySource) throws
+  // "No capability signing seed" iff getCapabilitySigningSeed is null, and space-register
+  // reads the VK. Both present after restore → the write path no longer throws. The full
+  // end-to-end write (through log-sync + relay) is covered by the Spur-B emulator run.
+  it('a recovery device (fresh keyManagement) imports the seed on restore → write material present', async () => {
     const space = await device1.createSpace('shared', TestDoc(), { name: 'S', members: [alice.getDid()] })
 
     // Device 2: fresh key material, but sees the same (synced) PersonalDoc.

@@ -2144,13 +2144,15 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
   private async _backfillCapabilitySeed(spaceId: string): Promise<void> {
     if (!this.metadataStorage) return
     // No local content key for this space (e.g. a recovery device mid-restore) → nothing
-    // to backfill; getCurrentGeneration would throw on an empty key set.
+    // to backfill. getCurrentGeneration returns -1 for an unknown/keyless space; calling
+    // getCapabilitySigningSeed(-1) would then throw the generation validation.
     let currentGen: number
     try {
       currentGen = await this.keyManagement.getCurrentGeneration(spaceId)
     } catch {
       return
     }
+    if (currentGen < 0) return
     const seed = await this.keyManagement.getCapabilitySigningSeed(spaceId, currentGen)
     if (seed) {
       await this.metadataStorage.saveCapabilitySigningSeed({ spaceId, generation: currentGen, seed })
