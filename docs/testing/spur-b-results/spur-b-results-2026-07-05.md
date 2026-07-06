@@ -1,5 +1,18 @@
 # Spur-B Dry-Run — Ergebnis-Protokoll (2026-07-05)
 
+> **Status-Nachtrag (2026-07-06): ALLE 6 Findings gefixt und runtime-verifiziert.**
+>
+> | Fund | Issue | Fix | Verifikation |
+> |---|---|---|---|
+> | 1 — OTA überschreibt Test-Builds | #238 | PR #244 (Kill-Switch `VITE_DISABLE_LIVE_UPDATE`; der unten in Fund 1 beschriebene `VITE_UPDATE_CHANNEL`-Workaround war wirkungslos — Server liefert für unbekannte Channels HTML/200 statt 404 — und ist ÜBERHOLT) | am Gerät: kein OTA-Bundle-Dir nach fresh install |
+> | 2 — outboxDepth klemmt | #236 | PR #245 (eine Retry-Autorität für Log-Sync-Envelopes) | Box-Dry-Run 06.07.: `outboxDepth 0` beidseitig, auch nach Kill+Relaunch |
+> | 3 — Panel „Relay Disconnected" | #237 | PR #247 (globalThis-Singleton gegen Chunk-Duplikation) | Test simuliert Duplikation; Panel-Status im 06.07.-Lauf korrekt |
+> | 4 — Seed-Copy-Crash | #235 | PR #243 (`@capacitor/clipboard` nativ + sichtbarer Fallback) | Emulator (WebView 113): „Kopiert!" via nativem Plugin, kein Crash |
+> | 5 — Emulator-WebView zu alt | #239 | PR #246 (Runbook-Abschnitt „Emulator als Zweitgerät") | — (Docs) |
+> | 6 — Recovery-Device kann nicht schreiben | #234 | PR #242 (grow-only `capabilitySigningSeeds` im PersonalDoc + Backfill) | Staging-Emulator-Kette 06.07. **und** Box-Dry-Run S9: Recovery-Write kommt durch |
+>
+> Zweiter Dry-Run (S1+S9) am 2026-07-06 **gegen die Festival-Offline-Box** (Pi): PASS auf allen Kriterien; E2E-Suite 18/18 gegen die Box (PR #248).
+
 Runbook: [`../spur-b-native-dryrun.md`](../spur-b-native-dryrun.md). Live durchgeführt (Anton am Gerät, Claude Werkzeug/adb/Auswertung).
 
 ## Session-Kopf
