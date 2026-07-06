@@ -96,6 +96,25 @@ async function killPortHolder(port: number): Promise<void> {
 }
 
 export default async function globalSetup() {
+  // External-backend mode (see playwright.config.ts): the suite runs against an
+  // already-running backend (festival box / staging) — do NOT spawn or kill any
+  // local servers. A best-effort reachability probe fails fast with a clear
+  // message instead of 90s-timeouting every spec.
+  if (process.env.E2E_RELAY_URL) {
+    const probeUrl = process.env.E2E_PROFILES_URL ?? process.env.E2E_RELAY_URL.replace(/^ws/, 'http')
+    try {
+      await fetch(probeUrl, { signal: AbortSignal.timeout(5000) })
+    } catch (err) {
+      throw new Error(
+        `[e2e] External backend not reachable (${probeUrl}): ${err instanceof Error ? err.message : err}. ` +
+          'Is the box online and are its domains resolvable from this machine?',
+      )
+    }
+    console.log(`[e2e] EXTERNAL backend mode: relay=${process.env.E2E_RELAY_URL} (no local servers spawned)`)
+    await writeFile(STATE_FILE, JSON.stringify({ external: true }))
+    return
+  }
+
   // Clean up stale processes from previous runs that didn't tear down properly
   await Promise.all([
     killPortHolder(RELAY_PORT),

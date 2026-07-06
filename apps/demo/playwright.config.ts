@@ -7,6 +7,15 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const RELAY_PORT = 9787
 const PROFILES_PORT = 9788
 const VAULT_PORT = 9789
+
+// External-backend mode: set E2E_RELAY_URL (+ E2E_PROFILES_URL / E2E_VAULT_URL) to
+// run the suite against an EXTERNAL backend — e.g. the festival offline box
+// (wss://relay.box.web-of-trust.de) — instead of the localhost servers that
+// global-setup spawns. global-setup/-teardown skip the server lifecycle when set.
+// The three URLs travel together; defaults stay the localhost trio.
+const RELAY_URL = process.env.E2E_RELAY_URL ?? `ws://localhost:${RELAY_PORT}`
+const PROFILES_URL = process.env.E2E_PROFILES_URL ?? `http://localhost:${PROFILES_PORT}`
+const VAULT_URL = process.env.E2E_VAULT_URL ?? `http://localhost:${VAULT_PORT}`
 // Dedicated E2E port — deliberately NOT vite's default 5173. With
 // `reuseExistingServer` Playwright silently REUSES whatever already listens on
 // the port; on 5173 that is typically a normal `pnpm dev` session of some OTHER
@@ -53,9 +62,9 @@ export default defineConfig({
 
   webServer: {
     command: [
-      `VITE_RELAY_URL=ws://localhost:${RELAY_PORT}`,
-      `VITE_PROFILE_SERVICE_URL=http://localhost:${PROFILES_PORT}`,
-      `VITE_VAULT_URL=http://localhost:${VAULT_PORT}`,
+      `VITE_RELAY_URL=${RELAY_URL}`,
+      `VITE_PROFILE_SERVICE_URL=${PROFILES_URL}`,
+      `VITE_VAULT_URL=${VAULT_URL}`,
       `npx vite --port ${DEMO_PORT}`,
     ].join(' '),
     port: DEMO_PORT,
