@@ -133,6 +133,7 @@ export type {
 export { GraphCacheService } from './adapters/discovery/GraphCacheService'
 export type { GraphCacheOptions } from './adapters/discovery/GraphCacheService'
 export { VaultClient, base64ToUint8 } from './adapters/vault/VaultClient'
+export { DualVaultClient, type VaultClientLike } from './adapters/vault/DualVaultClient'
 export { VaultPushScheduler } from './adapters/vault/VaultPushScheduler'
 export type { VaultPushSchedulerConfig } from './adapters/vault/VaultPushScheduler'
 
@@ -178,6 +179,8 @@ export type { TraceEntry, TraceStore, TraceOp, TraceFilter } from './storage/Tra
 // Traced Wrappers (Debug Dashboard)
 export { TracedCompactStorageManager } from './storage/TracedCompactStorageManager'
 export { TracedOutboxMessagingAdapter } from './adapters/messaging/TracedOutboxMessagingAdapter'
+export { MultiBrokerMessagingAdapter } from './adapters/messaging/MultiBrokerMessagingAdapter'
+export { routeForEnvelope, FANOUT_TYPES } from './adapters/messaging/broker-routing-policy'
 
 // Yjs-specific exports have moved to @web_of_trust/adapter-yjs
 // import { initYjsPersonalDoc, YjsReplicationAdapter, ... } from '@web_of_trust/adapter-yjs'

@@ -55,6 +55,8 @@ import type { MembershipEvent, AdminEntry } from '@web_of_trust/core/protocol'
 import { WebCryptoProtocolCryptoAdapter } from '@web_of_trust/core/protocol-adapters'
 import {
   VaultClient,
+  DualVaultClient,
+  type VaultClientLike,
   VaultPushScheduler,
   base64ToUint8,
   InMemoryKeyManagementAdapter,
@@ -179,8 +181,8 @@ interface YjsReplicationConfig {
   capabilityValidityMs?: number
   metadataStorage?: SpaceMetadataStorage
   compactStore?: YjsCompactStore
-  vaultUrl?: string
-  vault?: VaultClient  // direct injection for testing
+  vaultUrl?: string | string[]
+  vault?: VaultClientLike  // direct injection for testing
   spaceFilter?: (info: SpaceInfo) => boolean
   /** Flush PersonalDoc to Vault immediately (for key rotation safety) */
   flushPersonalDoc?: () => Promise<void>
@@ -412,7 +414,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
   private readonly messageIdHistory: MessageIdHistoryPort
   private metadataStorage?: SpaceMetadataStorage
   private compactStore?: YjsCompactStore
-  private vault?: VaultClient
+  private vault?: VaultClientLike
   private readonly crypto: ProtocolCryptoAdapter
   private readonly brokerUrls: readonly string[]
   private readonly capabilityValidityMs?: number
@@ -491,7 +493,14 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
     if (config.vault) {
       this.vault = config.vault
     } else if (config.vaultUrl) {
-      this.vault = new VaultClient(config.vaultUrl, config.identity)
+      // Stage A (I-VAULT-SURVIVES): multiple vault URLs → dual-write/merge-read client.
+      // An EMPTY array behaves like "no vault" (review: [] is truthy).
+      const vaultUrls = (Array.isArray(config.vaultUrl) ? config.vaultUrl : [config.vaultUrl]).filter(Boolean)
+      this.vault = vaultUrls.length > 1
+        ? new DualVaultClient(vaultUrls.map((u) => new VaultClient(u, config.identity)))
+        : vaultUrls.length === 1
+          ? new VaultClient(vaultUrls[0], config.identity)
+          : undefined
     }
   }
 

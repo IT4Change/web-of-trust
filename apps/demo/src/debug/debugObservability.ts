@@ -55,6 +55,8 @@ export interface WotDebugSnapshot {
   outboxDepth: number
   keystore: { enrolled: KeystoreStatus }
   durableStores: DurableStorePresence[]
+  /** Stage A dual-broker: per-broker connection states (primary first); absent in single-broker mode. */
+  brokerStates?: string[]
 }
 
 export type WotDebugCollector = () => Promise<WotDebugSnapshot>
@@ -80,6 +82,8 @@ export interface CollectDeps {
   docLogStore: HeadsSource
   replication: SpacesSource
   outboxStore: OutboxSource
+  /** Stage A (I-UI-TRUTH): per-broker connection states, primary first. */
+  brokerStates?: () => string[]
 }
 
 /** Keystore STATUS only, fail-closed (a throw → 'error', never 'false'). */
@@ -136,6 +140,7 @@ export async function collectDebugObservabilitySnapshot(deps: CollectDeps): Prom
     did: deps.did,
     spaces: spaceObservables,
     outboxDepth: await deps.outboxStore.count().catch(() => -1),
+    ...(deps.brokerStates ? { brokerStates: deps.brokerStates() } : {}),
     keystore: { enrolled: await keystoreStatus() },
     durableStores: await durableStorePresence(deps.did),
   }
