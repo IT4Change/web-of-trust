@@ -45,12 +45,14 @@ export class DualVaultClient implements VaultClientLike {
   }
 
   async putSnapshot(docId: string, encryptedData: Uint8Array, nonce: Uint8Array, upToSeq: number): Promise<void> {
-    // upToSeq is vault-local — computing it from one vault and applying it to the
-    // other could prune foreign changes. Safe stage-A semantics: only the PRIMARY
-    // gets the compacting snapshot with the caller's upToSeq; secondaries receive
-    // the same snapshot bytes with upToSeq=0 (pure additive backup, no pruning).
+    // CONSUMER CONTRACT: the Yjs vault paths use a CLIENT-monOTONE upToSeq counter
+    // (snapshot-only, no pushChange) — the SAME value goes to EVERY vault, which
+    // makes upToSeq comparable ACROSS vaults. getChanges below relies on that to
+    // pick the freshest snapshot (a stale-but-reachable primary must lose against
+    // a fresher secondary — Codex R1 blocker on I-VAULT-SURVIVES). Vault-side
+    // change pruning at upToSeq is a no-op on the snapshot-only paths.
     const results = await Promise.allSettled(
-      this.targets.map((t, i) => t.putSnapshot(docId, encryptedData, nonce, i === 0 ? upToSeq : 0)),
+      this.targets.map((t) => t.putSnapshot(docId, encryptedData, nonce, upToSeq)),
     )
     if (!results.some((r) => r.status === 'fulfilled')) {
       const firstErr = (results[0] as PromiseRejectedResult).reason

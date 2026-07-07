@@ -225,6 +225,13 @@ export function AdapterProvider({ children, identity }: AdapterProviderProps) {
         const vaultUrls: string | string[] = appRuntimeConfig.vaultUrl2
           ? [appRuntimeConfig.vaultUrl, appRuntimeConfig.vaultUrl2]
           : appRuntimeConfig.vaultUrl
+        // SF (dual-broker): peer count aggregated over CONNECTED brokers so the
+        // metric doesn't read 0 while the secondary carries the connection.
+        const relayPeerCount = () =>
+          [wsAdapter, wsAdapter2]
+            .filter((a): a is NonNullable<typeof a> => !!a)
+            .filter((a) => a.getState() === 'connected')
+            .reduce((n, a) => n + a.getPeerCount(), 0)
 
         // Outbox + Inbox-Reception-Host VOR dem connect verdrahten: der Broker
         // liefert die Initial-Queue direkt nach der Auth aus — ohne
@@ -278,6 +285,8 @@ export function AdapterProvider({ children, identity }: AdapterProviderProps) {
         } else {
           const { isPersonalDocInitialized, initPersonalDoc } = await import('@web_of_trust/adapter-automerge')
           if (!isPersonalDocInitialized()) {
+            // Stage A: the Automerge personal-doc path stays SINGLE-vault by design
+            // (the dual-broker cut targets the Yjs path; Automerge follows in A.2/B).
             await initPersonalDoc(identity, outboxAdapter, appRuntimeConfig.vaultUrl, { docLogStore, deviceId })
           }
           console.debug('[init] Using Automerge PersonalDocManager')
@@ -579,7 +588,7 @@ export function AdapterProvider({ children, identity }: AdapterProviderProps) {
             await outboxAdapter!.connect(did)
             if (!cancelled) {
               setMessagingState('connected')
-              metrics.setRelayStatus(true, appRuntimeConfig.relayUrl, wsAdapter.getPeerCount())
+              metrics.setRelayStatus(true, appRuntimeConfig.relayUrl, relayPeerCount())
             }
           } catch (error) {
             console.warn('Relay reconnect failed:', error)
@@ -646,7 +655,7 @@ export function AdapterProvider({ children, identity }: AdapterProviderProps) {
             outboxAdapter.onStateChange((state) => {
               if (!cancelled) {
                 setMessagingState(state)
-                metrics.setRelayStatus(state === 'connected', appRuntimeConfig.relayUrl, wsAdapter.getPeerCount())
+                metrics.setRelayStatus(state === 'connected', appRuntimeConfig.relayUrl, relayPeerCount())
                 // Flush outbox + retry profile sync on reconnect
                 if (state === 'connected') {
                   outboxAdapter!.flushOutbox()
@@ -661,7 +670,7 @@ export function AdapterProvider({ children, identity }: AdapterProviderProps) {
               await outboxAdapter.connect(did)
               if (!cancelled) {
                 setMessagingState('connected')
-                metrics.setRelayStatus(true, appRuntimeConfig.relayUrl, wsAdapter.getPeerCount())
+                metrics.setRelayStatus(true, appRuntimeConfig.relayUrl, relayPeerCount())
               }
               console.log(`Relay connected: ${appRuntimeConfig.relayUrl} (${did.slice(0, 20)}...)`)
             } catch (error) {

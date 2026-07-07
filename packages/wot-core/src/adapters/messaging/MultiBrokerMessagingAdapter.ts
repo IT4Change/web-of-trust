@@ -38,9 +38,16 @@ export class MultiBrokerMessagingAdapter implements MessagingAdapter {
   private stateCallbacks = new Set<(state: MessagingState) => void>()
   private childStateUnsubs: Array<() => void> = []
   private lastAggregate: MessagingState = 'disconnected'
-  /** I-RECEIPT-MONOTON: messageIds that saw an ok receipt (bounded ring). */
-  private okReceipts = new Set<string>()
-  private static readonly OK_RING_MAX = 512
+  /**
+   * I-RECEIPT-MONOTON — per-message fanout aggregation. A fanout send registers
+   * its messageId with the target count; child receipts are then aggregated:
+   * ok passes through (and ends the tracking), a child `failed` is HELD until
+   * either an ok arrives (drop the failure) or ALL targets failed (emit exactly
+   * one failure). Non-tracked ids keep single-broker passthrough semantics.
+   * Size-bounded FIFO against receipts that never turn terminal.
+   */
+  private fanoutTracker = new Map<string, { targets: number; failed: number; okSeen: boolean }>()
+  private static readonly TRACKER_MAX = 256
 
   /**
    * VE-9/VE-11 passthroughs — bound ONLY when the PRIMARY supports them, so the
@@ -93,14 +100,23 @@ export class MultiBrokerMessagingAdapter implements MessagingAdapter {
     this.myDid = myDid
     this.startReconnectLoop()
 
+    // Idempotent + partial (I-START-ANYWHERE): skip children that are already
+    // connected OR currently dialing (in-flight guard) — a second connect()
+    // (the demo init calls messagingRoot.connect early and outbox.connect later)
+    // must never throw while the aggregate is fine.
     const attempts = this.children
       .map((child, i) => ({ child, i }))
-      .filter(({ child }) => child.getState() !== 'connected')
+      .filter(({ child, i }) => child.getState() !== 'connected' && !this.connecting[i] && child.getState() !== 'connecting')
       .map(({ child, i }) => this.dialChild(child, i, myDid))
 
-    if (attempts.length === 0) return // everything already connected
+    if (attempts.length === 0) {
+      if (this.getState() === 'connected') return // aggregate already carried
+      // Everything is in flight — await the aggregate instead of double-dialing.
+      return this.awaitAggregateConnected()
+    }
 
-    // First success wins; if all settle without success, throw the first error.
+    // First success wins; if all settle without success, throw the first error —
+    // UNLESS another in-flight dial (skipped above) carried the aggregate.
     return new Promise<void>((resolve, reject) => {
       let pending = attempts.length
       let firstError: unknown = null
@@ -115,11 +131,26 @@ export class MultiBrokerMessagingAdapter implements MessagingAdapter {
             pending -= 1
             if (pending === 0 && !settled) {
               settled = true
+              if (this.getState() === 'connected') { resolve(); return }
               reject(firstError instanceof Error ? firstError : new Error(String(firstError)))
             }
           },
         )
       }
+    })
+  }
+
+  /** Resolve when the aggregate reaches 'connected' within the connect timeout. */
+  private awaitAggregateConnected(): Promise<void> {
+    if (this.getState() === 'connected') return Promise.resolve()
+    return new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        unsub()
+        reject(new Error(`no broker reached 'connected' within ${this.connectTimeoutMs}ms`))
+      }, Math.max(this.connectTimeoutMs, 1))
+      const unsub = this.onStateChange((state) => {
+        if (state === 'connected') { clearTimeout(timer); unsub(); resolve() }
+      })
     })
   }
 
@@ -133,10 +164,13 @@ export class MultiBrokerMessagingAdapter implements MessagingAdapter {
         return
       }
       await new Promise<void>((resolve, reject) => {
-        const timer = setTimeout(
-          () => reject(new Error(`broker[${index}] connect timeout after ${this.connectTimeoutMs}ms`)),
-          this.connectTimeoutMs,
-        )
+        const timer = setTimeout(() => {
+          // The child's own connect has no abort — force it back to a state the
+          // reconnect loop handles ('connecting' would be invisible to it) by
+          // tearing the socket down. Best-effort; the loop redials next tick.
+          void child.disconnect().catch(() => {})
+          reject(new Error(`broker[${index}] connect timeout after ${this.connectTimeoutMs}ms`))
+        }, this.connectTimeoutMs)
         child.connect(did).then(
           () => { clearTimeout(timer); resolve() },
           (err) => { clearTimeout(timer); reject(err) },
@@ -222,6 +256,9 @@ export class MultiBrokerMessagingAdapter implements MessagingAdapter {
     const targets = this.children.filter((c) => c.getState() === 'connected')
     if (targets.length === 0) return this.children[0].send(envelope) // throws like single (outbox queues)
 
+    const messageId = (envelope as { id?: string }).id
+    if (messageId) this.trackFanout(messageId, targets.length)
+
     return new Promise<DeliveryReceipt>((resolve, reject) => {
       let pending = targets.length
       let settled = false
@@ -229,7 +266,7 @@ export class MultiBrokerMessagingAdapter implements MessagingAdapter {
       let firstError: unknown = null
       const settleOne = (receipt: DeliveryReceipt | null, err?: unknown) => {
         if (receipt && (receipt.status === 'accepted' || receipt.status === 'delivered')) {
-          this.recordOk(receipt.messageId)
+          this.markFanoutOk(receipt.messageId)
           if (!settled) { settled = true; resolve(receipt) }
           return
         }
@@ -261,27 +298,41 @@ export class MultiBrokerMessagingAdapter implements MessagingAdapter {
   }
 
   onReceipt(callback: (receipt: DeliveryReceipt) => void): () => void {
-    // I-RECEIPT-MONOTON: ok receipts pass through (idempotent upgrade);
-    // a child 'failed' is suppressed once ANY ok receipt was seen for that id.
+    // I-RECEIPT-MONOTON via per-message aggregation: for a tracked fanout id,
+    // ok passes through; a child 'failed' is HELD until either an ok arrives
+    // (drop it) or ALL targets failed (emit exactly one failure). Untracked ids
+    // keep single-broker passthrough.
     const wrapped = (receipt: DeliveryReceipt) => {
+      const entry = this.fanoutTracker.get(receipt.messageId)
       if (receipt.status === 'accepted' || receipt.status === 'delivered') {
-        this.recordOk(receipt.messageId)
+        if (entry) entry.okSeen = true
         callback(receipt)
         return
       }
-      if (this.okReceipts.has(receipt.messageId)) return // late partial failure — swallow
-      callback(receipt)
+      if (!entry) { callback(receipt); return } // untracked → single semantics
+      if (entry.okSeen) return // late partial failure — swallow
+      entry.failed += 1
+      if (entry.failed >= entry.targets) {
+        this.fanoutTracker.delete(receipt.messageId)
+        callback(receipt) // ALL targets failed — exactly one visible failure
+      }
+      // else: hold — another target may still succeed
     }
     const unsubs = this.children.map((c) => c.onReceipt(wrapped))
     return () => unsubs.forEach((u) => u())
   }
 
-  private recordOk(messageId: string): void {
-    this.okReceipts.add(messageId)
-    if (this.okReceipts.size > MultiBrokerMessagingAdapter.OK_RING_MAX) {
-      const oldest = this.okReceipts.values().next().value
-      if (oldest !== undefined) this.okReceipts.delete(oldest)
+  private trackFanout(messageId: string, targets: number): void {
+    this.fanoutTracker.set(messageId, { targets, failed: 0, okSeen: false })
+    if (this.fanoutTracker.size > MultiBrokerMessagingAdapter.TRACKER_MAX) {
+      const oldest = this.fanoutTracker.keys().next().value
+      if (oldest !== undefined) this.fanoutTracker.delete(oldest)
     }
+  }
+
+  private markFanoutOk(messageId: string): void {
+    const entry = this.fanoutTracker.get(messageId)
+    if (entry) entry.okSeen = true
   }
 
   // --- Transport resolution (Old-World channel → primary-only) ---

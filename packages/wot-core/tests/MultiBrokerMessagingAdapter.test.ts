@@ -152,13 +152,13 @@ describe('MultiBrokerMessagingAdapter (Stage A)', () => {
     const receipt = await multi.send(env as never)
     expect(receipt.status).toBe('delivered')
 
-    // onReceipt stream: ok first, then a late failed for the SAME id → suppressed
-    box.pushReceipt({ messageId: 'm-1', status: 'accepted', timestamp: 't' })
-    server.pushReceipt({ messageId: 'm-1', status: 'failed', timestamp: 't', reason: 'late' })
-    expect(seen.map((r) => `${r.messageId}:${r.status}`)).toContain('m-1:accepted')
-    expect(seen.some((r) => r.messageId === 'm-1' && r.status === 'failed')).toBe(false)
+    // onReceipt stream (TRACKED fanout id): ok first, then a late failed → suppressed
+    server.pushReceipt({ messageId: env.id, status: 'accepted', timestamp: 't' })
+    box.pushReceipt({ messageId: env.id, status: 'failed', timestamp: 't', reason: 'late' })
+    expect(seen.map((r) => `${r.messageId}:${r.status}`)).toContain(`${env.id}:accepted`)
+    expect(seen.some((r) => r.messageId === env.id && r.status === 'failed')).toBe(false)
 
-    // but a failed with NO prior ok still passes (all-failed case must stay visible)
+    // UNTRACKED ids (no fanout send) keep single-broker passthrough semantics.
     server.pushReceipt({ messageId: 'm-2', status: 'failed', timestamp: 't', reason: 'real' })
     expect(seen.some((r) => r.messageId === 'm-2' && r.status === 'failed')).toBe(true)
   })
@@ -181,6 +181,58 @@ describe('MultiBrokerMessagingAdapter (Stage A)', () => {
     expect(transitions).toEqual([])
     server.setState('disconnected')   // aggregate drops → event
     expect(transitions).toEqual(['disconnected'])
+  })
+
+  // B1 (R1) — connect is idempotent while a child dial is in flight
+  it('B1: a second connect() while the primary dial hangs resolves via the aggregate instead of throwing', async () => {
+    box.connectImpl = () => new Promise(() => {}) // hangs forever
+    const m = new MultiBrokerMessagingAdapter([box, server], { connectTimeoutMs: 5000, reconnectIntervalMs: 0 })
+    await m.connect(DID) // settles via server (first success)
+    // The demo init calls connect twice (early race + outbox.connect):
+    await expect(m.connect(DID)).resolves.toBeUndefined() // must NOT throw 'already in flight'
+    expect(m.getState()).toBe('connected')
+    await m.disconnect()
+  })
+
+  // B2 (R1) — a timed-out child is reset so the reconnect loop can grab it
+  it('B2: a child that times out on connect is torn down to disconnected (reconnect loop stays able)', async () => {
+    vi.useFakeTimers()
+    const disconnectSpy = vi.spyOn(box, 'disconnect')
+    box.connectImpl = () => new Promise(() => {}) // hangs; only the timeout path can settle it
+    const m = new MultiBrokerMessagingAdapter([box, server], { connectTimeoutMs: 100, reconnectIntervalMs: 0 })
+    const p = m.connect(DID)
+    await vi.advanceTimersByTimeAsync(150)
+    await p // server succeeded
+    expect(disconnectSpy).toHaveBeenCalled() // hung dial was torn down
+    expect(box.getState()).toBe('disconnected') // the state the reconnect loop handles
+    await m.disconnect()
+  })
+
+  // B3 (R1) — failed BEFORE ok must also be suppressed (held until outcome)
+  it('B3: a child-failed receipt arriving BEFORE the ok is held and dropped once the ok arrives', async () => {
+    await multi.connect(DID)
+    const seen: DeliveryReceipt[] = []
+    multi.onReceipt((r) => seen.push(r))
+
+    // Register fanout tracking exactly like a real fanout send does:
+    box.sendImpl = async (e) => ({ messageId: (e as { id: string }).id, status: 'failed', timestamp: 't', reason: 'box down' })
+    server.sendImpl = async (e) => ({ messageId: (e as { id: string }).id, status: 'delivered', timestamp: 't' })
+    const env = inboxEnvelope('33333333-aaaa-4bbb-8ccc-000000000003')
+    await multi.send(env as never)
+
+    // Receipt stream: failed arrives FIRST, ok second → consumer sees ONLY the ok.
+    box.pushReceipt({ messageId: env.id, status: 'failed', timestamp: 't', reason: 'early' })
+    server.pushReceipt({ messageId: env.id, status: 'delivered', timestamp: 't' })
+    expect(seen.some((r) => r.messageId === env.id && r.status === 'failed')).toBe(false)
+    expect(seen.some((r) => r.messageId === env.id && r.status === 'delivered')).toBe(true)
+
+    // All-failed case: both children fail → exactly ONE failed reaches the consumer.
+    const env2 = inboxEnvelope('44444444-aaaa-4bbb-8ccc-000000000004')
+    server.sendImpl = async (e) => ({ messageId: (e as { id: string }).id, status: 'failed', timestamp: 't', reason: 'y' })
+    await multi.send(env2 as never) // resolves with a failed receipt (all failed)
+    box.pushReceipt({ messageId: env2.id, status: 'failed', timestamp: 't', reason: 'a' })
+    server.pushReceipt({ messageId: env2.id, status: 'failed', timestamp: 't', reason: 'b' })
+    expect(seen.filter((r) => r.messageId === env2.id && r.status === 'failed')).toHaveLength(1)
   })
 
   // RX side: messages from every child reach the (idempotency-owning) consumer
