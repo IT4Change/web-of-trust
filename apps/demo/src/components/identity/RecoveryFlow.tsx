@@ -423,6 +423,13 @@ export function RecoveryFlow({ onComplete, onCancel }: RecoveryFlowProps) {
                 className="w-full px-4 py-3 bg-card border border-border rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500"
                 placeholder={t.common.passwordConfirmPlaceholder}
               />
+              {/* Live mismatch hint: only once both fields are non-empty. Mirrors the
+                  handleProtect submit check; disappears the moment they match. */}
+              {passphrase && passphraseConfirm && passphrase !== passphraseConfirm && (
+                <p className="mt-1 text-sm text-destructive" role="alert">
+                  {t.common.passwordsMismatch}
+                </p>
+              )}
             </div>
 
             {error && (
@@ -432,10 +439,12 @@ export function RecoveryFlow({ onComplete, onCancel }: RecoveryFlowProps) {
               </div>
             )}
 
+            {/* Disabled until the submit preconditions hold (min length + match);
+                handleProtect keeps the checks as a fallback. */}
             <button
               onClick={handleProtect}
-              disabled={isLoading || !passphrase || !passphraseConfirm}
-              className="w-full py-3 bg-primary-600 text-white font-medium rounded-lg hover:bg-primary-700 transition-colors disabled:opacity-50"
+              disabled={isLoading || passphrase.length < 8 || passphrase !== passphraseConfirm}
+              className="w-full py-3 bg-primary-600 text-white font-medium rounded-lg hover:bg-primary-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {isLoading ? t.recovery.recovering : t.recovery.recoverButton}
             </button>
