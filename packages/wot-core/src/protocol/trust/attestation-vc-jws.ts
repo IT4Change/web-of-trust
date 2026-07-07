@@ -217,6 +217,16 @@ export function assertAttestationVcPayload(
 
   const nowSeconds = Math.floor(now.getTime() / 1000)
   if (!Number.isFinite(nowSeconds)) throw new Error('Invalid attestation verification time')
+  // Fail closed on an invalid skew configuration: NaN would make both time
+  // comparisons below always-false (NaN compares false) and Infinity would
+  // swallow any nbf/exp — either silently disables the gate. An invalid
+  // security config must throw, never quietly degrade to the default.
+  if (
+    options.maxClockSkewMs !== undefined &&
+    !(Number.isFinite(options.maxClockSkewMs) && options.maxClockSkewMs >= 0)
+  ) {
+    throw new Error('Invalid attestation maxClockSkewMs')
+  }
   // Clock-skew tolerance, symmetric on both edges. The inner VC gate must not be
   // stricter than the outer inbox-envelope gate (INBOX_INNER_JWS_DEFAULT_MAX_CLOCK_SKEW_MS)
   // that already accepted the message: a receiver whose clock lags a few seconds

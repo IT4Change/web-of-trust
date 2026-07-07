@@ -629,6 +629,77 @@ describe('WoT protocol interop vectors', () => {
     ).resolves.toMatchObject({ nbf: nbfSeconds })
   })
 
+  it('accepts and rejects exp exactly at the 5min clock-skew boundary', async () => {
+    // now = 2026-04-22T10:00:00Z (1776852000). Default clock-skew tolerance = 5min.
+    // Expiry edge is inclusive on the reject side: exp <= now - 300s expires.
+    const rejectedJws = await createSignedAttestationPayload({
+      ...phase1.attestation_vc_jws.payload,
+      // exp = now - 5min (the exact edge)
+      validUntil: '2026-04-22T09:55:00Z',
+      exp: 1776851700,
+    })
+    await expect(
+      verifyAttestationVcJws(rejectedJws, { crypto: cryptoAdapter, now: new Date('2026-04-22T10:00:00Z') }),
+    ).rejects.toThrow('Attestation expired')
+
+    const acceptedJws = await createSignedAttestationPayload({
+      ...phase1.attestation_vc_jws.payload,
+      // exp = now - 5min + 1s (one second inside the grace window)
+      validUntil: '2026-04-22T09:55:01Z',
+      exp: 1776851701,
+    })
+    await expect(
+      verifyAttestationVcJws(acceptedJws, { crypto: cryptoAdapter, now: new Date('2026-04-22T10:00:00Z') }),
+    ).resolves.toMatchObject({ exp: 1776851701 })
+  })
+
+  it('fails closed on an invalid maxClockSkewMs instead of disabling the time gate', async () => {
+    // NaN would make both time comparisons always-false and Infinity would
+    // swallow any nbf/exp — either silently disables the gate (fail-open).
+    // An invalid security config must throw, never quietly degrade.
+    const validJws = await createSignedAttestationPayload(phase1.attestation_vc_jws.payload)
+    for (const invalidSkew of [Number.NaN, Number.POSITIVE_INFINITY, -1]) {
+      await expect(
+        verifyAttestationVcJws(validJws, {
+          crypto: cryptoAdapter,
+          now: new Date('2026-04-22T10:00:00Z'),
+          maxClockSkewMs: invalidSkew,
+        }),
+        `maxClockSkewMs=${invalidSkew}`,
+      ).rejects.toThrow('Invalid attestation maxClockSkewMs')
+    }
+
+    // Fail-open proof: a far-future nbf (now + 26h) with maxClockSkewMs=NaN was
+    // ACCEPTED before this guard (NaN comparisons are false). Now it throws.
+    const farFutureJws = await createSignedAttestationPayload({
+      ...phase1.attestation_vc_jws.payload,
+      validFrom: '2026-04-23T12:00:00Z',
+      nbf: 1776945600,
+    })
+    await expect(
+      verifyAttestationVcJws(farFutureJws, {
+        crypto: cryptoAdapter,
+        now: new Date('2026-04-22T10:00:00Z'),
+        maxClockSkewMs: Number.NaN,
+      }),
+    ).rejects.toThrow('Invalid attestation maxClockSkewMs')
+
+    // maxClockSkewMs = 0 is a valid (strict) configuration: nbf one second in
+    // the future rejects again under zero tolerance.
+    const oneSecondFutureJws = await createSignedAttestationPayload({
+      ...phase1.attestation_vc_jws.payload,
+      validFrom: '2026-04-22T10:00:01Z',
+      nbf: 1776852001,
+    })
+    await expect(
+      verifyAttestationVcJws(oneSecondFutureJws, {
+        crypto: cryptoAdapter,
+        now: new Date('2026-04-22T10:00:00Z'),
+        maxClockSkewMs: 0,
+      }),
+    ).rejects.toThrow('Attestation not yet valid')
+  })
+
   it('rejects attestation VC-JWS with invalid JOSE header fields', async () => {
     const payload = phase1.attestation_vc_jws.payload as JsonValue
     const signingSeed = hexToBytes(phase1.identity.ed25519_seed_hex)
