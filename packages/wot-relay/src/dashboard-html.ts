@@ -180,6 +180,15 @@ const fmtUp = s => s < 60 ? Math.floor(s) + 's' : s < 3600 ? Math.floor(s/60) + 
 // RELAY_DEBUG_STATS). Detection must NOT key on devicesPerDid: it is ALWAYS public
 // and contains full DIDs, so preferring it would show full DIDs on a public broker.
 const isFullDetail = d => !!(((d.logStats || {}).entriesByDoc) || ((d.queueStats || {}).byDid))
+// Max rows in the documents card (mirrors the server's DISPLAY_TOP_DOCS_LIMIT).
+const TOP_DOCS_LIMIT = 12
+// AbortSignal.timeout is missing in some older WebViews — tiny controller fallback.
+const timeoutSignal = ms => {
+  if (typeof AbortSignal !== 'undefined' && AbortSignal.timeout) return AbortSignal.timeout(ms)
+  const c = new AbortController()
+  setTimeout(() => c.abort(), ms)
+  return c.signal
+}
 
 $('host').textContent = location.host || 'broker'
 $('brokerline').innerHTML = '<code>' + esc(location.host || '') + '</code>'
@@ -242,7 +251,7 @@ function renderDocuments(d, full) {
   if (full && ls.entriesByDoc) {
     const dev = ls.devicesByDoc || {}
     rows = Object.entries(ls.entriesByDoc)
-      .sort((a, b) => b[1] - a[1]).slice(0, 12)
+      .sort((a, b) => b[1] - a[1]).slice(0, TOP_DOCS_LIMIT)
       .map(([id, n]) => ({ id, entries: Number(n), devices: Number(dev[id] || 0) }))
   } else {
     rows = ((d.display && d.display.topDocs) || [])
@@ -317,7 +326,7 @@ async function tick() {
   if (document.hidden || inFlight) return
   inFlight = true
   try {
-    const r = await fetch('/dashboard/data', { cache: 'no-store', signal: AbortSignal.timeout(4000) })
+    const r = await fetch('/dashboard/data', { cache: 'no-store', signal: timeoutSignal(4000) })
     if (!r.ok) throw new Error('HTTP ' + r.status)
     const d = await r.json()
     $('dot').classList.remove('off')

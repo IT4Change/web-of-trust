@@ -852,6 +852,26 @@ export class DocLog {
   }
 
   /**
+   * Top-N documents by entry count, LIMITED at the SQL root (review #256): the
+   * public /dashboard/data display block is polled every 2s and must never
+   * materialize the unbounded per-doc maps ({@link entriesByDoc}/{@link devicesByDoc}
+   * stay exclusively on the flag-gated debug path). One GROUP BY computes both
+   * aggregates for exactly the surfaced rows; the (doc_id, …) primary key /
+   * idx_doc_log_coords give the grouping an index prefix — no schema change
+   * needed. Deterministic order: entries DESC, doc_id ASC as tiebreaker.
+   */
+  topDocsByEntries(limit: number): Array<{ docId: string; entries: number; devices: number }> {
+    const rows = this.db
+      .prepare(
+        `SELECT doc_id, COUNT(*) AS entries, COUNT(DISTINCT device_id) AS devices
+         FROM doc_log GROUP BY doc_id
+         ORDER BY entries DESC, doc_id ASC LIMIT ?`,
+      )
+      .all(limit) as Array<{ doc_id: string; entries: number; devices: number }>
+    return rows.map((r) => ({ docId: r.doc_id, entries: r.entries, devices: r.devices }))
+  }
+
+  /**
    * Entries per (docId, deviceId). The aggregate-map sibling of {@link entryCountForDevice}
    * (one GROUP BY instead of N point reads), mirroring {@link entriesByDoc}. Used by the
    * Dashboard / remote-observation path (D1 Spur-C): a removed member's deviceId MUST show

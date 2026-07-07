@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { createHash } from 'crypto'
+import { createHash, randomBytes } from 'crypto'
 import {
   shortenDid,
   shortenDeviceId,
@@ -10,9 +10,16 @@ import {
 
 // Broker-Dashboard: the /dashboard/data `display` block shortens ids SERVER-SIDE
 // (relay.ts), so full ids never leave an unauthenticated + ACAO:* endpoint without
-// RELAY_DEBUG_STATS. These unit-test the exported shorten*/buildDisplayBlock helpers:
-// the shortening RULES (DID prefix+suffix, deviceId prefix, docId sha256-hash) and
-// their DETERMINISM (stable across polls).
+// RELAY_DEBUG_STATS. These unit-test the exported helpers:
+// - DIDs/deviceIds: PREFIX cuts (high-entropy random identifiers — no candidate
+//   dictionary exists, so a prefix is not an oracle).
+// - docIds: KEYED hash (HMAC-SHA256 with a per-process random salt) — an unsalted
+//   hash of a CLIENT-CHOSEN speaking name would be a guessing oracle on the public
+//   surface (review-#256 blocker). Shortcuts are deterministic per (docId, salt),
+//   differ across salts (i.e. across relay restarts), and are NOT reproducible
+//   offline without the process secret.
+
+const SALT = randomBytes(32)
 
 describe('shortenDid', () => {
   it('cuts a did:key to first-8 of the multibase part + … + last-4', () => {
@@ -72,29 +79,40 @@ describe('shortenDeviceId', () => {
   })
 })
 
-describe('shortenDocId', () => {
-  it('hashes with sha256 and keeps first 10 hex + … (NOT a prefix cut)', () => {
+describe('shortenDocId — keyed (salted) hash', () => {
+  it('emits exactly 10 hex chars + the ellipsis and hides speaking names', () => {
     const docId = 'familie-mueller-urlaubsplanung-2026'
-    const expectedHex = createHash('sha256').update(docId, 'utf8').digest('hex').slice(0, 10)
-    expect(shortenDocId(docId)).toBe(`${expectedHex}…`)
-    // The speaking name must NOT survive — this is why docIds are hashed, not prefixed.
-    expect(shortenDocId(docId)).not.toContain('familie')
-    expect(shortenDocId(docId)).not.toContain('mueller')
-  })
-
-  it('is deterministic (stable hash across polls)', () => {
-    const docId = 'some-client-chosen-doc-id'
-    expect(shortenDocId(docId)).toBe(shortenDocId(docId))
-  })
-
-  it('produces different short ids for different docIds', () => {
-    expect(shortenDocId('doc-a')).not.toBe(shortenDocId('doc-b'))
-  })
-
-  it('emits exactly 10 hex chars + the ellipsis', () => {
-    const out = shortenDocId('anything')
+    const out = shortenDocId(docId, SALT)
     expect(out.endsWith('…')).toBe(true)
     expect(out.slice(0, -1)).toMatch(/^[0-9a-f]{10}$/)
+    expect(out).not.toContain('familie')
+    expect(out).not.toContain('mueller')
+  })
+
+  it('is deterministic WITHIN one salt (stable across polls of one process)', () => {
+    const docId = 'some-client-chosen-doc-id'
+    expect(shortenDocId(docId, SALT)).toBe(shortenDocId(docId, SALT))
+  })
+
+  it('produces DIFFERENT shortcuts under different salts (i.e. across restarts)', () => {
+    const docId = 'familie-mueller-urlaubsplanung-2026'
+    const saltA = randomBytes(32)
+    const saltB = randomBytes(32)
+    expect(shortenDocId(docId, saltA)).not.toBe(shortenDocId(docId, saltB))
+  })
+
+  it('ORACLE TEST: an offline unsalted sha256(docId) prefix does NOT match the shortcut', () => {
+    // The review-#256 blocker: with an unsalted hash an observer offline-hashes
+    // candidate names and compares prefixes against the public surface. With the
+    // keyed hash the candidate computation (sha256 without the process secret)
+    // must NOT reproduce the served shortcut.
+    const docId = 'familie-mueller-urlaubsplanung-2026'
+    const offlineGuess = `${createHash('sha256').update(docId, 'utf8').digest('hex').slice(0, 10)}…`
+    expect(shortenDocId(docId, SALT)).not.toBe(offlineGuess)
+  })
+
+  it('produces different short ids for different docIds under the same salt', () => {
+    expect(shortenDocId('doc-a', SALT)).not.toBe(shortenDocId('doc-b', SALT))
   })
 })
 
@@ -103,14 +121,13 @@ describe('buildDisplayBlock', () => {
   const did2 = 'did:key:z6Mk2222222222222222222222222222BBBB'
   const docA = 'space-alpha-client-chosen'
   const docB = 'space-beta-client-chosen'
+  const EMPTY = { topDocs: [], inboxPendingByDid: [], docIdSalt: SALT }
 
   it('builds dids (shortened, deviceCount, online) sorted by deviceCount desc', () => {
     const block = buildDisplayBlock({
+      ...EMPTY,
       connectedDids: [did1],
       devicesPerDid: { [did1]: 1, [did2]: 3 },
-      entriesByDoc: {},
-      devicesByDoc: {},
-      inboxPendingByDid: {},
     })
     expect(block.dids).toEqual([
       { idShort: shortenDid(did2), deviceCount: 3, online: false },
@@ -118,53 +135,47 @@ describe('buildDisplayBlock', () => {
     ])
   })
 
-  it('builds topDocs (hashed id, entries, devices) sorted by entries desc', () => {
+  it('builds topDocs (keyed-hash id, entries, devices) sorted by entries desc', () => {
     const block = buildDisplayBlock({
+      ...EMPTY,
       connectedDids: [],
       devicesPerDid: {},
-      entriesByDoc: { [docA]: 2, [docB]: 5 },
-      devicesByDoc: { [docA]: 1, [docB]: 2 },
-      inboxPendingByDid: {},
+      topDocs: [
+        { docId: docA, entries: 2, devices: 1 },
+        { docId: docB, entries: 5, devices: 2 },
+      ],
     })
     expect(block.topDocs).toEqual([
-      { idShort: shortenDocId(docB), entries: 5, devices: 2 },
-      { idShort: shortenDocId(docA), entries: 2, devices: 1 },
+      { idShort: shortenDocId(docB, SALT), entries: 5, devices: 2 },
+      { idShort: shortenDocId(docA, SALT), entries: 2, devices: 1 },
     ])
   })
 
-  it('caps topDocs at DISPLAY_TOP_DOCS_LIMIT', () => {
-    const entriesByDoc: Record<string, number> = {}
-    for (let i = 0; i < DISPLAY_TOP_DOCS_LIMIT + 5; i++) entriesByDoc[`doc-${i}`] = i
+  it('defensively caps topDocs at DISPLAY_TOP_DOCS_LIMIT (belt — SQL already limits)', () => {
+    const topDocs: Array<{ docId: string; entries: number; devices: number }> = []
+    for (let i = 0; i < DISPLAY_TOP_DOCS_LIMIT + 5; i++) {
+      topDocs.push({ docId: `doc-${i}`, entries: i, devices: 1 })
+    }
     const block = buildDisplayBlock({
+      ...EMPTY,
       connectedDids: [],
       devicesPerDid: {},
-      entriesByDoc,
-      devicesByDoc: {},
-      inboxPendingByDid: {},
+      topDocs,
     })
     expect(block.topDocs).toHaveLength(DISPLAY_TOP_DOCS_LIMIT)
-    // Highest-entry docs are retained (doc-16 = 16 is the top).
+    // Highest-entry docs are retained.
     expect(block.topDocs[0].entries).toBe(DISPLAY_TOP_DOCS_LIMIT + 4)
-  })
-
-  it('defaults devices to 0 when a doc is absent from devicesByDoc', () => {
-    const block = buildDisplayBlock({
-      connectedDids: [],
-      devicesPerDid: {},
-      entriesByDoc: { [docA]: 1 },
-      devicesByDoc: {},
-      inboxPendingByDid: {},
-    })
-    expect(block.topDocs[0].devices).toBe(0)
   })
 
   it('builds inboxPendingByDid (shortened) sorted by pending desc', () => {
     const block = buildDisplayBlock({
+      ...EMPTY,
       connectedDids: [],
       devicesPerDid: {},
-      entriesByDoc: {},
-      devicesByDoc: {},
-      inboxPendingByDid: { [did1]: 1, [did2]: 4 },
+      inboxPendingByDid: [
+        { did: did1, pending: 1 },
+        { did: did2, pending: 4 },
+      ],
     })
     expect(block.inboxPendingByDid).toEqual([
       { idShort: shortenDid(did2), pending: 4 },
@@ -176,9 +187,9 @@ describe('buildDisplayBlock', () => {
     const block = buildDisplayBlock({
       connectedDids: [did1],
       devicesPerDid: { [did1]: 2 },
-      entriesByDoc: { [docA]: 3 },
-      devicesByDoc: { [docA]: 1 },
-      inboxPendingByDid: { [did2]: 1 },
+      topDocs: [{ docId: docA, entries: 3, devices: 1 }],
+      inboxPendingByDid: [{ did: did2, pending: 1 }],
+      docIdSalt: SALT,
     })
     const serialized = JSON.stringify(block)
     expect(serialized).not.toContain(did1)
@@ -186,13 +197,16 @@ describe('buildDisplayBlock', () => {
     expect(serialized).not.toContain(docA)
   })
 
-  it('is deterministic for identical input', () => {
+  it('is deterministic for identical input (same salt)', () => {
     const input = {
       connectedDids: [did1],
       devicesPerDid: { [did1]: 2, [did2]: 2 },
-      entriesByDoc: { [docA]: 1, [docB]: 1 },
-      devicesByDoc: {},
-      inboxPendingByDid: {},
+      topDocs: [
+        { docId: docA, entries: 1, devices: 1 },
+        { docId: docB, entries: 1, devices: 1 },
+      ],
+      inboxPendingByDid: [],
+      docIdSalt: SALT,
     }
     expect(JSON.stringify(buildDisplayBlock(input))).toBe(JSON.stringify(buildDisplayBlock(input)))
   })

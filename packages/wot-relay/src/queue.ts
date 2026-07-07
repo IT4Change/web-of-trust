@@ -463,6 +463,25 @@ export class OfflineQueue {
     return result
   }
 
+  /**
+   * Top-N recipients by pending delivery slots, LIMITED at the SQL root
+   * (review #256): the public /dashboard/data display block is polled every 2s
+   * and must never materialize the unbounded {@link countByDid} map (which stays
+   * exclusively on the flag-gated debug path). inbox_message(to_did) is indexed
+   * (idx_inbox_message_to_did) and inbox_entry joins over its PK prefix — no
+   * schema change needed. Deterministic order: pending DESC, to_did ASC.
+   */
+  topPendingByDid(limit: number): Array<{ did: string; pending: number }> {
+    const rows = this.db
+      .prepare(
+        `SELECT m.to_did AS to_did, COUNT(*) AS pending FROM inbox_entry e
+         JOIN inbox_message m ON e.message_id = m.message_id
+         GROUP BY m.to_did ORDER BY pending DESC, m.to_did ASC LIMIT ?`,
+      )
+      .all(limit) as Array<{ to_did: string; pending: number }>
+    return rows.map((r) => ({ did: r.to_did, pending: r.pending }))
+  }
+
   /** Distinct retained messages (`inbox_message` rows), optionally scoped to a DID. */
   messageCount(toDid?: string): number {
     if (toDid) {

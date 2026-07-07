@@ -1,5 +1,5 @@
 import { createServer, type Server as HttpServer } from 'http'
-import { randomBytes, randomUUID, createHash } from 'crypto'
+import { randomBytes, randomUUID, createHmac } from 'crypto'
 import Database from 'better-sqlite3'
 import { WebSocketServer, type WebSocket } from 'ws'
 import { protocol, WebCryptoProtocolCryptoAdapter } from '@web_of_trust/core'
@@ -148,7 +148,7 @@ const NONCE_BYTE_LENGTH = 32
 //
 // Shortening rules (Anton, 07.07.): DIDs + deviceIds shown but shortened; docIds
 // are CLIENT-CHOSEN strings (a speaking name would leak via a prefix) so they are
-// HASHED, not prefix-cut.
+// KEYED-HASHED (HMAC with a per-process random salt), not prefix-cut.
 // ---------------------------------------------------------------------------
 
 /** Top-N documents surfaced in the always-public `display.topDocs` array. */
@@ -161,6 +161,13 @@ export const DISPLAY_TOP_DOCS_LIMIT = 12
  * polls. Format: first 8 chars of the multibase part + `…` + last 4
  * (e.g. `z6MktgyS…tUfX`). A non-`did:key` (or too-short) input is returned as-is
  * (still escaped downstream) rather than mangled. Deterministic + pure.
+ *
+ * Threat model — why prefix-cutting is fine HERE but not for docIds: a DID's
+ * multibase part is HIGH-ENTROPY random key material, so there is no candidate
+ * dictionary to hash/compare against — a prefix reveals nothing an observer
+ * could not already enumerate. docIds are CLIENT-CHOSEN (often speaking,
+ * low-entropy) strings, hence the keyed-hash treatment in {@link shortenDocId}.
+ * The same reasoning applies to UUID deviceIds ({@link shortenDeviceId}).
  */
 export function shortenDid(did: string): string {
   const PREFIX = 'did:key:'
@@ -187,21 +194,23 @@ export function shortenDeviceId(deviceId: string): string {
 /**
  * Shorten a docId for public display. Unlike DIDs/deviceIds a docId is a
  * CLIENT-CHOSEN string (personalDocId is even a bearer secret, A2 Teil B) — a
- * speaking name like `familie-mueller-2026` would leak via a prefix cut. So we
- * HASH it: `sha256(docId)` → first 10 hex chars + `…`. Stable across polls,
- * collision risk negligible at display-N. Deterministic + pure.
+ * speaking name like `familie-mueller-2026` would leak via a prefix cut, and an
+ * UNSALTED hash would be a GUESSING ORACLE on the unauthenticated public surface
+ * (offline-hash candidates like `familie-mueller-*`, compare against
+ * /dashboard/data). So the shortcut is a KEYED hash:
+ * `HMAC-SHA256(salt, docId)` → first 10 hex chars + `…`, with a PER-PROCESS
+ * random salt (`randomBytes(32)`, minted once in the RelayServer constructor).
  *
- * Honesty note: this is PSEUDONYMIZATION, not secrecy. An UNSALTED sha256 is
- * dictionary-attackable for low-entropy speaking names (offline-hash candidates
- * like `familie-mueller-*` and compare prefixes). High-entropy docIds (UUIDs,
- * personalDocIds) are unaffected. If low-entropy doc names ever become a real
- * risk, switch to an HMAC with a server-held secret — deliberately NOT built
- * today: server-secret management is overkill for display pseudonymization.
- *
- * NOTE: an empty docId hashes like any other string (never a real docId).
+ * Properties (Antons Freigabe der einfachen Variante, Loop-Review #256):
+ * - stable WITHIN one relay process (enough — dashboard + polls are process-local),
+ * - CHANGES ACROSS RESTARTS (documented, deliberate: the shortcut is a display
+ *   pseudonym, not a durable identifier),
+ * - not computable without the process secret → no candidate-dictionary oracle.
+ * Collision risk at display-N stays negligible. Deterministic + pure given
+ * (docId, salt). NOTE: an empty docId hashes like any other string.
  */
-export function shortenDocId(docId: string): string {
-  const hex = createHash('sha256').update(docId, 'utf8').digest('hex')
+export function shortenDocId(docId: string, salt: Uint8Array): string {
+  const hex = createHmac('sha256', salt).update(docId, 'utf8').digest('hex')
   return `${hex.slice(0, 10)}…`
 }
 
@@ -233,24 +242,30 @@ export interface DisplayBlock {
 }
 
 /**
- * Build the always-public `display` block from the FULL (unredacted) in-process
- * stats. This runs server-side regardless of `exposeDebugStats`; only the shortened
- * forms are ever serialized, so full ids never leave the server without the flag.
+ * Build the always-public `display` block. This runs server-side regardless of
+ * `exposeDebugStats`; only the shortened forms are ever serialized, so full ids
+ * never leave the server without the flag.
  *
- * - `dids`: from `devicesPerDid` (all connected DIDs are online by definition, but
- *   we keep `online` explicit against `connectedDids` for a stable contract).
- * - `topDocs`: Top-N by entry count from `entriesByDoc`, joined with `devicesByDoc`.
- * - `inboxPendingByDid`: from the queue's per-recipient delivery-slot counts.
+ * - `dids`: from `devicesPerDid` (in-memory connection map — no DB cost; all
+ *   connected DIDs are online by definition, but we keep `online` explicit
+ *   against `connectedDids` for a stable contract).
+ * - `topDocs` / `inboxPendingByDid`: from the SQL-LIMITED top-N queries
+ *   (DocLog.topDocsByEntries / OfflineQueue.topPendingByDid) — the 2s public
+ *   poll must never materialize unbounded full-table aggregates (review #256);
+ *   the unlimited maps remain exclusively on the flag-gated debug path.
+ * - `docIdSalt`: the per-process secret for the keyed docId shortcut
+ *   ({@link shortenDocId}).
  *
- * The inputs are the raw maps — this function is the ONLY consumer of the full
- * docId/DID keys, and it emits only shortened arrays.
+ * The inputs carry the full ids — this function is the ONLY consumer of them,
+ * and it emits only shortened arrays. Sort + slice are kept as a defensive
+ * belt (the SQL already orders + limits).
  */
 export function buildDisplayBlock(input: {
   connectedDids: string[]
   devicesPerDid: Record<string, number>
-  entriesByDoc: Record<string, number>
-  devicesByDoc: Record<string, number>
-  inboxPendingByDid: Record<string, number>
+  topDocs: Array<{ docId: string; entries: number; devices: number }>
+  inboxPendingByDid: Array<{ did: string; pending: number }>
+  docIdSalt: Uint8Array
 }): DisplayBlock {
   const online = new Set(input.connectedDids)
 
@@ -263,22 +278,19 @@ export function buildDisplayBlock(input: {
     // Most devices first, stable by shortened id for a deterministic order.
     .sort((a, b) => b.deviceCount - a.deviceCount || a.idShort.localeCompare(b.idShort))
 
-  // Deliberately simple: sort the WHOLE map per poll (O(n log n)) and slice. At
-  // our doc counts this is noise next to the SQLite GROUP BY that produced the
-  // map; a partial top-N selection (heap) is the option if a broker ever hosts a
-  // very large log. Do not optimize preemptively.
-  const topDocs: DisplayDoc[] = Object.entries(input.entriesByDoc)
-    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+  const topDocs: DisplayDoc[] = [...input.topDocs]
+    .sort((a, b) => b.entries - a.entries || a.docId.localeCompare(b.docId))
     .slice(0, DISPLAY_TOP_DOCS_LIMIT)
-    .map(([docId, entries]) => ({
-      idShort: shortenDocId(docId),
-      entries,
-      devices: input.devicesByDoc[docId] ?? 0,
+    .map((d) => ({
+      idShort: shortenDocId(d.docId, input.docIdSalt),
+      entries: d.entries,
+      devices: d.devices,
     }))
 
-  const inboxPendingByDid: DisplayInboxPending[] = Object.entries(input.inboxPendingByDid)
-    .map(([did, pending]) => ({ idShort: shortenDid(did), pending }))
-    .sort((a, b) => b.pending - a.pending || a.idShort.localeCompare(b.idShort))
+  const inboxPendingByDid: DisplayInboxPending[] = [...input.inboxPendingByDid]
+    .sort((a, b) => b.pending - a.pending || a.did.localeCompare(b.did))
+    .slice(0, DISPLAY_TOP_DOCS_LIMIT)
+    .map((p) => ({ idShort: shortenDid(p.did), pending: p.pending }))
 
   return { dids, topDocs, inboxPendingByDid }
 }
@@ -299,6 +311,13 @@ export class RelayServer {
   private queue: OfflineQueue
   private docLog: DocLog
   private startedAt = Date.now()
+  /**
+   * Per-process random secret keying the docId display shortcut (shortenDocId,
+   * review-#256 blocker): without it the public shortcut would be a guessing
+   * oracle for low-entropy speaking docIds. Minted once per process — shortcuts
+   * are stable across polls but DELIBERATELY change on restart.
+   */
+  private readonly docIdDisplaySalt = randomBytes(32)
   /** Injectable clock (epoch ms) for the capability-expiry gate; see options.now. */
   private now: () => number
   /** Gate for sensitive extended /dashboard/data stats; see options.exposeDebugStats. */
@@ -480,16 +499,16 @@ export class RelayServer {
       logStats: this.buildLogStats(),
       memoryMB: process.memoryUsage().rss / (1024 * 1024),
       // Broker-Dashboard: ALWAYS-public block of server-side SHORTENED ids (arrays,
-      // no map keys). Built from the FULL in-process maps below, but only the
-      // shortened forms are serialized — full ids never leave the server without
-      // RELAY_DEBUG_STATS. This is additive: the flag-gated maps above keep their
-      // exact redaction semantics (harness + DashboardStats omission tests).
+      // no map keys). Only the shortened forms are serialized — full ids never
+      // leave the server without RELAY_DEBUG_STATS. Fed by SQL-LIMITED top-N
+      // queries (never the unbounded full maps — those stay flag-gated above with
+      // their exact redaction semantics: harness + DashboardStats omission tests).
       display: buildDisplayBlock({
         connectedDids: dids,
         devicesPerDid,
-        entriesByDoc: this.docLog.entriesByDoc(),
-        devicesByDoc: this.docLog.devicesByDoc(),
-        inboxPendingByDid: this.queue.countByDid(),
+        topDocs: this.docLog.topDocsByEntries(DISPLAY_TOP_DOCS_LIMIT),
+        inboxPendingByDid: this.queue.topPendingByDid(DISPLAY_TOP_DOCS_LIMIT),
+        docIdSalt: this.docIdDisplaySalt,
       }),
     }
   }

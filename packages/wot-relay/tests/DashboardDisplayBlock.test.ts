@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { randomUUID } from 'crypto'
-import { RelayServer, shortenDid, shortenDocId } from '../src/relay.js'
+import { createHash, randomUUID } from 'crypto'
+import { RelayServer, shortenDid, shortenDocId, DISPLAY_TOP_DOCS_LIMIT } from '../src/relay.js'
 import type { DocLog } from '../src/log-store.js'
 import type { OfflineQueue } from '../src/queue.js'
 
@@ -23,6 +23,11 @@ function reachDocLog(server: RelayServer): DocLog {
 }
 function reachQueue(server: RelayServer): OfflineQueue {
   return (server as unknown as { queue: OfflineQueue }).queue
+}
+/** The per-process docId display salt (shortenDocId is keyed since review #256) —
+ * tests reach it to compute EXPECTED shortcuts; production code never exposes it. */
+function reachSalt(server: RelayServer): Uint8Array {
+  return (server as unknown as { docIdDisplaySalt: Uint8Array }).docIdDisplaySalt
 }
 /** Inject a live connection WITHOUT the full auth handshake (the redaction under
  * test is at the serializer, not the auth path). Mirrors the private connection map;
@@ -78,7 +83,7 @@ describe('Broker-Dashboard /dashboard/data display block (debug stats OFF — pr
       ]),
     )
     expect(json.display.topDocs).toEqual([
-      { idShort: shortenDocId(SPEAKING_DOC_ID), entries: 1, devices: 1 },
+      { idShort: shortenDocId(SPEAKING_DOC_ID, reachSalt(server)), entries: 1, devices: 1 },
     ])
     expect(json.display.inboxPendingByDid).toEqual([
       { idShort: shortenDid(FULL_DID_A), pending: 1 },
@@ -111,7 +116,78 @@ describe('Broker-Dashboard /dashboard/data display block (debug stats OFF — pr
     expect(displayStr).not.toContain('mueller')
     // ...but the shortened forms ARE present (proves it was rendered, not dropped).
     expect(displayStr).toContain(shortenDid(FULL_DID_A))
-    expect(displayStr).toContain(shortenDocId(SPEAKING_DOC_ID))
+    expect(displayStr).toContain(shortenDocId(SPEAKING_DOC_ID, reachSalt(server)))
+  })
+
+  it('ORACLE TEST (HTTP): an offline unsalted sha256(docId) prefix does NOT appear in the response', async () => {
+    // Review-#256 blocker: with an unsalted hash an observer offline-hashes
+    // candidate names (familie-mueller-*) and compares prefixes against the
+    // public surface. The served shortcut is keyed with a per-process salt, so
+    // the offline candidate hash must NOT match anything in the response.
+    reachDocLog(server).appendEntry({
+      docId: SPEAKING_DOC_ID, deviceId: randomUUID(), seq: 0, contentHash: 'h0', entryJws: 'jws0',
+    })
+    const text = await (await fetch(`${httpBase}/dashboard/data`)).text()
+    const offlineGuess = createHash('sha256').update(SPEAKING_DOC_ID, 'utf8').digest('hex').slice(0, 10)
+    expect(text).not.toContain(offlineGuess)
+    // ...while the keyed shortcut IS served (shortcut exists, oracle does not).
+    expect(text).toContain(shortenDocId(SPEAKING_DOC_ID, reachSalt(server)).slice(0, 10))
+  })
+
+  it('two relay instances (fresh per-process salts) serve DIFFERENT shortcuts for the same docId', async () => {
+    // Restart semantics: the salt is minted per RelayServer/process, so shortcuts
+    // deliberately change across restarts — pinned here via two instances.
+    reachDocLog(server).appendEntry({
+      docId: SPEAKING_DOC_ID, deviceId: randomUUID(), seq: 0, contentHash: 'h0', entryJws: 'jws0',
+    })
+    const second = new RelayServer({ port: 0, dbPath: ':memory:' })
+    await second.start()
+    try {
+      reachDocLog(second).appendEntry({
+        docId: SPEAKING_DOC_ID, deviceId: randomUUID(), seq: 0, contentHash: 'h0', entryJws: 'jws0',
+      })
+      const first = (await (await fetch(`${httpBase}/dashboard/data`)).json()) as {
+        display: { topDocs: Array<{ idShort: string }> }
+      }
+      const other = (await (await fetch(`http://localhost:${second.port}/dashboard/data`)).json()) as {
+        display: { topDocs: Array<{ idShort: string }> }
+      }
+      expect(first.display.topDocs[0].idShort).not.toBe(other.display.topDocs[0].idShort)
+    } finally {
+      await second.stop()
+    }
+  })
+
+  it('feeds display from SQL-LIMITED top-N queries (never unbounded): caps + orders topDocs/inbox', async () => {
+    // Seed MORE docs and pending recipients than the display limit.
+    const total = DISPLAY_TOP_DOCS_LIMIT + 3
+    for (let i = 1; i <= total; i++) {
+      const docId = `doc-${String(i).padStart(2, '0')}`
+      for (let seq = 0; seq < i; seq++) {
+        reachDocLog(server).appendEntry({
+          docId, deviceId: `dev-${i}`, seq, contentHash: `h${i}-${seq}`, entryJws: 'jws',
+        })
+      }
+      reachQueue(server).enqueueFanout({
+        messageId: randomUUID(),
+        toDid: `did:key:z6MkPending${String(i).padStart(2, '0')}RestOfTheKeyMaterial`,
+        envelope: { type: 'x' },
+        deliveryTargetDeviceIds: Array.from({ length: i }, () => randomUUID()),
+      })
+    }
+
+    const json = (await (await fetch(`${httpBase}/dashboard/data`)).json()) as {
+      display: {
+        topDocs: Array<{ entries: number }>
+        inboxPendingByDid: Array<{ pending: number }>
+      }
+    }
+    // Capped at the limit, highest counts first (SQL ORDER BY ... DESC LIMIT).
+    expect(json.display.topDocs).toHaveLength(DISPLAY_TOP_DOCS_LIMIT)
+    expect(json.display.topDocs[0].entries).toBe(total)
+    expect(json.display.topDocs[DISPLAY_TOP_DOCS_LIMIT - 1].entries).toBe(total - DISPLAY_TOP_DOCS_LIMIT + 1)
+    expect(json.display.inboxPendingByDid).toHaveLength(DISPLAY_TOP_DOCS_LIMIT)
+    expect(json.display.inboxPendingByDid[0].pending).toBe(total)
   })
 
   it('CRITICAL: a docId (bearer secret) + a deviceId never leak in the FULL response without the flag', async () => {
@@ -185,7 +261,7 @@ describe('Broker-Dashboard /dashboard/data display block (debug stats ON — box
     // Full map present under the flag (box path) — the client prefers it for FULL ids.
     expect(json.logStats.entriesByDoc?.[SPEAKING_DOC_ID]).toBe(1)
     // The always-public shortened block is present regardless of the flag.
-    expect(json.display.topDocs[0].idShort).toBe(shortenDocId(SPEAKING_DOC_ID))
+    expect(json.display.topDocs[0].idShort).toBe(shortenDocId(SPEAKING_DOC_ID, reachSalt(server)))
   })
 })
 
