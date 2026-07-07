@@ -23,6 +23,8 @@ import { WebCryptoProtocolCryptoAdapter } from '@web_of_trust/core/protocol-adap
 import {
   VaultPushScheduler,
   VaultClient,
+  DualVaultClient,
+  type VaultClientLike,
   base64ToUint8,
 } from '@web_of_trust/core/adapters'
 import {
@@ -52,7 +54,7 @@ let ydoc: Y.Doc | null = null
 let compactStore: CompactStorageManager | null = null
 let compactScheduler: VaultPushScheduler | null = null
 let vaultScheduler: VaultPushScheduler | null = null
-let vaultClient: VaultClient | null = null
+let vaultClient: VaultClientLike | null = null
 let vaultPersonalKey: Uint8Array | null = null
 let vaultSeq = 0
 let logSyncAdapter: YjsPersonalLogSyncAdapter | null = null
@@ -459,7 +461,7 @@ function notifyListeners(): void {
  * @param messaging - Optional MessagingAdapter for multi-device sync via relay
  * @param vaultUrl - Optional vault URL for encrypted backup
  */
-export async function initYjsPersonalDoc(identity: IdentitySession, messaging?: MessagingAdapter, vaultUrl?: string, externalCompactStore?: { open(): Promise<void>; save(id: string, data: Uint8Array): Promise<void>; load(id: string): Promise<Uint8Array | null>; delete(id: string): Promise<void>; list(): Promise<string[]>; close(): void }, logSync?: { docLogStore: DocLogStore; deviceId: string }): Promise<PersonalDoc> {
+export async function initYjsPersonalDoc(identity: IdentitySession, messaging?: MessagingAdapter, vaultUrl?: string | string[], externalCompactStore?: { open(): Promise<void>; save(id: string, data: Uint8Array): Promise<void>; load(id: string): Promise<Uint8Array | null>; delete(id: string): Promise<void>; list(): Promise<string[]>; close(): void }, logSync?: { docLogStore: DocLogStore; deviceId: string }): Promise<PersonalDoc> {
   // Idempotent
   if (ydoc) return snapshotDoc()
 
@@ -547,7 +549,11 @@ export async function initYjsPersonalDoc(identity: IdentitySession, messaging?: 
   if (vaultUrl) {
     const personalKey = await identity.deriveFrameworkKey('personal-doc-v1')
     vaultPersonalKey = personalKey
-    vaultClient = new VaultClient(vaultUrl, identity)
+    // Stage A (I-VAULT-SURVIVES): multiple vault URLs → dual-write/merge-read client.
+    const vaultUrls = Array.isArray(vaultUrl) ? vaultUrl : [vaultUrl]
+    vaultClient = vaultUrls.length > 1
+      ? new DualVaultClient(vaultUrls.map((u) => new VaultClient(u, identity)))
+      : new VaultClient(vaultUrls[0], identity)
 
     // If CompactStore was empty, try vault
     if (loadedFrom === 'new') {

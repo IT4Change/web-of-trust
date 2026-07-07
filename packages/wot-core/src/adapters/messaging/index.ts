@@ -10,6 +10,8 @@ export type {
 export { InMemoryOutboxStore } from './InMemoryOutboxStore'
 export { OutboxMessagingAdapter } from './OutboxMessagingAdapter'
 export { TracedOutboxMessagingAdapter } from './TracedOutboxMessagingAdapter'
+export { MultiBrokerMessagingAdapter } from './MultiBrokerMessagingAdapter'
+export { routeForEnvelope, FANOUT_TYPES, type BrokerRoute } from './broker-routing-policy'
 // Slice A (Phase 4): engine-neutral restore/clone mechanism for the log path.
 // Shared by the Yjs Space + Personal-Doc adapters and the Automerge adapter.
 export { createRestoreCloneHandler } from './logRestoreClone'

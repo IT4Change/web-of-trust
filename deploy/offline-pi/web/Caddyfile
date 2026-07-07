@@ -45,14 +45,25 @@
 	}
 }
 
-# --- Landing-Page (HTTPS, echtes Cert) + APK ---
+# --- Landing-Page (HTTPS, echtes Cert) + APK + Live-Monitor ---
 box.web-of-trust.de {
 	tls /certs/box.crt /certs/box.key
-	root * /srv
-	encode gzip
-	file_server
-	@apk path *.apk
-	header @apk Content-Type application/vnd.android.package-archive
+
+	# Live-Monitor-Datenquelle (same-origin für monitor.html, kein CORS):
+	# /monitor-data → Relay-Dashboard-JSON. Read-only Metadaten (Counts, gekürzte
+	# IDs) — Log-Payloads sind E2EE und für den Relay ohnehin unlesbar.
+	handle /monitor-data {
+		rewrite * /dashboard/data
+		reverse_proxy wot-relay:8787
+	}
+
+	handle {
+		root * /srv
+		encode gzip
+		file_server
+		@apk path *.apk
+		header @apk Content-Type application/vnd.android.package-archive
+	}
 }
 
 # --- Web-App (SPA, HTTPS) ---

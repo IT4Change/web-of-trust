@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WoT Box — Live Monitor</title>
+<style>
+  :root{ --bg:#0b1220; --card:#111a2e; --ink:#e6edf7; --dim:#8a97ad; --accent:#4f8cff; --good:#3ddc84; --warn:#ffb84f; }
+  *{ box-sizing:border-box; }
+  html,body{ margin:0; background:var(--bg); color:var(--ink); font-family:'Inter',system-ui,-apple-system,'Segoe UI',Roboto,sans-serif; }
+  .wrap{ max-width:1100px; margin:0 auto; padding:28px 20px 40px; }
+  header{ display:flex; align-items:baseline; justify-content:space-between; gap:12px; flex-wrap:wrap; margin-bottom:22px; }
+  h1{ margin:0; font-size:1.6rem; letter-spacing:-.01em; }
+  h1 .dot{ display:inline-block; width:.6em; height:.6em; border-radius:50%; background:var(--good); margin-right:.35em; animation:pulse 2s infinite; }
+  @keyframes pulse{ 50%{ opacity:.35; } }
+  .sub{ color:var(--dim); font-size:.95rem; }
+  .grid{ display:grid; grid-template-columns:repeat(auto-fit,minmax(230px,1fr)); gap:14px; }
+  .card{ background:var(--card); border:1px solid #1e2a44; border-radius:16px; padding:18px 20px; }
+  .label{ color:var(--dim); font-size:.85rem; text-transform:uppercase; letter-spacing:.08em; margin-bottom:6px; }
+  .big{ font-size:3.4rem; font-weight:800; line-height:1; font-variant-numeric:tabular-nums; }
+  .unit{ font-size:1rem; color:var(--dim); font-weight:500; margin-left:.3em; }
+  .row2{ display:grid; grid-template-columns:2fr 1fr; gap:14px; margin-top:14px; }
+  @media (max-width:760px){ .row2{ grid-template-columns:1fr; } }
+  canvas{ width:100%; height:120px; display:block; }
+  .docs{ font-size:.92rem; }
+  .docs .bar{ height:10px; border-radius:6px; background:var(--accent); min-width:4px; }
+  .docs .drow{ display:grid; grid-template-columns:110px 1fr 60px; align-items:center; gap:10px; margin:8px 0; color:var(--dim); font-variant-numeric:tabular-nums; }
+  .docs code{ color:var(--ink); }
+  footer{ margin-top:22px; color:var(--dim); font-size:.85rem; }
+  .offline{ color:var(--warn); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1><span class="dot" id="dot"></span>Web of Trust — Box Monitor</h1>
+    <div class="sub">everything below happens <b>locally on this Raspberry Pi</b> — end-to-end encrypted, no cloud <span id="status"></span></div>
+  </header>
+
+  <div class="grid">
+    <div class="card"><div class="label">Devices connected</div><div class="big" id="devices">–</div></div>
+    <div class="card"><div class="label">Identities online</div><div class="big" id="dids">–</div></div>
+    <div class="card"><div class="label">Shared spaces</div><div class="big" id="spaces">–</div></div>
+    <div class="card"><div class="label">Messages in the log</div><div class="big" id="entries">–</div></div>
+  </div>
+
+  <div class="row2">
+    <div class="card">
+      <div class="label">Activity — messages per 10s (last 5 min)</div>
+      <canvas id="spark" width="800" height="120"></canvas>
+    </div>
+    <div class="card">
+      <div class="label">Vitals</div>
+      <div class="docs">
+        <div class="drow"><span>Rate</span><span></span><code id="rate">–</code></div>
+        <div class="drow"><span>Log size</span><span></span><code id="bytes">–</code></div>
+        <div class="drow"><span>Personal docs</span><span></span><code id="pdocs">–</code></div>
+        <div class="drow"><span>Relay uptime</span><span></span><code id="uptime">–</code></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card" style="margin-top:14px">
+    <div class="label">Most active documents (ids shortened — content is encrypted, the relay can't read it)</div>
+    <div class="docs" id="doclist">–</div>
+  </div>
+
+  <footer>Raspberry Pi 4 · wot-relay · updates every 2s · <code>relay.box.web-of-trust.de</code></footer>
+</div>
+
+<script>
+const $ = id => document.getElementById(id)
+const fmtBytes = b => b < 1024 ? b + ' B' : b < 1048576 ? (b/1024).toFixed(1) + ' KB' : (b/1048576).toFixed(1) + ' MB'
+const fmtUp = s => s < 3600 ? Math.floor(s/60) + 'm' : Math.floor(s/3600) + 'h ' + Math.floor(s%3600/60) + 'm'
+
+// history of totalEntries deltas, one sample per 10s bucket, 5 min window
+const hist = []
+let lastEntries = null, lastSampleAt = 0, offlineSince = null
+
+function draw() {
+  const c = $('spark'), ctx = c.getContext('2d')
+  ctx.clearRect(0, 0, c.width, c.height)
+  const max = Math.max(1, ...hist)
+  const w = c.width / 30
+  ctx.fillStyle = '#4f8cff'
+  hist.forEach((v, i) => {
+    const h = Math.max(2, (v / max) * (c.height - 8))
+    ctx.fillRect(i * w + 1, c.height - h, w - 2, h)
+  })
+}
+
+async function tick() {
+  try {
+    const d = await (await fetch('/monitor-data', { cache: 'no-store' })).json()
+    $('dot').style.background = 'var(--good)'
+    $('status').textContent = ''
+    offlineSince = null
+
+    const ls = d.logStats ?? {}
+    const spaces = (ls.docCount ?? 0) - (ls.personalDocCount ?? 0)
+    $('devices').textContent = d.connectionCount ?? 0
+    $('dids').textContent = (d.connectedDids ?? []).length
+    $('spaces').textContent = Math.max(0, spaces)
+    $('entries').textContent = ls.totalEntries ?? 0
+    $('bytes').textContent = fmtBytes(ls.totalLogBytes ?? 0)
+    $('pdocs').textContent = ls.personalDocCount ?? 0
+    $('uptime').textContent = fmtUp(d.uptimeSeconds ?? 0)
+
+    // rate: delta per 10s bucket
+    const now = Date.now()
+    if (lastEntries !== null && now - lastSampleAt >= 10_000) {
+      hist.push(Math.max(0, (ls.totalEntries ?? 0) - lastEntries))
+      if (hist.length > 30) hist.shift()
+      lastEntries = ls.totalEntries ?? 0
+      lastSampleAt = now
+      draw()
+    } else if (lastEntries === null) {
+      lastEntries = ls.totalEntries ?? 0
+      lastSampleAt = now
+    }
+    const lastRate = hist.length ? hist[hist.length - 1] : 0
+    $('rate').textContent = lastRate + ' msg/10s'
+
+    // top docs by entries (ids shortened, devices per doc)
+    const byDoc = Object.entries(ls.entriesByDoc ?? {}).sort((a, b) => b[1] - a[1]).slice(0, 6)
+    const maxDoc = Math.max(1, ...byDoc.map(([, n]) => n))
+    $('doclist').innerHTML = byDoc.length
+      ? byDoc.map(([id, n]) =>
+          `<div class="drow"><code>${id.slice(0, 8)}…</code><span class="bar" style="width:${(n / maxDoc) * 100}%"></span><code>${n} · ${(ls.devicesByDoc ?? {})[id] ?? 0} dev</code></div>`
+        ).join('')
+      : '<span style="color:var(--dim)">no documents yet — connect and create a space!</span>'
+  } catch {
+    $('dot').style.background = 'var(--warn)'
+    if (!offlineSince) offlineSince = Date.now()
+    $('status').innerHTML = `<span class="offline">— relay unreachable (${Math.round((Date.now() - offlineSince) / 1000)}s)</span>`
+  }
+}
+tick()
+setInterval(tick, 2000)
+</script>
+</body>
+</html>

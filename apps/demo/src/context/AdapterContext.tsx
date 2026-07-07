@@ -3,6 +3,7 @@ import {
   WebCryptoAdapter,
   OfflineFirstDiscoveryAdapter,
   OutboxMessagingAdapter,
+  MultiBrokerMessagingAdapter,
   PersonalDocSpaceMetadataStorage,
 } from '@web_of_trust/core/adapters'
 import { WebSocketMessagingAdapter } from '@web_of_trust/core/adapters/messaging/websocket'
@@ -205,6 +206,25 @@ export function AdapterProvider({ children, identity }: AdapterProviderProps) {
           deviceId,
           signBrokerAuthTranscript: (bytes: Uint8Array) => identity.signEd25519(bytes),
         })
+        // Stage A dual-broker (Sync 003 §Multi-Broker): with a secondary relay
+        // configured, the inbox family fans out to BOTH brokers (handshakes work
+        // wherever any connectivity exists); log-sync/control stay strictly on the
+        // primary. Each broker registers the SAME deviceId in its own registry.
+        // Without VITE_RELAY_URL_2 this is exactly today's single-broker stack.
+        const wsAdapter2 = appRuntimeConfig.relayUrl2
+          ? new WebSocketMessagingAdapter(appRuntimeConfig.relayUrl2, {
+              deviceId,
+              signBrokerAuthTranscript: (bytes: Uint8Array) => identity.signEd25519(bytes),
+            })
+          : null
+        const messagingRoot = wsAdapter2
+          ? new MultiBrokerMessagingAdapter([wsAdapter, wsAdapter2])
+          : wsAdapter
+        // I-VAULT-SURVIVES: with a secondary vault, snapshots are pushed to both
+        // and recovery merge-reads both — Words-recovery survives the camp.
+        const vaultUrls: string | string[] = appRuntimeConfig.vaultUrl2
+          ? [appRuntimeConfig.vaultUrl, appRuntimeConfig.vaultUrl2]
+          : appRuntimeConfig.vaultUrl
 
         // Outbox + Inbox-Reception-Host VOR dem connect verdrahten: der Broker
         // liefert die Initial-Queue direkt nach der Auth aus — ohne
@@ -213,7 +233,7 @@ export function AdapterProvider({ children, identity }: AdapterProviderProps) {
         localCacheStore = new LocalCacheStore('wot-local-cache')
         await localCacheStore.open()
         const outboxStore = new LocalOutboxStore(localCacheStore)
-        outboxAdapter = new OutboxMessagingAdapter(wsAdapter, outboxStore, {
+        outboxAdapter = new OutboxMessagingAdapter(messagingRoot, outboxStore, {
           // content = Automerge CRDT sync messages (high volume, auto-resync on reconnect)
           // personal-sync = multi-device personal doc sync (same reason)
           // profile-update = fire-and-forget notifications
@@ -235,7 +255,7 @@ export function AdapterProvider({ children, identity }: AdapterProviderProps) {
 
         try {
           await Promise.race([
-            wsAdapter.connect(did),
+            messagingRoot.connect(did),
             new Promise((_, reject) => setTimeout(() => reject(new Error('WS connect timeout')), 3000)),
           ])
         } catch {
@@ -251,7 +271,7 @@ export function AdapterProvider({ children, identity }: AdapterProviderProps) {
         // per-DID docLogStore, and the resolveConnectDeviceId-resolved deviceId (nonce-safe).
         if (USE_YJS) {
           const { initYjsPersonalDoc } = await import('@web_of_trust/adapter-yjs')
-          await initYjsPersonalDoc(identity, outboxAdapter, appRuntimeConfig.vaultUrl, undefined, { docLogStore, deviceId })
+          await initYjsPersonalDoc(identity, outboxAdapter, vaultUrls, undefined, { docLogStore, deviceId })
           console.debug('[init] Using Yjs PersonalDocManager')
           const { YjsStorageAdapter } = await import('../adapters/YjsStorageAdapter')
           storage = new YjsStorageAdapter(did)
@@ -332,7 +352,7 @@ export function AdapterProvider({ children, identity }: AdapterProviderProps) {
             messageIdHistory,
             metadataStorage: spaceMetadataStorage,
             compactStore: spaceCompactStore,
-            vaultUrl: appRuntimeConfig.vaultUrl,
+            vaultUrl: vaultUrls,
             brokerUrls: [appRuntimeConfig.relayUrl],
             flushPersonalDoc: flushYjsPersonalDoc,
             refreshPersonalDocFromVault: refreshYjsPersonalDocFromVault,
@@ -613,6 +633,11 @@ export function AdapterProvider({ children, identity }: AdapterProviderProps) {
             docLogStore,
             replication: replicationAdapter!,
             outboxStore,
+            // Stage A (I-UI-TRUTH): per-broker states so an operator sees which
+            // broker (box vs. server) actually carries the connection.
+            ...(wsAdapter2
+              ? { brokerStates: () => (messagingRoot as MultiBrokerMessagingAdapter).getBrokerStates() }
+              : {}),
           }))
 
           // Connect to relay after adapters are set
