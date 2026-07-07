@@ -1,5 +1,5 @@
 import { createServer, type Server as HttpServer } from 'http'
-import { randomBytes, randomUUID } from 'crypto'
+import { randomBytes, randomUUID, createHash } from 'crypto'
 import Database from 'better-sqlite3'
 import { WebSocketServer, type WebSocket } from 'ws'
 import { protocol, WebCryptoProtocolCryptoAdapter } from '@web_of_trust/core'
@@ -133,6 +133,144 @@ interface CachedScope {
 const CHALLENGE_TIMEOUT_MS = 30_000 // 30 seconds to respond
 const NONCE_BYTE_LENGTH = 32
 
+// ---------------------------------------------------------------------------
+// /dashboard/data `display` block — server-side shortening (Broker-Dashboard).
+//
+// The generic broker dashboard shows identities/documents/inbox with SHORTENED
+// ids. The shortening happens HERE, server-side: `/dashboard/data` is served
+// UNAUTHENTICATED with `Access-Control-Allow-Origin: *` (see start()/CORS), so a
+// full id must NEVER leave the server without RELAY_DEBUG_STATS — display-cosmetic
+// truncation on the client would be trivially bypassable. The `display` block is
+// ALWAYS public (it carries only shortened forms), and is deliberately built as
+// ARRAYS (no map keys) so it can coexist with the existing flag-gated maps without
+// touching their redaction semantics (the e2e-log-sync harness + DashboardStats
+// tests pin the OMISSION of those maps by default).
+//
+// Shortening rules (Anton, 07.07.): DIDs + deviceIds shown but shortened; docIds
+// are CLIENT-CHOSEN strings (a speaking name would leak via a prefix) so they are
+// HASHED, not prefix-cut.
+// ---------------------------------------------------------------------------
+
+/** Top-N documents surfaced in the always-public `display.topDocs` array. */
+export const DISPLAY_TOP_DOCS_LIMIT = 12
+
+/**
+ * Shorten a `did:key` for public display. A did:key is
+ * `did:key:z6Mk…<multibase-pubkey>` — the multibase part is a random pubkey
+ * encoding, so a PREFIX+SUFFIX cut leaks nothing sensitive and stays stable across
+ * polls. Format: first 8 chars of the multibase part + `…` + last 4
+ * (e.g. `z6MktgyS…tUfX`). A non-`did:key` (or too-short) input is returned as-is
+ * (still escaped downstream) rather than mangled. Deterministic + pure.
+ */
+export function shortenDid(did: string): string {
+  const PREFIX = 'did:key:'
+  if (!did.startsWith(PREFIX)) {
+    // Not a did:key — fall back to a generic middle-ellipsis so we never emit a
+    // long opaque string, but do not assume multibase structure.
+    return did.length > 16 ? `${did.slice(0, 10)}…${did.slice(-4)}` : did
+  }
+  const mb = did.slice(PREFIX.length)
+  if (mb.length <= 12) return mb
+  return `${mb.slice(0, 8)}…${mb.slice(-4)}`
+}
+
+/**
+ * Shorten a deviceId (canonical lowercase UUID v4, fully random) for public
+ * display: first 8 chars + `…` (e.g. `87473e1b…`). A short/empty input is returned
+ * unchanged. Deterministic + pure.
+ */
+export function shortenDeviceId(deviceId: string): string {
+  if (deviceId.length <= 8) return deviceId
+  return `${deviceId.slice(0, 8)}…`
+}
+
+/**
+ * Shorten a docId for public display. Unlike DIDs/deviceIds a docId is a
+ * CLIENT-CHOSEN string (personalDocId is even a bearer secret, A2 Teil B) — a
+ * speaking name like `familie-mueller-2026` would leak via a prefix cut. So we
+ * HASH it: `sha256(docId)` → first 10 hex chars + `…`. Stable across polls,
+ * one-way (not reversible), collision risk negligible at display-N. Deterministic
+ * + pure. NOTE: an empty docId hashes like any other string (never a real docId).
+ */
+export function shortenDocId(docId: string): string {
+  const hex = createHash('sha256').update(docId, 'utf8').digest('hex')
+  return `${hex.slice(0, 10)}…`
+}
+
+/** One shortened identity row in `display.dids`. */
+export interface DisplayDid {
+  idShort: string
+  deviceCount: number
+  online: boolean
+}
+
+/** One shortened document row in `display.topDocs`. */
+export interface DisplayDoc {
+  idShort: string
+  entries: number
+  devices: number
+}
+
+/** One shortened inbox-recipient row in `display.inboxPendingByDid`. */
+export interface DisplayInboxPending {
+  idShort: string
+  pending: number
+}
+
+/** The always-public, server-shortened `display` block of `/dashboard/data`. */
+export interface DisplayBlock {
+  dids: DisplayDid[]
+  topDocs: DisplayDoc[]
+  inboxPendingByDid: DisplayInboxPending[]
+}
+
+/**
+ * Build the always-public `display` block from the FULL (unredacted) in-process
+ * stats. This runs server-side regardless of `exposeDebugStats`; only the shortened
+ * forms are ever serialized, so full ids never leave the server without the flag.
+ *
+ * - `dids`: from `devicesPerDid` (all connected DIDs are online by definition, but
+ *   we keep `online` explicit against `connectedDids` for a stable contract).
+ * - `topDocs`: Top-N by entry count from `entriesByDoc`, joined with `devicesByDoc`.
+ * - `inboxPendingByDid`: from the queue's per-recipient delivery-slot counts.
+ *
+ * The inputs are the raw maps — this function is the ONLY consumer of the full
+ * docId/DID keys, and it emits only shortened arrays.
+ */
+export function buildDisplayBlock(input: {
+  connectedDids: string[]
+  devicesPerDid: Record<string, number>
+  entriesByDoc: Record<string, number>
+  devicesByDoc: Record<string, number>
+  inboxPendingByDid: Record<string, number>
+}): DisplayBlock {
+  const online = new Set(input.connectedDids)
+
+  const dids: DisplayDid[] = Object.entries(input.devicesPerDid)
+    .map(([did, deviceCount]) => ({
+      idShort: shortenDid(did),
+      deviceCount,
+      online: online.has(did),
+    }))
+    // Most devices first, stable by shortened id for a deterministic order.
+    .sort((a, b) => b.deviceCount - a.deviceCount || a.idShort.localeCompare(b.idShort))
+
+  const topDocs: DisplayDoc[] = Object.entries(input.entriesByDoc)
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .slice(0, DISPLAY_TOP_DOCS_LIMIT)
+    .map(([docId, entries]) => ({
+      idShort: shortenDocId(docId),
+      entries,
+      devices: input.devicesByDoc[docId] ?? 0,
+    }))
+
+  const inboxPendingByDid: DisplayInboxPending[] = Object.entries(input.inboxPendingByDid)
+    .map(([did, pending]) => ({ idShort: shortenDid(did), pending }))
+    .sort((a, b) => b.pending - a.pending || a.idShort.localeCompare(b.idShort))
+
+  return { dids, topDocs, inboxPendingByDid }
+}
+
 export class RelayServer {
   private wss: WebSocketServer | null = null
   private httpServer: HttpServer | null = null
@@ -177,14 +315,29 @@ export class RelayServer {
         res.setHeader('Access-Control-Allow-Origin', '*')
         res.setHeader('Access-Control-Allow-Methods', 'GET')
 
-        if (req.url === '/health') {
+        // Match on the PATH only (ignore any query string / trailing slash), so
+        // `/dashboard`, `/dashboard/`, and `/dashboard?x=1` all resolve.
+        const path = (req.url ?? '').split('?')[0]
+
+        if (path === '/health') {
           res.writeHead(200, { 'Content-Type': 'application/json' })
           res.end(JSON.stringify({ status: 'ok' }))
-        } else if (req.url === '/dashboard') {
+        } else if (path === '/dashboard' || path === '/dashboard/') {
+          // Single-file dashboard: inline CSS + JS. This is a self-contained
+          // operator page (no external origins, no user-authored HTML injected —
+          // all interpolated strings are esc()'d client-side), so we intentionally
+          // ship it without a strict CSP; adding one would forbid the inline
+          // <style>/<script>. Kept pragmatic per the broker-dashboard spec.
           res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
           res.end(getDashboardHtml())
-        } else if (req.url === '/dashboard/data') {
-          res.writeHead(200, { 'Content-Type': 'application/json' })
+        } else if (path === '/dashboard/data' || path === '/dashboard/data/') {
+          // `no-store`: the dashboard polls every 2s with `cache: no-store`, and
+          // this endpoint is live per-request state — never let a proxy/browser
+          // serve a stale snapshot.
+          res.writeHead(200, {
+            'Content-Type': 'application/json',
+            'Cache-Control': 'no-store',
+          })
           res.end(JSON.stringify(this.getStats()))
         } else {
           res.writeHead(404)
@@ -309,6 +462,18 @@ export class RelayServer {
       // fields below are non-sensitive aggregates and stay public.
       logStats: this.buildLogStats(),
       memoryMB: process.memoryUsage().rss / (1024 * 1024),
+      // Broker-Dashboard: ALWAYS-public block of server-side SHORTENED ids (arrays,
+      // no map keys). Built from the FULL in-process maps below, but only the
+      // shortened forms are serialized — full ids never leave the server without
+      // RELAY_DEBUG_STATS. This is additive: the flag-gated maps above keep their
+      // exact redaction semantics (harness + DashboardStats omission tests).
+      display: buildDisplayBlock({
+        connectedDids: dids,
+        devicesPerDid,
+        entriesByDoc: this.docLog.entriesByDoc(),
+        devicesByDoc: this.docLog.devicesByDoc(),
+        inboxPendingByDid: this.queue.countByDid(),
+      }),
     }
   }
 
