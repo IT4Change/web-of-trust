@@ -6,8 +6,16 @@ const DB_PATH = process.env.DB_PATH ?? './relay-queue.db'
 // explicitly enabled — /dashboard/data is unauthenticated + public, so prod stays redacted.
 // Set this ONLY on staging / local test relays (the D1 Spur-C remote-e2e harness needs it).
 const EXPOSE_DEBUG_STATS = /^(1|true|yes)$/i.test(process.env.RELAY_DEBUG_STATS ?? '')
+// Metrics net rx/tx byte series: /proc/net/dev interface override for
+// multi-interface hosts / containers; default = first non-lo interface.
+const NET_INTERFACE = process.env.RELAY_NET_INTERFACE
 
-const server = new RelayServer({ port: PORT, dbPath: DB_PATH, exposeDebugStats: EXPOSE_DEBUG_STATS })
+const server = new RelayServer({
+  port: PORT,
+  dbPath: DB_PATH,
+  exposeDebugStats: EXPOSE_DEBUG_STATS,
+  metricsNetInterface: NET_INTERFACE,
+})
 
 await server.start()
 console.log(`WoT Relay running on ws://localhost:${PORT}`)

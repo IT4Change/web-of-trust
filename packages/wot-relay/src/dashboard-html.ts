@@ -24,6 +24,14 @@
 // polled every 2s, PAUSED while the tab is hidden; a later SSE upgrade swaps only
 // the source, not the UI. On a failed/late fetch the live dot turns amber and shows
 // "relay unreachable (Ns)".
+//
+// History: a SEPARATE, encapsulated `tickMetrics()` cycle (30s + on window switch,
+// also paused while hidden) polls GET `/dashboard/metrics?window=…` and renders
+// six canvas line charts (messages/errors rate, event-loop/sqlite latency, CPU
+// load/temp, RAM, network rate, disk free). It never touches the live `tick()`
+// logic. Metrics buckets are aggregates only (no ids); rates are derived
+// client-side as counterSum / spanSeconds (the server sums byte/count deltas on
+// downsampling and reports the honest span per bucket).
 
 const DASHBOARD_CSS = `
   :root {
@@ -98,9 +106,52 @@ const DASHBOARD_CSS = `
     transition: width .5s ease; }
   .empty { color: var(--dim); font-size: .9rem; padding: 6px 0; }
 
+  /* ⓘ explainer buttons + tooltips (hover via CSS, click-toggle via JS) */
+  .card { position: relative; }
+  .info { position: absolute; top: 10px; right: 10px; width: 20px; height: 20px;
+    border-radius: 50%; border: 1px solid var(--line); background: transparent;
+    color: var(--dim); font: 600 11px/1 system-ui, sans-serif; cursor: pointer;
+    display: flex; align-items: center; justify-content: center; padding: 0; }
+  .info:hover { color: var(--ink); border-color: var(--accent); }
+  .tip { display: none; position: absolute; top: 34px; right: 8px; max-width: 280px;
+    z-index: 20; background: var(--card-2); border: 1px solid var(--line);
+    border-radius: 10px; padding: 10px 12px; font-size: .82rem; color: var(--dim);
+    line-height: 1.45; text-transform: none; letter-spacing: normal; text-align: left;
+    font-weight: 400; }
+  .info:hover + .tip, .tip.open { display: block; }
+
+  /* History (metrics) section */
+  .histhead { display: flex; align-items: center; justify-content: space-between;
+    gap: 12px; flex-wrap: wrap; margin: 22px 0 12px; }
+  .histhead .label { margin-bottom: 0; }
+  .winbtns { display: flex; gap: 6px; }
+  .winbtn { background: var(--card); border: 1px solid var(--line); color: var(--dim);
+    border-radius: 8px; padding: 5px 12px; font: inherit; font-size: .82rem; cursor: pointer; }
+  .winbtn.active { color: var(--ink); border-color: var(--accent); }
+  .charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 14px; }
+  .chart-label { color: var(--dim); font-size: .8rem; text-transform: uppercase;
+    letter-spacing: .08em; margin-bottom: 8px; display: flex; gap: 12px; flex-wrap: wrap; }
+  .ldot { display: inline-block; width: .55em; height: .55em; border-radius: 50%;
+    margin-right: .35em; }
+  canvas.histchart { width: 100%; height: 110px; display: block; }
+
   footer { margin-top: 24px; color: var(--dim); font-size: .84rem; line-height: 1.5; }
   footer code { color: var(--ink); }
 `
+
+/**
+ * Static ⓘ explainer for one dashboard card (Antons Wunsch): a small round
+ * button revealing a short English description on hover (CSS) AND on click/tap
+ * (JS toggle — touch + Beamer). Rendered server-side into the static template;
+ * the texts are dev-authored STATIC strings — no dynamic values are ever
+ * interpolated into a tooltip.
+ */
+function infoTip(label: string, text: string): string {
+  return (
+    `<button class="info" aria-label="About: ${label}" aria-expanded="false">i</button>` +
+    `<div class="tip" role="tooltip">${text}</div>`
+  )
+}
 
 export function getDashboardHtml(): string {
   return `<!DOCTYPE html>
@@ -120,19 +171,21 @@ export function getDashboardHtml(): string {
 
   <!-- Hero -->
   <div class="grid">
-    <div class="card"><div class="label">Connections</div><div class="big" id="connections">&ndash;</div></div>
-    <div class="card"><div class="label">Identities online</div><div class="big" id="dids">&ndash;</div></div>
-    <div class="card"><div class="label">Shared spaces</div><div class="big" id="spaces">&ndash;</div></div>
-    <div class="card"><div class="label">Messages in the log</div><div class="big" id="entries">&ndash;</div></div>
+    <div class="card">${infoTip('Connections', 'Live WebSocket connections — devices currently online on this broker. One person may be online with several devices.')}<div class="label">Connections</div><div class="big" id="connections">&ndash;</div></div>
+    <div class="card">${infoTip('Identities online', 'Distinct identities (DIDs) with at least one connected device right now. An identity can be online with several devices at once.')}<div class="label">Identities online</div><div class="big" id="dids">&ndash;</div></div>
+    <div class="card">${infoTip('Shared spaces', 'Shared end-to-end-encrypted rooms. This broker stores their sync logs but cannot read them — it only ever sees ciphertext.')}<div class="label">Shared spaces</div><div class="big" id="spaces">&ndash;</div></div>
+    <div class="card">${infoTip('Messages in the log', 'Entries in the durable sync log this broker keeps so devices can catch up. Ciphertext only — content stays end-to-end encrypted.')}<div class="label">Messages in the log</div><div class="big" id="entries">&ndash;</div></div>
   </div>
 
   <!-- Performance -->
   <div class="row2">
     <div class="card">
+      ${infoTip('Activity', 'New log entries per 10 seconds over the last 5 minutes — the live heartbeat of this broker.')}
       <div class="label">Activity &mdash; messages per 10s (last 5 min)</div>
       <canvas id="spark" width="800" height="120"></canvas>
     </div>
     <div class="card">
+      ${infoTip('Performance', 'Uptime and memory of the relay process. Rate is how many new log entries arrived in the last 10 seconds; log size is the durable (encrypted) store on disk.')}
       <div class="label">Performance</div>
       <div class="vitals">
         <div class="vrow"><span>Rate</span><code id="rate">&ndash;</code></div>
@@ -146,16 +199,62 @@ export function getDashboardHtml(): string {
   <!-- Identities / Documents / Inbox -->
   <div class="cards3">
     <div class="card">
+      ${infoTip('Identities', 'Identities this broker knows and whether they are online right now. IDs are shortened for privacy — full IDs appear only on a relay running in debug mode.')}
       <div class="label">Identities <span id="didsCount"></span></div>
       <div class="list" id="idlist"></div>
     </div>
     <div class="card">
+      ${infoTip('Documents', 'The most active documents on this broker. IDs are pseudonymized (a keyed hash — not reversible, changes on restart) and the contents are encrypted.')}
       <div class="label">Documents <span id="docsAgg"></span></div>
       <div class="list" id="doclist"></div>
     </div>
     <div class="card">
+      ${infoTip('Inbox', 'Encrypted messages waiting for recipients that are currently offline. They are delivered and cleared when the recipient&#39;s device comes back online.')}
       <div class="label">Inbox <span id="inboxAgg"></span></div>
       <div class="list" id="inboxlist"></div>
+    </div>
+  </div>
+
+  <!-- History (metrics ring, /dashboard/metrics) -->
+  <div class="histhead">
+    <div class="label">History <span class="unit" id="histmeta"></span></div>
+    <div class="winbtns" id="winbtns">
+      <button class="winbtn" data-win="15m">15m</button>
+      <button class="winbtn active" data-win="1h">1h</button>
+      <button class="winbtn" data-win="6h">6h</button>
+      <button class="winbtn" data-win="24h">24h</button>
+    </div>
+  </div>
+  <div class="charts">
+    <div class="card">
+      ${infoTip('Messages and errors', 'Throughput: accepted log entries and error frames per second. Occasional errors are normal — sustained errors mean something is wrong.')}
+      <div class="chart-label"><span><span class="ldot" style="background:#4f8cff"></span>messages/s</span><span><span class="ldot" style="background:#ffb84f"></span>errors/s</span></div>
+      <canvas id="ch-msg" class="histchart" width="800" height="110"></canvas>
+    </div>
+    <div class="card">
+      ${infoTip('Latency', 'Saturation early-warning: event-loop lag (p99) and SQLite write time (p95). If these climb under load, the broker is nearing its limit.')}
+      <div class="chart-label"><span><span class="ldot" style="background:#4f8cff"></span>event-loop p99 ms</span><span><span class="ldot" style="background:#3ddc84"></span>sqlite write p95 ms</span></div>
+      <canvas id="ch-lat" class="histchart" width="800" height="110"></canvas>
+    </div>
+    <div class="card">
+      ${infoTip('CPU and temperature', 'Host health: CPU load average (1 min) and SoC temperature. A Pi 4 starts throttling above roughly 80 &deg;C.')}
+      <div class="chart-label"><span><span class="ldot" style="background:#4f8cff"></span>cpu load (1m)</span><span><span class="ldot" style="background:#ffb84f"></span>temp &deg;C</span></div>
+      <canvas id="ch-cpu" class="histchart" width="800" height="110"></canvas>
+    </div>
+    <div class="card">
+      ${infoTip('Memory', 'Memory: what the relay process itself uses (rss) versus what the host still has available.')}
+      <div class="chart-label"><span><span class="ldot" style="background:#4f8cff"></span>relay rss MB</span><span><span class="ldot" style="background:#3ddc84"></span>host mem available MB</span></div>
+      <canvas id="ch-mem" class="histchart" width="800" height="110"></canvas>
+    </div>
+    <div class="card">
+      ${infoTip('Network', 'Network traffic in and out of this broker (its container), derived from cumulative byte counters.')}
+      <div class="chart-label"><span><span class="ldot" style="background:#3ddc84"></span>net rx B/s</span><span><span class="ldot" style="background:#4f8cff"></span>net tx B/s</span></div>
+      <canvas id="ch-net" class="histchart" width="800" height="110"></canvas>
+    </div>
+    <div class="card">
+      ${infoTip('Disk', 'How full the disk holding the log is — shown as a fill level, with free space and percent in the middle. The log grows append-only, so free space is this broker&#39;s runway.')}
+      <div class="chart-label"><span><span class="ldot" style="background:#3ddc84"></span>disk free</span><span><span class="ldot" style="background:#33415a"></span>used</span></div>
+      <canvas id="ch-disk" class="histchart" width="800" height="110"></canvas>
     </div>
   </div>
 
@@ -192,6 +291,27 @@ const timeoutSignal = ms => {
 
 $('host').textContent = location.host || 'broker'
 $('brokerline').innerHTML = '<code>' + esc(location.host || '') + '</code>'
+
+// ⓘ explainers: hover opens via CSS (.info:hover + .tip); click/tap TOGGLES
+// (touch + Beamer). Only one tooltip open at a time; outside click and Escape
+// close. Tooltip texts are static server-rendered strings — nothing dynamic is
+// ever interpolated into them.
+const closeTips = () => document.querySelectorAll('.tip.open').forEach(t => {
+  t.classList.remove('open')
+  t.previousElementSibling.setAttribute('aria-expanded', 'false')
+})
+document.addEventListener('click', e => {
+  const btn = e.target.closest('.info')
+  if (!btn) { closeTips(); return }
+  const tip = btn.nextElementSibling
+  const wasOpen = tip.classList.contains('open')
+  closeTips()
+  if (!wasOpen) {
+    tip.classList.add('open')
+    btn.setAttribute('aria-expanded', 'true')
+  }
+})
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeTips() })
 
 // Pulse a hero number only when its rendered value actually changes (no bounce).
 function setNum(el, val) {
@@ -346,6 +466,245 @@ async function tick() {
 setInterval(tick, 2000)
 document.addEventListener('visibilitychange', () => { if (!document.hidden) tick() })
 tick()
+
+// ---- History charts — ENCAPSULATED tickMetrics() cycle -----------------------
+// Separate from the live tick() (which stays untouched): 30s polling + immediate
+// refresh on window switch, paused while the tab is hidden. Buckets are pure
+// aggregates (no ids). Rates = counterSum / spanSeconds (spanSeconds grows under
+// server-side downsampling, so rates stay honest across windows).
+let metricsWindow = '1h'
+let metricsInFlight = false
+let metricsBuckets = []
+
+const rate = (v, b) => v == null ? null : v / b.spanSeconds
+// fmt = axis/value formatting kind per chart: 'int' (MB — whole numbers),
+// 'ms' (1 decimal below 10), default generic (k/M suffixes handle the rest,
+// which also makes the ~70 °C temperature render as an integer).
+const CHART_DEFS = [
+  { id: 'ch-msg',  fmt: 'num', series: [{ color: '#4f8cff', f: b => rate(b.ingestOk, b) }, { color: '#ffb84f', f: b => rate(b.errorFramesSent, b) }] },
+  { id: 'ch-lat',  fmt: 'ms',  series: [{ color: '#4f8cff', f: b => b.eventLoopLagP99Ms }, { color: '#3ddc84', f: b => b.sqliteWriteP95Ms }] },
+  { id: 'ch-cpu',  fmt: 'num', series: [{ color: '#4f8cff', f: b => b.loadavg1 }, { color: '#ffb84f', f: b => b.cpuTempC }] },
+  { id: 'ch-mem',  fmt: 'int', series: [{ color: '#4f8cff', f: b => b.rssMB }, { color: '#3ddc84', f: b => b.memAvailableMB }] },
+  { id: 'ch-net',  fmt: 'num', series: [{ color: '#3ddc84', f: b => rate(b.netRxBytes, b) }, { color: '#4f8cff', f: b => rate(b.netTxBytes, b) }] },
+  // Disk is a FILL LEVEL, not a time series (Anton) — rendered as a donut from
+  // the newest bucket that carries disk stats, not as a polyline.
+  { id: 'ch-disk', kind: 'donut' },
+]
+
+// Axis/value labels: >=1e6 → 1.2M, >=1e3 → 1.2k, else per fmt kind.
+const fmtVal = (v, kind) => {
+  const a = Math.abs(v)
+  if (a >= 1e6) return (v / 1e6).toFixed(1) + 'M'
+  if (a >= 1e3) return (v / 1e3).toFixed(1) + 'k'
+  if (kind === 'int') return String(Math.round(v))
+  if (kind === 'ms') return a < 10 ? v.toFixed(1) : String(Math.round(v))
+  return a >= 10 ? String(Math.round(v)) : String(Math.round(v * 100) / 100)
+}
+
+// Nice ceiling on the 1-2-5×10^n raster — axis maxima come out calm (0.5, 1, 2, 5 …).
+const nice125 = v => {
+  if (!(v > 0)) return 1
+  const base = Math.pow(10, Math.floor(Math.log10(v)))
+  const m = v / base
+  return (m <= 1 ? 1 : m <= 2 ? 2 : m <= 5 ? 5 : 10) * base
+}
+
+// Match the canvas backing store to its CSS size × devicePixelRatio and draw in
+// CSS-pixel space. Root cause of Antons "winzige Labels": the previous fixed
+// 800px backing store was downscaled by CSS to card width, shrinking 12px text
+// to ~5px. With the store fitted, an 11px label IS 11 displayed pixels (crisp
+// on hi-dpi via the dpr transform).
+function fitCanvas(c) {
+  const dpr = window.devicePixelRatio || 1
+  const w = Math.max(200, c.clientWidth || 320)
+  const h = 110
+  const bw = Math.round(w * dpr), bh = Math.round(h * dpr)
+  if (c.width !== bw || c.height !== bh) { c.width = bw; c.height = bh }
+  const ctx = c.getContext('2d')
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+  return { ctx, w, h }
+}
+
+// Polyline chart. Axis rules (Antons Screenshot-Feedback zur History-Sektion):
+// - RANGE: every plotted series is NON-NEGATIVE → the baseline is lo = 0 and the
+//   top is the data max rounded UP on the 1-2-5 raster. No symmetric padding —
+//   the old code padded/expanded around the data (min-1/max+1 for constants),
+//   which fabricated negative axis values like "-1 msg/s" or "-16.6k B/s".
+//   ONE exception: data sitting far above zero with a small span (dMin > span,
+//   e.g. temp 69–71 °C or a constant loadavg) zooms into a nice step band
+//   BELOW the data minimum — clamped to >= 0, NEVER negative.
+// - AXIS: 3 ticks (lo/mid/hi) with subtle 1px gridlines across the plot; 11px
+//   labels sit right-aligned in a fixed 44px LEFT GUTTER, outside the plot —
+//   nothing sticks to or overlaps the lines.
+// - Null values AND gap:true buckets break every series line (gap semantics).
+// - Bottom right: the PRIMARY series' latest value as a small live label
+//   (Beamer readability).
+function drawChart(def, buckets) {
+  const { ctx, w, h } = fitCanvas($(def.id))
+  ctx.clearRect(0, 0, w, h)
+  ctx.font = '11px system-ui, sans-serif'
+  const seriesVals = def.series.map(s => buckets.map(b => b.gap ? null : s.f(b)))
+  let dMin = Infinity, dMax = -Infinity
+  for (const vals of seriesVals) for (const v of vals) {
+    if (v == null || !isFinite(v)) continue
+    if (v < dMin) dMin = v
+    if (v > dMax) dMax = v
+  }
+  if (!(dMin <= dMax)) {
+    ctx.fillStyle = '#8a97ad'
+    ctx.textAlign = 'left'
+    ctx.textBaseline = 'alphabetic'
+    ctx.fillText('collecting…', 8, 18)
+    return
+  }
+
+  // Range per the rules above.
+  let lo, hi
+  const span = dMax - dMin
+  if (dMax <= 0) {
+    lo = 0; hi = 1
+  } else if (dMin > 0 && dMin > span) {
+    const step = nice125(Math.max(span, dMax * 0.05) / 2)
+    lo = Math.max(0, Math.floor(dMin / step) * step)
+    hi = Math.ceil(dMax / step) * step
+    if (hi <= lo) hi = lo + step
+  } else {
+    lo = 0
+    hi = nice125(dMax)
+  }
+
+  const PAD_L = 44, PAD_T = 6, PAD_B = 6
+  const plotW = w - PAD_L - 4, plotH = h - PAD_T - PAD_B
+  const n = buckets.length
+  const yOf = v => PAD_T + (1 - (v - lo) / (hi - lo)) * plotH
+  const xOf = i => PAD_L + (n <= 1 ? plotW : (i / (n - 1)) * plotW)
+
+  // Gridlines + tick labels (lo / mid / hi) in the left gutter.
+  ctx.textAlign = 'right'
+  ctx.textBaseline = 'middle'
+  for (const tv of [lo, (lo + hi) / 2, hi]) {
+    const y = yOf(tv)
+    ctx.strokeStyle = '#18233c'
+    ctx.lineWidth = 1
+    ctx.beginPath()
+    ctx.moveTo(PAD_L, y)
+    ctx.lineTo(w - 2, y)
+    ctx.stroke()
+    ctx.fillStyle = '#8a97ad'
+    ctx.fillText(fmtVal(tv, def.fmt), PAD_L - 6, y)
+  }
+
+  for (let s = 0; s < def.series.length; s++) {
+    ctx.strokeStyle = def.series[s].color
+    ctx.lineWidth = 1.6
+    ctx.beginPath()
+    let pen = false
+    for (let i = 0; i < n; i++) {
+      const v = seriesVals[s][i]
+      if (v == null || !isFinite(v)) { pen = false; continue }
+      if (pen) ctx.lineTo(xOf(i), yOf(v))
+      else { ctx.moveTo(xOf(i), yOf(v)); pen = true }
+    }
+    ctx.stroke()
+  }
+
+  // Live label: the PRIMARY series' latest value, bottom right.
+  let last
+  for (let i = n - 1; i >= 0; i--) {
+    const v = seriesVals[0][i]
+    if (v != null && isFinite(v)) { last = v; break }
+  }
+  if (last !== undefined) {
+    ctx.fillStyle = def.series[0].color
+    ctx.textAlign = 'right'
+    ctx.textBaseline = 'alphabetic'
+    ctx.fillText(fmtVal(last, def.fmt), w - 6, h - 8)
+  }
+}
+
+// Disk donut: used vs. free from the NEWEST bucket with disk stats. Center shows
+// the free amount (MB/GB) with percent-free below. Colors: free = green (--good),
+// used = muted blue-grey. Host reader unavailable (nulls) → calm "n/a" ring
+// instead of an empty circle.
+function drawDonut(def, buckets) {
+  const { ctx, w, h } = fitCanvas($(def.id))
+  ctx.clearRect(0, 0, w, h)
+  let free = null, total = null
+  for (let i = buckets.length - 1; i >= 0; i--) {
+    const b = buckets[i]
+    if (b.diskFreeMB != null && b.diskTotalMB != null && b.diskTotalMB > 0) {
+      free = b.diskFreeMB
+      total = b.diskTotalMB
+      break
+    }
+  }
+  const cx = w / 2, cy = h / 2, r = 38
+  ctx.lineWidth = 14
+  ctx.textAlign = 'center'
+  if (free === null) {
+    ctx.strokeStyle = '#18233c'
+    ctx.beginPath(); ctx.arc(cx, cy, r, 0, 2 * Math.PI); ctx.stroke()
+    ctx.fillStyle = '#8a97ad'
+    ctx.font = '12px system-ui, sans-serif'
+    ctx.textBaseline = 'middle'
+    ctx.fillText('n/a', cx, cy)
+    return
+  }
+  const usedFrac = Math.min(1, Math.max(0, (total - free) / total))
+  const top = -Math.PI / 2 // start at 12 o'clock
+  ctx.strokeStyle = '#33415a' // used — muted blue-grey
+  ctx.beginPath(); ctx.arc(cx, cy, r, top, top + usedFrac * 2 * Math.PI); ctx.stroke()
+  ctx.strokeStyle = '#3ddc84' // free — green (--good)
+  ctx.beginPath(); ctx.arc(cx, cy, r, top + usedFrac * 2 * Math.PI, top + 2 * Math.PI); ctx.stroke()
+  const fmtDisk = v => v >= 1024 ? (v / 1024).toFixed(1) + ' GB' : Math.round(v) + ' MB'
+  ctx.textBaseline = 'alphabetic'
+  ctx.fillStyle = '#e6edf7'
+  ctx.font = '600 13px system-ui, sans-serif'
+  ctx.fillText(fmtDisk(free), cx, cy - 1)
+  ctx.fillStyle = '#8a97ad'
+  ctx.font = '10px system-ui, sans-serif'
+  ctx.fillText(Math.round((free / total) * 100) + '% free', cx, cy + 12)
+}
+
+function renderMetrics() {
+  for (const def of CHART_DEFS) {
+    if (def.kind === 'donut') drawDonut(def, metricsBuckets)
+    else drawChart(def, metricsBuckets)
+  }
+  $('histmeta').textContent = metricsBuckets.length
+    ? '(' + metricsBuckets.length + ' points · ' + metricsWindow + ')'
+    : ''
+}
+
+async function tickMetrics() {
+  if (document.hidden || metricsInFlight) return
+  metricsInFlight = true
+  try {
+    const r = await fetch('/dashboard/metrics?window=' + encodeURIComponent(metricsWindow), {
+      cache: 'no-store', signal: timeoutSignal(8000), // shared WebView-safe fallback (see tick)
+    })
+    if (!r.ok) throw new Error('HTTP ' + r.status)
+    const d = await r.json()
+    metricsBuckets = d.buckets || []
+    renderMetrics()
+  } catch {
+    // Unreachability is already surfaced by the live tick(); charts keep last state.
+  } finally {
+    metricsInFlight = false
+  }
+}
+
+$('winbtns').addEventListener('click', e => {
+  const btn = e.target.closest('button[data-win]')
+  if (!btn) return
+  metricsWindow = btn.dataset.win
+  for (const b of $('winbtns').querySelectorAll('.winbtn')) b.classList.toggle('active', b === btn)
+  tickMetrics()
+})
+
+setInterval(tickMetrics, 30000)
+document.addEventListener('visibilitychange', () => { if (!document.hidden) tickMetrics() })
+tickMetrics()
 </script>
 </body>
 </html>`
