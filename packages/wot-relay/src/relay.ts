@@ -1,5 +1,5 @@
 import { createServer, type Server as HttpServer } from 'http'
-import { randomBytes, randomUUID } from 'crypto'
+import { randomBytes, randomUUID, createHmac } from 'crypto'
 import Database from 'better-sqlite3'
 import { WebSocketServer, type WebSocket } from 'ws'
 import { protocol, WebCryptoProtocolCryptoAdapter } from '@web_of_trust/core'
@@ -133,6 +133,168 @@ interface CachedScope {
 const CHALLENGE_TIMEOUT_MS = 30_000 // 30 seconds to respond
 const NONCE_BYTE_LENGTH = 32
 
+// ---------------------------------------------------------------------------
+// /dashboard/data `display` block — server-side shortening (Broker-Dashboard).
+//
+// The generic broker dashboard shows identities/documents/inbox with SHORTENED
+// ids. The shortening happens HERE, server-side: `/dashboard/data` is served
+// UNAUTHENTICATED with `Access-Control-Allow-Origin: *` (see start()/CORS), so a
+// full id must NEVER leave the server without RELAY_DEBUG_STATS — display-cosmetic
+// truncation on the client would be trivially bypassable. The `display` block is
+// ALWAYS public (it carries only shortened forms), and is deliberately built as
+// ARRAYS (no map keys) so it can coexist with the existing flag-gated maps without
+// touching their redaction semantics (the e2e-log-sync harness + DashboardStats
+// tests pin the OMISSION of those maps by default).
+//
+// Shortening rules (Anton, 07.07.): DIDs + deviceIds shown but shortened; docIds
+// are CLIENT-CHOSEN strings (a speaking name would leak via a prefix) so they are
+// KEYED-HASHED (HMAC with a per-process random salt), not prefix-cut.
+// ---------------------------------------------------------------------------
+
+/** Top-N documents surfaced in the always-public `display.topDocs` array. */
+export const DISPLAY_TOP_DOCS_LIMIT = 12
+
+/**
+ * Shorten a `did:key` for public display. A did:key is
+ * `did:key:z6Mk…<multibase-pubkey>` — the multibase part is a random pubkey
+ * encoding, so a PREFIX+SUFFIX cut leaks nothing sensitive and stays stable across
+ * polls. Format: first 8 chars of the multibase part + `…` + last 4
+ * (e.g. `z6MktgyS…tUfX`). A non-`did:key` (or too-short) input is returned as-is
+ * (still escaped downstream) rather than mangled. Deterministic + pure.
+ *
+ * Threat model — why prefix-cutting is fine HERE but not for docIds: a DID's
+ * multibase part is HIGH-ENTROPY random key material, so there is no candidate
+ * dictionary to hash/compare against — a prefix reveals nothing an observer
+ * could not already enumerate. docIds are CLIENT-CHOSEN (often speaking,
+ * low-entropy) strings, hence the keyed-hash treatment in {@link shortenDocId}.
+ * The same reasoning applies to UUID deviceIds ({@link shortenDeviceId}).
+ */
+export function shortenDid(did: string): string {
+  const PREFIX = 'did:key:'
+  if (!did.startsWith(PREFIX)) {
+    // Not a did:key — fall back to a generic middle-ellipsis so we never emit a
+    // long opaque string, but do not assume multibase structure.
+    return did.length > 16 ? `${did.slice(0, 10)}…${did.slice(-4)}` : did
+  }
+  const mb = did.slice(PREFIX.length)
+  if (mb.length <= 12) return mb
+  return `${mb.slice(0, 8)}…${mb.slice(-4)}`
+}
+
+/**
+ * Shorten a deviceId (canonical lowercase UUID v4, fully random) for public
+ * display: first 8 chars + `…` (e.g. `87473e1b…`). A short/empty input is returned
+ * unchanged. Deterministic + pure.
+ */
+export function shortenDeviceId(deviceId: string): string {
+  if (deviceId.length <= 8) return deviceId
+  return `${deviceId.slice(0, 8)}…`
+}
+
+/**
+ * Shorten a docId for public display. Unlike DIDs/deviceIds a docId is a
+ * CLIENT-CHOSEN string (personalDocId is even a bearer secret, A2 Teil B) — a
+ * speaking name like `familie-mueller-2026` would leak via a prefix cut, and an
+ * UNSALTED hash would be a GUESSING ORACLE on the unauthenticated public surface
+ * (offline-hash candidates like `familie-mueller-*`, compare against
+ * /dashboard/data). So the shortcut is a KEYED hash:
+ * `HMAC-SHA256(salt, docId)` → first 10 hex chars + `…`, with a PER-PROCESS
+ * random salt (`randomBytes(32)`, minted once in the RelayServer constructor).
+ *
+ * Properties (Antons Freigabe der einfachen Variante, Loop-Review #256):
+ * - stable WITHIN one relay process (enough — dashboard + polls are process-local),
+ * - CHANGES ACROSS RESTARTS (documented, deliberate: the shortcut is a display
+ *   pseudonym, not a durable identifier),
+ * - not computable without the process secret → no candidate-dictionary oracle.
+ * Collision risk at display-N stays negligible. Deterministic + pure given
+ * (docId, salt). NOTE: an empty docId hashes like any other string.
+ */
+export function shortenDocId(docId: string, salt: Uint8Array): string {
+  const hex = createHmac('sha256', salt).update(docId, 'utf8').digest('hex')
+  return `${hex.slice(0, 10)}…`
+}
+
+/** One shortened identity row in `display.dids`. */
+export interface DisplayDid {
+  idShort: string
+  deviceCount: number
+  online: boolean
+}
+
+/** One shortened document row in `display.topDocs`. */
+export interface DisplayDoc {
+  idShort: string
+  entries: number
+  devices: number
+}
+
+/** One shortened inbox-recipient row in `display.inboxPendingByDid`. */
+export interface DisplayInboxPending {
+  idShort: string
+  pending: number
+}
+
+/** The always-public, server-shortened `display` block of `/dashboard/data`. */
+export interface DisplayBlock {
+  dids: DisplayDid[]
+  topDocs: DisplayDoc[]
+  inboxPendingByDid: DisplayInboxPending[]
+}
+
+/**
+ * Build the always-public `display` block. This runs server-side regardless of
+ * `exposeDebugStats`; only the shortened forms are ever serialized, so full ids
+ * never leave the server without the flag.
+ *
+ * - `dids`: from `devicesPerDid` (in-memory connection map — no DB cost; all
+ *   connected DIDs are online by definition, but we keep `online` explicit
+ *   against `connectedDids` for a stable contract).
+ * - `topDocs` / `inboxPendingByDid`: from the SQL-LIMITED top-N queries
+ *   (DocLog.topDocsByEntries / OfflineQueue.topPendingByDid) — the 2s public
+ *   poll must never materialize unbounded full-table aggregates (review #256);
+ *   the unlimited maps remain exclusively on the flag-gated debug path.
+ * - `docIdSalt`: the per-process secret for the keyed docId shortcut
+ *   ({@link shortenDocId}).
+ *
+ * The inputs carry the full ids — this function is the ONLY consumer of them,
+ * and it emits only shortened arrays. Sort + slice are kept as a defensive
+ * belt (the SQL already orders + limits).
+ */
+export function buildDisplayBlock(input: {
+  connectedDids: string[]
+  devicesPerDid: Record<string, number>
+  topDocs: Array<{ docId: string; entries: number; devices: number }>
+  inboxPendingByDid: Array<{ did: string; pending: number }>
+  docIdSalt: Uint8Array
+}): DisplayBlock {
+  const online = new Set(input.connectedDids)
+
+  const dids: DisplayDid[] = Object.entries(input.devicesPerDid)
+    .map(([did, deviceCount]) => ({
+      idShort: shortenDid(did),
+      deviceCount,
+      online: online.has(did),
+    }))
+    // Most devices first, stable by shortened id for a deterministic order.
+    .sort((a, b) => b.deviceCount - a.deviceCount || a.idShort.localeCompare(b.idShort))
+
+  const topDocs: DisplayDoc[] = [...input.topDocs]
+    .sort((a, b) => b.entries - a.entries || a.docId.localeCompare(b.docId))
+    .slice(0, DISPLAY_TOP_DOCS_LIMIT)
+    .map((d) => ({
+      idShort: shortenDocId(d.docId, input.docIdSalt),
+      entries: d.entries,
+      devices: d.devices,
+    }))
+
+  const inboxPendingByDid: DisplayInboxPending[] = [...input.inboxPendingByDid]
+    .sort((a, b) => b.pending - a.pending || a.did.localeCompare(b.did))
+    .slice(0, DISPLAY_TOP_DOCS_LIMIT)
+    .map((p) => ({ idShort: shortenDid(p.did), pending: p.pending }))
+
+  return { dids, topDocs, inboxPendingByDid }
+}
+
 export class RelayServer {
   private wss: WebSocketServer | null = null
   private httpServer: HttpServer | null = null
@@ -149,6 +311,13 @@ export class RelayServer {
   private queue: OfflineQueue
   private docLog: DocLog
   private startedAt = Date.now()
+  /**
+   * Per-process random secret keying the docId display shortcut (shortenDocId,
+   * review-#256 blocker): without it the public shortcut would be a guessing
+   * oracle for low-entropy speaking docIds. Minted once per process — shortcuts
+   * are stable across polls but DELIBERATELY change on restart.
+   */
+  private readonly docIdDisplaySalt = randomBytes(32)
   /** Injectable clock (epoch ms) for the capability-expiry gate; see options.now. */
   private now: () => number
   /** Gate for sensitive extended /dashboard/data stats; see options.exposeDebugStats. */
@@ -177,14 +346,34 @@ export class RelayServer {
         res.setHeader('Access-Control-Allow-Origin', '*')
         res.setHeader('Access-Control-Allow-Methods', 'GET')
 
-        if (req.url === '/health') {
+        // Match on the PATH only (ignore any query string / trailing slash), so
+        // `/dashboard`, `/dashboard/`, and `/dashboard?x=1` all resolve.
+        const path = (req.url ?? '').split('?')[0]
+
+        if (path === '/health') {
           res.writeHead(200, { 'Content-Type': 'application/json' })
           res.end(JSON.stringify({ status: 'ok' }))
-        } else if (req.url === '/dashboard') {
-          res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
+        } else if (path === '/dashboard' || path === '/dashboard/') {
+          // Single-file dashboard: inline CSS + JS. This is a self-contained
+          // operator page (no external origins, no user-authored HTML injected —
+          // all interpolated strings are esc()'d client-side), so we intentionally
+          // ship it without a strict CSP; adding one would forbid the inline
+          // <style>/<script>. Kept pragmatic per the broker-dashboard spec.
+          // `no-store` also here: the page ships its JS INLINE, so a cached copy
+          // would pin a stale dashboard version (old render logic) after a deploy.
+          res.writeHead(200, {
+            'Content-Type': 'text/html; charset=utf-8',
+            'Cache-Control': 'no-store',
+          })
           res.end(getDashboardHtml())
-        } else if (req.url === '/dashboard/data') {
-          res.writeHead(200, { 'Content-Type': 'application/json' })
+        } else if (path === '/dashboard/data' || path === '/dashboard/data/') {
+          // `no-store`: the dashboard polls every 2s with `cache: no-store`, and
+          // this endpoint is live per-request state — never let a proxy/browser
+          // serve a stale snapshot.
+          res.writeHead(200, {
+            'Content-Type': 'application/json',
+            'Cache-Control': 'no-store',
+          })
           res.end(JSON.stringify(this.getStats()))
         } else {
           res.writeHead(404)
@@ -309,6 +498,18 @@ export class RelayServer {
       // fields below are non-sensitive aggregates and stay public.
       logStats: this.buildLogStats(),
       memoryMB: process.memoryUsage().rss / (1024 * 1024),
+      // Broker-Dashboard: ALWAYS-public block of server-side SHORTENED ids (arrays,
+      // no map keys). Only the shortened forms are serialized — full ids never
+      // leave the server without RELAY_DEBUG_STATS. Fed by SQL-LIMITED top-N
+      // queries (never the unbounded full maps — those stay flag-gated above with
+      // their exact redaction semantics: harness + DashboardStats omission tests).
+      display: buildDisplayBlock({
+        connectedDids: dids,
+        devicesPerDid,
+        topDocs: this.docLog.topDocsByEntries(DISPLAY_TOP_DOCS_LIMIT),
+        inboxPendingByDid: this.queue.topPendingByDid(DISPLAY_TOP_DOCS_LIMIT),
+        docIdSalt: this.docIdDisplaySalt,
+      }),
     }
   }
 
