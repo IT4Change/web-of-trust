@@ -1,6 +1,8 @@
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import {
+  ATTESTATION_DEFAULT_MAX_CLOCK_SKEW_MS,
+  INBOX_INNER_JWS_DEFAULT_MAX_CLOCK_SKEW_MS,
   canonicalize,
   canonicalizeToBytes,
   buildBrokerAuthTranscript,
@@ -533,7 +535,8 @@ describe('WoT protocol interop vectors', () => {
 
   it('rejects signed attestation VC-JWS payloads with invalid Trust 001 time claims', async () => {
     const invalidPayloads: Array<[string, Record<string, unknown>]> = [
-      ['future nbf', {
+      // now (2026-04-22T10:00:00Z) + 26h — far beyond the 5min clock-skew tolerance.
+      ['future nbf beyond skew', {
         ...phase1.attestation_vc_jws.payload,
         validFrom: '2026-04-23T12:00:00Z',
         nbf: 1776945600,
@@ -547,13 +550,13 @@ describe('WoT protocol interop vectors', () => {
         validFrom: '2026-02-30T10:00:00Z',
         nbf: 1772445600,
       }],
-      ['offset validFrom one second in the future', {
-        ...phase1.attestation_vc_jws.payload,
-        validFrom: '2026-04-22T12:00:01+02:00',
-        nbf: 1776852001,
-      }],
       ['validFrom and nbf mismatch', { ...phase1.attestation_vc_jws.payload, nbf: 1776945600 }],
-      ['expired exp', { ...phase1.attestation_vc_jws.payload, exp: 1776851999 }],
+      // exp 6min in the past — beyond the 5min skew, so genuinely expired.
+      ['expired exp beyond skew', {
+        ...phase1.attestation_vc_jws.payload,
+        validUntil: '2026-04-22T09:54:00Z',
+        exp: 1776851640,
+      }],
     ]
 
     for (const [name, payload] of invalidPayloads) {
@@ -566,6 +569,64 @@ describe('WoT protocol interop vectors', () => {
         name,
       ).rejects.toThrow()
     }
+  })
+
+  it('accepts and rejects nbf exactly at the 5min clock-skew boundary', async () => {
+    // now = 2026-04-22T10:00:00Z (1776852000). Default clock-skew tolerance = 5min.
+    // Boundary is inclusive on the accept side: nbf <= now + 300s passes.
+    const acceptedJws = await createSignedAttestationPayload({
+      ...phase1.attestation_vc_jws.payload,
+      // now + 5min - 1s
+      validFrom: '2026-04-22T10:04:59Z',
+      nbf: 1776852299,
+    })
+    await expect(
+      verifyAttestationVcJws(acceptedJws, { crypto: cryptoAdapter, now: new Date('2026-04-22T10:00:00Z') }),
+    ).resolves.toMatchObject({ nbf: 1776852299 })
+
+    const rejectedJws = await createSignedAttestationPayload({
+      ...phase1.attestation_vc_jws.payload,
+      // now + 5min + 1s
+      validFrom: '2026-04-22T10:05:01Z',
+      nbf: 1776852301,
+    })
+    await expect(
+      verifyAttestationVcJws(rejectedJws, { crypto: cryptoAdapter, now: new Date('2026-04-22T10:00:00Z') }),
+    ).rejects.toThrow('Attestation not yet valid')
+  })
+
+  it('accepts an nbf a few seconds in the future (the camp clock-skew bug)', async () => {
+    // Native sender clock a hair ahead of the receiver: nbf = now + 1s. Before the
+    // fix the inner VC gate silently rejected this even though the inbox envelope
+    // (5min skew) had already accepted the same message.
+    const jws = await createSignedAttestationPayload({
+      ...phase1.attestation_vc_jws.payload,
+      validFrom: '2026-04-22T10:00:01Z',
+      nbf: 1776852001,
+    })
+    await expect(
+      verifyAttestationVcJws(jws, { crypto: cryptoAdapter, now: new Date('2026-04-22T10:00:00Z') }),
+    ).resolves.toMatchObject({ nbf: 1776852001 })
+  })
+
+  it('keeps the inner VC gate no stricter than the outer inbox envelope (two-layer consistency)', async () => {
+    // A payload dated within the 5min future window that the inbox envelope accepts
+    // (INBOX_INNER_JWS_DEFAULT_MAX_CLOCK_SKEW_MS) MUST also pass the VC gate — the
+    // two layers must never diverge again. Assert the shared tolerance constants match.
+    expect(ATTESTATION_DEFAULT_MAX_CLOCK_SKEW_MS).toBe(INBOX_INNER_JWS_DEFAULT_MAX_CLOCK_SKEW_MS)
+    const envelopeAcceptedSkewMs = INBOX_INNER_JWS_DEFAULT_MAX_CLOCK_SKEW_MS
+    const now = new Date('2026-04-22T10:00:00Z')
+    // A created_time the envelope accepts: within skew, e.g. +2min.
+    const nbfSeconds = Math.floor(now.getTime() / 1000) + 2 * 60
+    expect(nbfSeconds * 1000 - now.getTime()).toBeLessThanOrEqual(envelopeAcceptedSkewMs)
+    const jws = await createSignedAttestationPayload({
+      ...phase1.attestation_vc_jws.payload,
+      validFrom: '2026-04-22T10:02:00Z',
+      nbf: nbfSeconds,
+    })
+    await expect(
+      verifyAttestationVcJws(jws, { crypto: cryptoAdapter, now }),
+    ).resolves.toMatchObject({ nbf: nbfSeconds })
   })
 
   it('rejects attestation VC-JWS with invalid JOSE header fields', async () => {
