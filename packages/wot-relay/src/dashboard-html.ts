@@ -417,50 +417,121 @@ let metricsInFlight = false
 let metricsBuckets = []
 
 const rate = (v, b) => v == null ? null : v / b.spanSeconds
+// fmt = axis/value formatting kind per chart: 'int' (MB — whole numbers),
+// 'ms' (1 decimal below 10), default generic (k/M suffixes handle the rest,
+// which also makes the ~70 °C temperature render as an integer).
 const CHART_DEFS = [
-  { id: 'ch-msg',  series: [{ color: '#4f8cff', f: b => rate(b.ingestOk, b) }, { color: '#ffb84f', f: b => rate(b.errorFramesSent, b) }] },
-  { id: 'ch-lat',  series: [{ color: '#4f8cff', f: b => b.eventLoopLagP99Ms }, { color: '#3ddc84', f: b => b.sqliteWriteP95Ms }] },
-  { id: 'ch-cpu',  series: [{ color: '#4f8cff', f: b => b.loadavg1 }, { color: '#ffb84f', f: b => b.cpuTempC }] },
-  { id: 'ch-mem',  series: [{ color: '#4f8cff', f: b => b.rssMB }, { color: '#3ddc84', f: b => b.memAvailableMB }] },
-  { id: 'ch-net',  series: [{ color: '#3ddc84', f: b => rate(b.netRxBytes, b) }, { color: '#4f8cff', f: b => rate(b.netTxBytes, b) }] },
-  { id: 'ch-disk', series: [{ color: '#4f8cff', f: b => b.diskFreeMB }] },
+  { id: 'ch-msg',  fmt: 'num', series: [{ color: '#4f8cff', f: b => rate(b.ingestOk, b) }, { color: '#ffb84f', f: b => rate(b.errorFramesSent, b) }] },
+  { id: 'ch-lat',  fmt: 'ms',  series: [{ color: '#4f8cff', f: b => b.eventLoopLagP99Ms }, { color: '#3ddc84', f: b => b.sqliteWriteP95Ms }] },
+  { id: 'ch-cpu',  fmt: 'num', series: [{ color: '#4f8cff', f: b => b.loadavg1 }, { color: '#ffb84f', f: b => b.cpuTempC }] },
+  { id: 'ch-mem',  fmt: 'int', series: [{ color: '#4f8cff', f: b => b.rssMB }, { color: '#3ddc84', f: b => b.memAvailableMB }] },
+  { id: 'ch-net',  fmt: 'num', series: [{ color: '#3ddc84', f: b => rate(b.netRxBytes, b) }, { color: '#4f8cff', f: b => rate(b.netTxBytes, b) }] },
+  { id: 'ch-disk', fmt: 'int', series: [{ color: '#4f8cff', f: b => b.diskFreeMB }] },
 ]
 
-const fmtShort = v => {
+// Axis/value labels: >=1e6 → 1.2M, >=1e3 → 1.2k, else per fmt kind.
+const fmtVal = (v, kind) => {
   const a = Math.abs(v)
   if (a >= 1e6) return (v / 1e6).toFixed(1) + 'M'
   if (a >= 1e3) return (v / 1e3).toFixed(1) + 'k'
+  if (kind === 'int') return String(Math.round(v))
+  if (kind === 'ms') return a < 10 ? v.toFixed(1) : String(Math.round(v))
   return a >= 10 ? String(Math.round(v)) : String(Math.round(v * 100) / 100)
 }
 
-// Simple polyline chart: shared y-scale across the chart's series, null values
-// break the line (server gap buckets), min/max as plain canvas text labels.
-// A merged bucket flagged gap:true (>=1 source slot was a gap bucket — the relay
-// was not sampling during part of the span) breaks EVERY series exactly like
-// null, so downsampled windows (6h/24h) show the same gaps as 15m/1h.
+// Nice ceiling on the 1-2-5×10^n raster — axis maxima come out calm (0.5, 1, 2, 5 …).
+const nice125 = v => {
+  if (!(v > 0)) return 1
+  const base = Math.pow(10, Math.floor(Math.log10(v)))
+  const m = v / base
+  return (m <= 1 ? 1 : m <= 2 ? 2 : m <= 5 ? 5 : 10) * base
+}
+
+// Match the canvas backing store to its CSS size × devicePixelRatio and draw in
+// CSS-pixel space. Root cause of Antons "winzige Labels": the previous fixed
+// 800px backing store was downscaled by CSS to card width, shrinking 12px text
+// to ~5px. With the store fitted, an 11px label IS 11 displayed pixels (crisp
+// on hi-dpi via the dpr transform).
+function fitCanvas(c) {
+  const dpr = window.devicePixelRatio || 1
+  const w = Math.max(200, c.clientWidth || 320)
+  const h = 110
+  const bw = Math.round(w * dpr), bh = Math.round(h * dpr)
+  if (c.width !== bw || c.height !== bh) { c.width = bw; c.height = bh }
+  const ctx = c.getContext('2d')
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+  return { ctx, w, h }
+}
+
+// Polyline chart. Axis rules (Antons Screenshot-Feedback zur History-Sektion):
+// - RANGE: every plotted series is NON-NEGATIVE → the baseline is lo = 0 and the
+//   top is the data max rounded UP on the 1-2-5 raster. No symmetric padding —
+//   the old code padded/expanded around the data (min-1/max+1 for constants),
+//   which fabricated negative axis values like "-1 msg/s" or "-16.6k B/s".
+//   ONE exception: data sitting far above zero with a small span (dMin > span,
+//   e.g. temp 69–71 °C or a constant loadavg) zooms into a nice step band
+//   BELOW the data minimum — clamped to >= 0, NEVER negative.
+// - AXIS: 3 ticks (lo/mid/hi) with subtle 1px gridlines across the plot; 11px
+//   labels sit right-aligned in a fixed 44px LEFT GUTTER, outside the plot —
+//   nothing sticks to or overlaps the lines.
+// - Null values AND gap:true buckets break every series line (gap semantics).
+// - Bottom right: the PRIMARY series' latest value as a small live label
+//   (Beamer readability).
 function drawChart(def, buckets) {
-  const c = $(def.id), ctx = c.getContext('2d')
-  ctx.clearRect(0, 0, c.width, c.height)
-  ctx.font = '12px system-ui, sans-serif'
+  const { ctx, w, h } = fitCanvas($(def.id))
+  ctx.clearRect(0, 0, w, h)
+  ctx.font = '11px system-ui, sans-serif'
   const seriesVals = def.series.map(s => buckets.map(b => b.gap ? null : s.f(b)))
-  let min = Infinity, max = -Infinity
+  let dMin = Infinity, dMax = -Infinity
   for (const vals of seriesVals) for (const v of vals) {
     if (v == null || !isFinite(v)) continue
-    if (v < min) min = v
-    if (v > max) max = v
+    if (v < dMin) dMin = v
+    if (v > dMax) dMax = v
   }
-  if (!(min <= max)) {
+  if (!(dMin <= dMax)) {
     ctx.fillStyle = '#8a97ad'
+    ctx.textAlign = 'left'
+    ctx.textBaseline = 'alphabetic'
     ctx.fillText('collecting…', 8, 18)
     return
   }
-  if (min === max) { min -= 1; max += 1 } else {
-    const pad = (max - min) * 0.08
-    min -= pad; max += pad
+
+  // Range per the rules above.
+  let lo, hi
+  const span = dMax - dMin
+  if (dMax <= 0) {
+    lo = 0; hi = 1
+  } else if (dMin > 0 && dMin > span) {
+    const step = nice125(Math.max(span, dMax * 0.05) / 2)
+    lo = Math.max(0, Math.floor(dMin / step) * step)
+    hi = Math.ceil(dMax / step) * step
+    if (hi <= lo) hi = lo + step
+  } else {
+    lo = 0
+    hi = nice125(dMax)
   }
+
+  const PAD_L = 44, PAD_T = 6, PAD_B = 6
+  const plotW = w - PAD_L - 4, plotH = h - PAD_T - PAD_B
   const n = buckets.length
-  const yOf = v => c.height - 4 - ((v - min) / (max - min)) * (c.height - 8)
-  const xOf = i => n <= 1 ? c.width - 2 : (i / (n - 1)) * c.width
+  const yOf = v => PAD_T + (1 - (v - lo) / (hi - lo)) * plotH
+  const xOf = i => PAD_L + (n <= 1 ? plotW : (i / (n - 1)) * plotW)
+
+  // Gridlines + tick labels (lo / mid / hi) in the left gutter.
+  ctx.textAlign = 'right'
+  ctx.textBaseline = 'middle'
+  for (const tv of [lo, (lo + hi) / 2, hi]) {
+    const y = yOf(tv)
+    ctx.strokeStyle = '#18233c'
+    ctx.lineWidth = 1
+    ctx.beginPath()
+    ctx.moveTo(PAD_L, y)
+    ctx.lineTo(w - 2, y)
+    ctx.stroke()
+    ctx.fillStyle = '#8a97ad'
+    ctx.fillText(fmtVal(tv, def.fmt), PAD_L - 6, y)
+  }
+
   for (let s = 0; s < def.series.length; s++) {
     ctx.strokeStyle = def.series[s].color
     ctx.lineWidth = 1.6
@@ -474,9 +545,19 @@ function drawChart(def, buckets) {
     }
     ctx.stroke()
   }
-  ctx.fillStyle = '#8a97ad'
-  ctx.fillText(fmtShort(max), 6, 14)
-  ctx.fillText(fmtShort(min), 6, c.height - 5)
+
+  // Live label: the PRIMARY series' latest value, bottom right.
+  let last
+  for (let i = n - 1; i >= 0; i--) {
+    const v = seriesVals[0][i]
+    if (v != null && isFinite(v)) { last = v; break }
+  }
+  if (last !== undefined) {
+    ctx.fillStyle = def.series[0].color
+    ctx.textAlign = 'right'
+    ctx.textBaseline = 'alphabetic'
+    ctx.fillText(fmtVal(last, def.fmt), w - 6, h - 8)
+  }
 }
 
 function renderMetrics() {
