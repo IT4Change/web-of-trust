@@ -23,6 +23,8 @@ describe('Festival-Scale-Stress PROD-GUARD', () => {
     expect(() => assertNotProdRelay('ws://127.0.0.1:18787')).not.toThrow()
     expect(() => assertNotProdRelay('http://[::1]:18787/dashboard')).not.toThrow()
     expect(() => assertNotProdRelay('wss://relay-staging.web-of-trust.de')).not.toThrow()
+    // The festival box is the designated load-test host (see prod-guard.ts).
+    expect(() => assertNotProdRelay('wss://relay.box.web-of-trust.de')).not.toThrow()
   })
 
   it('is FAIL-CLOSED: refuses a host that is neither prod nor allowlisted', () => {
