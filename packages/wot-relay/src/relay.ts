@@ -1,5 +1,6 @@
 import { createServer, type Server as HttpServer } from 'http'
 import { randomBytes, randomUUID, createHmac } from 'crypto'
+import { dirname, resolve as resolvePath } from 'node:path'
 import Database from 'better-sqlite3'
 import { WebSocketServer, type WebSocket } from 'ws'
 import { protocol, WebCryptoProtocolCryptoAdapter } from '@web_of_trust/core'
@@ -7,6 +8,13 @@ import type { RelayMessage } from './types.js'
 import { OfflineQueue, DEFAULT_INACTIVE_MS } from './queue.js'
 import { DocLog } from './log-store.js'
 import { getDashboardHtml } from './dashboard-html.js'
+import {
+  RelayMetrics,
+  METRICS_WINDOWS,
+  METRICS_BUCKET_SECONDS,
+  toIngestRejectCode,
+  type MetricsWindowKey,
+} from './metrics.js'
 
 const {
   didKeyToPublicKeyBytes,
@@ -95,6 +103,18 @@ export interface RelayServerOptions {
    * disable (tests that assert GC drive `collectGarbage` directly).
    */
   gcIntervalMs?: number
+  /**
+   * Metrics bucket-flush interval in ms. Default = METRICS_BUCKET_SECONDS (10s) —
+   * production leaves this unset (the ring assumes 10s buckets). TEST SEAM: 0
+   * disables the timer (tests drive `metrics.flush` directly with a controlled
+   * clock, mirroring gcIntervalMs).
+   */
+  metricsIntervalMs?: number
+  /**
+   * /proc/net/dev interface for the net rx/tx byte series (env RELAY_NET_INTERFACE
+   * via start.ts). Default: first non-`lo` interface.
+   */
+  metricsNetInterface?: string
 }
 
 /** Pending challenge awaiting response from client, bound to the connection. */
@@ -324,6 +344,15 @@ export class RelayServer {
   private exposeDebugStats: boolean
   /** Periodic inbox-retention sweep timer (Sync 003 Z.210-211); null when disabled/stopped. */
   private gcTimer: ReturnType<typeof setInterval> | null = null
+  /**
+   * Metrics accumulator + 24h ring (see metrics.ts). Owned by the RelayServer for
+   * its whole lifetime — the monotone counters live HERE (durable accumulator),
+   * never on short-lived per-connection objects, so they cannot jump backwards on
+   * internal object replacement.
+   */
+  private metrics: RelayMetrics
+  /** Periodic metrics bucket-flush timer (10s); null when disabled/stopped. */
+  private metricsTimer: ReturnType<typeof setInterval> | null = null
 
   constructor(private options: RelayServerOptions) {
     this.now = options.now ?? (() => Date.now())
@@ -336,6 +365,12 @@ export class RelayServer {
     this.db.pragma('journal_mode = WAL')
     this.queue = new OfflineQueue(this.db)
     this.docLog = new DocLog(this.db)
+    // Disk stats target the directory holding the SQLite file (':memory:' → none).
+    const dbPath = options.dbPath ?? ':memory:'
+    this.metrics = new RelayMetrics({
+      diskDir: dbPath === ':memory:' ? null : dirname(resolvePath(dbPath)),
+      netInterface: options.metricsNetInterface ?? null,
+    })
   }
 
   async start(): Promise<void> {
@@ -375,6 +410,19 @@ export class RelayServer {
             'Cache-Control': 'no-store',
           })
           res.end(JSON.stringify(this.getStats()))
+        } else if (path === '/dashboard/metrics' || path === '/dashboard/metrics/') {
+          // History ring (metrics.ts): aggregates only — NO DIDs/deviceIds/docIds,
+          // so it is public like the base /dashboard/data aggregates. Unknown or
+          // missing ?window falls back to 1h.
+          const rawWindow = new URLSearchParams((req.url ?? '').split('?')[1] ?? '').get('window') ?? ''
+          // Object.hasOwn, NOT `in`: `in` walks the prototype chain, so junk like
+          // `?window=__proto__` would pass the guard and yield undefined seconds.
+          const window = (Object.hasOwn(METRICS_WINDOWS, rawWindow) ? rawWindow : '1h') as MetricsWindowKey
+          res.writeHead(200, {
+            'Content-Type': 'application/json',
+            'Cache-Control': 'no-store',
+          })
+          res.end(JSON.stringify(this.metrics.query(window, Date.now())))
         } else {
           res.writeHead(404)
           res.end('Not Found')
@@ -385,6 +433,9 @@ export class RelayServer {
       this.wss = new WebSocketServer({ server: this.httpServer })
 
       this.wss.on('connection', (ws) => {
+        // Raw (pre-auth) socket churn — authenticated sessions are counted
+        // separately in completeRegistration (wsConnects).
+        this.metrics.countRawWsConnect()
         this.handleConnection(ws)
       })
 
@@ -394,6 +445,7 @@ export class RelayServer {
     })
 
     this.startInboxRetentionSweep()
+    this.startMetricsFlush()
   }
 
   /**
@@ -416,11 +468,40 @@ export class RelayServer {
     this.gcTimer.unref?.()
   }
 
+  /**
+   * Periodic metrics bucket flush (metrics.ts): every 10s fold the monotone
+   * counters into one ring bucket + sample process/host gauges. Wired exactly
+   * like the gcTimer (field / start-after-listen / unref / stop in stop()) — a
+   * periodic task without a wired call-site is a silent leak, so a test proves
+   * this timer produces buckets and that stop() halts it. A flush failure is
+   * logged, never fatal. Disabled when `metricsIntervalMs` is 0 (test seam).
+   */
+  private startMetricsFlush(): void {
+    const intervalMs = this.options.metricsIntervalMs ?? METRICS_BUCKET_SECONDS * 1000
+    if (intervalMs <= 0) return
+    this.metricsTimer = setInterval(() => {
+      try {
+        this.metrics.flush(Date.now(), {
+          connections: this.socketToDeviceId.size,
+          queuePendingTotal: this.queue.count(),
+        })
+      } catch (err) {
+        console.error('[relay] metrics flush failed:', err instanceof Error ? err.message : err)
+      }
+    }, intervalMs)
+    this.metricsTimer.unref?.()
+  }
+
   async stop(): Promise<void> {
     if (this.gcTimer) {
       clearInterval(this.gcTimer)
       this.gcTimer = null
     }
+    if (this.metricsTimer) {
+      clearInterval(this.metricsTimer)
+      this.metricsTimer = null
+    }
+    this.metrics.dispose()
     for (const sockets of this.connections.values()) {
       for (const ws of sockets) ws.close()
     }
@@ -562,6 +643,9 @@ export class RelayServer {
       this.socketToScopes.delete(ws)
       const did = this.socketToDid.get(ws)
       if (did) {
+        // Metrics: one AUTHENTICATED session ended (mirrors wsConnects, which
+        // counts authenticated sessions only — raw pre-auth churn is rawWsConnects).
+        this.metrics.countWsDisconnect()
         const sockets = this.connections.get(did)
         if (sockets) {
           sockets.delete(ws)
@@ -896,6 +980,9 @@ export class RelayServer {
     sockets.add(ws)
     this.socketToDid.set(ws, did)
     this.socketToDeviceId.set(ws, deviceId)
+    // Metrics: "connect" = AUTHENTICATED session established (v2 spec) — counted
+    // here after the socket bookkeeping, not at the raw wss connection.
+    this.metrics.countWsConnect()
 
     const registeredFrame = createBrokerRegisteredControlFrame({
       did,
@@ -914,6 +1001,8 @@ export class RelayServer {
     for (const envelope of pending) {
       this.sendTo(ws, { type: 'message', envelope })
     }
+    // Metrics: queued-on-connect redeliveries count as inbox deliveries too.
+    if (pending.length > 0) this.metrics.countInboxDelivered(pending.length)
   }
 
   /**
@@ -1836,9 +1925,12 @@ export class RelayServer {
         // Fire-and-forget, but never let a post-verify durable-write/broadcast
         // failure become an unhandled rejection (would crash the process on
         // Node 22) — report it to the sender instead.
-        this.handleLogEntry(ws, envelope, entryJws).catch((err) =>
-          this.sendInternalError(ws, err, 'log-entry ingest failed'),
-        )
+        this.handleLogEntry(ws, envelope, entryJws).catch((err) => {
+          // Metrics: an unexpected async ingest failure (SQLite/crypto/parse) is a
+          // reject outside the closed code catalog → 'OTHER'.
+          this.metrics.countIngestReject('OTHER')
+          this.sendInternalError(ws, err, 'log-entry ingest failed')
+        })
         return
       }
     }
@@ -1882,6 +1974,10 @@ export class RelayServer {
     // arbitrary-typed envelope LIVE to remaining members — the log-entry ingest
     // gate (incl. the generations-gate) does not reach that path.
     if (!(envelope.typ === DIDCOMM_PLAINTEXT_TYP && isEncryptedInboxMessageType(envelope.type as string))) {
+      // Metrics: the whitelist reject also catches a log-entry-typed-but-malformed
+      // envelope that failed to divert into handleLogEntry above (ingest reject site
+      // per plan review).
+      this.metrics.countIngestReject('MALFORMED_MESSAGE')
       this.sendTo(ws, {
         type: 'error',
         code: 'MALFORMED_MESSAGE',
@@ -1974,6 +2070,9 @@ export class RelayServer {
       })
       return
     }
+    // Metrics: one message accepted into the durable inbox ('inserted' only — an
+    // idempotent retransmission is not a new enqueue).
+    if (fanout.disposition === 'inserted') this.metrics.countInboxEnqueued()
 
     // Live-deliver to the CONNECTED sockets of the delivery-target devices only.
     // An active-but-offline target gets no live send — its 'pending' entry is
@@ -1990,6 +2089,9 @@ export class RelayServer {
         }
       }
     }
+
+    // Metrics: live inbox deliveries to connected target devices.
+    if (liveSends > 0) this.metrics.countInboxDelivered(liveSends)
 
     // Receipt: 'delivered' iff at least one live send happened, else 'accepted'
     // (retained for offline / cold-start pick-up). A self-addressed sender with no
@@ -2066,6 +2168,7 @@ export class RelayServer {
     try {
       payload = await verifyLogEntryJws(entryJws, { crypto: protocolCrypto })
     } catch (err) {
+      this.metrics.countIngestReject('AUTH_INVALID')
       this.sendTo(ws, {
         type: 'error',
         code: 'AUTH_INVALID',
@@ -2090,6 +2193,7 @@ export class RelayServer {
       socketDeviceId === undefined ||
       !this.docLog.isActive(socketDid, socketDeviceId)
     ) {
+      this.metrics.countIngestReject('DEVICE_REVOKED')
       this.sendTo(ws, {
         type: 'error',
         // Slice SR-2 / Symptom B (additive, backward-compatible): attach `thid ==
@@ -2113,6 +2217,7 @@ export class RelayServer {
     if (!this.docLog.isSpaceRegistered(docId)) {
       const personalOwner = this.docLog.getPersonalDocOwner(docId)
       if (personalOwner !== null && personalOwner !== socketDid) {
+        this.metrics.countIngestReject('PERSONAL_DOC_OWNER_MISMATCH')
         this.sendTo(ws, {
           type: 'error',
           thid: messageId,
@@ -2134,6 +2239,7 @@ export class RelayServer {
     // in either case. Author-binding / seq checks follow.
     const writeScope = this.checkScope(ws, docId, 'write')
     if (writeScope !== 'granted') {
+      this.metrics.countIngestReject(writeScope === 'expired' ? 'CAPABILITY_EXPIRED' : 'CAPABILITY_REQUIRED')
       this.sendTo(ws, {
         type: 'error',
         // Slice SR-2 / Symptom A+B (additive, backward-compatible): attach `thid ==
@@ -2160,6 +2266,7 @@ export class RelayServer {
     const ownerDid = this.docLog.didForDevice(deviceId)
     if (ownerDid === null) {
       // payload.deviceId is not registered at all.
+      this.metrics.countIngestReject('DEVICE_NOT_REGISTERED')
       this.sendTo(ws, {
         type: 'error',
         // Slice SR-2 / Symptom B (additive, backward-compatible): attach `thid ==
@@ -2173,6 +2280,7 @@ export class RelayServer {
     }
     if (ownerDid !== didOrKidToDid(authorKid)) {
       // The authorKid DID does not own this deviceId. Not stored, not relayed.
+      this.metrics.countIngestReject('AUTHOR_MISMATCH')
       this.sendTo(ws, {
         type: 'error',
         // Slice SR-2 / Symptom B (additive, backward-compatible): attach `thid ==
@@ -2214,6 +2322,7 @@ export class RelayServer {
     // still land between this read and the durable insert below.
     const space = this.docLog.getSpace(docId)
     if (space !== null && payload.keyGeneration < space.generation) {
+      this.metrics.countIngestReject('KEY_GENERATION_STALE')
       // Slice SR / VE-C2 (APPROVAL-GATED relay change): attach `thid == messageId` so
       // the sender's LogSyncCoordinator can CORRELATE this routed error back to the
       // exact in-flight write (onWritePathErrorFrame / routeWritePathError require a
@@ -2239,6 +2348,10 @@ export class RelayServer {
     // appendEntry (one SQLite transaction, no intervening await), so a divergent
     // seq cannot race a concurrent first write. The broker reads the coordinates
     // from the verified JWS only.
+    // Metrics: time the hot durable ingest write (synchronous better-sqlite3
+    // transaction) — sqliteWriteP95Ms is the write-pressure indicator. Duration
+    // via performance.now() (monotonic), never wall clock.
+    const writeStart = performance.now()
     const result = this.docLog.appendEntry({
       docId,
       deviceId,
@@ -2249,8 +2362,10 @@ export class RelayServer {
       // space generation (the authoritative race-closing check).
       keyGeneration: payload.keyGeneration,
     })
+    this.metrics.recordSqliteWriteMs(performance.now() - writeStart)
 
     if (result.disposition === 'reject-key-generation-stale') {
+      this.metrics.countIngestReject('KEY_GENERATION_STALE')
       // Slice SR / B2 — the AUTHORITATIVE in-transaction gate fired: a concurrent
       // rotateSpace advanced the generation past this NEW entry between the fast-path
       // pre-gate and the durable insert. Same wire response as the pre-gate
@@ -2267,7 +2382,9 @@ export class RelayServer {
     }
     if (result.disposition === 'reject-seq-collision') {
       // Nonce-safety boundary: the divergent entry never reached the durable log
-      // and is not relayed. Sender gets the restore-clone hint.
+      // and is not relayed. Sender gets the restore-clone hint. (Metrics: the wire
+      // code comes from the store result — fold via the closed catalog.)
+      this.metrics.countIngestReject(toIngestRejectCode(result.errorCode))
       this.sendTo(ws, {
         type: 'error',
         // Slice SR-2 / Symptom B (additive, backward-compatible): attach `thid ==
@@ -2284,7 +2401,9 @@ export class RelayServer {
     }
     if (result.disposition === 'idempotent-retransmission') {
       // Already have this exact (deviceId,seq,content): no re-store, no
-      // re-broadcast. Acknowledge so the client's send() resolves.
+      // re-broadcast. Acknowledge so the client's send() resolves. (Metrics: an
+      // idempotent retransmission is an OK ingest outcome.)
+      this.metrics.countIngestOk()
       this.sendTo(ws, {
         type: 'receipt',
         receipt: { messageId, status: 'delivered', timestamp: new Date().toISOString() },
@@ -2295,6 +2414,7 @@ export class RelayServer {
     // accept-new-entry: the entry is durably stored. Live broadcast to currently-connected recipient devices (realtime
     // preserved). Routing uses the transport envelope `to` recipients; the
     // sender's own socket is excluded so a device does not receive its own echo.
+    this.metrics.countIngestOk()
     const recipients = Array.isArray(envelope.to)
       ? (envelope.to as unknown[]).filter((d): d is string => typeof d === 'string')
       : []
@@ -2537,7 +2657,10 @@ export class RelayServer {
     // acking device is the authenticated socket's deviceId.
     const deviceId = this.socketToDeviceId.get(ws)
     if (deviceId !== undefined) {
-      this.queue.ackDevice(messageId, deviceId, { nowMs: this.now() })
+      const ack = this.queue.ackDevice(messageId, deviceId, { nowMs: this.now() })
+      // Metrics: count only a DURABLY APPLIED ack (changes > 0) — a no-op re-ack /
+      // foreign-device ack is not inbox progress (v2 spec).
+      if (ack.applied) this.metrics.countAck()
     }
     // Receipt (idempotent — sent even on a no-op ack) so the client-side send() of the
     // ack envelope resolves; existing send()/ack flows depend on it.
@@ -2562,6 +2685,11 @@ export class RelayServer {
 
   private sendTo(ws: WebSocket, msg: RelayMessage): void {
     if (ws.readyState === ws.OPEN) {
+      // Metrics: ONE central hook for receipt/error frames actually written to an
+      // OPEN socket (v2 spec — instead of a dozen per-call-site increments).
+      // receipt 'failed' has no sender in the relay (types-only) and stays uncounted.
+      if (msg.type === 'receipt') this.metrics.countReceipt(msg.receipt.status)
+      else if (msg.type === 'error') this.metrics.countErrorFrame()
       ws.send(JSON.stringify(msg))
     }
   }
