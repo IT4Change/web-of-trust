@@ -18,6 +18,16 @@ const WOT_ATTESTATION_TYPE = 'WotAttestation'
  * `credentialSubject.claim` label (which stays purely for display).
  */
 export const WOT_VERIFICATION_TYPE = 'WotVerification'
+
+/**
+ * Clock-skew tolerance for the attestation-VC time gate (nbf/exp), mirroring
+ * INBOX_INNER_JWS_DEFAULT_MAX_CLOCK_SKEW_MS by design: the inner VC gate must
+ * not be stricter than the outer inbox-envelope gate that already accepted the
+ * message. Without this, a receiver whose clock lags a few seconds ACKs an
+ * attestation at the envelope layer and then silently drops it here as "not yet
+ * valid" (camp bug, 2026-07-07).
+ */
+export const ATTESTATION_DEFAULT_MAX_CLOCK_SKEW_MS = 5 * 60 * 1000
 const RFC3339_WHOLE_SECOND_DATE_TIME_WITH_ZONE = /^(\d{4})-(\d{2})-(\d{2})[Tt](\d{2}):(\d{2}):(\d{2})([Zz]|([+-])(\d{2}):(\d{2}))$/
 
 export interface AttestationVcPayload {
@@ -87,11 +97,21 @@ export interface VerifyAttestationVcJwsOptions {
   crypto: ProtocolCryptoAdapter
   didResolver?: DidResolver
   now?: Date
+  /**
+   * Clock-skew tolerance for the nbf/exp time gate. Defaults to
+   * ATTESTATION_DEFAULT_MAX_CLOCK_SKEW_MS (mirrors the inbox-envelope gate).
+   */
+  maxClockSkewMs?: number
 }
 
 export interface AssertAttestationVcPayloadOptions {
   now?: Date
   requireIssuerKidBinding?: boolean
+  /**
+   * Clock-skew tolerance for the nbf/exp time gate. Defaults to
+   * ATTESTATION_DEFAULT_MAX_CLOCK_SKEW_MS (mirrors the inbox-envelope gate).
+   */
+  maxClockSkewMs?: number
 }
 
 export async function createAttestationVcJws(options: CreateAttestationVcJwsOptions): Promise<string> {
@@ -131,7 +151,7 @@ export async function verifyAttestationVcJws(
   const payload = decoded.payload
   const jwsHeader = decoded.header as { typ?: string }
   if (jwsHeader.typ !== 'vc+jwt') throw new Error('Invalid attestation JWS typ')
-  assertAttestationVcPayload(payload, kid, { now: options.now })
+  assertAttestationVcPayload(payload, kid, { now: options.now, maxClockSkewMs: options.maxClockSkewMs })
   return payload
 }
 
@@ -197,8 +217,15 @@ export function assertAttestationVcPayload(
 
   const nowSeconds = Math.floor(now.getTime() / 1000)
   if (!Number.isFinite(nowSeconds)) throw new Error('Invalid attestation verification time')
-  if (nbf > nowSeconds) throw new Error('Attestation not yet valid')
-  if (payload.exp !== undefined && integerSeconds(payload.exp, 'Invalid attestation exp') <= nowSeconds) {
+  // Clock-skew tolerance, symmetric on both edges. The inner VC gate must not be
+  // stricter than the outer inbox-envelope gate (INBOX_INNER_JWS_DEFAULT_MAX_CLOCK_SKEW_MS)
+  // that already accepted the message: a receiver whose clock lags a few seconds
+  // would otherwise ACK the attestation and then silently drop it as "not yet
+  // valid" (camp bug, 2026-07-07). The upper edge (exp) gets the same grace so a
+  // slightly-fast receiver clock does not falsely expire a still-valid credential.
+  const skewSeconds = Math.ceil((options.maxClockSkewMs ?? ATTESTATION_DEFAULT_MAX_CLOCK_SKEW_MS) / 1000)
+  if (nbf > nowSeconds + skewSeconds) throw new Error('Attestation not yet valid')
+  if (payload.exp !== undefined && integerSeconds(payload.exp, 'Invalid attestation exp') <= nowSeconds - skewSeconds) {
     throw new Error('Attestation expired')
   }
 }

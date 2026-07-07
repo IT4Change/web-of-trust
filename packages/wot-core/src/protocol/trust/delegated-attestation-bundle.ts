@@ -35,6 +35,8 @@ export interface VerifyDelegatedAttestationBundleOptions {
   crypto: ProtocolCryptoAdapter
   requiredCapability?: DeviceCapability
   now?: Date
+  /** Clock-skew tolerance for the nbf/exp time gate (mirrors the inbox-envelope gate). */
+  maxClockSkewMs?: number
 }
 
 export async function createDelegatedAttestationBundle(
@@ -110,6 +112,7 @@ export async function verifyDelegatedAttestationBundle(
   }
   assertAttestationVcPayload(attestationPayload, bindingPayload.deviceKid, {
     now: options.now,
+    maxClockSkewMs: options.maxClockSkewMs,
     requireIssuerKidBinding: false,
   })
   if (!bindingPayload.capabilities.includes(requiredCapability)) throw new Error('Missing required device capability')
