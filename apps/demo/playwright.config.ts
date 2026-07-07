@@ -34,6 +34,16 @@ const VAULT_URL = process.env.E2E_VAULT_URL ?? `http://localhost:${VAULT_PORT}`
 // app, so the whole suite then tests the WRONG app and every spec times out.
 const DEMO_PORT = 5273
 
+// Dual-broker project (Stage A, #251): its OWN dev server so the main suite
+// stays byte-identical (no VITE_RELAY_URL_2 there). Role mapping mirrors the
+// camp: PRIMARY = the killable per-spec relay 2 ("festival box"), SECONDARY =
+// the shared suite relay ("public server"). D2 observability is ON so the spec
+// can assert per-broker states via window.__wotDebug. Local-backend only —
+// external mode (festival box) has no second local relay to kill.
+const RELAY2_PORT = 9790
+const DUAL_DEMO_PORT = 5274
+const EXTERNAL_MODE = !!process.env.E2E_RELAY_URL
+
 export default defineConfig({
   testDir: './e2e',
   fullyParallel: false,
@@ -62,6 +72,7 @@ export default defineConfig({
   projects: [
     {
       name: 'chromium',
+      testIgnore: '**/dual-broker.spec.ts',
       use: {
         ...devices['Desktop Chrome'],
         launchOptions: {
@@ -70,18 +81,54 @@ export default defineConfig({
         locale: 'de-DE',
       },
     },
+    ...(EXTERNAL_MODE
+      ? []
+      : [
+          {
+            name: 'dual-broker',
+            testMatch: '**/dual-broker.spec.ts',
+            use: {
+              ...devices['Desktop Chrome'],
+              baseURL: `http://localhost:${DUAL_DEMO_PORT}`,
+              launchOptions: {
+                executablePath: process.env.E2E_CHROME_PATH ?? '/usr/bin/chromium',
+              },
+              locale: 'de-DE',
+            },
+          },
+        ]),
   ],
 
-  webServer: {
-    command: [
-      `VITE_RELAY_URL=${RELAY_URL}`,
-      `VITE_PROFILE_SERVICE_URL=${PROFILES_URL}`,
-      `VITE_VAULT_URL=${VAULT_URL}`,
-      `npx vite --port ${DEMO_PORT}`,
-    ].join(' '),
-    port: DEMO_PORT,
-    reuseExistingServer: !process.env.CI,
-    timeout: 30_000,
-    cwd: path.resolve(__dirname),
-  },
+  webServer: [
+    {
+      command: [
+        `VITE_RELAY_URL=${RELAY_URL}`,
+        `VITE_PROFILE_SERVICE_URL=${PROFILES_URL}`,
+        `VITE_VAULT_URL=${VAULT_URL}`,
+        `npx vite --port ${DEMO_PORT}`,
+      ].join(' '),
+      port: DEMO_PORT,
+      reuseExistingServer: !process.env.CI,
+      timeout: 30_000,
+      cwd: path.resolve(__dirname),
+    },
+    ...(EXTERNAL_MODE
+      ? []
+      : [
+          {
+            command: [
+              `VITE_RELAY_URL=ws://localhost:${RELAY2_PORT}`,
+              `VITE_RELAY_URL_2=${RELAY_URL}`,
+              `VITE_PROFILE_SERVICE_URL=${PROFILES_URL}`,
+              `VITE_VAULT_URL=${VAULT_URL}`,
+              'VITE_WOT_DEBUG_OBSERVABILITY=1',
+              `npx vite --port ${DUAL_DEMO_PORT}`,
+            ].join(' '),
+            port: DUAL_DEMO_PORT,
+            reuseExistingServer: !process.env.CI,
+            timeout: 30_000,
+            cwd: path.resolve(__dirname),
+          },
+        ]),
+  ],
 })

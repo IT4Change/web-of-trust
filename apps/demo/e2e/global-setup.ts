@@ -9,11 +9,16 @@ const __dirname = dirname(fileURLToPath(import.meta.url))
 const RELAY_PORT = 9787
 const PROFILES_PORT = 9788
 const VAULT_PORT = 9789
+// Second relay for the dual-broker project (dual-broker.spec.ts): it plays the
+// PRIMARY ("festival box") there and gets killed mid-spec — which is safe
+// exactly because no other spec ever talks to it.
+const RELAY2_PORT = 9790
 const STATE_FILE = '/tmp/wot-e2e-state.json'
 const MONOREPO_ROOT = join(__dirname, '..', '..', '..')
 
 interface ServerState {
   relayPid: number
+  relay2Pid: number
   profilesPid: number
   vaultPid: number
   tmpDir: string
@@ -45,8 +50,14 @@ function waitForPort(port: number, timeoutMs = 10_000): Promise<void> {
 function spawnServer(
   script: string,
   env: Record<string, string>,
+  options?: { detached?: boolean },
 ): ChildProcess {
   const child = spawn('tsx', [script], {
+    // detached → own process GROUP, so kill(-pid) reaches the node child behind
+    // the tsx wrapper. SIGKILL is never forwarded by tsx (unlike SIGTERM), so a
+    // plain kill(pid) would orphan the actual server. Used for relay 2, which
+    // dual-broker.spec.ts hard-kills mid-spec.
+    detached: options?.detached ?? false,
     env: {
       ...process.env,
       ...env,
@@ -129,6 +140,7 @@ export default async function globalSetup() {
   // Clean up stale processes from previous runs that didn't tear down properly
   await Promise.all([
     killPortHolder(RELAY_PORT),
+    killPortHolder(RELAY2_PORT),
     killPortHolder(PROFILES_PORT),
     killPortHolder(VAULT_PORT),
   ])
@@ -143,6 +155,15 @@ export default async function globalSetup() {
       PORT: String(RELAY_PORT),
       DB_PATH: join(tmpDir, 'relay.db'),
     },
+  )
+
+  const relay2 = spawnServer(
+    join(MONOREPO_ROOT, 'packages/wot-relay/src/start.ts'),
+    {
+      PORT: String(RELAY2_PORT),
+      DB_PATH: join(tmpDir, 'relay2.db'),
+    },
+    { detached: true },
   )
 
   const profiles = spawnServer(
@@ -164,17 +185,19 @@ export default async function globalSetup() {
   // Wait for all servers to be ready
   await Promise.all([
     waitForPort(RELAY_PORT),
+    waitForPort(RELAY2_PORT),
     waitForPort(PROFILES_PORT),
     waitForPort(VAULT_PORT),
   ])
 
-  console.log(`[e2e] Servers ready (relay: ${RELAY_PORT}, profiles: ${PROFILES_PORT}, vault: ${VAULT_PORT})`)
+  console.log(`[e2e] Servers ready (relay: ${RELAY_PORT}, relay2: ${RELAY2_PORT}, profiles: ${PROFILES_PORT}, vault: ${VAULT_PORT})`)
 
   // NOTE: VITE_VAULT_URL is passed to Vite in playwright.config.ts webServer command.
   // This enables Vault-Pull for offline multi-device scenarios.
 
   const state: ServerState = {
     relayPid: relay.pid!,
+    relay2Pid: relay2.pid!,
     profilesPid: profiles.pid!,
     vaultPid: vault.pid!,
     tmpDir,
