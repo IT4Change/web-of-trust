@@ -202,20 +202,18 @@ export function AdapterProvider({ children, identity }: AdapterProviderProps) {
         }
 
         // Create WebSocket adapter — try to connect quickly, but don't block init
-        const wsAdapter = new WebSocketMessagingAdapter(appRuntimeConfig.relayUrl, {
+        const wsOptions = {
           deviceId,
           signBrokerAuthTranscript: (bytes: Uint8Array) => identity.signEd25519(bytes),
-        })
+        }
+        const wsAdapter = new WebSocketMessagingAdapter(appRuntimeConfig.relayUrl, wsOptions)
         // Stage A dual-broker (Sync 003 §Multi-Broker): with a secondary relay
         // configured, the inbox family fans out to BOTH brokers (handshakes work
         // wherever any connectivity exists); log-sync/control stay strictly on the
         // primary. Each broker registers the SAME deviceId in its own registry.
         // Without VITE_RELAY_URL_2 this is exactly today's single-broker stack.
         const wsAdapter2 = appRuntimeConfig.relayUrl2
-          ? new WebSocketMessagingAdapter(appRuntimeConfig.relayUrl2, {
-              deviceId,
-              signBrokerAuthTranscript: (bytes: Uint8Array) => identity.signEd25519(bytes),
-            })
+          ? new WebSocketMessagingAdapter(appRuntimeConfig.relayUrl2, wsOptions)
           : null
         const messagingRoot = wsAdapter2
           ? new MultiBrokerMessagingAdapter([wsAdapter, wsAdapter2])
@@ -232,6 +230,14 @@ export function AdapterProvider({ children, identity }: AdapterProviderProps) {
             .filter((a): a is NonNullable<typeof a> => !!a)
             .filter((a) => a.getState() === 'connected')
             .reduce((n, a) => n + a.getPeerCount(), 0)
+        // Metrics URL = the broker actually CARRYING the connection (review: a
+        // primary-only URL is misleading when the secondary holds the aggregate).
+        const relayStatusUrl = () =>
+          wsAdapter.getState() === 'connected' || !wsAdapter2
+            ? appRuntimeConfig.relayUrl
+            : wsAdapter2.getState() === 'connected'
+              ? appRuntimeConfig.relayUrl2!
+              : appRuntimeConfig.relayUrl
 
         // Outbox + Inbox-Reception-Host VOR dem connect verdrahten: der Broker
         // liefert die Initial-Queue direkt nach der Auth aus — ohne
@@ -584,17 +590,17 @@ export function AdapterProvider({ children, identity }: AdapterProviderProps) {
           if (!did || currentState === 'connected' || currentState === 'connecting') return
           try {
             setMessagingState('connecting')
-            metrics.setRelayStatus(false, appRuntimeConfig.relayUrl, 0)
+            metrics.setRelayStatus(false, relayStatusUrl(), 0)
             await outboxAdapter!.connect(did)
             if (!cancelled) {
               setMessagingState('connected')
-              metrics.setRelayStatus(true, appRuntimeConfig.relayUrl, relayPeerCount())
+              metrics.setRelayStatus(true, relayStatusUrl(), relayPeerCount())
             }
           } catch (error) {
             console.warn('Relay reconnect failed:', error)
             if (!cancelled) {
               setMessagingState('error')
-              metrics.setRelayStatus(false, appRuntimeConfig.relayUrl, 0)
+              metrics.setRelayStatus(false, relayStatusUrl(), 0)
             }
           }
         }
@@ -655,7 +661,7 @@ export function AdapterProvider({ children, identity }: AdapterProviderProps) {
             outboxAdapter.onStateChange((state) => {
               if (!cancelled) {
                 setMessagingState(state)
-                metrics.setRelayStatus(state === 'connected', appRuntimeConfig.relayUrl, relayPeerCount())
+                metrics.setRelayStatus(state === 'connected', relayStatusUrl(), relayPeerCount())
                 // Flush outbox + retry profile sync on reconnect
                 if (state === 'connected') {
                   outboxAdapter!.flushOutbox()
@@ -666,18 +672,18 @@ export function AdapterProvider({ children, identity }: AdapterProviderProps) {
 
             try {
               setMessagingState('connecting')
-              metrics.setRelayStatus(false, appRuntimeConfig.relayUrl, 0)
+              metrics.setRelayStatus(false, relayStatusUrl(), 0)
               await outboxAdapter.connect(did)
               if (!cancelled) {
                 setMessagingState('connected')
-                metrics.setRelayStatus(true, appRuntimeConfig.relayUrl, relayPeerCount())
+                metrics.setRelayStatus(true, relayStatusUrl(), relayPeerCount())
               }
               console.log(`Relay connected: ${appRuntimeConfig.relayUrl} (${did.slice(0, 20)}...)`)
             } catch (error) {
               console.warn('Relay connection failed:', error)
               if (!cancelled) {
                 setMessagingState('error')
-                metrics.setRelayStatus(false, appRuntimeConfig.relayUrl, 0)
+                metrics.setRelayStatus(false, relayStatusUrl(), 0)
               }
             }
 
@@ -686,7 +692,7 @@ export function AdapterProvider({ children, identity }: AdapterProviderProps) {
               if (!cancelled) {
                 outboxAdapter!.disconnect()
                 setMessagingState('disconnected')
-                metrics.setRelayStatus(false, appRuntimeConfig.relayUrl, 0)
+                metrics.setRelayStatus(false, relayStatusUrl(), 0)
               }
             }
             window.addEventListener('offline', offlineHandler)

@@ -494,10 +494,13 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
       this.vault = config.vault
     } else if (config.vaultUrl) {
       // Stage A (I-VAULT-SURVIVES): multiple vault URLs → dual-write/merge-read client.
-      const vaultUrls = Array.isArray(config.vaultUrl) ? config.vaultUrl : [config.vaultUrl]
+      // An EMPTY array behaves like "no vault" (review: [] is truthy).
+      const vaultUrls = (Array.isArray(config.vaultUrl) ? config.vaultUrl : [config.vaultUrl]).filter(Boolean)
       this.vault = vaultUrls.length > 1
         ? new DualVaultClient(vaultUrls.map((u) => new VaultClient(u, config.identity)))
-        : new VaultClient(vaultUrls[0], config.identity)
+        : vaultUrls.length === 1
+          ? new VaultClient(vaultUrls[0], config.identity)
+          : undefined
     }
   }
 

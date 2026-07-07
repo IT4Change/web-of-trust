@@ -99,7 +99,17 @@ export class DualVaultClient implements VaultClientLike {
       }
       return null
     }
-    return infos.reduce((a, b) => (b.latestSeq > a.latestSeq ? b : a))
+    // Per-field merge (review): taking the whole object with the highest
+    // latestSeq can DROP the other vault's non-null snapshotSeq and break the
+    // consumer's snapshot cache-hit (repeated re-download/decrypt).
+    return infos.reduce((a, b) => ({
+      latestSeq: Math.max(a.latestSeq, b.latestSeq),
+      snapshotSeq:
+        a.snapshotSeq === null ? b.snapshotSeq
+        : b.snapshotSeq === null ? a.snapshotSeq
+        : Math.max(a.snapshotSeq, b.snapshotSeq),
+      changeCount: Math.max(a.changeCount, b.changeCount),
+    }))
   }
 
   async deleteDoc(docId: string): Promise<void> {

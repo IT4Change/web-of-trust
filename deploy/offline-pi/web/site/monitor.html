@@ -70,6 +70,8 @@
 
 <script>
 const $ = id => document.getElementById(id)
+// docIds are CLIENT-chosen strings from the relay stats — escape before innerHTML.
+const esc = v => String(v).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))
 const fmtBytes = b => b < 1024 ? b + ' B' : b < 1048576 ? (b/1024).toFixed(1) + ' KB' : (b/1048576).toFixed(1) + ' MB'
 const fmtUp = s => s < 3600 ? Math.floor(s/60) + 'm' : Math.floor(s/3600) + 'h ' + Math.floor(s%3600/60) + 'm'
 
@@ -126,7 +128,7 @@ async function tick() {
     const maxDoc = Math.max(1, ...byDoc.map(([, n]) => n))
     $('doclist').innerHTML = byDoc.length
       ? byDoc.map(([id, n]) =>
-          `<div class="drow"><code>${id.slice(0, 8)}…</code><span class="bar" style="width:${(n / maxDoc) * 100}%"></span><code>${n} · ${(ls.devicesByDoc ?? {})[id] ?? 0} dev</code></div>`
+          `<div class="drow"><code>${esc(id.slice(0, 8))}…</code><span class="bar" style="width:${(Number(n) / maxDoc) * 100}%"></span><code>${Number(n)} · ${Number((ls.devicesByDoc ?? {})[id] ?? 0)} dev</code></div>`
         ).join('')
       : '<span style="color:var(--dim)">no documents yet — connect and create a space!</span>'
   } catch {

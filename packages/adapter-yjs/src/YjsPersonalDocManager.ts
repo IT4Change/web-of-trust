@@ -550,10 +550,14 @@ export async function initYjsPersonalDoc(identity: IdentitySession, messaging?: 
     const personalKey = await identity.deriveFrameworkKey('personal-doc-v1')
     vaultPersonalKey = personalKey
     // Stage A (I-VAULT-SURVIVES): multiple vault URLs → dual-write/merge-read client.
-    const vaultUrls = Array.isArray(vaultUrl) ? vaultUrl : [vaultUrl]
+    // An EMPTY array behaves like "no vault" (review: [] is truthy and would
+    // otherwise construct VaultClient(undefined, …)).
+    const vaultUrls = (Array.isArray(vaultUrl) ? vaultUrl : [vaultUrl]).filter(Boolean)
     vaultClient = vaultUrls.length > 1
       ? new DualVaultClient(vaultUrls.map((u) => new VaultClient(u, identity)))
-      : new VaultClient(vaultUrls[0], identity)
+      : vaultUrls.length === 1
+        ? new VaultClient(vaultUrls[0], identity)
+        : null
 
     // If CompactStore was empty, try vault
     if (loadedFrom === 'new') {
