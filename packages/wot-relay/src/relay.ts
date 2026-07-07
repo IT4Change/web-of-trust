@@ -189,8 +189,16 @@ export function shortenDeviceId(deviceId: string): string {
  * CLIENT-CHOSEN string (personalDocId is even a bearer secret, A2 Teil B) — a
  * speaking name like `familie-mueller-2026` would leak via a prefix cut. So we
  * HASH it: `sha256(docId)` → first 10 hex chars + `…`. Stable across polls,
- * one-way (not reversible), collision risk negligible at display-N. Deterministic
- * + pure. NOTE: an empty docId hashes like any other string (never a real docId).
+ * collision risk negligible at display-N. Deterministic + pure.
+ *
+ * Honesty note: this is PSEUDONYMIZATION, not secrecy. An UNSALTED sha256 is
+ * dictionary-attackable for low-entropy speaking names (offline-hash candidates
+ * like `familie-mueller-*` and compare prefixes). High-entropy docIds (UUIDs,
+ * personalDocIds) are unaffected. If low-entropy doc names ever become a real
+ * risk, switch to an HMAC with a server-held secret — deliberately NOT built
+ * today: server-secret management is overkill for display pseudonymization.
+ *
+ * NOTE: an empty docId hashes like any other string (never a real docId).
  */
 export function shortenDocId(docId: string): string {
   const hex = createHash('sha256').update(docId, 'utf8').digest('hex')
@@ -255,6 +263,10 @@ export function buildDisplayBlock(input: {
     // Most devices first, stable by shortened id for a deterministic order.
     .sort((a, b) => b.deviceCount - a.deviceCount || a.idShort.localeCompare(b.idShort))
 
+  // Deliberately simple: sort the WHOLE map per poll (O(n log n)) and slice. At
+  // our doc counts this is noise next to the SQLite GROUP BY that produced the
+  // map; a partial top-N selection (heap) is the option if a broker ever hosts a
+  // very large log. Do not optimize preemptively.
   const topDocs: DisplayDoc[] = Object.entries(input.entriesByDoc)
     .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
     .slice(0, DISPLAY_TOP_DOCS_LIMIT)
@@ -328,7 +340,12 @@ export class RelayServer {
           // all interpolated strings are esc()'d client-side), so we intentionally
           // ship it without a strict CSP; adding one would forbid the inline
           // <style>/<script>. Kept pragmatic per the broker-dashboard spec.
-          res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
+          // `no-store` also here: the page ships its JS INLINE, so a cached copy
+          // would pin a stale dashboard version (old render logic) after a deploy.
+          res.writeHead(200, {
+            'Content-Type': 'text/html; charset=utf-8',
+            'Cache-Control': 'no-store',
+          })
           res.end(getDashboardHtml())
         } else if (path === '/dashboard/data' || path === '/dashboard/data/') {
           // `no-store`: the dashboard polls every 2s with `cache: no-store`, and

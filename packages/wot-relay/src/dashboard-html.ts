@@ -7,9 +7,13 @@
 //     logStats.{totalEntries,docCount,personalDocCount,totalLogBytes}, uptimeSeconds,
 //     memoryMB).
 //   - Identities / Documents / Inbox from the ALWAYS-public server-SHORTENED
-//     `display` block (dids / topDocs / inboxPendingByDid).
-//   - If the FULL flag-gated maps are ALSO present (RELAY_DEBUG_STATS=1, i.e. box
-//     operation) it prefers them and shows the FULL ids instead of the shortcuts.
+//     `display` block (dids / topDocs / inboxPendingByDid) — this is the DEFAULT.
+//   - Full-detail mode (RELAY_DEBUG_STATS=1, i.e. box operation) is detected ONLY
+//     via the PRESENCE of the flag-gated fields (logStats.entriesByDoc /
+//     queueStats.byDid). Only then do the cards render the FULL ids from the full
+//     maps. The detection must NEVER key on `devicesPerDid`: that field is always
+//     public (frozen harness contract) and carries full DIDs even on a prod
+//     broker — preferring it would undo the shortening at the render layer.
 //
 // Security: `/dashboard/data` is unauthenticated + `ACAO:*`; the redaction is
 // server-side (see relay.ts). This page still esc()'s EVERY interpolated string —
@@ -169,9 +173,13 @@ const $ = id => document.getElementById(id)
 const esc = v => String(v).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))
 const fmtBytes = b => b < 1024 ? b + ' B' : b < 1048576 ? (b/1024).toFixed(1) + ' KB' : (b/1048576).toFixed(1) + ' MB'
 const fmtUp = s => s < 60 ? Math.floor(s) + 's' : s < 3600 ? Math.floor(s/60) + 'm' : s < 86400 ? Math.floor(s/3600) + 'h ' + Math.floor(s%3600/60) + 'm' : Math.floor(s/86400) + 'd ' + Math.floor(s%86400/3600) + 'h'
-// Client-side prefix/hash shorteners MIRROR relay.ts, used ONLY to render the FULL
-// maps under the debug flag; the default path already receives server-shortened ids.
-const shortDid = d => { const p = 'did:key:'; if (!d.startsWith(p)) return d.length > 16 ? d.slice(0,10)+'…'+d.slice(-4) : d; const m = d.slice(p.length); return m.length <= 12 ? m : m.slice(0,8)+'…'+m.slice(-4) }
+// PRECEDENCE RULE (security-relevant): the server-shortened 'display' block is the
+// DEFAULT source for the identities/documents/inbox cards. Full ids are rendered
+// ONLY in full-detail mode, detected via the PRESENCE of the flag-gated fields
+// (logStats.entriesByDoc / queueStats.byDid — emitted solely under
+// RELAY_DEBUG_STATS). Detection must NOT key on devicesPerDid: it is ALWAYS public
+// and contains full DIDs, so preferring it would show full DIDs on a public broker.
+const isFullDetail = d => !!(((d.logStats || {}).entriesByDoc) || ((d.queueStats || {}).byDid))
 
 $('host').textContent = location.host || 'broker'
 $('brokerline').innerHTML = '<code>' + esc(location.host || '') + '</code>'
@@ -200,11 +208,13 @@ function draw() {
   })
 }
 
-function renderIdentities(d) {
-  // Prefer FULL maps when present (debug flag / box), else the server-shortened array.
-  const online = new Set(d.connectedDids || [])
+function renderIdentities(d, full) {
+  // DEFAULT: server-shortened display.dids. Full DIDs ONLY in full-detail mode
+  // (flag-gated detection, see isFullDetail) — devicesPerDid itself is always
+  // public and MUST NOT drive this decision.
   let rows
-  if (d.devicesPerDid && Object.keys(d.devicesPerDid).length) {
+  if (full && d.devicesPerDid) {
+    const online = new Set(d.connectedDids || [])
     rows = Object.entries(d.devicesPerDid)
       .map(([did, n]) => ({ id: did, dev: Number(n), on: online.has(did) }))
       .sort((a, b) => b.dev - a.dev)
@@ -222,12 +232,14 @@ function renderIdentities(d) {
     : '<div class="empty">no identities connected</div>'
 }
 
-function renderDocuments(d) {
+function renderDocuments(d, full) {
   const ls = d.logStats || {}
   const spaces = Math.max(0, (ls.docCount || 0) - (ls.personalDocCount || 0))
   $('docsAgg').textContent = '(' + spaces + ' spaces · ' + (ls.personalDocCount || 0) + ' personal)'
+  // DEFAULT: server-shortened display.topDocs; full docIds only in full-detail
+  // mode (entriesByDoc is itself flag-gated, so the guard is belt-and-braces).
   let rows
-  if (ls.entriesByDoc && Object.keys(ls.entriesByDoc).length) {
+  if (full && ls.entriesByDoc) {
     const dev = ls.devicesByDoc || {}
     rows = Object.entries(ls.entriesByDoc)
       .sort((a, b) => b[1] - a[1]).slice(0, 12)
@@ -246,12 +258,14 @@ function renderDocuments(d) {
     : '<div class="empty">no documents yet — connect and create a space</div>'
 }
 
-function renderInbox(d) {
+function renderInbox(d, full) {
   const q = d.queueStats || {}
   $('inboxAgg').textContent = '(' + (q.messages || 0) + ' retained · ' + (q.total || 0) + ' pending)'
+  // DEFAULT: server-shortened display.inboxPendingByDid; full recipient DIDs only
+  // in full-detail mode (byDid is itself flag-gated — belt-and-braces guard).
   let rows
-  if (q.byDid && Object.keys(q.byDid).length) {
-    rows = Object.entries(q.byDid).map(([did, n]) => ({ id: shortDid(did), pending: Number(n) }))
+  if (full && q.byDid) {
+    rows = Object.entries(q.byDid).map(([did, n]) => ({ id: did, pending: Number(n) }))
       .sort((a, b) => b.pending - a.pending)
   } else {
     rows = ((d.display && d.display.inboxPendingByDid) || [])
@@ -290,9 +304,11 @@ function render(d) {
   }
   $('rate').textContent = (hist.length ? hist[hist.length - 1] : 0) + ' msg/10s'
 
-  renderIdentities(d)
-  renderDocuments(d)
-  renderInbox(d)
+  // One flag-gated full-detail decision for all three cards (see isFullDetail).
+  const full = isFullDetail(d)
+  renderIdentities(d, full)
+  renderDocuments(d, full)
+  renderInbox(d, full)
 }
 
 // One gated fetch — a later SSE upgrade replaces only this source.

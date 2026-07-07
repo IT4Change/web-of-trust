@@ -203,10 +203,11 @@ describe('Broker-Dashboard serving routes + headers (smoke)', () => {
     await server.stop()
   })
 
-  it('GET /dashboard returns HTML', async () => {
+  it('GET /dashboard returns HTML with Cache-Control: no-store (inline JS must not go stale)', async () => {
     const res = await fetch(`${httpBase}/dashboard`)
     expect(res.ok).toBe(true)
     expect(res.headers.get('content-type')).toContain('text/html')
+    expect(res.headers.get('cache-control')).toBe('no-store')
     const html = await res.text()
     expect(html).toContain('<!DOCTYPE html>')
     expect(html).toContain('/dashboard/data') // the page polls the data endpoint
@@ -216,6 +217,7 @@ describe('Broker-Dashboard serving routes + headers (smoke)', () => {
     const res = await fetch(`${httpBase}/dashboard/`)
     expect(res.ok).toBe(true)
     expect(res.headers.get('content-type')).toContain('text/html')
+    expect(res.headers.get('cache-control')).toBe('no-store')
     expect(await res.text()).toContain('<!DOCTYPE html>')
   })
 
@@ -224,5 +226,35 @@ describe('Broker-Dashboard serving routes + headers (smoke)', () => {
     expect(res.ok).toBe(true)
     expect(res.headers.get('content-type')).toContain('application/json')
     expect(res.headers.get('cache-control')).toBe('no-store')
+  })
+
+  it('pins the render precedence: display block is the DEFAULT, full maps only behind flag-gated detection', async () => {
+    // The dashboard HTML is a static string with inline JS — we pin the
+    // security-relevant PRECEDENCE RULE by string-matching the served source
+    // (pragmatic; a DOM/execution test would need a browser env for no extra
+    // confidence). Rule: full ids render ONLY when full-detail mode is detected
+    // via the PRESENCE of flag-gated fields; devicesPerDid (ALWAYS public, full
+    // DIDs even in prod) must never drive that decision.
+    const html = await (await fetch(`${httpBase}/dashboard`)).text()
+
+    // (1) The detection keys on flag-gated fields ONLY...
+    const detection = html.match(/const isFullDetail = .*/)?.[0] ?? ''
+    expect(detection).toContain('entriesByDoc')
+    expect(detection).toContain('byDid')
+    // ...and NOT on the always-public devicesPerDid.
+    expect(detection).not.toContain('devicesPerDid')
+
+    // (2) Each card consumes its FULL map only behind the full-detail guard...
+    expect(html).toContain('full && d.devicesPerDid')
+    expect(html).toContain('full && ls.entriesByDoc')
+    expect(html).toContain('full && q.byDid')
+    // devicesPerDid appears ONLY in the guarded consumption + a warning comment —
+    // never as an unguarded `if (d.devicesPerDid`.
+    expect(html).not.toContain('if (d.devicesPerDid')
+
+    // (3) ...with the server-shortened display arrays as the default source.
+    expect(html).toContain('display.dids')
+    expect(html).toContain('display.topDocs')
+    expect(html).toContain('display.inboxPendingByDid')
   })
 })
