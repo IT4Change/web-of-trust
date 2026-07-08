@@ -6,6 +6,8 @@ export interface ImportAttestationOptions {
   crypto: ProtocolCryptoAdapter
   didResolver?: DidResolver
   now?: Date
+  /** Clock-skew tolerance for the nbf/exp time gate (mirrors the inbox-envelope gate). */
+  maxClockSkewMs?: number
 }
 
 /**
@@ -53,6 +55,7 @@ export async function importVerifiedAttestationFromVcJws(
       crypto: options.crypto,
       didResolver: options.didResolver,
       now: options.now,
+      maxClockSkewMs: options.maxClockSkewMs,
     })
   } catch {
     throw new Error('Invalid attestation signature')

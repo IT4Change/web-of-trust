@@ -350,16 +350,19 @@ describe('Device delegation protocol verification', () => {
         credentialSubject: { id: validPayload.credentialSubject.id },
       }, 'Missing credentialSubject claim'],
       ['validFrom and nbf mismatch', { ...validPayload, nbf: 1777802401 }, 'Attestation validFrom and nbf differ'],
-      ['future nbf', {
+      // now = 2026-05-03T10:00:00Z. +24h is far beyond the 5min clock-skew tolerance.
+      ['future nbf beyond skew', {
         ...validPayload,
         validFrom: '2026-05-04T10:00:00Z',
         nbf: 1777888800,
         iat: 1777888800,
       }, 'Attestation not yet valid'],
-      ['expired exp', {
+      // exp 6min in the past — beyond the 5min skew, so genuinely expired. iat stays
+      // at now so the delegation-window check is unaffected.
+      ['expired exp beyond skew', {
         ...validPayload,
-        validUntil: '2026-05-03T09:59:59Z',
-        exp: 1777802399,
+        validUntil: '2026-05-03T09:54:00Z',
+        exp: 1777802040,
       }, 'Attestation expired'],
     ]
 
@@ -372,6 +375,25 @@ describe('Device delegation protocol verification', () => {
         name,
       ).rejects.toThrow(expectedError)
     }
+  })
+
+  it('accepts a delegated attestation whose nbf is within the 5min clock skew', async () => {
+    // The clock-skew tolerance is threaded through the delegated-bundle path too:
+    // an nbf a couple of minutes ahead of the receiver clock (now + 2min) must be
+    // accepted, mirroring the direct verifyAttestationVcJws gate. iat stays at now
+    // so the delegation-window check is unaffected.
+    const validPayload = deviceDelegation.delegated_attestation_bundle.attestationPayload
+    const futureNbfPayload = {
+      ...validPayload,
+      validFrom: '2026-05-03T10:02:00Z',
+      nbf: 1777802520,
+    }
+    await expect(
+      verifyDelegatedAttestationBundle(await bundleWith({ attestationPayload: futureNbfPayload }) as any, {
+        crypto: cryptoAdapter,
+        now: new Date('2026-05-03T10:00:00Z'),
+      }),
+    ).resolves.toMatchObject({ attestationPayload: { nbf: 1777802520 } })
   })
 
   it('checks the requested delegated capability explicitly', async () => {

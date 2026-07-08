@@ -13,6 +13,8 @@ export interface AttestationWorkflowOptions {
   crypto: ProtocolCryptoAdapter
   randomId?: () => string
   now?: () => Date
+  /** Clock-skew tolerance for the nbf/exp time gate (mirrors the inbox-envelope gate). */
+  maxClockSkewMs?: number
 }
 
 export interface CreateAttestationInput {
@@ -27,11 +29,13 @@ export class AttestationWorkflow {
   private readonly crypto: ProtocolCryptoAdapter
   private readonly randomId: () => string
   private readonly now: () => Date
+  private readonly maxClockSkewMs?: number
 
   constructor(options: AttestationWorkflowOptions) {
     this.crypto = options.crypto
     this.randomId = options.randomId ?? (() => crypto.randomUUID())
     this.now = options.now ?? (() => new Date())
+    this.maxClockSkewMs = options.maxClockSkewMs
   }
 
   async createAttestation(input: CreateAttestationInput): Promise<Attestation> {
@@ -79,7 +83,11 @@ export class AttestationWorkflow {
   }
 
   verifyAttestationVcJws(jws: string): Promise<AttestationVcPayload> {
-    return verifyAttestationVcJws(jws, { crypto: this.crypto })
+    return verifyAttestationVcJws(jws, {
+      crypto: this.crypto,
+      now: this.now(),
+      maxClockSkewMs: this.maxClockSkewMs,
+    })
   }
 
   exportAttestation(attestation: Attestation): string {
@@ -88,7 +96,11 @@ export class AttestationWorkflow {
   }
 
   async importAttestation(encoded: string): Promise<Attestation> {
-    return importAttestationFromVcJws(encoded, { crypto: this.crypto })
+    return importAttestationFromVcJws(encoded, {
+      crypto: this.crypto,
+      now: this.now(),
+      maxClockSkewMs: this.maxClockSkewMs,
+    })
   }
 
   private createVcPayload(input: {
