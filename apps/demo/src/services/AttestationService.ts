@@ -7,12 +7,101 @@ import type {
   Attestation,
   IdentitySession,
 } from '@web_of_trust/core/types'
-import type { AttestationVcPayload } from '@web_of_trust/core/protocol'
-import { INBOX_MESSAGE_TYPE, isDidcommMessage, isVerificationAttestation } from '@web_of_trust/core/protocol'
+import type { AttestationVcPayload, AttestationReceiptBody } from '@web_of_trust/core/protocol'
+import {
+  ATTESTATION_RECEIPT_BODY_KIND,
+  INBOX_MESSAGE_TYPE,
+  isDidcommMessage,
+  isVerificationAttestation,
+} from '@web_of_trust/core/protocol'
 import { deliverInboxMessage } from '@web_of_trust/core/application'
 import { createAttestationWorkflow, protocolCrypto } from '../runtime/appRuntime'
 
-export type DeliveryStatus = 'sending' | 'queued' | 'delivered' | 'failed'
+/**
+ * Zustellstatus einer Attestation (persistent, "Häkchen"-Modell):
+ * - `sending`/`queued` → in der Outbox, noch nicht am Server
+ * - `delivered` → Häkchen 1: der Server hat sie (Transport-Receipt)
+ * - `acknowledged` → Häkchen 2: die Empfänger-App hat verifiziert+gespeichert
+ *   und einen App-Level Empfangs-Ack zurückgeschickt (Variante A, E2EE)
+ * - `failed` → Transport-Hardfail
+ */
+export type DeliveryStatus = 'sending' | 'queued' | 'delivered' | 'acknowledged' | 'failed'
+
+/**
+ * Persistierbare Status-Strings (Restore-Whitelist). `acknowledged` ist bewusst
+ * enthalten — das zweite Häkchen überlebt Reload/Gerätewechsel (CRDT-synced).
+ */
+const PERSISTABLE_DELIVERY_STATUSES: readonly DeliveryStatus[] = [
+  'sending',
+  'queued',
+  'delivered',
+  'acknowledged',
+  'failed',
+]
+
+/**
+ * Monotonie-Rang der positiven Zustell-Stufen. Zentral in `setStatus`
+ * ausgewertet, damit ALLE Caller (Receipts, Outbox-Init, Retry, Create, Send,
+ * Empfangs-Ack) dieselbe Regel teilen: kein Downgrade, `acknowledged` ist
+ * terminal-positiv (ein spätes `delivered` darf es nicht überschreiben),
+ * `failed` nur aus einem nicht-acknowledged Zustand.
+ */
+const DELIVERY_STATUS_RANK: Record<Exclude<DeliveryStatus, 'failed'>, number> = {
+  sending: 0,
+  queued: 1,
+  delivered: 2,
+  acknowledged: 3,
+}
+
+/**
+ * Erlaubte Zustands-Übergänge (Monotonie):
+ * - unbekannt → alles (Erstsetzung)
+ * - gleicher Status → No-op (spart redundantes persist/notify)
+ * - `→ failed`: nur wenn aktuell NICHT `acknowledged` (terminal-positiv)
+ * - `failed → *`: erlaubt (Retry re-entert die positive Kette)
+ * - `acknowledged → *`: gesperrt (terminal-positiv, kein Downgrade)
+ * - sonst (beide positiv): nur vorwärts (höherer Rang)
+ */
+function isAllowedStatusTransition(
+  current: DeliveryStatus | undefined,
+  next: DeliveryStatus,
+): boolean {
+  if (current === undefined) return true
+  if (current === next) return false
+  if (next === 'failed') return current !== 'acknowledged'
+  if (current === 'failed') return true
+  if (current === 'acknowledged') return false
+  return DELIVERY_STATUS_RANK[next] > DELIVERY_STATUS_RANK[current]
+}
+
+/**
+ * Deterministische, wire-konforme (UUID v4) Message-ID für den Empfangs-Ack,
+ * eindeutig pro (jti, SENDER-DID). Zweck:
+ * - Eigene Retries (gleiche jti, gleiche eigene DID) → gleiche ID → RX-Dedup
+ *   beim Sender greift weiter (kein Doppel-Processing).
+ * - Anti-Suppression: ein FREMDER (der die jti kennt) leitet mit SEINER DID
+ *   eine ANDERE ID ab und belegt damit NICHT den History-Slot des legitimen
+ *   Empfängers. Ohne die Sender-Bindung könnte ein Angreifer den Slot vorab
+ *   terminal belegen (Forgery-Check verwirft ihn zwar → kein falsches Häkchen,
+ *   ABER der spätere echte Receipt derselben jti würde als Replay verworfen →
+ *   Häkchen 2 erschiene nie: DoS auf die Bestätigung).
+ * Wire-Vorgabe "id MUSS UUID v4 sein" (assertPlaintextMessage): SHA-256 über
+ * (Domain-Prefix + jti + Sender-DID), erste 16 Bytes als v4.
+ */
+async function deriveReceiptMessageId(jti: string, senderDid: string): Promise<string> {
+  const digest = await protocolCrypto.sha256(
+    new TextEncoder().encode(`attestation-receipt:${jti}:${senderDid}`),
+  )
+  return uuidV4FromBytes(digest)
+}
+
+function uuidV4FromBytes(bytes: Uint8Array): string {
+  const b = bytes.slice(0, 16)
+  b[6] = (b[6] & 0x0f) | 0x40 // Version 4
+  b[8] = (b[8] & 0x3f) | 0x80 // Variant 10
+  const hex = Array.from(b, (byte) => byte.toString(16).padStart(2, '0')).join('')
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`
+}
 
 /** Löst den X25519-Encryption-Key eines Empfängers auf (Sync 004 keyAgreement im DID-Dokument). */
 export type RecipientEncryptionKeyResolver = (did: string) => Promise<Uint8Array | null>
@@ -90,7 +179,7 @@ export class AttestationService {
   /** Restore delivery statuses from persistent storage (call on app startup) */
   restoreDeliveryStatuses(statuses: Map<string, string>): void {
     for (const [id, status] of statuses) {
-      if (['sending', 'queued', 'delivered', 'failed'].includes(status)) {
+      if ((PERSISTABLE_DELIVERY_STATUSES as readonly string[]).includes(status)) {
         this.deliveryStatus.set(id, status as DeliveryStatus)
       }
     }
@@ -119,10 +208,39 @@ export class AttestationService {
   }
 
   private setStatus(attestationId: string, status: DeliveryStatus): void {
+    // Zentraler Monotonie-Guard (greift für ALLE Caller): kein Downgrade,
+    // `acknowledged` ist terminal-positiv, `failed` nicht aus `acknowledged`.
+    const current = this.deliveryStatus.get(attestationId)
+    if (!isAllowedStatusTransition(current, status)) return
     this.deliveryStatus = new Map(this.deliveryStatus)
     this.deliveryStatus.set(attestationId, status)
     this.notifySubscribers()
     this.persistFn?.(attestationId, status).catch(() => {})
+  }
+
+  /**
+   * Häkchen 2: der Aussteller hat einen App-Level Empfangs-Ack (Variante A)
+   * erhalten. Setzt `acknowledged` NUR wenn
+   * 1. der Sender diese Attestation kennt (`deliveryStatus.has(jti)`), UND
+   * 2. der Receipt-Sender (aus dem verifizierten Inner-JWS) der ursprüngliche
+   *    Empfänger der Attestation ist (`attestation.to === receiptSenderDid`).
+   *
+   * (2) ist die AUTHENTIZITÄTS-Prüfung: der Inbox-Empfang authentifiziert nur,
+   * DASS ein Absender die ECIES-Nachricht signiert hat — NICHT dass er der
+   * legitime Empfänger der Attestation war. Ohne diese Bindung könnte jeder,
+   * der dem Aussteller eine Inbox-Nachricht schicken kann und die jti kennt,
+   * das zweite Häkchen fälschen. Bei Fehlschlag: No-op + generischer Debug-Log
+   * (leakt weder jti noch DID). Der Monotonie-Guard in `setStatus` schützt
+   * zusätzlich gegen ein späteres Downgrade.
+   */
+  async markAcknowledged(jti: string, receiptSenderDid: string): Promise<void> {
+    if (!this.deliveryStatus.has(jti)) return
+    const attestation = await this.storage.getAttestation(jti)
+    if (!attestation || attestation.to !== receiptSenderDid) {
+      console.debug('[AttestationService] Receipt from unexpected sender, ignored')
+      return
+    }
+    this.setStatus(jti, 'acknowledged')
   }
 
   private notifySubscribers(): void {
@@ -301,6 +419,46 @@ export class AttestationService {
     })
     this.deliveryMessageIds.set(envelope.id, attestation.id)
     return this.messaging.send(envelope)
+  }
+
+  /**
+   * Variante A (zweites Häkchen): App-Level Empfangs-Ack. Der Empfänger einer
+   * Attestation schickt nach erfolgreichem Verify+Store einen verschlüsselten
+   * `inbox/1.0`-Body `{ kind:'attestation-receipt', jti, status:'received' }`
+   * (ECIES an die `iss`-DID des Ausstellers) zurück — KEIN neuer äußerer
+   * DIDComm-Typ, kein Relay-Change. Body-agnostischer Versand über denselben
+   * Inner-JWS+ECIES-Weg wie die Attestation selbst.
+   *
+   * Best-effort: der Aufrufer (Listener) fängt Fehler ab und rollt die bereits
+   * gespeicherte Attestation NICHT zurück (Häkchen 2 bleibt beim Sender aus).
+   */
+  async sendReceiptAck(issuerDid: string, jti: string): Promise<void> {
+    if (!this.messaging) throw new Error('Messaging not configured')
+    const identity = this.deliveryConfig?.identity
+    const resolver = this.deliveryConfig?.resolveRecipientEncryptionKey
+    if (!identity || !resolver) throw new Error('Attestation delivery not configured (configureDelivery)')
+
+    const recipientKey = await resolver(issuerDid)
+    if (!recipientKey) {
+      // Kein keyAgreement-Key des Ausstellers (Sync 004) → kein spec-konformer
+      // Ack möglich. Werfen: der Listener behandelt das best-effort.
+      throw new Error(`No encryption key published for ${issuerDid}`)
+    }
+
+    // ID pro (jti, eigene DID) — Anti-Suppression (siehe deriveReceiptMessageId).
+    const messageId = await deriveReceiptMessageId(jti, identity.getDid())
+    const body: AttestationReceiptBody = { kind: ATTESTATION_RECEIPT_BODY_KIND, jti, status: 'received' }
+    const envelope = await deliverInboxMessage({
+      type: INBOX_MESSAGE_TYPE,
+      body,
+      from: identity.getDid(),
+      to: issuerDid,
+      recipientEncryptionPublicKey: recipientKey,
+      sign: (input) => identity.signEd25519(input),
+      crypto: protocolCrypto,
+      randomId: () => messageId,
+    })
+    await this.messaging.send(envelope)
   }
 
   /**

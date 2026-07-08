@@ -125,6 +125,7 @@ function buildListenerDeps(
     attestationService: {
       decodeIncomingAttestation: decodeStub,
       saveIncomingAttestation,
+      sendReceiptAck: vi.fn(async () => {}),
     },
     verificationWorkflow: {
       acceptVerifiedVerificationAttestation: () => { throw new Error('not used in this test') },

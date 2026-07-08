@@ -27,6 +27,7 @@ import { HttpDiscoveryAdapter } from '@web_of_trust/core/adapters/discovery/http
 import { WebCryptoProtocolCryptoAdapter } from '@web_of_trust/core/protocol-adapters'
 import { signEnvelope } from '@web_of_trust/core/crypto'
 import {
+  ATTESTATION_RECEIPT_BODY_KIND,
   INBOX_MESSAGE_TYPE,
   assertAttestationDeliveryBody,
   createAckMessage,
@@ -34,11 +35,12 @@ import {
   decodeBase64Url,
   encryptionKeyMultibaseFromDidDocument,
   evaluateInboxAckDisposition,
+  isAttestationReceiptBody,
   isDidcommMessage,
   parseQrChallenge,
   x25519MultibaseToPublicKeyBytes,
 } from '@web_of_trust/core/protocol'
-import type { DidcommPlaintextMessage, InboxAckLocalOutcome } from '@web_of_trust/core/protocol'
+import type { AttestationReceiptBody, DidcommPlaintextMessage, InboxAckLocalOutcome } from '@web_of_trust/core/protocol'
 import { deliverInboxMessage, receiveInboxMessage } from '@web_of_trust/core/application'
 import type { StorageAdapter, ReactiveStorageAdapter } from '@web_of_trust/core/ports'
 import type { SpaceInfo, Contact, Attestation, MessageEnvelope, MessageType } from '@web_of_trust/core/types'
@@ -322,6 +324,56 @@ export class WotCliClient {
     await this.outboxAdapter.send(envelope)
   }
 
+  /**
+   * Variante A (zweites Häkchen): App-Level Empfangs-Ack an den Aussteller.
+   * Body `{ kind:'attestation-receipt', jti, status:'received' }` als normale
+   * inbox/1.0 (E2EE, kein eigener äußerer Typ, kein Relay-Change). Best-effort:
+   * ohne keyAgreement-Key des Ausstellers wird der Ack ausgelassen (die
+   * gespeicherte Attestation bleibt).
+   */
+  private async deliverReceiptAck(issuerDid: string, jti: string): Promise<void> {
+    if (!this.outboxAdapter) return
+    const recipientKey = await this.resolveRecipientEncryptionKey(issuerDid)
+    if (!recipientKey) {
+      console.warn(`[wot-cli] No encryption key for ${issuerDid} — skipping receipt-ack`)
+      return
+    }
+    const senderDid = this.requireIdentity().getDid()
+    // ID pro (jti, eigene DID) — Anti-Suppression (siehe receiptMessageId).
+    const messageId = await this.receiptMessageId(jti, senderDid)
+    const body: AttestationReceiptBody = { kind: ATTESTATION_RECEIPT_BODY_KIND, jti, status: 'received' }
+    const envelope = await deliverInboxMessage({
+      type: INBOX_MESSAGE_TYPE,
+      body,
+      from: senderDid,
+      to: issuerDid,
+      recipientEncryptionPublicKey: recipientKey,
+      sign: (input) => this.requireIdentity().signEd25519(input),
+      crypto: this.protocolCrypto,
+      randomId: () => messageId,
+    })
+    await this.outboxAdapter.send(envelope)
+  }
+
+  /**
+   * Deterministische, wire-konforme (UUID v4) Message-ID für den Empfangs-Ack,
+   * eindeutig pro (jti, SENDER-DID): eigene Retries dedupen weiter, aber ein
+   * fremder Absender (der die jti kennt) leitet eine ANDERE ID ab und belegt
+   * damit nicht den History-Slot des legitimen Empfängers (Anti-Suppression,
+   * s. Demo AttestationService.deriveReceiptMessageId). SHA-256 über
+   * (Domain-Prefix + jti + Sender-DID), erste 16 Bytes als v4.
+   */
+  private async receiptMessageId(jti: string, senderDid: string): Promise<string> {
+    const digest = await this.protocolCrypto.sha256(
+      new TextEncoder().encode(`attestation-receipt:${jti}:${senderDid}`),
+    )
+    const b = digest.slice(0, 16)
+    b[6] = (b[6] & 0x0f) | 0x40
+    b[8] = (b[8] & 0x3f) | 0x80
+    const hex = Array.from(b, (byte) => byte.toString(16).padStart(2, '0')).join('')
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`
+  }
+
   /** X25519-Empfänger-Key aus dem keyAgreement des DID-Dokuments (Sync 004). */
   private async resolveRecipientEncryptionKey(did: string): Promise<Uint8Array | null> {
     if (!this.discovery) return null
@@ -431,6 +483,32 @@ export class WotCliClient {
       return
     }
 
+    // Body-Discriminator (Variante A): ein App-Level Empfangs-Ack reist als
+    // normale inbox/1.0 und wird HIER vom Attestation-Pfad abgezweigt — VOR
+    // assertAttestationDeliveryBody, sonst stauen Receipt-Bodies als malformed.
+    // Die CLI trackt keinen Häkchen-Status; recognize + konklusiv (record + ack,
+    // Queue-Hygiene). Ein Ack löst NIE einen weiteren Ack aus (kein Pingpong).
+    if (isAttestationReceiptBody(result.body)) {
+      // Authentizität analog zur Demo: ein Receipt gilt nur als echt, wenn der
+      // (per Inner-JWS authentifizierte) Sender der ursprüngliche Empfänger der
+      // Attestation ist (`attestation.to`). Ein fremder Receipt wird nicht als
+      // bestätigt geloggt — aber IMMER konkludiert (record + ack, Queue-Hygiene),
+      // sonst würde eine gefälschte Nachricht endlos redeliveren.
+      const known = this.storage ? await this.storage.getAttestation(result.body.jti) : null
+      if (known && known.to === result.senderDid) {
+        console.log(`[wot-cli] Attestation receipt received for ${result.body.jti}`)
+      } else {
+        console.debug('[wot-cli] Attestation receipt from unexpected sender, ignored')
+      }
+      await this.concludeByDisposition(
+        result.outerId,
+        { kind: 'applied', durable: true },
+        'unique',
+        result.recordProcessed,
+      )
+      return
+    }
+
     let outcome: InboxAckLocalOutcome
     try {
       assertAttestationDeliveryBody(result.body)
@@ -492,6 +570,16 @@ export class WotCliClient {
       await this.maybeSendCounterVerification(attestation)
     } catch (err) {
       console.error('[wot-cli] Attestation follow-up failed:', err)
+    }
+
+    // CLI-Symmetrie (Variante A, zweites Häkchen): App-Level Empfangs-Ack an
+    // den Aussteller nach Verify+Store, damit ein Demo-Sender sein zweites
+    // Häkchen bekommt. EIGENER best-effort-Block — ein Fehler in den Follow-ups
+    // oben darf den Empfangs-Ack nicht verhindern (und umgekehrt).
+    try {
+      await this.deliverReceiptAck(attestation.from, attestation.id)
+    } catch (err) {
+      console.error('[wot-cli] Receipt-ack send failed:', err)
     }
     return { kind: 'applied', durable: true }
   }

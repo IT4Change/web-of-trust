@@ -5,6 +5,7 @@ import {
   createDidKeyResolver,
   decodeBase64Url,
   evaluateInboxAckDisposition,
+  isAttestationReceiptBody,
   isDidcommMessage,
 } from '@web_of_trust/core/protocol'
 import type {
@@ -39,12 +40,37 @@ export type AttestationDeliveryListener = (
 ) => void | Promise<void>
 
 /**
+ * App-Level Empfangs-Ack (Variante A, "zweites Häkchen"): kommt beim
+ * ursprünglichen Aussteller einer Attestation an. Reist als NORMALE
+ * `inbox/1.0`-Nachricht mit Body-Discriminator (kein eigener äußerer Typ) und
+ * wird HIER vom Attestation-Pfad abgezweigt — sie durchläuft `receiveInboxMessage`
+ * (Decrypt + Inner-JWS + Replay), aber NICHT `assertAttestationDeliveryBody`.
+ */
+export interface IncomingAttestationReceipt {
+  /** Attestation-ID (= VC-jti), die der Empfänger bestätigt. */
+  jti: string
+  /** Authentifizierter Inner-JWS-Sender (der Attestation-Empfänger). */
+  senderDid: string
+  outerId: string
+}
+
+export type AttestationReceiptListener = (
+  receipt: IncomingAttestationReceipt,
+) => void | Promise<void>
+
+/**
  * Gepufferte Zustellung samt Record-Schritt: recordProcessed gehört zum
  * Workflow-Result und wird erst am konklusiven Dispositions-Punkt aufgerufen
  * (Sync 003 Z.466 + Z.620-622) — der Listener-Payload bleibt davon frei.
  */
 interface PendingInboxDelivery {
   delivery: IncomingAttestationDelivery
+  recordProcessed: () => Promise<void>
+}
+
+/** Wie PendingInboxDelivery, für den Empfangs-Ack-Pfad (Variante A). */
+interface PendingInboxReceipt {
+  receipt: IncomingAttestationReceipt
   recordProcessed: () => Promise<void>
 }
 
@@ -86,6 +112,8 @@ export class InboxReceptionHost {
    * Recovery-Pfad.
    */
   private pendingDeliveries: PendingInboxDelivery[] = []
+  private receiptListeners = new Set<AttestationReceiptListener>()
+  private pendingReceipts: PendingInboxReceipt[] = []
   private unsubscribe: (() => void) | null = null
 
   constructor(options: InboxReceptionHostOptions) {
@@ -113,6 +141,8 @@ export class InboxReceptionHost {
     this.unsubscribe = null
     this.listeners.clear()
     this.pendingDeliveries = []
+    this.receiptListeners.clear()
+    this.pendingReceipts = []
   }
 
   /** Typed Attestation-Event (VE-9) — Muster `onSpaceInvite` aus #189. */
@@ -129,6 +159,28 @@ export class InboxReceptionHost {
     }
     return () => {
       this.listeners.delete(listener)
+    }
+  }
+
+  /**
+   * Empfangs-Ack-Event (Variante A, zweites Häkchen): der ursprüngliche
+   * Aussteller lauscht hier auf App-Level Empfangs-Bestätigungen. Analog
+   * `onAttestation`, eigener Registry — ein Ack löst NIE einen weiteren Ack aus
+   * (kein Ack-Pingpong; der Receipt-Pfad ruft den Attestation-Listener nie).
+   */
+  onAttestationReceipt(listener: AttestationReceiptListener): () => void {
+    this.receiptListeners.add(listener)
+    if (this.pendingReceipts.length > 0) {
+      const pending = this.pendingReceipts.splice(0)
+      void (async () => {
+        for (const { receipt, recordProcessed } of pending) {
+          const outcome = await this.dispatchReceipt(receipt)
+          await this.concludeByDisposition(receipt.outerId, outcome, 'unique', recordProcessed)
+        }
+      })()
+    }
+    return () => {
+      this.receiptListeners.delete(listener)
     }
   }
 
@@ -161,6 +213,29 @@ export class InboxReceptionHost {
       // K1-Pflicht: fehlgeschlagene Verarbeitung → KEIN ack/1.0 — die Nachricht
       // bleibt in der Relay-Queue (Redelivery-Pfad).
       console.warn('[InboxReception] Rejected inbox/1.0 message:', result.reason)
+      return
+    }
+
+    // Body-Discriminator (Variante A) VOR assertAttestationDeliveryBody: ein
+    // App-Level Empfangs-Ack `{ kind:'attestation-receipt', jti, status }` reist
+    // als normale inbox/1.0 (kein eigener äußerer Typ) und zweigt HIER ab. Der
+    // Receipt-Pfad ruft NIE den Attestation-Listener → kein Ack-auf-Ack.
+    if (isAttestationReceiptBody(result.body)) {
+      const receipt: IncomingAttestationReceipt = {
+        jti: result.body.jti,
+        senderDid: result.senderDid,
+        outerId: result.outerId,
+      }
+      if (this.receiptListeners.size === 0) {
+        // In-Memory gepuffert = nicht durabel → kein ack, kein record (analog
+        // pendingDeliveries); der Listener-Flush wendet an + löst die Disposition.
+        if (!this.pendingReceipts.some((pending) => pending.receipt.outerId === receipt.outerId)) {
+          this.pendingReceipts.push({ receipt, recordProcessed: result.recordProcessed })
+        }
+        return
+      }
+      const outcome = await this.dispatchReceipt(receipt)
+      await this.concludeByDisposition(receipt.outerId, outcome, 'unique', result.recordProcessed)
       return
     }
 
@@ -210,6 +285,21 @@ export class InboxReceptionHost {
       return { kind: 'applied', durable: true }
     } catch (err) {
       console.debug('[InboxReception] Attestation listener failed:', err)
+      return { kind: 'processing-incomplete', waitingOn: 'durable-apply' }
+    }
+  }
+
+  private async dispatchReceipt(receipt: IncomingAttestationReceipt): Promise<InboxAckLocalOutcome> {
+    try {
+      for (const listener of [...this.receiptListeners]) {
+        await listener(receipt)
+      }
+      // markAcknowledged ist idempotent + deterministisch → applied (konklusiv):
+      // Message-ID recorden + Transport-ack (Queue-Hygiene). Ein erneuter Ack
+      // desselben jti wird über die Message-ID-History als Replay dedupliziert.
+      return { kind: 'applied', durable: true }
+    } catch (err) {
+      console.debug('[InboxReception] Attestation receipt listener failed:', err)
       return { kind: 'processing-incomplete', waitingOn: 'durable-apply' }
     }
   }
