@@ -290,6 +290,7 @@ export const en: Translations = {
     deliverySending: 'Sending...',
     deliveryQueued: 'In queue',
     deliveryDelivered: 'Delivered',
+    deliveryAcknowledged: 'Confirmed by recipient',
     deliveryFailed: 'Delivery failed',
     retryButton: 'Retry',
   },

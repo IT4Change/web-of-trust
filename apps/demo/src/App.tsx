@@ -57,7 +57,17 @@ function AttestationListenerEffect() {
       setPendingIncoming,
       triggerAttestationDialog,
     })
-    return inboxReception.onAttestation(listener)
+    const unsubAttestation = inboxReception.onAttestation(listener)
+    // Zweites Häkchen (Variante A): eingehender App-Level Empfangs-Ack →
+    // acknowledged, aber NUR für dem Sender bekannte jti (markAcknowledged ist
+    // ein No-op bei unbekannter jti).
+    const unsubReceipt = inboxReception.onAttestationReceipt((receipt) => {
+      attestationService.markAcknowledged(receipt.jti)
+    })
+    return () => {
+      unsubAttestation()
+      unsubReceipt()
+    }
   }, [inboxReception, attestationService, triggerAttestationDialog, setChallengeNonce, setPendingIncoming])
 
   return null

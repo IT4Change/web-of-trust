@@ -288,6 +288,7 @@ export const de = {
     deliverySending: 'Wird gesendet...',
     deliveryQueued: 'In Warteschlange',
     deliveryDelivered: 'Zugestellt',
+    deliveryAcknowledged: 'Vom Empfänger bestätigt',
     deliveryFailed: 'Zustellung fehlgeschlagen',
     retryButton: 'Erneut senden',
   },

@@ -22,6 +22,12 @@ export interface AttestationListenerDeps {
       payload: AttestationVcPayload
     }>
     saveIncomingAttestation(attestation: Attestation): Promise<Attestation>
+    /**
+     * Variante A (zweites Häkchen): App-Level Empfangs-Ack an die `iss`-DID des
+     * Ausstellers, NACH erfolgreichem Verify+Store. Best-effort — Fehler dürfen
+     * die bereits gespeicherte Attestation nicht zurückrollen.
+     */
+    sendReceiptAck(issuerDid: string, jti: string): Promise<void>
   }
   verificationWorkflow: {
     acceptVerifiedVerificationAttestation(
@@ -107,18 +113,25 @@ export function createAttestationListener(deps: AttestationListenerDeps): Attest
         // isNew-Gate hat den Dialog dann still verschluckt. Aufgelöstes
         // unterdrückt der generische OPEN-Gate (¬resolved) im Provider.
         await saveUnlessDuplicate(deps, attestation)
+        // Zweites Häkchen: verifiziert+gespeichert → Empfangs-Ack (Variante A).
+        await ackReceipt(deps, attestation)
         deps.setChallengeNonce(null)
         deps.setPendingIncoming({ attestation, fromDid: attestation.from })
       } else if (decision.decision === 'accept-mutual-in-person') {
         // Duplikat-Counter-Verifications (z.B. Redelivery) sind konklusiv egal.
         await saveUnlessDuplicate(deps, attestation)
+        await ackReceipt(deps, attestation)
       }
+      // Alle anderen Verification-Decisions kehren OHNE Speicherung zurück →
+      // KEIN Ack (ehrliche Semantik: Reject-Pfad, z.B. Clock-Skew).
       return
     }
 
     // Save idempotent; Trigger immer — der generische OPEN-Gate (¬resolved)
     // entscheidet, ob der Dialog erscheint (siehe accept-in-person oben).
     await saveUnlessDuplicate(deps, attestation)
+    // Zweites Häkchen: verifiziert+gespeichert → Empfangs-Ack (Variante A).
+    await ackReceipt(deps, attestation)
     const name = deps.findContactName(attestation.from) || 'Kontakt'
     deps.triggerAttestationDialog({
       attestationId: attestation.id,
@@ -144,6 +157,26 @@ async function saveUnlessDuplicate(
   } catch (error) {
     if (error instanceof DuplicateAttestationError) return false
     throw error
+  }
+}
+
+/**
+ * Variante A (zweites Häkchen): Empfangs-Ack an den Aussteller senden, NACH
+ * erfolgreichem Verify+Store. Best-effort — jeder Fehler (kein keyAgreement-Key
+ * des Ausstellers, Transport-Fehler) wird verschluckt: die bereits gespeicherte
+ * Attestation bleibt, der Transport-Ack der Original-Nachricht ist unberührt,
+ * das zweite Häkchen bleibt beim Sender einfach aus. Wird auch bei
+ * DuplicateAttestationError erneut gesendet (der Aussteller hat evtl. den ersten
+ * Ack verpasst); die stabile Ack-ID sorgt für RX-Dedup beim Sender.
+ */
+async function ackReceipt(
+  deps: Pick<AttestationListenerDeps, 'attestationService'>,
+  attestation: Attestation,
+): Promise<void> {
+  try {
+    await deps.attestationService.sendReceiptAck(attestation.from, attestation.id)
+  } catch (error) {
+    console.debug('[attestationListener] Receipt-ack send failed (best-effort):', error)
   }
 }
 
