@@ -338,12 +338,14 @@ export class WotCliClient {
       console.warn(`[wot-cli] No encryption key for ${issuerDid} — skipping receipt-ack`)
       return
     }
-    const messageId = await this.receiptMessageId(jti)
+    const senderDid = this.requireIdentity().getDid()
+    // ID pro (jti, eigene DID) — Anti-Suppression (siehe receiptMessageId).
+    const messageId = await this.receiptMessageId(jti, senderDid)
     const body: AttestationReceiptBody = { kind: ATTESTATION_RECEIPT_BODY_KIND, jti, status: 'received' }
     const envelope = await deliverInboxMessage({
       type: INBOX_MESSAGE_TYPE,
       body,
-      from: this.requireIdentity().getDid(),
+      from: senderDid,
       to: issuerDid,
       recipientEncryptionPublicKey: recipientKey,
       sign: (input) => this.requireIdentity().signEd25519(input),
@@ -354,12 +356,17 @@ export class WotCliClient {
   }
 
   /**
-   * Deterministische, wire-konforme (UUID v4) Message-ID für den Empfangs-Ack:
-   * aus der jti abgeleitet (RX-Dedup beim Sender per Message-ID-History), innerhalb
-   * der Wire-Vorgabe "id MUSS UUID v4 sein". SHA-256 → erste 16 Bytes als v4.
+   * Deterministische, wire-konforme (UUID v4) Message-ID für den Empfangs-Ack,
+   * eindeutig pro (jti, SENDER-DID): eigene Retries dedupen weiter, aber ein
+   * fremder Absender (der die jti kennt) leitet eine ANDERE ID ab und belegt
+   * damit nicht den History-Slot des legitimen Empfängers (Anti-Suppression,
+   * s. Demo AttestationService.deriveReceiptMessageId). SHA-256 über
+   * (Domain-Prefix + jti + Sender-DID), erste 16 Bytes als v4.
    */
-  private async receiptMessageId(jti: string): Promise<string> {
-    const digest = await this.protocolCrypto.sha256(new TextEncoder().encode(`attestation-receipt:${jti}`))
+  private async receiptMessageId(jti: string, senderDid: string): Promise<string> {
+    const digest = await this.protocolCrypto.sha256(
+      new TextEncoder().encode(`attestation-receipt:${jti}:${senderDid}`),
+    )
     const b = digest.slice(0, 16)
     b[6] = (b[6] & 0x0f) | 0x40
     b[8] = (b[8] & 0x3f) | 0x80

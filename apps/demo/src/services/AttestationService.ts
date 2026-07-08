@@ -75,14 +75,23 @@ function isAllowedStatusTransition(
 }
 
 /**
- * Deterministische, wire-konforme (UUID v4) Message-ID für den Empfangs-Ack:
- * abgeleitet aus der jti, damit ein erneut gesendeter Ack (Duplikat-Empfang)
- * beim Sender per Message-ID-History dedupliziert (RX-Dedup) — das Spec-Ziel
- * "ID-stabil" innerhalb der Wire-Vorgabe "id MUSS UUID v4 sein"
- * (assertPlaintextMessage). SHA-256 über die jti, erste 16 Bytes als v4.
+ * Deterministische, wire-konforme (UUID v4) Message-ID für den Empfangs-Ack,
+ * eindeutig pro (jti, SENDER-DID). Zweck:
+ * - Eigene Retries (gleiche jti, gleiche eigene DID) → gleiche ID → RX-Dedup
+ *   beim Sender greift weiter (kein Doppel-Processing).
+ * - Anti-Suppression: ein FREMDER (der die jti kennt) leitet mit SEINER DID
+ *   eine ANDERE ID ab und belegt damit NICHT den History-Slot des legitimen
+ *   Empfängers. Ohne die Sender-Bindung könnte ein Angreifer den Slot vorab
+ *   terminal belegen (Forgery-Check verwirft ihn zwar → kein falsches Häkchen,
+ *   ABER der spätere echte Receipt derselben jti würde als Replay verworfen →
+ *   Häkchen 2 erschiene nie: DoS auf die Bestätigung).
+ * Wire-Vorgabe "id MUSS UUID v4 sein" (assertPlaintextMessage): SHA-256 über
+ * (Domain-Prefix + jti + Sender-DID), erste 16 Bytes als v4.
  */
-async function deriveReceiptMessageId(jti: string): Promise<string> {
-  const digest = await protocolCrypto.sha256(new TextEncoder().encode(`attestation-receipt:${jti}`))
+async function deriveReceiptMessageId(jti: string, senderDid: string): Promise<string> {
+  const digest = await protocolCrypto.sha256(
+    new TextEncoder().encode(`attestation-receipt:${jti}:${senderDid}`),
+  )
   return uuidV4FromBytes(digest)
 }
 
@@ -436,7 +445,8 @@ export class AttestationService {
       throw new Error(`No encryption key published for ${issuerDid}`)
     }
 
-    const messageId = await deriveReceiptMessageId(jti)
+    // ID pro (jti, eigene DID) — Anti-Suppression (siehe deriveReceiptMessageId).
+    const messageId = await deriveReceiptMessageId(jti, identity.getDid())
     const body: AttestationReceiptBody = { kind: ATTESTATION_RECEIPT_BODY_KIND, jti, status: 'received' }
     const envelope = await deliverInboxMessage({
       type: INBOX_MESSAGE_TYPE,

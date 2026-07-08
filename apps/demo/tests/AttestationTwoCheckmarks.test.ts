@@ -477,6 +477,62 @@ describe('InboxReceptionHost — Receipt-Pfad (Sender-Seite, zweites Häkchen)',
     })
     unsub()
   })
+
+  it('ANTI-SUPPRESSION: ein fremder Receipt (gleiche jti) verdrängt Bobs legitime Bestätigung NICHT', async () => {
+    const alice = await createIdentity('anti-supp-alice')   // Aussteller = lokaler Sender
+    const bob = await createIdentity('anti-supp-bob')       // legitimer Empfänger (attestation.to)
+    const eve = await createIdentity('anti-supp-eve')       // Angreifer, kennt die jti
+    const messaging = createMessaging()
+    const host = new InboxReceptionHost({ messaging: messaging.adapter, identity: alice, crypto: cryptoAdapter })
+    host.start()
+
+    const storage = createMockStorage()
+    await storage.saveAttestation({
+      id: AID, from: alice.getDid(), to: bob.getDid(),
+      claim: 'x', createdAt: '2026-06-10T10:00:00Z', vcJws: 'header.payload.signature',
+    })
+    const service = new AttestationService(storage)
+    service.restoreDeliveryStatuses(new Map([[AID, 'delivered']]))
+
+    let receiptListenerCalls = 0
+    host.onAttestationReceipt((receipt) => {
+      receiptListenerCalls++
+      return service.markAcknowledged(receipt.jti, receipt.senderDid)
+    })
+
+    // Echten Receipt via sendReceiptAck bauen → deterministische ID pro (jti, sender).
+    async function realReceipt(sender: PublicIdentitySession): Promise<DidcommPlaintextMessage<object>> {
+      const captured = createMessaging()
+      const s = new AttestationService(createMockStorage())
+      s.setMessaging(captured.adapter)
+      s.configureDelivery({ identity: sender, resolveRecipientEncryptionKey: async () => alice.x25519PublicKey })
+      await s.sendReceiptAck(alice.getDid(), AID)
+      return inboxMessages(captured.sent)[0]
+    }
+
+    const eveReceipt = await realReceipt(eve)
+    const bobReceipt = await realReceipt(bob)
+    // Kern des Fixes: pro (jti, sender) eindeutige Envelope-ID.
+    expect(eveReceipt.id).not.toBe(bobReceipt.id)
+
+    // 1. Eves Receipt zuerst: Forgery-Check verwirft ihn (kein Häkchen), aber sein
+    //    History-Slot (Eves ID) ist jetzt belegt.
+    await messaging.deliver(eveReceipt)
+    expect(service.getDeliveryStatus(AID)).toBe('delivered')
+
+    // 2. Bobs legitimer Receipt (ANDERE ID) → NICHT als Replay verworfen →
+    //    erreicht markAcknowledged → acknowledged. Ohne die Sender-Bindung hätte
+    //    Eve Bobs Slot vorab belegt und diese Bestätigung unterdrückt.
+    await messaging.deliver(bobReceipt)
+    expect(service.getDeliveryStatus(AID)).toBe('acknowledged')
+
+    // Retry-Dedup bleibt erhalten: Bobs identischer Receipt (gleiche jti + Bob) →
+    // gleiche ID → Replay → KEIN zweites Processing (Listener nicht erneut gerufen).
+    const callsAfterBob = receiptListenerCalls
+    await messaging.deliver(bobReceipt)
+    expect(service.getDeliveryStatus(AID)).toBe('acknowledged')
+    expect(receiptListenerCalls).toBe(callsAfterBob)
+  })
 })
 
 // --- 5. Host + echter Listener: Reject sendet keinen App-Receipt -----------
