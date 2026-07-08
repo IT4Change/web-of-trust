@@ -7,6 +7,7 @@ import {
   assertAttestationDeliveryBody,
   createDidKeyResolver,
   decodeBase64Url,
+  isAttestationReceiptBody,
   isDidcommMessage,
   resolveDidKey,
   x25519PublicKeyToMultibase,
@@ -232,10 +233,27 @@ describe('WotCliClient inbox/1.0 attestation delivery (K2/K3)', () => {
       }),
     ])
 
-    // Counter-Attestation reist ebenfalls als inbox/1.0 an Bob.
-    const counterEnvelopes = inboxMessages(alice.outbox)
-    expect(counterEnvelopes).toHaveLength(1)
-    expect(counterEnvelopes[0].to).toEqual([bobIdentity.getDid()])
+    // Alice sendet ZWEI inbox/1.0 an Bob: die Counter-Attestation ({vcJws}) und
+    // den App-Level Empfangs-Ack (Variante A, zweites Häkchen) für Bobs
+    // eingehende Verification. Entschlüsseln + über den Body-Discriminator trennen.
+    const aliceInbox = inboxMessages(alice.outbox)
+    expect(aliceInbox).toHaveLength(2)
+    const aliceInboxDecoded = await Promise.all(
+      aliceInbox.map(async (env) => ({ env, result: await receiveAsRecipient(env, bobIdentity) })),
+    )
+    const counterEntry = aliceInboxDecoded.find(
+      ({ result }) => result.decision === 'accept' && !isAttestationReceiptBody(result.body),
+    )
+    const receiptEntry = aliceInboxDecoded.find(
+      ({ result }) => result.decision === 'accept' && isAttestationReceiptBody(result.body),
+    )
+    expect(counterEntry).toBeDefined()
+    expect(receiptEntry).toBeDefined()
+    expect(counterEntry!.env.to).toEqual([bobIdentity.getDid()])
+    expect(receiptEntry!.env.to).toEqual([bobIdentity.getDid()])
+    // Der Empfangs-Ack bestätigt Bobs eingehende Verification (jti = incoming.id).
+    if (receiptEntry!.result.decision !== 'accept') throw new Error('unreachable')
+    expect((receiptEntry!.result.body as { jti: string }).jti).toBe(incoming?.id)
 
     // ack/1.0 nach Anwendung (K1): thid = body.messageId = Original-id.
     const acks = ackMessages(alice.outbox)
@@ -245,7 +263,7 @@ describe('WotCliClient inbox/1.0 attestation delivery (K2/K3)', () => {
 
     // Bob kann die Counter-Zustellung entschlüsseln, der Inner-JWS-Sender ist
     // Alice (Sync 003 Z.460-464), und der VC verifiziert.
-    const received = await receiveAsRecipient(counterEnvelopes[0], bobIdentity)
+    const received = await receiveAsRecipient(counterEntry!.env, bobIdentity)
     expect(received.decision).toBe('accept')
     if (received.decision !== 'accept') throw new Error('unreachable')
     expect(received.senderDid).toBe(aliceIdentity.getDid())
