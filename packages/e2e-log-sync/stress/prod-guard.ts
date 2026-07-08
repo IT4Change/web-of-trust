@@ -14,7 +14,16 @@
 export const PROD_RELAY_HOSTS = ['relay.web-of-trust.de', 'relay.utopia-lab.org'] as const
 
 /** The ONLY hosts a stress run may target. Fail-closed: not on this list → refused. */
-export const ALLOWED_RELAY_HOSTS = ['localhost', '127.0.0.1', '::1', 'relay-staging.web-of-trust.de'] as const
+export const ALLOWED_RELAY_HOSTS = [
+  'localhost',
+  '127.0.0.1',
+  '::1',
+  'relay-staging.web-of-trust.de',
+  // The festival box is the DESIGNATED load-test host (Anton, 07.07.): scale runs
+  // answer "what can a Pi 4 carry" against the real hardware. Still gated behind
+  // REMOTE_ALLOW_DESTRUCTIVE=1 like every remote target, and reset afterwards.
+  'relay.box.web-of-trust.de',
+] as const
 
 export class ProdGuardError extends Error {
   constructor(message: string) {
