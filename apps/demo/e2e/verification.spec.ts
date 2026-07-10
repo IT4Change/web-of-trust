@@ -16,9 +16,9 @@ test.describe('QR Verification', () => {
     const { context: bobCtx, page: bobPage } = await createFreshContext(browser)
 
     try {
-      // Onboard both users
+      // Onboard both users (capture Bob's DID for the exact profile-URL assert below)
       await createIdentity(alicePage, { name: 'Alice', passphrase: 'alice123pw' })
-      await createIdentity(bobPage, { name: 'Bob', passphrase: 'bob12345pw' })
+      const { did: bobDid } = await createIdentity(bobPage, { name: 'Bob', passphrase: 'bob12345pw' })
 
       // Wait for relay connection on both
       await waitForRelayConnected(alicePage)
@@ -47,9 +47,11 @@ test.describe('QR Verification', () => {
       // Both should see the mutual friends dialog.
       // Alice takes the new primary path "Fertig": the success moment ends on the
       // fresh contact's profile (/p/<did>), not in the attestation form (U1 fix).
+      // Assert the EXACT peer DID (Bob's) — a loose /p/did… match would also pass
+      // if the wrong profile (e.g. Alice's own) were opened.
       await alicePage.getByText('seid verbunden!').waitFor({ timeout: 20_000 })
       await alicePage.getByRole('button', { name: 'Fertig' }).click()
-      await expect(alicePage).toHaveURL(/\/p\/did/)
+      await expect(alicePage).toHaveURL(`/p/${encodeURIComponent(bobDid)}`)
       await expect(alicePage.getByText('seid verbunden!')).toBeHidden()
 
       // Bob dismisses via the close (X) button.
