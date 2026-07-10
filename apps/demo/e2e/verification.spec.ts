@@ -6,7 +6,6 @@ import {
   submitVerificationCode,
   confirmVerificationInFlow,
   confirmIncomingVerification,
-  dismissMutualDialog,
 } from './helpers/verification'
 
 test.describe('QR Verification', () => {
@@ -16,9 +15,9 @@ test.describe('QR Verification', () => {
     const { context: bobCtx, page: bobPage } = await createFreshContext(browser)
 
     try {
-      // Onboard both users
+      // Onboard both users (capture Bob's DID for the exact profile-URL assert below)
       await createIdentity(alicePage, { name: 'Alice', passphrase: 'alice123pw' })
-      await createIdentity(bobPage, { name: 'Bob', passphrase: 'bob12345pw' })
+      const { did: bobDid } = await createIdentity(bobPage, { name: 'Bob', passphrase: 'bob12345pw' })
 
       // Wait for relay connection on both
       await waitForRelayConnected(alicePage)
@@ -44,9 +43,24 @@ test.describe('QR Verification', () => {
       // Alice receives the incoming verification dialog
       await confirmIncomingVerification(alicePage)
 
-      // Both should see the mutual friends dialog
-      await dismissMutualDialog(alicePage)
-      await dismissMutualDialog(bobPage)
+      // Both should see the mutual friends dialog.
+      // Alice takes the primary path "Profil ansehen": the success moment ends on
+      // the fresh contact's profile (/p/<did>), not in a form (U1 fix).
+      // Assert the EXACT peer DID (Bob's) — a loose /p/did… match would also pass
+      // if the wrong profile (e.g. Alice's own) were opened.
+      await alicePage.getByText('seid verbunden!').waitFor({ timeout: 20_000 })
+      await alicePage.getByRole('button', { name: 'Profil ansehen' }).click()
+      await expect(alicePage).toHaveURL(`/p/${encodeURIComponent(bobDid)}`)
+      await expect(alicePage.getByText('seid verbunden!')).toBeHidden()
+
+      // Bob takes the secondary path "Schließen": dialog closes, NO navigation.
+      // (exact: true — the X button's accessible name "Dialog schließen" would
+      // otherwise also match by substring.)
+      await bobPage.getByText('seid verbunden!').waitFor({ timeout: 20_000 })
+      const bobUrlBefore = bobPage.url()
+      await bobPage.getByRole('button', { name: 'Schließen', exact: true }).click()
+      await expect(bobPage.getByText('seid verbunden!')).toBeHidden()
+      expect(bobPage.url()).toBe(bobUrlBefore)
 
       // Verify contacts appear in the contact list
       await navigateTo(alicePage, '/contacts')

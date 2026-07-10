@@ -388,7 +388,6 @@ export const en: Translations = {
   app: {
     contactFallback: 'Contact',
     mutualFriendsTitle: 'You and {name} are connected!',
-    createAttestation: 'Create confirmation',
     viewProfile: 'View profile',
     newAttestationFrom: 'New confirmation from {name}',
     spaceInviteTitle: 'Space Invitation',
