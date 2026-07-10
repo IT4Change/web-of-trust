@@ -67,8 +67,8 @@ export class WebSocketMessagingAdapter implements MessagingAdapter {
   private earlyMessageBuffer: WireMessage[] = []
   private heartbeatInterval: ReturnType<typeof setInterval> | null = null
   private heartbeatTimeout: ReturnType<typeof setTimeout> | null = null
-  private readonly HEARTBEAT_INTERVAL_MS = 15_000
-  private readonly HEARTBEAT_TIMEOUT_MS = 5_000
+  private readonly HEARTBEAT_INTERVAL_MS: number
+  private readonly HEARTBEAT_TIMEOUT_MS: number
   private readonly SEND_TIMEOUT_MS: number
 
   // Mutable: a VE-11 restore-clone re-binds it to a fresh deviceId via rebindDeviceId().
@@ -81,6 +81,10 @@ export class WebSocketMessagingAdapter implements MessagingAdapter {
       deviceId?: string
       signBrokerAuthTranscript?: SignBrokerAuthTranscriptFn
       sendTimeoutMs?: number
+      /** Heartbeat ping cadence (default 15 000 ms). Tunable for tests. */
+      heartbeatIntervalMs?: number
+      /** Grace window for a pong before the socket is judged dead (default 5 000 ms). */
+      heartbeatTimeoutMs?: number
     },
   ) {
     // Sync 003 requires a canonical lowercase UUID-v4 deviceId on register.
@@ -90,6 +94,8 @@ export class WebSocketMessagingAdapter implements MessagingAdapter {
     this.deviceId = options?.deviceId ?? crypto.randomUUID()
     this.signBrokerAuthTranscript = options?.signBrokerAuthTranscript ?? null
     this.SEND_TIMEOUT_MS = options?.sendTimeoutMs ?? 10_000
+    this.HEARTBEAT_INTERVAL_MS = options?.heartbeatIntervalMs ?? 15_000
+    this.HEARTBEAT_TIMEOUT_MS = options?.heartbeatTimeoutMs ?? 5_000
   }
 
   private setState(newState: MessagingState) {
@@ -242,7 +248,10 @@ export class WebSocketMessagingAdapter implements MessagingAdapter {
             this.connectedDid = myDid
             this.peerCount = typeof msg.peers === 'number' ? msg.peers : 0
             this.setState('connected')
-            this.startHeartbeat()
+            // Bind the heartbeat to THIS socket instance (not this.ws): after a
+            // teardown+redial a stale timer must never probe or kill the next
+            // socket (#251 socket-instance safety).
+            this.startHeartbeat(ws)
             settle.resolve()
             break
 
@@ -305,6 +314,11 @@ export class WebSocketMessagingAdapter implements MessagingAdapter {
         // connection's state to 'disconnected' (the outbox timer and the
         // multiplexer's reconnect loop key off this state).
         if (this.ws !== ws) return
+        // Stop the heartbeat AFTER the instance guard: a live socket's close must
+        // stop its own timer immediately (so no stale pong-timeout survives into
+        // the next redial), but a stale close from a replaced socket returns above
+        // and must NOT touch the live socket's heartbeat.
+        this.stopHeartbeat()
         this.setState('disconnected')
       }
     })
@@ -370,26 +384,81 @@ export class WebSocketMessagingAdapter implements MessagingAdapter {
     return this.peerCount
   }
 
-  private startHeartbeat(): void {
+  /**
+   * Transport-liveness heartbeat, bound to a SINGLE socket instance (`ws`), not to
+   * `this.ws`. All three failure modes the DWeb-Camp field bug exposed are handled
+   * here:
+   *
+   *  (a) CLOSING/CLOSED-Erkennung: a half-open socket wedged in CLOSING while the
+   *      state still reads 'connected' (Android WebView initiates close on a
+   *      network flap, the TCP close-handshake never completes) is a DEAD
+   *      transport. The old code returned early on `readyState !== OPEN` → no ping,
+   *      no timeout, state lied 'connected' for minutes until TCP gave up. We now
+   *      tear it down on the very next tick so the reconnect loop fires.
+   *  (b) Instanz-Bindung: the pong-timeout closes the captured `ws`, never
+   *      `this.ws`. After a redial `this.ws` is the NEXT socket — a stale timeout
+   *      must not kill it (killSocket's instance guard enforces this).
+   *  (c) Eine Teardown-Quelle: death is funnelled through killSocket() — a
+   *      DELIBERATE direct teardown, not "call ws.close() and let onclose finish".
+   *      We choose direct teardown because the primary death mode is a socket stuck
+   *      in CLOSING, where the browser's close-handshake is already wedged and
+   *      onclose may not fire for minutes — flipping state here is the only prompt
+   *      path. onclose stays instance-guarded and idempotent for the other paths.
+   *
+   * NOTE (documented limit, post-camp): the ping is PRE-AUTH at the relay — it
+   * proves TRANSPORT liveness, not SESSION liveness. A socket that is open but whose
+   * registration was dropped server-side still answers pong, so this heartbeat will
+   * NOT detect that class of half-open. Session-level liveness is a separate,
+   * deferred concern.
+   */
+  private startHeartbeat(ws: WebSocket): void {
     this.stopHeartbeat()
     this.heartbeatInterval = setInterval(() => {
-      if (this.state !== 'connected' || !this.ws) {
+      // Instance + state guard: a redial replaced this.ws, or we are no longer
+      // connected → this interval is orphaned, stop it.
+      if (this.ws !== ws || this.state !== 'connected') {
         this.stopHeartbeat()
         return
       }
-      // Send ping and start timeout
-      if (this.ws.readyState !== WebSocket.OPEN) return
-      this.ws.send(JSON.stringify({ type: 'ping' }))
+      // (a) CLOSING/CLOSED while 'connected' = dead transport → tear down NOW.
+      if (ws.readyState !== WebSocket.OPEN) {
+        this.killSocket(ws)
+        return
+      }
+      // Doppel-Ping/Timeout-Guard (Codex-Nit): a ping is already outstanding
+      // (its pong-timeout is armed). Do NOT stack a second ping/timeout — matters
+      // when interval <= timeout, where the next tick would otherwise overwrite
+      // this.heartbeatTimeout and leak the first timer. handlePong clears it.
+      if (this.heartbeatTimeout) return
+      // Send the ping over the CAPTURED socket, never this.ws.
+      ws.send(JSON.stringify({ type: 'ping' }))
       this.heartbeatTimeout = setTimeout(() => {
-        // No pong received — connection is dead
-        this.stopHeartbeat()
-        if (this.ws) {
-          this.ws.close()
-          this.ws = null
-        }
-        this.setState('disconnected')
+        // No pong within the window — the transport is dead. (b) Bound to THIS
+        // socket: killSocket's instance guard makes a stale timeout after a redial
+        // a no-op on the new socket.
+        this.killSocket(ws)
       }, this.HEARTBEAT_TIMEOUT_MS)
     }, this.HEARTBEAT_INTERVAL_MS)
+  }
+
+  /**
+   * (c) The single teardown path for a heartbeat-detected dead socket. Direct and
+   * instance-guarded: only acts if `ws` is still the live socket, so a late kill
+   * from a replaced socket never touches the new connection. Sets state directly
+   * (rather than waiting for onclose) because a CLOSING socket's onclose may never
+   * fire promptly — this is the whole point of the fix. The subsequent onclose (if
+   * any) is caught by its own `this.ws !== ws` guard and does nothing.
+   */
+  private killSocket(ws: WebSocket): void {
+    if (this.ws !== ws) return
+    this.stopHeartbeat()
+    try {
+      ws.close()
+    } catch {
+      // Already closing/closed — closing again is a spec no-op; ignore.
+    }
+    this.ws = null
+    this.setState('disconnected')
   }
 
   private stopHeartbeat(): void {
