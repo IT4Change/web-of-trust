@@ -6,8 +6,8 @@ import { Avatar } from './components/shared/Avatar'
 import { LegacyResetNotice } from './components/identity/LegacyResetNotice'
 import { X, Award, Users } from 'lucide-react'
 import { Home, Identity, Contacts, Verify, Attestations, PublicProfile, Spaces, Network } from './pages'
-import { useProfileSync, useContacts, useVerification, useLocalIdentity } from './hooks'
-import { useVerificationStatus, getVerificationStatus } from './hooks/useVerificationStatus'
+import { useProfileSync, useContacts, useVerification, useLocalIdentity, useAttestations } from './hooks'
+import { useVerificationStatus, getVerificationStatus, isVerificationAttestation } from './hooks/useVerificationStatus'
 import type { PublicProfile as PublicProfileType } from '@web_of_trust/core/types'
 import { LanguageProvider, useLanguage } from './i18n'
 import { DebugPanel } from './components/debug/DebugPanel'
@@ -128,7 +128,8 @@ function MutualVerificationDialog() {
   const { mutualPeer, dismissMutualDialog } = useConfetti()
   const { discovery } = useAdapters()
   const localIdentity = useLocalIdentity()
-  const navigate = useNavigate()
+  const { receivedAttestations, setAttestationAccepted } = useAttestations()
+  const { uploadAttestations } = useProfileSync()
   const { t, fmt } = useLanguage()
   const [peerProfile, setPeerProfile] = useState<PublicProfileType | null>(null)
 
@@ -144,6 +145,24 @@ function MutualVerificationDialog() {
   if (!mutualPeer) return null
 
   const peerName = peerProfile?.name || mutualPeer.name
+
+  // Consent-Modell (Antons Entscheidung, analog zum Attestation-Dialog):
+  // „Veröffentlichen" akzeptiert die zu diesem Peer gehörende EIGENE empfangene
+  // Verifikations-Attestation (from = Peer) und lädt sie direkt hoch (Muster:
+  // AttestationList.handleTogglePublic). „Schließen" lässt accepted:false —
+  // publizierbar bleibt sie später über die Bestätigungen-Liste.
+  const handlePublish = async () => {
+    const match = receivedAttestations.find(
+      (a) => a.from === mutualPeer.did && isVerificationAttestation(a),
+    )
+    if (match) {
+      await setAttestationAccepted(match.id, true)
+      uploadAttestations()
+    }
+    // Defensiv: ohne passende Attestation (sollte beim Mutual-Trigger nicht
+    // vorkommen) nur schließen — kein Crash, kein blinder Accept.
+    dismissMutualDialog()
+  }
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" role="dialog" aria-modal="true" aria-labelledby="mutual-dialog-title">
@@ -180,16 +199,14 @@ function MutualVerificationDialog() {
           >
             {t.common.close}
           </button>
-          {/* Primär: der Erfolgsmoment endet beim Menschen (Profil des frischen
-              Kontakts), nicht im Attestation-Formular (U1, Camp-Befund). */}
+          {/* Primär: Veröffentlichen (publish default + schließen, analog zum
+              Attestation-Dialog) — die Verbindung landet auf dem eigenen /v und
+              damit im öffentlichen Profil + Live-Graph. */}
           <button
-            onClick={() => {
-              dismissMutualDialog()
-              navigate(`/p/${encodeURIComponent(mutualPeer.did)}`)
-            }}
+            onClick={handlePublish}
             className="flex-1 px-4 py-3 bg-primary-600 text-white font-medium rounded-xl hover:bg-primary-700 transition-colors"
           >
-            {t.app.viewProfile}
+            {t.common.publish}
           </button>
         </div>
       </div>

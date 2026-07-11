@@ -123,11 +123,14 @@ describe('Trust 002 verification attestation listener (real listener code)', () 
 
   function buildListener(overrides: Partial<AttestationListenerDeps> = {}) {
     const deps: AttestationListenerDeps = {
+      // setAttestationAccepted ist im Deps-Interface bewusst NICHT enthalten
+      // (Consent-Modell) — der Spy liegt trotzdem im Mock, damit eine Regression
+      // (Listener ruft Accept wieder auf) als Testfehler sichtbar würde.
       attestationService: {
-        decodeIncomingAttestation: decodeIncomingAttestation as unknown as AttestationListenerDeps['attestationService']['decodeIncomingAttestation'],
-        saveIncomingAttestation: saveIncomingAttestation as unknown as AttestationListenerDeps['attestationService']['saveIncomingAttestation'],
-        setAttestationAccepted: setAttestationAccepted as unknown as AttestationListenerDeps['attestationService']['setAttestationAccepted'],
-      },
+        decodeIncomingAttestation,
+        saveIncomingAttestation,
+        setAttestationAccepted,
+      } as unknown as AttestationListenerDeps['attestationService'],
       verificationWorkflow: {
         acceptVerifiedVerificationAttestation: acceptVerifiedVerificationAttestation as unknown as AttestationListenerDeps['verificationWorkflow']['acceptVerifiedVerificationAttestation'],
         acceptVerifiedCounterVerification: acceptVerifiedCounterVerification as unknown as AttestationListenerDeps['verificationWorkflow']['acceptVerifiedCounterVerification'],
@@ -173,30 +176,34 @@ describe('Trust 002 verification attestation listener (real listener code)', () 
     expect(triggerAttestationDialog).not.toHaveBeenCalled()
   })
 
-  // --- Auto-Publish (Legacy-Parität): frischer Verifikations-Save → accepted:true ---
+  // --- Consent-Modell (Antons Entscheidung): der Eingang speichert IMMER mit
+  // accepted:false. Publiziert wird erst über den Verbunden-Dialog
+  // („Veröffentlichen") bzw. den Toggle in der Bestätigungen-Liste — der
+  // Listener ruft NIE setAttestationAccepted (kein Silent-Auto-Accept). ---
 
-  it('Auto-Publish (a): a fresh verification save is flipped to accepted:true', async () => {
+  it('Consent-Modell: a fresh verification ingest is saved WITHOUT flipping accepted', async () => {
     const handler = buildListener()
 
     await handler(makeDelivery(makeVcJws()))
 
     expect(saveIncomingAttestation).toHaveBeenCalledTimes(1)
-    expect(setAttestationAccepted).toHaveBeenCalledWith(`urn:uuid:${CHALLENGE_NONCE}`, true)
+    expect(setAttestationAccepted).not.toHaveBeenCalled()
   })
 
-  it('Auto-Publish (a): a fresh mutual-counter verification save is flipped to accepted:true', async () => {
+  it('Consent-Modell: a fresh mutual-counter verification ingest is saved WITHOUT flipping accepted', async () => {
     // inResponseTo routes to the counter-verification decision → accept-mutual-in-person.
     const handler = buildListener()
 
     await handler(makeDelivery(makeVcJws({ id: 'urn:uuid:counter-1', inResponseTo: `urn:uuid:${CHALLENGE_NONCE}` })))
 
     expect(acceptVerifiedCounterVerification).toHaveBeenCalledTimes(1)
-    expect(setAttestationAccepted).toHaveBeenCalledWith('urn:uuid:counter-1', true)
+    expect(saveIncomingAttestation).toHaveBeenCalledTimes(1)
+    expect(setAttestationAccepted).not.toHaveBeenCalled()
   })
 
-  it('Auto-Publish (b): a duplicate redelivery after manual depublish does NOT re-flip accepted (stays false)', async () => {
-    // The user toggled the verification off → accepted:false. A relay redelivery
-    // saves as duplicate (savedFresh=false) and must NOT overwrite that decision.
+  it('Consent-Modell: a duplicate redelivery never touches accepted (Depublish-Entscheidung bleibt)', async () => {
+    // Der User hat ggf. bewusst depubliziert (accepted:false). Eine Relay-
+    // Redelivery (Duplikat) darf diese Entscheidung nicht anfassen.
     saveIncomingAttestation.mockRejectedValue(new DuplicateAttestationError(`urn:uuid:${CHALLENGE_NONCE}`))
     const handler = buildListener()
 
@@ -205,7 +212,7 @@ describe('Trust 002 verification attestation listener (real listener code)', () 
     expect(setAttestationAccepted).not.toHaveBeenCalled()
   })
 
-  it('Auto-Publish (c): a normal (non-verification) attestation is NOT auto-accepted (stays false)', async () => {
+  it('Consent-Modell: a normal (non-verification) attestation stays accepted:false as well', async () => {
     const handler = buildListener()
 
     await handler(makeDelivery(makeVcJws({ id: 'urn:uuid:ordinary-attestation', claim: 'Knows TypeScript' })))

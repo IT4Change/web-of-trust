@@ -386,7 +386,6 @@ export const de = {
   app: {
     contactFallback: 'Kontakt',
     mutualFriendsTitle: 'Du und {name} seid verbunden!',
-    viewProfile: 'Profil ansehen',
     newAttestationFrom: 'Neue Bestätigung von {name}',
     spaceInviteTitle: 'Einladung zu Space',
     spaceInviteMessage: '{name} hat dich zum Space "{spaceName}" eingeladen.',
