@@ -51,6 +51,16 @@ export function useGraphCache() {
   }
   const service = serviceRef.current
 
+  // Unmount-Guard für async State-Sets: ein forceRefresh-Sweep kann in-flight
+  // sein, wenn die Seite unmountet (Sweep-Dauer > Verweildauer) — danach weder
+  // nachladen noch setState. Eigener Effect, damit StrictMode-Remounts das Flag
+  // wieder auf true setzen.
+  const mountedRef = useRef(true)
+  useEffect(() => {
+    mountedRef.current = true
+    return () => { mountedRef.current = false }
+  }, [])
+
   // Load cached entries for all active contacts and refresh stale ones
   useEffect(() => {
     let cancelled = false
@@ -122,10 +132,15 @@ export function useGraphCache() {
       await Promise.allSettled(batch.map(did => service.refresh(did)))
     }
 
+    // Nach Unmount endet ein in-flight Sweep still: weder den State-Reload
+    // anstoßen noch setState auf einem unmounted Hook aufrufen.
+    if (!mountedRef.current) return
+
     const [freshEntries, freshV] = await Promise.all([
       graphCacheStore.getEntries(contactDids),
       loadVerifications(graphCacheStore, contactDids),
     ])
+    if (!mountedRef.current) return
     setEntries(freshEntries)
     setVerifications(freshV)
   }, [activeContacts, graphCacheStore, service])
