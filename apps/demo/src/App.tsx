@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { BrowserRouter, Routes, Route, Navigate, useNavigate } from 'react-router-dom'
 import { AdapterProvider, IdentityProvider, useIdentity, useAdapters, ConfettiProvider, useConfetti } from './context'
 import { AppShell, IdentityManagement, Confetti } from './components'
@@ -7,7 +7,8 @@ import { LegacyResetNotice } from './components/identity/LegacyResetNotice'
 import { X, Award, Users } from 'lucide-react'
 import { Home, Identity, Contacts, Verify, Attestations, PublicProfile, Spaces, Network } from './pages'
 import { useProfileSync, useContacts, useVerification, useLocalIdentity, useAttestations } from './hooks'
-import { useVerificationStatus, getVerificationStatus, isVerificationAttestation } from './hooks/useVerificationStatus'
+import { useVerificationStatus, getVerificationStatus } from './hooks/useVerificationStatus'
+import { newestVerificationAttestationFrom } from './lib/verification-attestation'
 import type { PublicProfile as PublicProfileType } from '@web_of_trust/core/types'
 import { LanguageProvider, useLanguage } from './i18n'
 import { DebugPanel } from './components/debug/DebugPanel'
@@ -142,25 +143,35 @@ function MutualVerificationDialog() {
     return () => { cancelled = true }
   }, [mutualPeer, discovery])
 
+  // Publish-Ziel beim RENDER berechnen (nicht erst beim Klick): die NEUESTE
+  // empfangene Verifikations-Attestation dieses Peers. Bei Mehrfach-
+  // Verifikationen mit demselben Peer darf ein Klick keine ältere, evtl.
+  // bewusst depublizierte Attestation wieder auf accepted:true kippen.
+  // Existiert KEIN Ziel, wird der Veröffentlichen-Button gar nicht gerendert —
+  // ein toter Klick (Silent-Dismiss) ist damit konstruktiv unmöglich.
+  const publishTarget = useMemo(
+    () => (mutualPeer ? newestVerificationAttestationFrom(receivedAttestations, mutualPeer.did) : null),
+    [receivedAttestations, mutualPeer],
+  )
+
   if (!mutualPeer) return null
 
   const peerName = peerProfile?.name || mutualPeer.name
 
   // Consent-Modell (Antons Entscheidung, analog zum Attestation-Dialog):
-  // „Veröffentlichen" akzeptiert die zu diesem Peer gehörende EIGENE empfangene
-  // Verifikations-Attestation (from = Peer) und lädt sie direkt hoch (Muster:
-  // AttestationList.handleTogglePublic). „Schließen" lässt accepted:false —
-  // publizierbar bleibt sie später über die Bestätigungen-Liste.
+  // „Veröffentlichen" akzeptiert das Publish-Ziel und stößt den Upload an
+  // (Muster: AttestationList.handleTogglePublic). „Schließen" lässt
+  // accepted:false — publizierbar bleibt sie über die Bestätigungen-Liste.
+  //
+  // uploadAttestations() ist bewusst fire-and-forget: mit dem Accept ist die
+  // Verifikation zur Veröffentlichung VORGEMERKT — Fehlschläge hält der
+  // OfflineFirstDiscoveryAdapter dirty und retryt via syncDiscovery (eventual
+  // publish, identisch zur Profil-Publish-Semantik der ganzen App). KEIN
+  // await/Spinner: das würde am langsamen Gerät den Erfolgsmoment blockieren.
   const handlePublish = async () => {
-    const match = receivedAttestations.find(
-      (a) => a.from === mutualPeer.did && isVerificationAttestation(a),
-    )
-    if (match) {
-      await setAttestationAccepted(match.id, true)
-      uploadAttestations()
-    }
-    // Defensiv: ohne passende Attestation (sollte beim Mutual-Trigger nicht
-    // vorkommen) nur schließen — kein Crash, kein blinder Accept.
+    if (!publishTarget) return
+    await setAttestationAccepted(publishTarget.id, true)
+    uploadAttestations()
     dismissMutualDialog()
   }
 
@@ -201,13 +212,16 @@ function MutualVerificationDialog() {
           </button>
           {/* Primär: Veröffentlichen (publish default + schließen, analog zum
               Attestation-Dialog) — die Verbindung landet auf dem eigenen /v und
-              damit im öffentlichen Profil + Live-Graph. */}
-          <button
-            onClick={handlePublish}
-            className="flex-1 px-4 py-3 bg-primary-600 text-white font-medium rounded-xl hover:bg-primary-700 transition-colors"
-          >
-            {t.common.publish}
-          </button>
+              damit im öffentlichen Profil + Live-Graph. Nur wenn ein Publish-
+              Ziel existiert; sonst bleibt „Schließen" der einzige Button. */}
+          {publishTarget && (
+            <button
+              onClick={handlePublish}
+              className="flex-1 px-4 py-3 bg-primary-600 text-white font-medium rounded-xl hover:bg-primary-700 transition-colors"
+            >
+              {t.common.publish}
+            </button>
+          )}
         </div>
       </div>
     </div>

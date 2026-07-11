@@ -24,3 +24,26 @@ export const VERIFICATION_ATTESTATION_CLAIM = 'in-person verifiziert'
 export function isVerificationAttestation(attestation: Attestation): boolean {
   return attestation.isVerification === true
 }
+
+/**
+ * Die NEUESTE empfangene Verifikations-Attestation eines Peers (per createdAt),
+ * oder null. Publish-Ziel des Verbunden-Dialogs (Consent-Modell).
+ *
+ * Warum neueste statt find(): bei Mehrfach-Verifikationen mit demselben Peer
+ * (Re-Verifikation nach Key-Wechsel, wiederholte Begegnung) ist die Liste
+ * unsortiert — ein blindes find() kann eine ALTE, evtl. bewusst depublizierte
+ * Attestation treffen und deren Depublish-Entscheidung überschreiben. Gleiches
+ * Muster wie useVerification.counterVerify (dort für inResponseTo-Bindung).
+ *
+ * Dependency-free (kein React), damit sie pur testbar ist.
+ */
+export function newestVerificationAttestationFrom(
+  attestations: readonly Attestation[],
+  peerDid: string,
+): Attestation | null {
+  return (
+    attestations
+      .filter(a => a.from === peerDid && isVerificationAttestation(a))
+      .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))[0] ?? null
+  )
+}
