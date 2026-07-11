@@ -388,7 +388,6 @@ export const en: Translations = {
   app: {
     contactFallback: 'Contact',
     mutualFriendsTitle: 'You and {name} are connected!',
-    viewProfile: 'View profile',
     newAttestationFrom: 'New confirmation from {name}',
     spaceInviteTitle: 'Space Invitation',
     spaceInviteMessage: '{name} invited you to the space "{spaceName}".',
@@ -482,5 +481,7 @@ export const en: Translations = {
     emptyText: 'Connect with someone to start your personal trust network.',
     connect: 'Connect',
     hint: 'Click or drag nodes',
+    beamerMode: 'Beamer mode',
+    exitBeamer: 'Exit beamer mode',
   },
 }

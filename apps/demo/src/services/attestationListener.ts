@@ -112,6 +112,10 @@ export function createAttestationListener(deps: AttestationListenerDeps): Attest
         // gespeichert haben, BEVOR die eigene Inbox-Delivery ankommt — das
         // isNew-Gate hat den Dialog dann still verschluckt. Aufgelöstes
         // unterdrückt der generische OPEN-Gate (¬resolved) im Provider.
+        //
+        // Consent-Modell: gespeichert wird mit accepted:false — publiziert wird
+        // erst über den Verbunden-Dialog („Veröffentlichen") bzw. den Toggle in
+        // der Bestätigungen-Liste. KEIN Silent-Auto-Accept beim Eingang.
         await saveUnlessDuplicate(deps, attestation)
         // Zweites Häkchen: verifiziert+gespeichert → Empfangs-Ack (Variante A).
         await ackReceipt(deps, attestation)
@@ -119,6 +123,7 @@ export function createAttestationListener(deps: AttestationListenerDeps): Attest
         deps.setPendingIncoming({ attestation, fromDid: attestation.from })
       } else if (decision.decision === 'accept-mutual-in-person') {
         // Duplikat-Counter-Verifications (z.B. Redelivery) sind konklusiv egal.
+        // Auch hier: accepted:false — Consent kommt aus dem Verbunden-Dialog.
         await saveUnlessDuplicate(deps, attestation)
         await ackReceipt(deps, attestation)
       }

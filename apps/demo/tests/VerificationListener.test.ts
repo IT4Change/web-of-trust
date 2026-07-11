@@ -101,6 +101,7 @@ async function decodeStub(vcJws: string): Promise<{ attestation: Attestation; pa
 describe('Trust 002 verification attestation listener (real listener code)', () => {
   let decodeIncomingAttestation: ReturnType<typeof vi.fn>
   let saveIncomingAttestation: ReturnType<typeof vi.fn>
+  let setAttestationAccepted: ReturnType<typeof vi.fn>
   let acceptVerifiedVerificationAttestation: ReturnType<typeof vi.fn>
   let acceptVerifiedCounterVerification: ReturnType<typeof vi.fn>
   let setPendingIncoming: ReturnType<typeof vi.fn>
@@ -110,6 +111,7 @@ describe('Trust 002 verification attestation listener (real listener code)', () 
   beforeEach(() => {
     decodeIncomingAttestation = vi.fn(decodeStub)
     saveIncomingAttestation = vi.fn(async (attestation: Attestation) => attestation)
+    setAttestationAccepted = vi.fn(async () => {})
     acceptVerifiedVerificationAttestation = vi.fn()
       .mockResolvedValue({ decision: 'accept-in-person', nonce: CHALLENGE_NONCE })
     acceptVerifiedCounterVerification = vi.fn()
@@ -121,10 +123,14 @@ describe('Trust 002 verification attestation listener (real listener code)', () 
 
   function buildListener(overrides: Partial<AttestationListenerDeps> = {}) {
     const deps: AttestationListenerDeps = {
+      // setAttestationAccepted ist im Deps-Interface bewusst NICHT enthalten
+      // (Consent-Modell) — der Spy liegt trotzdem im Mock, damit eine Regression
+      // (Listener ruft Accept wieder auf) als Testfehler sichtbar würde.
       attestationService: {
-        decodeIncomingAttestation: decodeIncomingAttestation as unknown as AttestationListenerDeps['attestationService']['decodeIncomingAttestation'],
-        saveIncomingAttestation: saveIncomingAttestation as unknown as AttestationListenerDeps['attestationService']['saveIncomingAttestation'],
-      },
+        decodeIncomingAttestation,
+        saveIncomingAttestation,
+        setAttestationAccepted,
+      } as unknown as AttestationListenerDeps['attestationService'],
       verificationWorkflow: {
         acceptVerifiedVerificationAttestation: acceptVerifiedVerificationAttestation as unknown as AttestationListenerDeps['verificationWorkflow']['acceptVerifiedVerificationAttestation'],
         acceptVerifiedCounterVerification: acceptVerifiedCounterVerification as unknown as AttestationListenerDeps['verificationWorkflow']['acceptVerifiedCounterVerification'],
@@ -168,6 +174,51 @@ describe('Trust 002 verification attestation listener (real listener code)', () 
       fromDid: BOB_DID,
     })
     expect(triggerAttestationDialog).not.toHaveBeenCalled()
+  })
+
+  // --- Consent-Modell (Antons Entscheidung): der Eingang speichert IMMER mit
+  // accepted:false. Publiziert wird erst über den Verbunden-Dialog
+  // („Veröffentlichen") bzw. den Toggle in der Bestätigungen-Liste — der
+  // Listener ruft NIE setAttestationAccepted (kein Silent-Auto-Accept). ---
+
+  it('Consent-Modell: a fresh verification ingest is saved WITHOUT flipping accepted', async () => {
+    const handler = buildListener()
+
+    await handler(makeDelivery(makeVcJws()))
+
+    expect(saveIncomingAttestation).toHaveBeenCalledTimes(1)
+    expect(setAttestationAccepted).not.toHaveBeenCalled()
+  })
+
+  it('Consent-Modell: a fresh mutual-counter verification ingest is saved WITHOUT flipping accepted', async () => {
+    // inResponseTo routes to the counter-verification decision → accept-mutual-in-person.
+    const handler = buildListener()
+
+    await handler(makeDelivery(makeVcJws({ id: 'urn:uuid:counter-1', inResponseTo: `urn:uuid:${CHALLENGE_NONCE}` })))
+
+    expect(acceptVerifiedCounterVerification).toHaveBeenCalledTimes(1)
+    expect(saveIncomingAttestation).toHaveBeenCalledTimes(1)
+    expect(setAttestationAccepted).not.toHaveBeenCalled()
+  })
+
+  it('Consent-Modell: a duplicate redelivery never touches accepted (Depublish-Entscheidung bleibt)', async () => {
+    // Der User hat ggf. bewusst depubliziert (accepted:false). Eine Relay-
+    // Redelivery (Duplikat) darf diese Entscheidung nicht anfassen.
+    saveIncomingAttestation.mockRejectedValue(new DuplicateAttestationError(`urn:uuid:${CHALLENGE_NONCE}`))
+    const handler = buildListener()
+
+    await expect(handler(makeDelivery(makeVcJws()))).resolves.toBeUndefined()
+
+    expect(setAttestationAccepted).not.toHaveBeenCalled()
+  })
+
+  it('Consent-Modell: a normal (non-verification) attestation stays accepted:false as well', async () => {
+    const handler = buildListener()
+
+    await handler(makeDelivery(makeVcJws({ id: 'urn:uuid:ordinary-attestation', claim: 'Knows TypeScript' })))
+
+    expect(saveIncomingAttestation).toHaveBeenCalledTimes(1)
+    expect(setAttestationAccepted).not.toHaveBeenCalled()
   })
 
   it('rejects remote or unbound Verification-Attestations without saving or prompting', async () => {

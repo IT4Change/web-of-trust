@@ -386,7 +386,6 @@ export const de = {
   app: {
     contactFallback: 'Kontakt',
     mutualFriendsTitle: 'Du und {name} seid verbunden!',
-    viewProfile: 'Profil ansehen',
     newAttestationFrom: 'Neue Bestätigung von {name}',
     spaceInviteTitle: 'Einladung zu Space',
     spaceInviteMessage: '{name} hat dich zum Space "{spaceName}" eingeladen.',
@@ -480,5 +479,7 @@ export const de = {
     emptyText: 'Verbinde dich mit jemandem, um dein persönliches Vertrauensnetzwerk zu starten.',
     connect: 'Verbinden',
     hint: 'Knoten anklicken oder ziehen',
+    beamerMode: 'Beamer-Modus',
+    exitBeamer: 'Beamer-Modus beenden',
   },
 } as const
