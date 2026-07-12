@@ -45,7 +45,7 @@ export function Contacts() {
         role="tablist"
         aria-label={t.contacts.title}
         onKeyDown={onKeyDown}
-        className="inline-flex gap-1 p-1 rounded-lg bg-muted"
+        className="flex gap-1 p-1 rounded-lg bg-muted"
       >
         {tabs.map(x => {
           const active = x.id === tab
@@ -59,7 +59,7 @@ export function Contacts() {
               aria-controls={`contacts-panel-${x.id}`}
               tabIndex={active ? 0 : -1}
               onClick={() => setTab(x.id)}
-              className={`px-4 py-1.5 text-sm font-medium rounded-md transition-colors ${
+              className={`flex-1 px-4 py-1.5 text-sm font-medium rounded-md transition-colors ${
                 active
                   ? 'bg-card text-foreground shadow-sm'
                   : 'text-muted-foreground hover:text-foreground'
