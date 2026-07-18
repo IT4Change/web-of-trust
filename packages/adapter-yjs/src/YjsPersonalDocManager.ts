@@ -37,6 +37,7 @@ import {
 import { YjsPersonalLogSyncAdapter } from './YjsPersonalLogSyncAdapter'
 
 import type {
+  NotificationStateDoc,
   PersonalDoc,
   ProfileDoc,
 } from './types'
@@ -96,6 +97,9 @@ function getCapabilitySigningSeedsMap(): Y.Map<any> {
 function getDismissedNotificationsMap(): Y.Map<any> {
   return ydoc!.getMap('dismissedNotifications')
 }
+function getNotificationStateMap(): Y.Map<any> {
+  return ydoc!.getMap('notificationState')
+}
 
 function getExistingRootMap(doc: Y.Doc, name: string): Y.Map<any> | null {
   return doc.share.has(name) ? doc.getMap(name) : null
@@ -105,7 +109,7 @@ function rebuildPersonalDocWithoutLegacyMaps(oldDoc: Y.Doc): Y.Doc {
   // dismissedNotifications MUSS hier drinstehen: der Legacy-Rebuild kopiert NUR
   // die gelisteten Root-Maps in das frische Y.Doc — ein fehlender Eintrag würde
   // die synced Resolve-Marker beim Migrations-Rebuild still wegwerfen (Re-Show).
-  const mapsToKeep = ['profile', 'contacts', 'attestations', 'attestationMetadata', 'spaces', 'groupKeys', 'capabilitySigningSeeds', 'dismissedNotifications']
+  const mapsToKeep = ['profile', 'contacts', 'attestations', 'attestationMetadata', 'spaces', 'groupKeys', 'capabilitySigningSeeds', 'dismissedNotifications', 'notificationState']
   const snapshots = new Map<string, Record<string, any>>()
   for (const mapName of mapsToKeep) {
     const src = oldDoc.getMap(mapName)
@@ -120,6 +124,8 @@ function rebuildPersonalDocWithoutLegacyMaps(oldDoc: Y.Doc): Y.Doc {
       const dst = freshDoc.getMap(mapName)
       if (mapName === 'profile') {
         applyPlainToYmap(dst, data)
+      } else if (mapName === 'notificationState') {
+        for (const [k, v] of Object.entries(data)) dst.set(k, v)
       } else {
         for (const [k, v] of Object.entries(data)) {
           const child = new Y.Map()
@@ -141,7 +147,8 @@ function snapshotDoc(): PersonalDoc {
   const profileMap = getProfileMap()
   const profile = profileMap.size > 0 ? ymapToPlain(profileMap) as ProfileDoc : null
 
-  return {
+  const notificationStateMap = getNotificationStateMap()
+  const snapshot: PersonalDoc = {
     profile,
     contacts: ymapOfMapsToRecord(getContactsMap()),
     attestations: ymapOfMapsToRecord(getAttestationsMap()),
@@ -152,6 +159,8 @@ function snapshotDoc(): PersonalDoc {
     capabilitySigningSeeds: ymapOfMapsToRecord(getCapabilitySigningSeedsMap()),
     dismissedNotifications: ymapOfMapsToRecord(getDismissedNotificationsMap()),
   }
+  if (notificationStateMap.size > 0) snapshot.notificationState = notificationStateToPlain(notificationStateMap)
+  return snapshot
 }
 
 /** Convert a Y.Map to a plain object */
@@ -225,7 +234,122 @@ function createDocProxy(): PersonalDoc {
     set capabilitySigningSeeds(_v) { /* handled by proxy */ },
     get dismissedNotifications() { return createRecordProxy(getDismissedNotificationsMap()) },
     set dismissedNotifications(_v) { /* handled by proxy */ },
+    get notificationState(): NotificationStateDoc | undefined {
+      // Always a writable lazy proxy: `doc.notificationState ??= {}` followed
+      // by nested writes must work even while the map is still empty.
+      // Snapshots keep omitting the field until something is stored.
+      return createNotificationStateProxy(getNotificationStateMap())
+    },
+    set notificationState(value: NotificationStateDoc | undefined) {
+      const notificationStateMap = getNotificationStateMap()
+      for (const key of Array.from(notificationStateMap.keys())) notificationStateMap.delete(key)
+      if (value) applyNotificationStateToYmap(notificationStateMap, value)
+    },
   } as PersonalDoc
+}
+
+const notificationStateFields = ['lastSeenByDevice', 'readUpToByDevice', 'readEntryKeys', 'mutedGroupIds'] as const
+
+/**
+ * Keep notification contributions as direct root-map keys. Creating the same
+ * nested Y.Map concurrently would make that parent key conflict; flat,
+ * namespaced keys instead let Yjs merge independent device/group entries.
+ */
+function notificationStateToPlain(ymap: Y.Map<any>): NotificationStateDoc {
+  const result: NotificationStateDoc = {}
+  for (const field of notificationStateFields) {
+    const values: Record<string, any> = {}
+    const prefix = `${field}:`
+    ymap.forEach((value, key) => {
+      if (key.startsWith(prefix)) values[key.slice(prefix.length)] = value
+    })
+    if (Object.keys(values).length > 0) (result as any)[field] = values
+  }
+  return result
+}
+
+function applyNotificationStateToYmap(ymap: Y.Map<any>, value: NotificationStateDoc): void {
+  for (const field of notificationStateFields) {
+    for (const [key, entry] of Object.entries(value[field] ?? {})) {
+      ymap.set(`${field}:${key}`, entry)
+    }
+  }
+}
+
+function createNotificationStateProxy(ymap: Y.Map<any>): NotificationStateDoc {
+  return new Proxy({} as NotificationStateDoc, {
+    get(target, prop) {
+      if (typeof prop !== 'string') return Reflect.get(target, prop)
+      if (!notificationStateFields.includes(prop as any)) return undefined
+      return createPrefixedRecordProxy(ymap, `${prop}:`)
+    },
+    set(target, prop, value: any) {
+      if (typeof prop !== 'string') return Reflect.set(target, prop, value)
+      if (!notificationStateFields.includes(prop as any)) return true
+      const prefix = `${prop}:`
+      for (const key of Array.from(ymap.keys())) if (key.startsWith(prefix)) ymap.delete(key)
+      for (const [key, entry] of Object.entries(value ?? {})) ymap.set(`${prefix}${key}`, entry)
+      return true
+    },
+    deleteProperty(target, prop) {
+      if (typeof prop !== 'string') return Reflect.deleteProperty(target, prop)
+      if (!notificationStateFields.includes(prop as any)) return true
+      const prefix = `${prop}:`
+      for (const key of Array.from(ymap.keys())) if (key.startsWith(prefix)) ymap.delete(key)
+      return true
+    },
+    has(target, prop) {
+      if (typeof prop !== 'string') return Reflect.has(target, prop)
+      if (!notificationStateFields.includes(prop as any)) return false
+      const prefix = `${prop}:`
+      return Array.from(ymap.keys()).some(key => key.startsWith(prefix))
+    },
+    ownKeys() {
+      return notificationStateFields.filter(field => Array.from(ymap.keys()).some(key => key.startsWith(`${field}:`)))
+    },
+    getOwnPropertyDescriptor(target, prop) {
+      if (typeof prop !== 'string') return Reflect.getOwnPropertyDescriptor(target, prop)
+      const prefix = `${prop}:`
+      if (Array.from(ymap.keys()).some(key => key.startsWith(prefix))) {
+        return { configurable: true, enumerable: true, writable: true, value: createPrefixedRecordProxy(ymap, prefix) }
+      }
+      return undefined
+    },
+  })
+}
+
+function createPrefixedRecordProxy<T>(ymap: Y.Map<any>, prefix: string): Record<string, T> {
+  return new Proxy({} as Record<string, T>, {
+    get(target, prop) {
+      if (typeof prop !== 'string') return Reflect.get(target, prop)
+      if (prop === 'toJSON') return undefined
+      return ymap.get(`${prefix}${prop}`)
+    },
+    set(target, prop, value: T) {
+      if (typeof prop !== 'string') return Reflect.set(target, prop, value)
+      ymap.set(`${prefix}${prop}`, value)
+      return true
+    },
+    deleteProperty(target, prop) {
+      if (typeof prop !== 'string') return Reflect.deleteProperty(target, prop)
+      ymap.delete(`${prefix}${prop}`)
+      return true
+    },
+    has(target, prop) {
+      if (typeof prop !== 'string') return Reflect.has(target, prop)
+      return ymap.has(`${prefix}${prop}`)
+    },
+    ownKeys() {
+      return Array.from(ymap.keys()).filter(key => key.startsWith(prefix)).map(key => key.slice(prefix.length))
+    },
+    getOwnPropertyDescriptor(target, prop) {
+      if (typeof prop !== 'string') return Reflect.getOwnPropertyDescriptor(target, prop)
+      if (ymap.has(`${prefix}${prop}`)) {
+        return { configurable: true, enumerable: true, writable: true, value: ymap.get(`${prefix}${prop}`) }
+      }
+      return undefined
+    },
+  })
 }
 
 /**

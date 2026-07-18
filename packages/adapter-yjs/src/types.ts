@@ -97,6 +97,14 @@ export interface ProfileDoc {
   updatedAt: string
 }
 
+/** Per-device notification markers. Interpretation belongs to the connector. */
+export interface NotificationStateDoc {
+  lastSeenByDevice?: Record<string, string>
+  readUpToByDevice?: Record<string, string>
+  readEntryKeys?: Record<string, string>
+  mutedGroupIds?: Record<string, true>
+}
+
 export interface PersonalDoc {
   profile: ProfileDoc | null
   contacts: Record<string, ContactDoc>
@@ -107,4 +115,5 @@ export interface PersonalDoc {
   groupKeys: Record<string, GroupKeyDoc>
   capabilitySigningSeeds: Record<string, CapabilitySigningSeedDoc>
   dismissedNotifications: Record<string, DismissedNotificationDoc>
+  notificationState?: NotificationStateDoc
 }

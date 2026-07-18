@@ -487,6 +487,149 @@ describe('YjsPersonalDocManager', () => {
       Y.applyUpdate(sanitizedDoc, compactStore.saved!)
       expect(sanitizedDoc.share.has('verifications')).toBe(false)
     })
+
+    it('keeps legacy PersonalDocs without notificationState unchanged until first write', async () => {
+      const oldDoc = new Y.Doc()
+      oldDoc.getMap('contacts').set('did:key:alice', new Y.Map())
+      const compactStore = new MemoryCompactStore(Y.encodeStateAsUpdate(oldDoc))
+
+      const loaded = await initYjsPersonalDoc(identity, undefined, undefined, compactStore)
+      expect(loaded).not.toHaveProperty('notificationState')
+
+      await flushYjsPersonalDoc()
+      const compacted = new Y.Doc()
+      Y.applyUpdate(compacted, compactStore.saved!)
+      expect(compacted.share.has('notificationState')).toBe(false)
+    })
+
+    it('round-trips nested writes for arbitrary restore-clone device slots through snapshots and compaction', async () => {
+      const compactStore = new MemoryCompactStore()
+      await initYjsPersonalDoc(identity, undefined, undefined, compactStore)
+
+      changeYjsPersonalDoc(doc => {
+        doc.notificationState = {
+          lastSeenByDevice: { 'restored-device': '2026-07-18T10:00:00.000Z' },
+          readUpToByDevice: { 'restored-device': '2026-07-18T10:01:00.000Z' },
+          readEntryKeys: { 'group-a:entry-a': '2026-07-18T10:02:00.000Z' },
+          mutedGroupIds: { 'group-muted': true },
+        }
+        doc.notificationState!.lastSeenByDevice!['other-device'] = '2026-07-18T10:03:00.000Z'
+        delete doc.notificationState!.readEntryKeys!['group-a:entry-a']
+        doc.notificationState!.readEntryKeys!['group-a:entry-b'] = '2026-07-18T10:04:00.000Z'
+        delete doc.notificationState!.mutedGroupIds!['group-muted']
+        doc.notificationState!.mutedGroupIds!['group-kept'] = true
+      })
+
+      expect(getYjsPersonalDoc().notificationState).toEqual({
+        lastSeenByDevice: {
+          'restored-device': '2026-07-18T10:00:00.000Z',
+          'other-device': '2026-07-18T10:03:00.000Z',
+        },
+        readUpToByDevice: { 'restored-device': '2026-07-18T10:01:00.000Z' },
+        readEntryKeys: { 'group-a:entry-b': '2026-07-18T10:04:00.000Z' },
+        mutedGroupIds: { 'group-kept': true },
+      })
+
+      await flushYjsPersonalDoc()
+      await resetYjsPersonalDoc()
+      expect((await initYjsPersonalDoc(identity, undefined, undefined, compactStore)).notificationState).toEqual({
+        lastSeenByDevice: {
+          'restored-device': '2026-07-18T10:00:00.000Z',
+          'other-device': '2026-07-18T10:03:00.000Z',
+        },
+        readUpToByDevice: { 'restored-device': '2026-07-18T10:01:00.000Z' },
+        readEntryKeys: { 'group-a:entry-b': '2026-07-18T10:04:00.000Z' },
+        mutedGroupIds: { 'group-kept': true },
+      })
+    })
+  })
+
+  describe('notificationState CRDT contract', () => {
+    it('supports lazy init: ??= {} followed by nested writes lands in Yjs', async () => {
+      await initYjsPersonalDoc(identity)
+      changeYjsPersonalDoc(doc => {
+        doc.notificationState ??= {}
+        doc.notificationState.lastSeenByDevice ??= {}
+        doc.notificationState.lastSeenByDevice['device-a'] = '2026-07-18T12:00:00.000Z'
+      })
+      expect(getYjsPersonalDoc().notificationState?.lastSeenByDevice?.['device-a']).toBe('2026-07-18T12:00:00.000Z')
+    })
+
+    it('deleting a top-level field clears its stored entries', async () => {
+      await initYjsPersonalDoc(identity)
+      changeYjsPersonalDoc(doc => {
+        doc.notificationState ??= {}
+        doc.notificationState.mutedGroupIds = { 'group-a': true, 'group-b': true }
+        doc.notificationState.lastSeenByDevice = { 'device-a': '2026-07-18T12:00:00.000Z' }
+      })
+      changeYjsPersonalDoc(doc => {
+        delete doc.notificationState!.mutedGroupIds
+      })
+      const state = getYjsPersonalDoc().notificationState
+      expect(state?.mutedGroupIds).toBeUndefined()
+      expect(state?.lastSeenByDevice?.['device-a']).toBe('2026-07-18T12:00:00.000Z')
+      await flushYjsPersonalDoc()
+      expect(getYjsPersonalDoc().notificationState).toEqual({
+        lastSeenByDevice: { 'device-a': '2026-07-18T12:00:00.000Z' },
+      })
+    })
+
+    it('the in operator reflects stored fields', async () => {
+      await initYjsPersonalDoc(identity)
+      changeYjsPersonalDoc(doc => {
+        doc.notificationState ??= {}
+        expect('lastSeenByDevice' in doc.notificationState).toBe(false)
+        doc.notificationState.lastSeenByDevice = { 'device-a': '2026-07-18T12:00:00.000Z' }
+        expect('lastSeenByDevice' in doc.notificationState).toBe(true)
+        expect('readUpToByDevice' in doc.notificationState).toBe(false)
+      })
+    })
+
+    it('proxy traps tolerate symbol keys (inspection does not crash)', async () => {
+      await initYjsPersonalDoc(identity)
+      changeYjsPersonalDoc(doc => {
+        doc.notificationState ??= {}
+        doc.notificationState.mutedGroupIds ??= {}
+        doc.notificationState.mutedGroupIds['group-x'] = true
+      })
+      const state = getYjsPersonalDoc().notificationState!
+      // util.inspect / console.log walk symbol properties on proxies.
+      expect(() => JSON.stringify({ ...state.mutedGroupIds })).not.toThrow()
+      expect(() => (state as any)[Symbol.toStringTag]).not.toThrow()
+      expect(() => (state.mutedGroupIds as any)[Symbol.toStringTag]).not.toThrow()
+      expect(Object.keys(state.mutedGroupIds!)).toEqual(['group-x'])
+    })
+
+    function notificationDoc(slot: string, timestamp: string): Y.Doc {
+      const doc = new Y.Doc()
+      doc.getMap('notificationState').set(`lastSeenByDevice:${slot}`, timestamp)
+      return doc
+    }
+
+    it('merges writes for different device slots and resolves same-slot writes deterministically', () => {
+      const first = notificationDoc('device-a', '2026-07-18T10:00:00.000Z')
+      const second = notificationDoc('device-b', '2026-07-18T10:01:00.000Z')
+      // Capture BOTH updates before applying either — otherwise the second
+      // sync step would no longer use the original concurrent state.
+      const firstUpdate = Y.encodeStateAsUpdate(first)
+      const secondUpdate = Y.encodeStateAsUpdate(second)
+      Y.applyUpdate(first, secondUpdate)
+      Y.applyUpdate(second, firstUpdate)
+      expect(first.getMap('notificationState').toJSON()).toEqual({
+        'lastSeenByDevice:device-a': '2026-07-18T10:00:00.000Z',
+        'lastSeenByDevice:device-b': '2026-07-18T10:01:00.000Z',
+      })
+      expect(second.toJSON()).toEqual(first.toJSON())
+
+      const left = notificationDoc('same-slot', '2026-07-18T10:00:00.000Z')
+      const right = notificationDoc('same-slot', '2026-07-18T10:01:00.000Z')
+      const leftUpdate = Y.encodeStateAsUpdate(left)
+      const rightUpdate = Y.encodeStateAsUpdate(right)
+      Y.applyUpdate(left, rightUpdate)
+      Y.applyUpdate(right, leftUpdate)
+      expect(left.toJSON()).toEqual(right.toJSON())
+      expect(left.getMap('notificationState').get('lastSeenByDevice:same-slot')).toBeDefined()
+    })
   })
 
   describe('Object.keys / Object.values compatibility', () => {
