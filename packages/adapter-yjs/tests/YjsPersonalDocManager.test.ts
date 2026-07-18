@@ -487,6 +487,94 @@ describe('YjsPersonalDocManager', () => {
       Y.applyUpdate(sanitizedDoc, compactStore.saved!)
       expect(sanitizedDoc.share.has('verifications')).toBe(false)
     })
+
+    it('keeps legacy PersonalDocs without notificationState unchanged until first write', async () => {
+      const oldDoc = new Y.Doc()
+      oldDoc.getMap('contacts').set('did:key:alice', new Y.Map())
+      const compactStore = new MemoryCompactStore(Y.encodeStateAsUpdate(oldDoc))
+
+      const loaded = await initYjsPersonalDoc(identity, undefined, undefined, compactStore)
+      expect(loaded).not.toHaveProperty('notificationState')
+
+      await flushYjsPersonalDoc()
+      const compacted = new Y.Doc()
+      Y.applyUpdate(compacted, compactStore.saved!)
+      expect(compacted.share.has('notificationState')).toBe(false)
+    })
+
+    it('round-trips nested notificationState writes through snapshots and compaction', async () => {
+      const compactStore = new MemoryCompactStore()
+      await initYjsPersonalDoc(identity, undefined, undefined, compactStore)
+
+      changeYjsPersonalDoc(doc => {
+        doc.notificationState = {
+          lastSeenByDevice: { 'restored-device': '2026-07-18T10:00:00.000Z' },
+          readUpToByDevice: { 'restored-device': '2026-07-18T10:01:00.000Z' },
+          readEntryKeys: { 'group-a:entry-a': '2026-07-18T10:02:00.000Z' },
+          mutedGroupIds: { 'group-muted': true },
+        }
+        doc.notificationState.lastSeenByDevice['other-device'] = '2026-07-18T10:03:00.000Z'
+        delete doc.notificationState.readEntryKeys['group-a:entry-a']
+        doc.notificationState.readEntryKeys['group-a:entry-b'] = '2026-07-18T10:04:00.000Z'
+        delete doc.notificationState.mutedGroupIds['group-muted']
+        doc.notificationState.mutedGroupIds['group-kept'] = true
+      })
+
+      expect(getYjsPersonalDoc().notificationState).toEqual({
+        lastSeenByDevice: {
+          'restored-device': '2026-07-18T10:00:00.000Z',
+          'other-device': '2026-07-18T10:03:00.000Z',
+        },
+        readUpToByDevice: { 'restored-device': '2026-07-18T10:01:00.000Z' },
+        readEntryKeys: { 'group-a:entry-b': '2026-07-18T10:04:00.000Z' },
+        mutedGroupIds: { 'group-kept': true },
+      })
+
+      await flushYjsPersonalDoc()
+      await resetYjsPersonalDoc()
+      expect((await initYjsPersonalDoc(identity, undefined, undefined, compactStore)).notificationState).toEqual({
+        lastSeenByDevice: {
+          'restored-device': '2026-07-18T10:00:00.000Z',
+          'other-device': '2026-07-18T10:03:00.000Z',
+        },
+        readUpToByDevice: { 'restored-device': '2026-07-18T10:01:00.000Z' },
+        readEntryKeys: { 'group-a:entry-b': '2026-07-18T10:04:00.000Z' },
+        mutedGroupIds: { 'group-kept': true },
+      })
+    })
+  })
+
+  describe('notificationState CRDT contract', () => {
+    function notificationDoc(slot: string, timestamp: string): Y.Doc {
+      const doc = new Y.Doc()
+      const state = new Y.Map<unknown>()
+      const lastSeen = new Y.Map<string>()
+      lastSeen.set(slot, timestamp)
+      state.set('lastSeenByDevice', lastSeen)
+      doc.getMap('notificationState').set('state', state)
+      return doc
+    }
+
+    it('merges writes for different device slots and resolves same-slot writes deterministically', () => {
+      const first = notificationDoc('device-a', '2026-07-18T10:00:00.000Z')
+      const second = notificationDoc('device-b', '2026-07-18T10:01:00.000Z')
+      Y.applyUpdate(first, Y.encodeStateAsUpdate(second))
+      Y.applyUpdate(second, Y.encodeStateAsUpdate(first))
+      expect(first.getMap('notificationState').toJSON()).toEqual({
+        state: { lastSeenByDevice: {
+          'device-a': '2026-07-18T10:00:00.000Z',
+          'device-b': '2026-07-18T10:01:00.000Z',
+        } },
+      })
+      expect(second.toJSON()).toEqual(first.toJSON())
+
+      const left = notificationDoc('same-slot', '2026-07-18T10:00:00.000Z')
+      const right = notificationDoc('same-slot', '2026-07-18T10:01:00.000Z')
+      Y.applyUpdate(left, Y.encodeStateAsUpdate(right))
+      Y.applyUpdate(right, Y.encodeStateAsUpdate(left))
+      expect(left.toJSON()).toEqual(right.toJSON())
+      expect(left.getMap('notificationState').get('state')).toBeDefined()
+    })
   })
 
   describe('Object.keys / Object.values compatibility', () => {
