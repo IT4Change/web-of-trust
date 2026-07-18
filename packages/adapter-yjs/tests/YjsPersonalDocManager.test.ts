@@ -502,7 +502,7 @@ describe('YjsPersonalDocManager', () => {
       expect(compacted.share.has('notificationState')).toBe(false)
     })
 
-    it('round-trips nested notificationState writes through snapshots and compaction', async () => {
+    it('round-trips nested writes for arbitrary restore-clone device slots through snapshots and compaction', async () => {
       const compactStore = new MemoryCompactStore()
       await initYjsPersonalDoc(identity, undefined, undefined, compactStore)
 
@@ -513,11 +513,11 @@ describe('YjsPersonalDocManager', () => {
           readEntryKeys: { 'group-a:entry-a': '2026-07-18T10:02:00.000Z' },
           mutedGroupIds: { 'group-muted': true },
         }
-        doc.notificationState.lastSeenByDevice['other-device'] = '2026-07-18T10:03:00.000Z'
-        delete doc.notificationState.readEntryKeys['group-a:entry-a']
-        doc.notificationState.readEntryKeys['group-a:entry-b'] = '2026-07-18T10:04:00.000Z'
-        delete doc.notificationState.mutedGroupIds['group-muted']
-        doc.notificationState.mutedGroupIds['group-kept'] = true
+        doc.notificationState!.lastSeenByDevice!['other-device'] = '2026-07-18T10:03:00.000Z'
+        delete doc.notificationState!.readEntryKeys!['group-a:entry-a']
+        doc.notificationState!.readEntryKeys!['group-a:entry-b'] = '2026-07-18T10:04:00.000Z'
+        delete doc.notificationState!.mutedGroupIds!['group-muted']
+        doc.notificationState!.mutedGroupIds!['group-kept'] = true
       })
 
       expect(getYjsPersonalDoc().notificationState).toEqual({
@@ -547,11 +547,7 @@ describe('YjsPersonalDocManager', () => {
   describe('notificationState CRDT contract', () => {
     function notificationDoc(slot: string, timestamp: string): Y.Doc {
       const doc = new Y.Doc()
-      const state = new Y.Map<unknown>()
-      const lastSeen = new Y.Map<string>()
-      lastSeen.set(slot, timestamp)
-      state.set('lastSeenByDevice', lastSeen)
-      doc.getMap('notificationState').set('state', state)
+      doc.getMap('notificationState').set(`lastSeenByDevice:${slot}`, timestamp)
       return doc
     }
 
@@ -561,10 +557,8 @@ describe('YjsPersonalDocManager', () => {
       Y.applyUpdate(first, Y.encodeStateAsUpdate(second))
       Y.applyUpdate(second, Y.encodeStateAsUpdate(first))
       expect(first.getMap('notificationState').toJSON()).toEqual({
-        state: { lastSeenByDevice: {
-          'device-a': '2026-07-18T10:00:00.000Z',
-          'device-b': '2026-07-18T10:01:00.000Z',
-        } },
+        'lastSeenByDevice:device-a': '2026-07-18T10:00:00.000Z',
+        'lastSeenByDevice:device-b': '2026-07-18T10:01:00.000Z',
       })
       expect(second.toJSON()).toEqual(first.toJSON())
 
@@ -573,7 +567,7 @@ describe('YjsPersonalDocManager', () => {
       Y.applyUpdate(left, Y.encodeStateAsUpdate(right))
       Y.applyUpdate(right, Y.encodeStateAsUpdate(left))
       expect(left.toJSON()).toEqual(right.toJSON())
-      expect(left.getMap('notificationState').get('state')).toBeDefined()
+      expect(left.getMap('notificationState').get('lastSeenByDevice:same-slot')).toBeDefined()
     })
   })
 
