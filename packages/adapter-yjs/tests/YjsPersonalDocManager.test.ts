@@ -545,6 +545,31 @@ describe('YjsPersonalDocManager', () => {
   })
 
   describe('notificationState CRDT contract', () => {
+    it('supports lazy init: ??= {} followed by nested writes lands in Yjs', async () => {
+      await initYjsPersonalDoc(identity)
+      changeYjsPersonalDoc(doc => {
+        doc.notificationState ??= {}
+        doc.notificationState.lastSeenByDevice ??= {}
+        doc.notificationState.lastSeenByDevice['device-a'] = '2026-07-18T12:00:00.000Z'
+      })
+      expect(getYjsPersonalDoc().notificationState?.lastSeenByDevice?.['device-a']).toBe('2026-07-18T12:00:00.000Z')
+    })
+
+    it('proxy traps tolerate symbol keys (inspection does not crash)', async () => {
+      await initYjsPersonalDoc(identity)
+      changeYjsPersonalDoc(doc => {
+        doc.notificationState ??= {}
+        doc.notificationState.mutedGroupIds ??= {}
+        doc.notificationState.mutedGroupIds['group-x'] = true
+      })
+      const state = getYjsPersonalDoc().notificationState!
+      // util.inspect / console.log walk symbol properties on proxies.
+      expect(() => JSON.stringify({ ...state.mutedGroupIds })).not.toThrow()
+      expect(() => (state as any)[Symbol.toStringTag]).not.toThrow()
+      expect(() => (state.mutedGroupIds as any)[Symbol.toStringTag]).not.toThrow()
+      expect(Object.keys(state.mutedGroupIds!)).toEqual(['group-x'])
+    })
+
     function notificationDoc(slot: string, timestamp: string): Y.Doc {
       const doc = new Y.Doc()
       doc.getMap('notificationState').set(`lastSeenByDevice:${slot}`, timestamp)

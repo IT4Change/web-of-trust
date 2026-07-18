@@ -235,8 +235,10 @@ function createDocProxy(): PersonalDoc {
     get dismissedNotifications() { return createRecordProxy(getDismissedNotificationsMap()) },
     set dismissedNotifications(_v) { /* handled by proxy */ },
     get notificationState(): NotificationStateDoc | undefined {
-      const notificationStateMap = getNotificationStateMap()
-      return notificationStateMap.size > 0 ? createNotificationStateProxy(notificationStateMap) : undefined
+      // Always a writable lazy proxy: `doc.notificationState ??= {}` followed
+      // by nested writes must work even while the map is still empty.
+      // Snapshots keep omitting the field until something is stored.
+      return createNotificationStateProxy(getNotificationStateMap())
     },
     set notificationState(value: NotificationStateDoc | undefined) {
       const notificationStateMap = getNotificationStateMap()
@@ -276,11 +278,13 @@ function applyNotificationStateToYmap(ymap: Y.Map<any>, value: NotificationState
 
 function createNotificationStateProxy(ymap: Y.Map<any>): NotificationStateDoc {
   return new Proxy({} as NotificationStateDoc, {
-    get(_target, prop: string) {
+    get(target, prop) {
+      if (typeof prop !== 'string') return Reflect.get(target, prop)
       if (!notificationStateFields.includes(prop as any)) return undefined
       return createPrefixedRecordProxy(ymap, `${prop}:`)
     },
-    set(_target, prop: string, value: any) {
+    set(target, prop, value: any) {
+      if (typeof prop !== 'string') return Reflect.set(target, prop, value)
       if (!notificationStateFields.includes(prop as any)) return true
       const prefix = `${prop}:`
       for (const key of Array.from(ymap.keys())) if (key.startsWith(prefix)) ymap.delete(key)
@@ -290,7 +294,8 @@ function createNotificationStateProxy(ymap: Y.Map<any>): NotificationStateDoc {
     ownKeys() {
       return notificationStateFields.filter(field => Array.from(ymap.keys()).some(key => key.startsWith(`${field}:`)))
     },
-    getOwnPropertyDescriptor(_target, prop: string) {
+    getOwnPropertyDescriptor(target, prop) {
+      if (typeof prop !== 'string') return Reflect.getOwnPropertyDescriptor(target, prop)
       const prefix = `${prop}:`
       if (Array.from(ymap.keys()).some(key => key.startsWith(prefix))) {
         return { configurable: true, enumerable: true, writable: true, value: createPrefixedRecordProxy(ymap, prefix) }
@@ -302,23 +307,30 @@ function createNotificationStateProxy(ymap: Y.Map<any>): NotificationStateDoc {
 
 function createPrefixedRecordProxy<T>(ymap: Y.Map<any>, prefix: string): Record<string, T> {
   return new Proxy({} as Record<string, T>, {
-    get(_target, prop: string) {
-      if (prop === Symbol.iterator as any || prop === 'toJSON') return undefined
+    get(target, prop) {
+      if (typeof prop !== 'string') return Reflect.get(target, prop)
+      if (prop === 'toJSON') return undefined
       return ymap.get(`${prefix}${prop}`)
     },
-    set(_target, prop: string, value: T) {
+    set(target, prop, value: T) {
+      if (typeof prop !== 'string') return Reflect.set(target, prop, value)
       ymap.set(`${prefix}${prop}`, value)
       return true
     },
-    deleteProperty(_target, prop: string) {
+    deleteProperty(target, prop) {
+      if (typeof prop !== 'string') return Reflect.deleteProperty(target, prop)
       ymap.delete(`${prefix}${prop}`)
       return true
     },
-    has(_target, prop: string) { return ymap.has(`${prefix}${prop}`) },
+    has(target, prop) {
+      if (typeof prop !== 'string') return Reflect.has(target, prop)
+      return ymap.has(`${prefix}${prop}`)
+    },
     ownKeys() {
       return Array.from(ymap.keys()).filter(key => key.startsWith(prefix)).map(key => key.slice(prefix.length))
     },
-    getOwnPropertyDescriptor(_target, prop: string) {
+    getOwnPropertyDescriptor(target, prop) {
+      if (typeof prop !== 'string') return Reflect.getOwnPropertyDescriptor(target, prop)
       if (ymap.has(`${prefix}${prop}`)) {
         return { configurable: true, enumerable: true, writable: true, value: ymap.get(`${prefix}${prop}`) }
       }
