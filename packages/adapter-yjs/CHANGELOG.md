@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.4](https://github.com/real-life-org/web-of-trust/compare/adapter-yjs-v0.1.3...adapter-yjs-v0.1.4) (2026-07-18)
+
+
+### Features
+
+* **adapter-yjs:** additives `notificationState` im PersonalDoc — per-Gerät Frontier-Slots, Gelesen-Ausnahmen, Gruppen-Mutes; Snapshot/Compaction/Schreib-Proxy inkl. Lazy-Init, symbol-sicherer Traps, deleteProperty/has ([#283](https://github.com/real-life-org/web-of-trust/pull/283))
+
+
 ## [0.1.3](https://github.com/real-life-org/web-of-trust/compare/adapter-yjs-v0.1.2...adapter-yjs-v0.1.3) (2026-07-15)
 
 
