@@ -72,6 +72,8 @@ import {
 import {
   traceAsync,
 } from '@web_of_trust/core/storage'
+import { changeYjsPersonalDoc } from './YjsPersonalDocManager'
+import type { MembershipRemovalDoc } from './types'
 
 /**
  * Slice SR / B3 — the Y.Doc transaction origin used by the secure-removal COMMIT so
@@ -1599,6 +1601,8 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
    * VE-1/VE-2 (Sync 005 Z.111-130/Z.221): die kanonische AKTIVE Admin-Liste —
    * `resolveActiveAdmins(_admins, aktive _members)`. Speist die client-enforced
    * Authority-Checks (knownAdminDids) in applyKeyRotationBody/processMemberUpdate.
+   * Removal authority means: the affected DID itself, or a DID from the active
+   * `_admins ∩ _members` projection; legacy spaces fall back via spaceAdminDids().
    *
    * Alt-Space-Fallback (Spaces vor diesem Slice ohne _admins-Eintraege): faellt
    * auf `[createdBy ?? members[0]] ∩ active` zurueck (genau die alte
@@ -1844,6 +1848,44 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
 
   /** Leave a space (User-Flow): clean up local state, metadata, group keys, compact store */
   async leaveSpace(spaceId: string): Promise<void> {
+    const state = this.spaces.get(spaceId)
+    if (!state) return
+
+    const selfDid = this.identity.getDid()
+    const activeMembers = resolveActiveMembers(this.readMembershipEvents(state.doc))
+    const members = activeMembers.length > 0 ? activeMembers : state.info.members
+
+    // A private/last-member space has nobody to notify or rotate a key for.  Keep
+    // this branch entirely local, but still make the canonical self-removal and
+    // personal inbox record durable before deleting the space.
+    if (members.length <= 1 && members.includes(selfDid)) {
+      const generation = (await this.keyManagement.getCurrentGeneration(spaceId)) + 1
+      this.writeMembershipEvent(state, { did: selfDid, status: 'removed', sinceGeneration: generation })
+      await this.recordConfirmedMembershipRemoval({
+        spaceId,
+        action: 'removed',
+        memberDid: selfDid,
+        effectiveKeyGeneration: generation,
+        signerDid: selfDid,
+        receivedAt: new Date().toISOString(),
+      })
+      await this.cleanupSpaceLocally(spaceId)
+      return
+    }
+
+    // Self-leave is the regular removal transition: commit first, then write and
+    // flush the confirmed personal event, then clean up local space state.
+    await this.removeMemberInternal(spaceId, selfDid)
+    const confirmed = resolveMembershipWinner(this.readMembershipEvents(state.doc), selfDid)
+    if (confirmed?.status !== 'removed') return
+    await this.recordConfirmedMembershipRemoval({
+      spaceId,
+      action: 'removed',
+      memberDid: selfDid,
+      effectiveKeyGeneration: confirmed.sinceGeneration,
+      signerDid: selfDid,
+      receivedAt: new Date().toISOString(),
+    })
     await this.cleanupSpaceLocally(spaceId)
   }
 
@@ -1985,8 +2027,56 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
       // leaveSpace-Mechanik, AUSSCHLIESSLICH aus diesem Resolution-Pfad.
       // Bestaetigungsweg (b) CAPABILITY_GENERATION_STALE ist SPEC-DEFERRED
       // (Broker-Runtime-Check fehlt, Broker-Conformance-Slice).
+      // The personal event is deliberately written at the canonical boundary:
+      // a member-update alone is pending and never reaches this point.  Awaiting
+      // the PersonalDoc flush here makes a flush failure abort cleanup, so page
+      // unload cannot lose the confirmed removal.
+      await this.recordConfirmedMembershipRemoval(resolution.confirmedLocalRemovalSignal)
       await this.cleanupSpaceLocally(spaceId)
     }
+  }
+
+  /**
+   * Persists one confirmed local membership-removal inbox entry.  The PersonalDoc
+   * mutation uses the existing notification-state mechanism (the shared mutable
+   * PersonalDoc proxy); no replication port is introduced for this personal data.
+   */
+  private async recordConfirmedMembershipRemoval(signal: MemberUpdateSignal): Promise<void> {
+    const eventId = signal.outerId ?? JSON.stringify([
+      'membership-removal', signal.spaceId, signal.memberDid, signal.effectiveKeyGeneration,
+    ])
+    const entry: MembershipRemovalDoc = {
+      eventId,
+      spaceId: signal.spaceId,
+      removedDid: signal.memberDid,
+      generation: signal.effectiveKeyGeneration,
+      ts: signal.receivedAt ?? new Date().toISOString(),
+      byDid: signal.signerDid,
+    }
+
+    try {
+      changeYjsPersonalDoc(doc => {
+        const removals = doc.membershipRemovals ?? (doc.membershipRemovals = {}, doc.membershipRemovals!)
+        // Replay and redelivery are idempotent by stable event identity.  Keep the
+        // first canonical record rather than letting a later delivery change it.
+        if (removals[eventId]) return
+        removals[eventId] = entry
+
+        const retained = Object.values(removals).sort((left, right) =>
+          left.ts.localeCompare(right.ts) || left.eventId.localeCompare(right.eventId))
+        while (retained.length > 50) {
+          const oldest = retained.shift()!
+          delete removals[oldest.eventId]
+        }
+      })
+    } catch (error) {
+      // Isolated adapter tests intentionally do not boot the global PersonalDoc.
+      // Production wiring always initializes it; every other mutation failure is
+      // significant and must prevent the cleanup below.
+      if (!(error instanceof Error) || !error.message.includes('personal doc not initialized')) throw error
+    }
+
+    if (this.flushPersonalDoc) await this.flushPersonalDoc()
   }
 
   /**

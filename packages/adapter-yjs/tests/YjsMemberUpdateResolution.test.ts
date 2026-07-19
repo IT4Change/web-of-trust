@@ -27,6 +27,7 @@ import { MEMBER_UPDATE_MESSAGE_TYPE, formatMembershipEventKey } from '@web_of_tr
 import type { MembershipEvent, AdminEntry } from '@web_of_trust/core/protocol'
 import type { MessagingAdapter, WireMessage } from '@web_of_trust/core/ports'
 import { YjsReplicationAdapter } from '../src/YjsReplicationAdapter'
+import { initYjsPersonalDoc, getYjsPersonalDoc, resetYjsPersonalDoc } from '../src/YjsPersonalDocManager'
 
 const ADMIN = 'did:key:z6MkAdminAdminAdmin'
 const TARGET = 'did:key:z6MkTargetTargetTarget'
@@ -112,6 +113,7 @@ async function setup(options?: {
   passphrase?: string
   memberUpdateStore?: InMemoryMemberUpdatePendingStore
   messagingOverride?: MessagingAdapter
+  flushPersonalDoc?: () => Promise<void>
 }): Promise<Harness> {
   const alice = (await createTestIdentity(options?.passphrase ?? 'res-alice')).identity
   const messaging = new InMemoryMessagingAdapter()
@@ -127,6 +129,7 @@ async function setup(options?: {
     metadataStorage: metadata,
     compactStore,
     memberUpdateStore,
+    flushPersonalDoc: options?.flushPersonalDoc,
   })
   await adapter.start()
   cleanups.push(async () => {
@@ -161,6 +164,63 @@ describe('Pflicht-Test 4 — kanonische Bestaetigung add (Sync 005 Z.196)', () =
     expect(spaceState(h.adapter, space.id).pendingAddition).toBeUndefined()
     // Bestaetigung ist KEIN Cleanup-Anlass fuer added — Space bleibt.
     expect(spaceState(h.adapter, space.id)).toBeDefined()
+  })
+})
+
+describe('P0b membershipRemovals — confirmed cleanup boundary', () => {
+  it('writes the authorized confirmed signal once, flushes it, then cleans up', async () => {
+    const h = await setup({ passphrase: 'p0b-confirmed-removal' })
+    await initYjsPersonalDoc(h.alice)
+    cleanups.push(resetYjsPersonalDoc)
+    const space = await h.adapter.createSpace<TestDoc>('shared', { items: {} }, { name: 'S' })
+    seedMembership(h.adapter, space.id, ADMIN, [ADMIN, h.alice.getDid()])
+    const outerId = 'confirmed-removal-id'
+
+    await (h.adapter as any).handleMemberUpdate({
+      type: MEMBER_UPDATE_MESSAGE_TYPE,
+      senderDid: ADMIN,
+      body: { spaceId: space.id, action: 'removed', memberDid: h.alice.getDid(), effectiveKeyGeneration: 1 },
+      outerId,
+      extensionFields: {},
+    })
+    applyRemoteMembershipEvent(h.adapter, space.id, { did: h.alice.getDid(), status: 'removed', sinceGeneration: 1 })
+    await waitUntil(() => spaceState(h.adapter, space.id) === undefined)
+
+    expect(getYjsPersonalDoc().membershipRemovals).toEqual({
+      [outerId]: expect.objectContaining({ eventId: outerId, spaceId: space.id, removedDid: h.alice.getDid(), generation: 1, byDid: ADMIN }),
+    })
+  })
+
+  it('does not clean up if the PersonalDoc flush fails', async () => {
+    const flushFailure = vi.fn(async () => { throw new Error('vault unavailable') })
+    const h = await setup({ passphrase: 'p0b-flush-failure', flushPersonalDoc: flushFailure })
+    await initYjsPersonalDoc(h.alice)
+    cleanups.push(resetYjsPersonalDoc)
+    const space = await h.adapter.createSpace<TestDoc>('shared', { items: {} }, { name: 'S' })
+    seedMembership(h.adapter, space.id, ADMIN, [ADMIN, h.alice.getDid()])
+    await (h.adapter as any).handleMemberUpdate(memberUpdateDecoded(ADMIN, {
+      spaceId: space.id, action: 'removed', memberDid: h.alice.getDid(), effectiveKeyGeneration: 1,
+    }))
+
+    applyRemoteMembershipEvent(h.adapter, space.id, { did: h.alice.getDid(), status: 'removed', sinceGeneration: 1 })
+    await wait()
+    expect(flushFailure).toHaveBeenCalled()
+    expect(spaceState(h.adapter, space.id)).toBeDefined()
+  })
+
+  it('leaveSpace records exactly one self-removal and keeps a last-member space local', async () => {
+    const h = await setup({ passphrase: 'p0b-self-leave' })
+    await initYjsPersonalDoc(h.alice)
+    cleanups.push(resetYjsPersonalDoc)
+    const space = await h.adapter.createSpace<TestDoc>('shared', { items: {} }, { name: 'S' })
+    const send = vi.spyOn(h.messaging, 'send')
+
+    await h.adapter.leaveSpace(space.id)
+    const removals = Object.values(getYjsPersonalDoc().membershipRemovals ?? {})
+      .filter(removal => removal.spaceId === space.id)
+    expect(removals).toHaveLength(1)
+    expect(removals[0]).toMatchObject({ spaceId: space.id, removedDid: h.alice.getDid(), byDid: h.alice.getDid() })
+    expect(send).not.toHaveBeenCalled()
   })
 })
 
