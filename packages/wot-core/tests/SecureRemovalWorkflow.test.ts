@@ -337,6 +337,33 @@ describe('recoverPendingRemovals — VE-C3 crash-recovery (single home broker)',
     expect(hex(after!.stagedKeyMaterial.contentKey)).not.toBe(hex(before!.stagedKeyMaterial.contentKey))
   })
 
+  it('GENERATION_GAP triggers catch-up, discards the too-high staging, then retries freshly staged material', async () => {
+    let attempts = 0
+    const h = await makeHarness({
+      sendSpaceRotate: async () => {
+        attempts += 1
+        if (attempts === 1) throw reject('GENERATION_GAP')
+      },
+    })
+    // Model local state that was already at generation 1 when the stale workflow
+    // staged generation 2; the broker's GAP response requires a catch-up pass.
+    await h.keyPort.saveKey(SPACE, 1, new Uint8Array(32).fill(3))
+    const catchUp = vi.fn(async () => true)
+    h.deps.catchUpGeneration = catchUp
+
+    await runTwoPhaseRemoval(h.deps, REMOVED)
+    const first = h.createRotateFrame.mock.calls[0]
+    const restaged = await h.docLogStore.getPendingRemoval(SPACE, REMOVED)
+    expect(catchUp).toHaveBeenCalledTimes(1)
+    expect(restaged!.newGeneration).toBe(2)
+    expect(hex(restaged!.stagedKeyMaterial.capVerificationKey)).not.toBe(hex(first[1]))
+
+    await recoverPendingRemovals(h.docLogStore, async () => h.deps)
+    expect(attempts).toBe(2)
+    expect(h.commitRemoval).toHaveBeenCalledWith(REMOVED, 2)
+    expect(await h.docLogStore.getPendingRemoval(SPACE, REMOVED)).toBeNull()
+  })
+
   it('a still-unreachable broker leaves the removal staged and recovery never throws (returns 0)', async () => {
     const h = await makeHarness({
       sendSpaceRotate: async () => {

@@ -105,6 +105,13 @@ export interface SecureRemovalDeps {
    * coordinator's serialized control tail (receipt.messageId == docId).
    */
   sendSpaceRotate: (brokerUrl: string, frame: ControlFrame) => Promise<void>
+  /** Trigger and await Sync-002 catch-up after a GENERATION_GAP. */
+  catchUpGeneration?: () => Promise<boolean>
+  /** Build/send the self-signed admin-remove after commit + distribution. */
+  createSelfAdminRemoveFrame?: () => Promise<ControlFrame>
+  sendAdminRemove?: (brokerUrl: string, frame: ControlFrame) => Promise<void>
+  /** Runs only after every home broker acknowledged the self admin-remove. */
+  finalizeSelfLeave?: () => Promise<void>
   /**
    * Engine-specific COMMIT side effects, run ONLY after the staged generation has
    * been activated and enforcement is complete: write the `removed@newGeneration`
@@ -274,6 +281,10 @@ async function driveRemovalToCompletion(
       await deps.docLogStore.markBrokerConfirmed(deps.spaceId, removal.removedDid, brokerUrl)
       confirmed.add(brokerUrl)
     } catch (err) {
+      if (err instanceof ControlFrameRejectedError && err.code === 'GENERATION_GAP') {
+        if (await handleGenerationGap(deps, removal)) return false
+        throw new RemovalPendingNotEnforcedError(deps.spaceId, removal.removedDid, removal.newGeneration)
+      }
       if (err instanceof ControlFrameRejectedError && err.code === 'GENERATION_TAKEN') {
         if (await handleGenerationTaken(deps, removal)) return false
         throw new RemovalPendingNotEnforcedError(deps.spaceId, removal.removedDid, removal.newGeneration)
@@ -297,7 +308,7 @@ async function driveRemovalToCompletion(
 
   // ── COMMIT (only now): activate the staged generation, then run the
   //    engine-specific membership-event + distribution, then drop the record. ──
-  await commitStagedRotation({
+  if (!removal.committed) await commitStagedRotation({
     crypto: deps.crypto,
     keyPort: deps.keyPort,
     spaceId: deps.spaceId,
@@ -311,9 +322,43 @@ async function driveRemovalToCompletion(
       capabilityVerificationKey: removal.stagedKeyMaterial.capVerificationKey,
     },
   })
-  if (removal.activityEntry === undefined) await deps.commitRemoval(removal.removedDid, removal.newGeneration)
-  else await deps.commitRemoval(removal.removedDid, removal.newGeneration, removal.activityEntry)
+  if (!removal.committed) {
+    if (removal.activityEntry === undefined) await deps.commitRemoval(removal.removedDid, removal.newGeneration)
+    else await deps.commitRemoval(removal.removedDid, removal.newGeneration, removal.activityEntry)
+    removal = { ...removal, committed: true }
+    await deps.docLogStore.putPendingRemoval(removal)
+  }
+  // Sync 005 Self-Leave: the departing admin remains durably staged after
+  // commit/distribution until its own broker authority is removed everywhere.
+  if (removal.removedDid === deps.ownerDid) {
+    if (!deps.createSelfAdminRemoveFrame || !deps.sendAdminRemove || !deps.finalizeSelfLeave) {
+      throw new Error('admin self-leave requires durable admin-remove dependencies')
+    }
+    const adminFrame = await deps.createSelfAdminRemoveFrame()
+    const adminConfirmed = new Set(removal.adminRemoveConfirmedBrokerUrls ?? [])
+    for (const brokerUrl of homeBrokerSet) {
+      if (adminConfirmed.has(brokerUrl)) continue
+      try {
+        await deps.sendAdminRemove(brokerUrl, adminFrame)
+      } catch {
+        throw new RemovalPendingNotEnforcedError(deps.spaceId, removal.removedDid, removal.newGeneration)
+      }
+      adminConfirmed.add(brokerUrl)
+      removal = { ...removal, adminRemoveConfirmedBrokerUrls: [...adminConfirmed] }
+      await deps.docLogStore.putPendingRemoval(removal)
+    }
+    await deps.finalizeSelfLeave()
+  }
   await deps.docLogStore.deletePendingRemoval(deps.spaceId, removal.removedDid)
+  return true
+}
+
+/** A gap is not retryable material: catch up, discard it, and restage current+1. */
+async function handleGenerationGap(deps: SecureRemovalDeps, removal: PendingRemoval): Promise<boolean> {
+  if (!deps.catchUpGeneration || !(await deps.catchUpGeneration())) return false
+  // `putPendingRemoval` deliberately overwrites the old record, including its
+  // confirmations, so the too-high frame can never be retried after convergence.
+  await stageRemoval(deps, removal.removedDid, removal.activityEntry, removal.kind)
   return true
 }
 

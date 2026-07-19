@@ -184,6 +184,10 @@ export interface PendingRemoval {
    * never a second removal commit.
    */
   kind?: 'canonical-self-removal-rotation'
+  /** Commit/distribution completed; an admin self-leave now awaits broker admin-remove. */
+  committed?: boolean
+  /** Home brokers that acknowledged the durable self admin-remove. */
+  adminRemoveConfirmedBrokerUrls?: string[]
 }
 
 /**

@@ -15,7 +15,8 @@ import {
   type ControlFrameReceipt,
 } from '../../protocol/sync/control-frame-transport'
 import { parsePresentCapabilityControlFrame, PRESENT_CAPABILITY_CONTROL_FRAME_TYPE } from '../../protocol/sync/present-capability-control-frame'
-import { parseSpaceRegisterMessage, SPACE_REGISTER_MESSAGE_TYPE, SPACE_ROTATE_MESSAGE_TYPE, parseSpaceRotateMessage } from '../../protocol/sync/broker-admin-messages'
+import { parseSpaceRegisterMessage, SPACE_REGISTER_MESSAGE_TYPE, SPACE_ROTATE_MESSAGE_TYPE, parseSpaceRotateMessage, ADMIN_REMOVE_MESSAGE_TYPE, parseAdminRemoveMessage, verifyAdminRemoveMessage } from '../../protocol/sync/broker-admin-messages'
+import { didKeyToPublicKeyBytes, didOrKidToDid } from '../../protocol/identity/did-key'
 import { controlFrameDocId } from '../../protocol/sync/control-frame-doc-id'
 import { WebCryptoProtocolCryptoAdapter } from '../protocol-crypto'
 import type { BrokerErrorCode } from '../../protocol/sync/broker-error'
@@ -206,6 +207,8 @@ export class InProcessLogBroker implements InProcessLogBrokerControls {
         return this.handleSpaceRegister(frame)
       case SPACE_ROTATE_MESSAGE_TYPE:
         return this.handleSpaceRotate(socketId, frame)
+      case ADMIN_REMOVE_MESSAGE_TYPE:
+        return this.handleAdminRemove(frame)
       case PRESENT_CAPABILITY_CONTROL_FRAME_TYPE:
         return this.handlePresentCapability(socketId, frame)
       default:
@@ -276,6 +279,28 @@ export class InProcessLogBroker implements InProcessLogBrokerControls {
       if (key.endsWith(`:${docId}`)) this.scopes.delete(key)
     }
     return this.receipt(docId)
+  }
+
+  private async handleAdminRemove(frame: ControlFrame): Promise<ControlFrameReceipt> {
+    const parsed = parseAdminRemoveMessage(frame)
+    const log = this.ensureDoc(parsed.payload.spaceId)
+    const signerDid = didOrKidToDid(String(parsed.header.kid ?? ''))
+    let publicKey: Uint8Array
+    try { publicKey = didKeyToPublicKeyBytes(signerDid) } catch {
+      throw new ControlFrameRejectedError({ code: 'AUTH_INVALID', message: 'admin signer is invalid' })
+    }
+    const verified = await verifyAdminRemoveMessage({ frame, adminDid: signerDid, adminPublicKey: publicKey, crypto: this.crypto })
+    if (verified.disposition === 'rejected') {
+      throw new ControlFrameRejectedError({ code: verified.errorCode, message: 'admin-remove rejected' })
+    }
+    const signerRegistered = log.registrationAdminDids.includes(signerDid)
+    const alreadyRemoved = !log.registrationAdminDids.includes(parsed.payload.removedAdminDid)
+    if (!signerRegistered) {
+      if (signerDid === parsed.payload.removedAdminDid && alreadyRemoved) return this.receipt(parsed.payload.spaceId)
+      throw new ControlFrameRejectedError({ code: 'AUTH_INVALID', message: 'admin signer is not registered' })
+    }
+    log.registrationAdminDids = log.registrationAdminDids.filter((did) => did !== parsed.payload.removedAdminDid)
+    return this.receipt(parsed.payload.spaceId)
   }
 
   private async handlePresentCapability(socketId: string, frame: ControlFrame): Promise<ControlFrameReceipt> {

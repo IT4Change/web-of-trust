@@ -660,6 +660,8 @@ interface StoredPendingRemoval {
   createdAt: number
   activityEntry?: Record<string, unknown>
   kind?: 'canonical-self-removal-rotation'
+  committed?: boolean
+  adminRemoveConfirmedBrokerUrls?: string[]
 }
 
 function toStoredRemoval(removal: PendingRemoval): StoredPendingRemoval {
@@ -679,6 +681,8 @@ function toStoredRemoval(removal: PendingRemoval): StoredPendingRemoval {
     createdAt: removal.createdAt,
     activityEntry: removal.activityEntry === undefined ? undefined : JSON.parse(JSON.stringify(removal.activityEntry)),
     kind: removal.kind,
+    committed: removal.committed,
+    adminRemoveConfirmedBrokerUrls: removal.adminRemoveConfirmedBrokerUrls === undefined ? undefined : [...removal.adminRemoveConfirmedBrokerUrls],
   }
 }
 
@@ -698,6 +702,8 @@ function fromStoredRemoval(stored: StoredPendingRemoval): PendingRemoval {
     createdAt: stored.createdAt,
     activityEntry: stored.activityEntry === undefined ? undefined : JSON.parse(JSON.stringify(stored.activityEntry)),
     kind: stored.kind,
+    committed: stored.committed,
+    adminRemoveConfirmedBrokerUrls: stored.adminRemoveConfirmedBrokerUrls === undefined ? undefined : [...stored.adminRemoveConfirmedBrokerUrls],
   }
 }
 

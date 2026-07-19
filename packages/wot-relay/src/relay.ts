@@ -1548,8 +1548,23 @@ export class RelayServer {
       return
     }
 
-    const signer = this.resolveAdminSigner(ws, parsed.adminChangeJws, 'adminChangeJws')
-    if (signer === null) return
+    // A byte-identical self-remove retry is safe after the first accepted frame:
+    // verify its signature against the removed DID, then acknowledge the no-op.
+    const claimedSignerDid = typeof parsed.header.kid === 'string' ? didOrKidToDid(parsed.header.kid) : ''
+    const admins = this.docLog.getSpaceAdmins(parsed.payload.spaceId)
+    const selfRetry = claimedSignerDid === parsed.payload.removedAdminDid && !admins.includes(claimedSignerDid)
+    let signer: { spaceId: string; adminDid: string; adminPublicKey: Uint8Array } | null
+    if (selfRetry) {
+      try {
+        signer = { spaceId: parsed.payload.spaceId, adminDid: claimedSignerDid, adminPublicKey: didKeyToPublicKeyBytes(claimedSignerDid) }
+      } catch {
+        this.sendTo(ws, { type: 'error', thid: parsed.payload.spaceId, code: 'AUTH_INVALID', message: 'Admin signer DID is not a resolvable did:key.' })
+        return
+      }
+    } else {
+      signer = this.resolveAdminSigner(ws, parsed.adminChangeJws, 'adminChangeJws')
+      if (signer === null) return
+    }
 
     let result
     try {
@@ -1576,7 +1591,7 @@ export class RelayServer {
       return
     }
 
-    this.docLog.removeAdmin(result.payload.spaceId, result.payload.removedAdminDid)
+    if (!selfRetry) this.docLog.removeAdmin(result.payload.spaceId, result.payload.removedAdminDid)
 
     this.sendTo(ws, {
       type: 'receipt',

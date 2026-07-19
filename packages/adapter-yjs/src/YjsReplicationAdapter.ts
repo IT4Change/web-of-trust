@@ -50,7 +50,7 @@ import {
   formatMembershipEventKey, parseMembershipEventKey, resolveActiveMembers, resolveMembershipWinner, assertMembershipEvent,
   resolveActiveAdmins, assertAdminEntry,
   LogSyncCoordinator, AuthorMismatchError, LocalAppendFailedError, createSpaceCapabilityJws,
-  createSpaceRegisterMessageWithSigner, createSpaceRotateMessageWithSigner,
+  createSpaceRegisterMessageWithSigner, createSpaceRotateMessageWithSigner, createAdminRemoveMessageWithSigner,
   LOG_ENTRY_MESSAGE_TYPE, SYNC_RESPONSE_MESSAGE_TYPE,
 } from '@web_of_trust/core/protocol'
 import type { LogSyncEngineHooks, CapabilitySource, ControlFrameReceipt, WriteRejectHandler } from '@web_of_trust/core/protocol'
@@ -1294,6 +1294,28 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
         // serialized control tail guarantees no docId-equal frame races it (VE-9).
         await coordinator.sendSpaceRotate(frame)
       },
+      catchUpGeneration: async () => {
+        const coordinator = await this.getOrCreateCoordinator(state)
+        if (!coordinator) return false
+        await coordinator.catchUp()
+        return true
+      },
+      createSelfAdminRemoveFrame: async () => createAdminRemoveMessageWithSigner({
+        spaceId,
+        removedAdminDid: myDid,
+        kid: this.authorKid(),
+        sign: (input) => this.identity.signEd25519(input),
+      }),
+      sendAdminRemove: async (brokerUrl, frame) => {
+        const activeBroker = this.brokerUrls[0]
+        if (brokerUrl !== activeBroker) throw new Error('admin-remove broker is not active')
+        const coordinator = await this.getOrCreateCoordinator(state)
+        if (!coordinator) throw new Error('admin self-leave requires a log-sync coordinator')
+        await coordinator.sendSpaceRotate(frame)
+      },
+      finalizeSelfLeave: async () => {
+        await this.keyManagement.deleteSpaceKeys(spaceId)
+      },
       commitRemoval: async (removedDid, newGeneration, activityEntry) => {
         // Drop the removed member from the encryption-key cache so it receives NO
         // key-rotation (only its member-update). The staged generation is already
@@ -1321,7 +1343,8 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
           cb({ spaceId, did: removedDid, action: 'removed' })
         }
         this.notifySpaceListeners()
-        if (departingSelf) await this.keyManagement.deleteSpaceKeys(spaceId)
+        // The self-leaver keeps the staged material until broker admin-remove is
+        // acknowledged; finalizeSelfLeave performs the irreversible deletion.
       },
     }
   }
