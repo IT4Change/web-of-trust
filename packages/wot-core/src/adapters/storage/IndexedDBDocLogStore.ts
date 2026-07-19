@@ -658,6 +658,7 @@ interface StoredPendingRemoval {
     capVerificationKey: string
   }
   createdAt: number
+  activityEntry?: Record<string, unknown>
 }
 
 function toStoredRemoval(removal: PendingRemoval): StoredPendingRemoval {
@@ -675,6 +676,7 @@ function toStoredRemoval(removal: PendingRemoval): StoredPendingRemoval {
       capVerificationKey: encodeBase64Url(removal.stagedKeyMaterial.capVerificationKey),
     },
     createdAt: removal.createdAt,
+    activityEntry: removal.activityEntry === undefined ? undefined : JSON.parse(JSON.stringify(removal.activityEntry)),
   }
 }
 
@@ -692,6 +694,7 @@ function fromStoredRemoval(stored: StoredPendingRemoval): PendingRemoval {
     newGeneration: stored.newGeneration,
     stagedKeyMaterial,
     createdAt: stored.createdAt,
+    activityEntry: stored.activityEntry === undefined ? undefined : JSON.parse(JSON.stringify(stored.activityEntry)),
   }
 }
 

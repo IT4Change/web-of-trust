@@ -31,8 +31,8 @@ export class InMemoryMemberUpdatePendingStore implements MemberUpdatePendingStor
     const list = this.seen.get(signal.spaceId)
     const existing = list?.find((s) => sameTuple(s, signal))
     if (!existing) return
-    // Upgrade only the authority/disposition; preserve the original signer provenance.
-    existing.storedDisposition = signal.storedDisposition
+    // The authoritative signal owns provenance; never retain an untrusted first sender.
+    Object.assign(existing, { ...signal })
   }
 
   async bufferFuture(signal: MemberUpdateSignal): Promise<void> {

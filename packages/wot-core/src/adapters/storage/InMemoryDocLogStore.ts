@@ -451,5 +451,6 @@ function cloneRemoval(removal: PendingRemoval): PendingRemoval {
       capVerificationKey: Uint8Array.from(removal.stagedKeyMaterial.capVerificationKey),
     },
     createdAt: removal.createdAt,
+    activityEntry: removal.activityEntry === undefined ? undefined : JSON.parse(JSON.stringify(removal.activityEntry)),
   }
 }

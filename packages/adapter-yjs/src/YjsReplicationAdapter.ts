@@ -34,6 +34,7 @@ import {
   runTwoPhaseRemoval, recoverPendingRemovals,
 } from '@web_of_trust/core/application'
 import type { LocalImpact, SecureRemovalDeps } from '@web_of_trust/core/application'
+import type { MembershipActivityCapable } from '@web_of_trust/core/ports'
 import type {
   ProtocolCryptoAdapter, MemberUpdateSignal, SeenMemberUpdateSignal, SpaceInviteBody, KeyRotationBody,
   DidResolver, DidcommPlaintextMessage, InboxAckLocalOutcome, InboxMessageKind,
@@ -405,7 +406,7 @@ function applyInitialDoc(doc: Y.Doc, initialDoc: Record<string, any>): void {
 
 // --- YjsReplicationAdapter ---
 
-export class YjsReplicationAdapter implements ReplicationAdapter {
+export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActivityCapable {
   private identity: IdentitySession
   private messaging: MessagingAdapter
   private readonly keyManagement: KeyManagementPort
@@ -880,6 +881,19 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
   }
 
   async addMember(spaceId: string, memberDid: string, memberEncryptionPublicKey: Uint8Array): Promise<void> {
+    await this.addMemberInternal(spaceId, memberDid, memberEncryptionPublicKey)
+  }
+
+  async addMemberWithActivity(spaceId: string, memberDid: string, memberEncryptionPublicKey: Uint8Array, opts?: { activityEntry?: Record<string, unknown> }): Promise<{ changed: boolean }> {
+    const activityEntry = this.validateActivityEntry(opts?.activityEntry)
+    const state = this.spaces.get(spaceId)
+    if (!state) throw new Error(`Space ${spaceId} not found`)
+    if (resolveMembershipWinner(this.readMembershipEvents(state.doc), memberDid)?.status === 'active') return { changed: false }
+    await this.addMemberInternal(spaceId, memberDid, memberEncryptionPublicKey, activityEntry)
+    return { changed: true }
+  }
+
+  private async addMemberInternal(spaceId: string, memberDid: string, memberEncryptionPublicKey: Uint8Array, activityEntry?: Record<string, unknown>): Promise<void> {
     const state = this.spaces.get(spaceId)
     if (!state) throw new Error(`Space ${spaceId} not found`)
 
@@ -922,7 +936,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
       status: 'active',
       sinceGeneration: currentGeneration,
       addedBy: myDid,
-    })
+    }, activityEntry)
 
     // Spec-conformant invite body (Sync 005 Z.62-103): all content keys + capability +
     // signing key. VE-2: adminDids = volle AKTIVE Admin-Liste aus dem _admins-Set
@@ -980,6 +994,18 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
   }
 
   async removeMember(spaceId: string, memberDid: string): Promise<void> {
+    await this.removeMemberInternal(spaceId, memberDid)
+  }
+
+  async removeMemberWithActivity(spaceId: string, memberDid: string, opts?: { activityEntry?: Record<string, unknown> }): Promise<{ changed: boolean }> {
+    const activityEntry = this.validateActivityEntry(opts?.activityEntry)
+    const state = this.spaces.get(spaceId)
+    if (!state || resolveMembershipWinner(this.readMembershipEvents(state.doc), memberDid)?.status !== 'active') return { changed: false }
+    await this.removeMemberInternal(spaceId, memberDid, activityEntry)
+    return { changed: true }
+  }
+
+  private async removeMemberInternal(spaceId: string, memberDid: string, activityEntry?: Record<string, unknown>): Promise<void> {
     const state = this.spaces.get(spaceId)
     if (!state) return
 
@@ -1000,7 +1026,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
     // → commit). The legacy content path (enableLogSync=false) keeps the original
     // single-phase rotate-and-distribute below, UNCHANGED.
     if (this.logSyncEnabled) {
-      await this.removeMemberSecure(state, memberDid)
+      await this.removeMemberSecure(state, memberDid, activityEntry)
       return
     }
 
@@ -1018,7 +1044,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
     // aktiven DIDs aus dem Event-Set ersetzt — hier leer). Bewusster Bruch,
     // Alt-Spaces sind neu zu erstellen (Anton-Entscheid 2026-06-11).
     const newGen = (await this.keyManagement.getCurrentGeneration(spaceId)) + 1
-    this.writeMembershipEvent(state, { did: memberDid, status: 'removed', sinceGeneration: newGen })
+    this.writeMembershipEvent(state, { did: memberDid, status: 'removed', sinceGeneration: newGen }, activityEntry)
 
     // Rotate group key + fresh capability key pair + self-capability und an die
     // REMAINING members verteilen (Sync 005 Z.230/Z.276). The removed member
@@ -1095,7 +1121,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
    * ONLY once all brokers confirm. Throws {@link RemovalPendingNotEnforcedError} if
    * staging succeeded but enforcement did not complete (durable; retried by VE-C3).
    */
-  private async removeMemberSecure(state: YjsSpaceState, memberDid: string): Promise<void> {
+  private async removeMemberSecure(state: YjsSpaceState, memberDid: string, activityEntry?: Record<string, unknown>): Promise<void> {
     // Ensure the durable log store is initialized (it owns the pending-removal
     // staging area used by the two-phase workflow).
     const docLogStore = await this.ensureDocLogStore()
@@ -1105,7 +1131,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
     // (spaceId, removedDid) so a crash-recovery commit on a fresh instance can also
     // reach it (it is re-derivable from the still-present invite key otherwise).
     const removedEncKey = state.memberEncryptionKeys.get(memberDid)
-    await runTwoPhaseRemoval(this.buildSecureRemovalDeps(state, removedEncKey), memberDid)
+    await runTwoPhaseRemoval(this.buildSecureRemovalDeps(state, removedEncKey), memberDid, { activityEntry })
   }
 
   /**
@@ -1181,7 +1207,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
         // serialized control tail guarantees no docId-equal frame races it (VE-9).
         await coordinator.sendSpaceRotate(frame)
       },
-      commitRemoval: async (removedDid, newGeneration) => {
+      commitRemoval: async (removedDid, newGeneration, activityEntry) => {
         // Drop the removed member from the encryption-key cache so it receives NO
         // key-rotation (only its member-update). The staged generation is already
         // activated by the workflow — persist + distribute it, do NOT re-rotate.
@@ -1191,7 +1217,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
         // durable append throws, this rejects → driveRemovalToCompletion does NOT delete
         // the PendingRemoval (it stays for VE-C3 recovery), so a removal can never end
         // up broker-enforced + distributed without a durable membership-removal record.
-        await this.commitMembershipEventDurable(state, { did: removedDid, status: 'removed', sinceGeneration: newGeneration })
+        await this.commitMembershipEventDurable(state, { did: removedDid, status: 'removed', sinceGeneration: newGeneration }, activityEntry)
         await this.persistRotatedKeyToPersonalDoc(spaceId, newGeneration)
         await this.distributeKeyRotation(state, newGeneration)
         await this.distributeMemberRemovedUpdate(state, removedDid, newGeneration, removedEncKey)
@@ -1694,11 +1720,37 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
    * ueberschrieben oder geloescht — konkurrierende Schreiber treffen verschiedene
    * Keys, derselbe Key traegt denselben semantischen Inhalt (idempotent).
    */
-  private writeMembershipEvent(state: YjsSpaceState, event: MembershipEvent): void {
+  private writeMembershipEvent(state: YjsSpaceState, event: MembershipEvent, activityEntry?: Record<string, unknown>): void {
     const key = formatMembershipEventKey(event)
     const map = this.membersEventMap(state.doc)
     if (map.has(key)) return
-    state.doc.transact(() => { map.set(key, event) }, 'local')
+    state.doc.transact(() => {
+      map.set(key, event)
+      if (activityEntry) this.writeActivityEntry(state.doc, activityEntry)
+    }, 'local')
+  }
+
+  /** Validate before a Yjs transaction: the following single Set cannot partly fail. */
+  private validateActivityEntry(entry: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
+    if (entry === undefined) return undefined
+    if (typeof entry.id !== 'string' || entry.id.trim().length === 0) throw new Error('activityEntry.id must be a non-empty string')
+    try {
+      const json = JSON.stringify(entry)
+      if (json === undefined) throw new Error('not JSON')
+      return JSON.parse(json) as Record<string, unknown>
+    } catch {
+      throw new Error('activityEntry must be JSON-roundtrip-safe')
+    }
+  }
+
+  private writeActivityEntry(doc: Y.Doc, entry: Record<string, unknown>): void {
+    const data = doc.getMap('data')
+    let activity = data.get('activity') as Y.Map<any> | undefined
+    if (!(activity instanceof Y.Map)) {
+      activity = new Y.Map()
+      data.set('activity', activity)
+    }
+    activity.set(entry.id as string, entry)
   }
 
   /**
@@ -1718,7 +1770,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
    * the method returns cleanly (the membership op is already durable from the first
    * commit; Sync-002 seq/engine-dedup makes any earlier in-flight write harmless).
    */
-  private async commitMembershipEventDurable(state: YjsSpaceState, event: MembershipEvent): Promise<void> {
+  private async commitMembershipEventDurable(state: YjsSpaceState, event: MembershipEvent, activityEntry?: Record<string, unknown>): Promise<void> {
     const key = formatMembershipEventKey(event)
     const map = this.membersEventMap(state.doc)
     // B3 retry-hole (loop-review): `map.has(key)` proves the event is LOCALLY applied,
@@ -1738,7 +1790,10 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
       }
       state.doc.on('update', captureHandler)
       try {
-        state.doc.transact(() => { map.set(key, event) }, MEMBERSHIP_COMMIT_ORIGIN)
+        state.doc.transact(() => {
+          map.set(key, event)
+          if (activityEntry) this.writeActivityEntry(state.doc, activityEntry)
+        }, MEMBERSHIP_COMMIT_ORIGIN)
       } finally {
         state.doc.off('update', captureHandler)
       }
@@ -1924,7 +1979,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
     }
     await this.derivePendingMemberUpdateFlags(state)
 
-    if (resolution.localRemovalConfirmed) {
+    if (resolution.confirmedLocalRemovalSignal) {
       // Sync 005 Z.253 Weg (a): erst die kanonische Bestaetigung der eigenen
       // Entfernung macht den lokalen Austritt dauerhaft — Cleanup ueber die
       // leaveSpace-Mechanik, AUSSCHLIESSLICH aus diesem Resolution-Pfad.
@@ -3044,6 +3099,8 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
       // Sync 003 Z.460-464: signerDid aus verifiziertem Inner-JWS, nicht aus
       // Envelope-Routing. Löst #189-SPEC-DEFERRED S1 auf.
       signerDid: decoded.senderDid,
+      outerId: decoded.outerId,
+      receivedAt: new Date().toISOString(),
     }
     const result = await processMemberUpdate({
       signal,

@@ -1,11 +1,12 @@
 import type { SpaceDocMeta, SpaceInfo } from '../types/space'
+import type { MembershipActivityCapable } from './ReplicationAdapter'
 
 export interface SpaceListSubscription {
   subscribe(callback: (spaces: SpaceInfo[]) => void): () => void
   getValue(): SpaceInfo[]
 }
 
-export interface SpaceReplicationPort {
+export interface SpaceReplicationPort extends Partial<MembershipActivityCapable> {
   createSpace<T>(type: SpaceInfo['type'], initialDoc: T, meta?: { name?: string; description?: string; appTag?: string }): Promise<SpaceInfo>
   updateSpace(spaceId: string, meta: SpaceDocMeta): Promise<void>
   getSpaces(): Promise<SpaceInfo[]>

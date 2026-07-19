@@ -176,6 +176,8 @@ export interface PendingRemoval {
   stagedKeyMaterial: StagedRemovalKeyMaterial
   /** Staging-record creation time (ms since epoch). */
   createdAt: number
+  /** Plain JSON activity committed atomically with the membership event, if requested. */
+  activityEntry?: Record<string, unknown>
 }
 
 /**

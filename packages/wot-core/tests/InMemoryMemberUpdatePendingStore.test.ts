@@ -29,14 +29,14 @@ describe('InMemoryMemberUpdatePendingStore', () => {
     expect(await store.listSeenForSpace(SPACE)).toHaveLength(1)
   })
 
-  it('upgradePending lifts the disposition but preserves the original signer provenance', async () => {
+  it('upgradePending replaces provenance with the authorized signal', async () => {
     const store = new InMemoryMemberUpdatePendingStore()
     await store.savePending(seen('store-unverified-pending-and-sync')) // signer ADMIN (helper default)
     await store.upgradePending({ ...signal({ signerDid: 'did:key:z6MkUpgrader' }), storedDisposition: 'store-pending-and-sync' })
     const list = await store.listSeenForSpace(SPACE)
     expect(list).toHaveLength(1)
     expect(list[0].storedDisposition).toBe('store-pending-and-sync')
-    expect(list[0].signerDid).toBe(ADMIN) // provenance not overwritten
+    expect(list[0].signerDid).toBe('did:key:z6MkUpgrader')
   })
 
   it('bufferFuture stores separately from seen (no storedDisposition leaks into seen)', async () => {

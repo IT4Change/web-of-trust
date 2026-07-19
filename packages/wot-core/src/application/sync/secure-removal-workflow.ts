@@ -112,7 +112,7 @@ export interface SecureRemovalDeps {
    * the remaining members and the member-update to remaining + removed members,
    * and push the re-encrypted snapshot. Receives the committed `newGeneration`.
    */
-  commitRemoval: (removedDid: string, newGeneration: number) => Promise<void>
+  commitRemoval: (removedDid: string, newGeneration: number, activityEntry?: Record<string, unknown>) => Promise<void>
 }
 
 /**
@@ -131,6 +131,7 @@ export interface SecureRemovalDeps {
 export async function runTwoPhaseRemoval(
   deps: SecureRemovalDeps,
   removedDid: string,
+  opts?: { activityEntry?: Record<string, unknown> },
 ): Promise<void> {
   // ── MULTI-BROKER GUARD (MUSS): no silent half-enforcement ──────────────────
   // A real multi-broker space-rotate transport (broadcast to several authoritative
@@ -148,7 +149,7 @@ export async function runTwoPhaseRemoval(
 
   // ── IDEMPOTENCY: reuse an existing staging record (no second rotate) ────────
   const existing = await deps.docLogStore.getPendingRemoval(spaceId, removedDid)
-  const removal = existing ?? (await stageRemoval(deps, removedDid))
+  const removal = existing ?? (await stageRemoval(deps, removedDid, opts?.activityEntry))
 
   // First-attempt semantics: a hard space-rotate reject (AUTH_INVALID) is a real
   // admin-authority bug and MUST propagate (see driveRemovalToCompletion).
@@ -210,7 +211,7 @@ export async function recoverPendingRemovals(
 // ───────────────────────────────────────────────────────────────────────────
 
 /** STAGE: generate next-gen material (NOT persisted to the key store) + durably stage the intent. */
-async function stageRemoval(deps: SecureRemovalDeps, removedDid: string): Promise<PendingRemoval> {
+async function stageRemoval(deps: SecureRemovalDeps, removedDid: string, activityEntry?: Record<string, unknown>): Promise<PendingRemoval> {
   const staged: StagedRotationMaterial = await stageRotateSpaceKey({
     crypto: deps.crypto,
     keyPort: deps.keyPort,
@@ -232,6 +233,7 @@ async function stageRemoval(deps: SecureRemovalDeps, removedDid: string): Promis
     newGeneration: staged.newGeneration,
     stagedKeyMaterial,
     createdAt: (deps.now ?? (() => new Date()))().getTime(),
+    activityEntry,
   }
   // Durable BEFORE any space-rotate send: a crash after this point recovers the
   // intent + key material and retries (VE-C3); a crash before it leaves no trace
@@ -311,7 +313,8 @@ async function driveRemovalToCompletion(
       capabilityVerificationKey: removal.stagedKeyMaterial.capVerificationKey,
     },
   })
-  await deps.commitRemoval(removal.removedDid, removal.newGeneration)
+  if (removal.activityEntry === undefined) await deps.commitRemoval(removal.removedDid, removal.newGeneration)
+  else await deps.commitRemoval(removal.removedDid, removal.newGeneration, removal.activityEntry)
   await deps.docLogStore.deletePendingRemoval(deps.spaceId, removal.removedDid)
 }
 

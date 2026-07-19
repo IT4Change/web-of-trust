@@ -38,6 +38,7 @@ import { YjsPersonalLogSyncAdapter } from './YjsPersonalLogSyncAdapter'
 
 import type {
   NotificationStateDoc,
+  MembershipRemovalDoc,
   PersonalDoc,
   ProfileDoc,
 } from './types'
@@ -100,6 +101,7 @@ function getDismissedNotificationsMap(): Y.Map<any> {
 function getNotificationStateMap(): Y.Map<any> {
   return ydoc!.getMap('notificationState')
 }
+function getMembershipRemovalsMap(): Y.Map<any> { return ydoc!.getMap('membershipRemovals') }
 
 function getExistingRootMap(doc: Y.Doc, name: string): Y.Map<any> | null {
   return doc.share.has(name) ? doc.getMap(name) : null
@@ -109,7 +111,7 @@ function rebuildPersonalDocWithoutLegacyMaps(oldDoc: Y.Doc): Y.Doc {
   // dismissedNotifications MUSS hier drinstehen: der Legacy-Rebuild kopiert NUR
   // die gelisteten Root-Maps in das frische Y.Doc — ein fehlender Eintrag würde
   // die synced Resolve-Marker beim Migrations-Rebuild still wegwerfen (Re-Show).
-  const mapsToKeep = ['profile', 'contacts', 'attestations', 'attestationMetadata', 'spaces', 'groupKeys', 'capabilitySigningSeeds', 'dismissedNotifications', 'notificationState']
+  const mapsToKeep = ['profile', 'contacts', 'attestations', 'attestationMetadata', 'spaces', 'groupKeys', 'capabilitySigningSeeds', 'dismissedNotifications', 'notificationState', 'membershipRemovals']
   const snapshots = new Map<string, Record<string, any>>()
   for (const mapName of mapsToKeep) {
     const src = oldDoc.getMap(mapName)
@@ -148,6 +150,7 @@ function snapshotDoc(): PersonalDoc {
   const profile = profileMap.size > 0 ? ymapToPlain(profileMap) as ProfileDoc : null
 
   const notificationStateMap = getNotificationStateMap()
+  const membershipRemovalsMap = getMembershipRemovalsMap()
   const snapshot: PersonalDoc = {
     profile,
     contacts: ymapOfMapsToRecord(getContactsMap()),
@@ -160,6 +163,7 @@ function snapshotDoc(): PersonalDoc {
     dismissedNotifications: ymapOfMapsToRecord(getDismissedNotificationsMap()),
   }
   if (notificationStateMap.size > 0) snapshot.notificationState = notificationStateToPlain(notificationStateMap)
+  if (membershipRemovalsMap.size > 0) snapshot.membershipRemovals = ymapOfMapsToRecord(membershipRemovalsMap)
   return snapshot
 }
 
@@ -244,6 +248,16 @@ function createDocProxy(): PersonalDoc {
       const notificationStateMap = getNotificationStateMap()
       for (const key of Array.from(notificationStateMap.keys())) notificationStateMap.delete(key)
       if (value) applyNotificationStateToYmap(notificationStateMap, value)
+    },
+    get membershipRemovals(): Record<string, MembershipRemovalDoc> | undefined {
+      return createRecordProxy(getMembershipRemovalsMap()) as Record<string, MembershipRemovalDoc>
+    },
+    set membershipRemovals(value: Record<string, MembershipRemovalDoc> | undefined) {
+      const map = getMembershipRemovalsMap()
+      for (const key of Array.from(map.keys())) map.delete(key)
+      if (value) for (const [key, entry] of Object.entries(value)) {
+        const child = new Y.Map(); map.set(key, child); applyPlainToYmap(child, entry)
+      }
     },
   } as PersonalDoc
 }

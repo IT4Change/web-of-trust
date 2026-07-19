@@ -17,6 +17,10 @@ export interface MemberUpdateSignal {
   memberDid: string
   effectiveKeyGeneration: number
   signerDid: string
+  /** Verified outer inbox id, used as stable removal provenance. */
+  outerId?: string
+  /** Receipt time in canonical ISO form. */
+  receivedAt?: string
 }
 
 export interface SeenMemberUpdateSignal extends MemberUpdateSignal {
