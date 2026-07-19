@@ -384,7 +384,7 @@
         "expectedDisposition": "store-pending-and-sync"
       },
       {
-        "name": "member-signed-removal-is-unverified-pending",
+        "name": "self-signed-removal-is-authorized-pending",
         "localKeyGeneration": 3,
         "knownAdminDids": ["did:key:z6MkvLMiE11z8wXjNScxqjcMJHNfNyc8XqDT4aGzry4pFTTd"],
         "knownMemberDids": ["did:key:z6MkpTHR8VNsBxYAAWHut2Geadd9jSwuBV8xRoAnwWsdvktH"],
@@ -396,7 +396,7 @@
           "effectiveKeyGeneration": 4,
           "signerDid": "did:key:z6MkpTHR8VNsBxYAAWHut2Geadd9jSwuBV8xRoAnwWsdvktH"
         },
-        "expectedDisposition": "store-unverified-pending-and-sync"
+        "expectedDisposition": "store-pending-and-sync"
       },
       {
         "name": "member-signed-add-is-actionable-pending",

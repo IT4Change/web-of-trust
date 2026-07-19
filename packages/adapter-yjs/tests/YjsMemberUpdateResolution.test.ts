@@ -27,7 +27,7 @@ import { MEMBER_UPDATE_MESSAGE_TYPE, formatMembershipEventKey } from '@web_of_tr
 import type { MembershipEvent, AdminEntry } from '@web_of_trust/core/protocol'
 import type { MessagingAdapter, WireMessage } from '@web_of_trust/core/ports'
 import { YjsReplicationAdapter } from '../src/YjsReplicationAdapter'
-import { initYjsPersonalDoc, getYjsPersonalDoc, resetYjsPersonalDoc } from '../src/YjsPersonalDocManager'
+import { changeYjsPersonalDoc, flushYjsPersonalDoc, initYjsPersonalDoc, getYjsPersonalDoc, resetYjsPersonalDoc } from '../src/YjsPersonalDocManager'
 
 const ADMIN = 'did:key:z6MkAdminAdminAdmin'
 const TARGET = 'did:key:z6MkTargetTargetTarget'
@@ -114,6 +114,7 @@ async function setup(options?: {
   memberUpdateStore?: InMemoryMemberUpdatePendingStore
   messagingOverride?: MessagingAdapter
   flushPersonalDoc?: () => Promise<void>
+  brokerUrls?: string[]
 }): Promise<Harness> {
   const alice = (await createTestIdentity(options?.passphrase ?? 'res-alice')).identity
   // A confirmed self-removal has a hard production dependency on the personal
@@ -133,6 +134,7 @@ async function setup(options?: {
     metadataStorage: metadata,
     compactStore,
     memberUpdateStore,
+    brokerUrls: options?.brokerUrls,
     flushPersonalDoc: options?.flushPersonalDoc ?? (async () => {}),
   })
   await adapter.start()
@@ -173,6 +175,70 @@ describe('Pflicht-Test 4 — kanonische Bestaetigung add (Sync 005 Z.196)', () =
 })
 
 describe('P0b membershipRemovals — confirmed cleanup boundary', () => {
+  it('two devices: self-leave reaches the sibling as authorized pending, then canonical resolution cleans it up with one stable PersonalDoc removal', async () => {
+    const h = await setup({ passphrase: 'p0b-self-leave-two-devices', brokerUrls: ['wss://broker.example.com'] })
+    const target = (await createTestIdentity('p0b-self-leave-target')).identity
+    const siblingMessaging = new InMemoryMessagingAdapter()
+    await siblingMessaging.connect(h.alice.getDid())
+    const siblingMetadata = new InMemorySpaceMetadataStorage()
+    const siblingKeys = new InMemoryKeyManagementAdapter()
+    const siblingPending = new InMemoryMemberUpdatePendingStore()
+    const siblingFlush = vi.fn(async () => {})
+    const sibling = new YjsReplicationAdapter({
+      identity: h.alice,
+      messaging: siblingMessaging,
+      metadataStorage: siblingMetadata,
+      keyManagement: siblingKeys,
+      compactStore: new InMemoryCompactStore(),
+      memberUpdateStore: siblingPending,
+      brokerUrls: ['wss://broker.example.com'],
+      flushPersonalDoc: siblingFlush,
+    })
+    cleanups.push(async () => {
+      await sibling.stop()
+      try { await target.deleteStoredIdentity() } catch {}
+    })
+
+    const space = await h.adapter.createSpace<TestDoc>('shared', { items: {} }, { name: 'S' })
+    await h.adapter.addMember(space.id, target.getDid(), await target.getEncryptionPublicKeyBytes())
+
+    // PersonalDoc metadata/key sync gives the sibling device a local copy; the
+    // canonical Space update itself deliberately arrives later than the inbox
+    // signal, exercising Pending -> canonical resolution.
+    const metadata = (await h.metadata.loadAllSpaceMetadata()).find(item => item.info.id === space.id)!
+    await siblingMetadata.saveSpaceMetadata(metadata)
+    for (const key of await h.metadata.loadGroupKeys(space.id)) await siblingMetadata.saveGroupKey(key)
+    for (const seed of await h.metadata.loadCapabilitySigningSeeds(space.id)) await siblingMetadata.saveCapabilitySigningSeed(seed)
+    await sibling.start()
+    Y.applyUpdate(spaceState(sibling, space.id).doc, Y.encodeStateAsUpdate(spaceState(h.adapter, space.id).doc), 'remote')
+
+    await h.adapter.leaveSpace(space.id)
+
+    await waitUntil(async () => (await siblingPending.listSeenForSpace(space.id)).length === 1)
+    expect(spaceState(sibling, space.id).pendingRemoval).toEqual({ effectiveKeyGeneration: 1 })
+
+    // The next canonical Space sync answers the pending self-signed removal.
+    applyRemoteMembershipEvent(sibling, space.id, { did: h.alice.getDid(), status: 'removed', sinceGeneration: 1 })
+    await waitUntil(() => spaceState(sibling, space.id) === undefined)
+
+    const removals = Object.values(getYjsPersonalDoc().membershipRemovals ?? {})
+      .filter(removal => removal.spaceId === space.id)
+    expect(removals).toHaveLength(1)
+    expect(removals[0]).toMatchObject({
+      eventId: JSON.stringify(['membership-removal', space.id, h.alice.getDid(), 1]),
+      removedDid: h.alice.getDid(),
+      generation: 1,
+      byDid: h.alice.getDid(),
+    })
+    expect(siblingFlush).toHaveBeenCalled()
+
+    // This suite shares the module-scoped PersonalDoc manager.  Remove the
+    // deliberately persisted E2E fixture again so later cases start from their
+    // own identity's empty PersonalDoc, as the production devices would.
+    changeYjsPersonalDoc(doc => { delete doc.membershipRemovals?.[removals[0].eventId] })
+    await flushYjsPersonalDoc()
+  })
+
   it('writes the authorized confirmed signal once, flushes it, then cleans up', async () => {
     const h = await setup({ passphrase: 'p0b-confirmed-removal' })
     await initYjsPersonalDoc(h.alice)
@@ -191,9 +257,9 @@ describe('P0b membershipRemovals — confirmed cleanup boundary', () => {
     applyRemoteMembershipEvent(h.adapter, space.id, { did: h.alice.getDid(), status: 'removed', sinceGeneration: 1 })
     await waitUntil(() => spaceState(h.adapter, space.id) === undefined)
 
-    expect(getYjsPersonalDoc().membershipRemovals).toEqual({
-      [outerId]: expect.objectContaining({ eventId: outerId, spaceId: space.id, removedDid: h.alice.getDid(), generation: 1, byDid: ADMIN }),
-    })
+    expect(getYjsPersonalDoc().membershipRemovals?.[outerId]).toEqual(
+      expect.objectContaining({ eventId: outerId, spaceId: space.id, removedDid: h.alice.getDid(), generation: 1, byDid: ADMIN }),
+    )
   })
 
   it('keeps the confirmed pending after a flush failure and retries exactly one event plus cleanup', async () => {

@@ -1104,7 +1104,12 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
     }
 
     for (const did of notifyDids) {
-      if (did === myDid) continue
+      // Own-DID delivery is normally skipped because this device already made
+      // the change.  A self-removal is different: another device of the same
+      // identity needs the signed inbox signal to create its pending record and
+      // resolve it against the canonical membership event.  This remains
+      // addressed ECIES delivery to the own DID, never a broadcast to others.
+      if (did === myDid && memberDid !== myDid) continue
 
       const encPub = did === memberDid ? removedMemberEncryptionKey : state.memberEncryptionKeys.get(did)
       if (!encPub) {
@@ -2111,7 +2116,17 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
    * PersonalDoc proxy); no replication port is introduced for this personal data.
    */
   private async recordConfirmedMembershipRemoval(signal: MemberUpdateSignal): Promise<void> {
-    const eventId = signal.outerId ?? JSON.stringify([
+    // Each recipient gets its own outer inbox envelope.  For a self-leave those
+    // envelope ids differ across the leaver's devices, while the canonical
+    // removal is one event.  Derive its identity from the stable tuple so the
+    // shared PersonalDoc deduplicates sibling-device resolution.  Admin removal
+    // provenance continues to use the verified outer inbox id.
+    const stableSelfRemovalId = signal.action === 'removed' && signal.signerDid === signal.memberDid
+      ? JSON.stringify([
+          'membership-removal', signal.spaceId, signal.memberDid, signal.effectiveKeyGeneration,
+        ])
+      : undefined
+    const eventId = stableSelfRemovalId ?? signal.outerId ?? JSON.stringify([
       'membership-removal', signal.spaceId, signal.memberDid, signal.effectiveKeyGeneration,
     ])
     const entry: MembershipRemovalDoc = {
