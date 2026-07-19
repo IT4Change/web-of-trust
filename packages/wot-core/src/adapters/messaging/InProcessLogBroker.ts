@@ -254,6 +254,12 @@ export class InProcessLogBroker implements InProcessLogBrokerControls {
         message: 'space-rotate generation has already been superseded',
       })
     }
+    if (parsed.payload.newGeneration > log.generation + 1) {
+      throw new ControlFrameRejectedError({
+        code: 'GENERATION_GAP',
+        message: 'space-rotate newGeneration is beyond the current generation plus one',
+      })
+    }
     if (parsed.payload.newGeneration !== log.generation + 1) {
       throw new ControlFrameRejectedError({
         code: 'AUTH_INVALID',

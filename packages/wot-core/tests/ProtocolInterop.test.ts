@@ -86,11 +86,12 @@ function loadSpecVector(relativePath: string): any {
   return JSON.parse(loadSpecFixtureText(relativePath))
 }
 
-function spaceRotateVectorOutcome(installed: { generation: number, verificationKey: string }, incoming: { newGeneration: number, newSpaceCapabilityVerificationKey: string }): 'success' | 'GENERATION_TAKEN' {
+function spaceRotateVectorOutcome(installed: { generation: number, verificationKey: string }, incoming: { newGeneration: number, newSpaceCapabilityVerificationKey: string }): 'success' | 'GENERATION_TAKEN' | 'GENERATION_GAP' {
   if (incoming.newGeneration === installed.generation) {
     return incoming.newSpaceCapabilityVerificationKey === installed.verificationKey ? 'success' : 'GENERATION_TAKEN'
   }
   if (incoming.newGeneration < installed.generation) return 'GENERATION_TAKEN'
+  if (incoming.newGeneration > installed.generation + 1) return 'GENERATION_GAP'
   throw new Error('vector does not cover a new rotation')
 }
 

@@ -510,7 +510,7 @@ describe('space-rotate + admin-add/remove over the real relay (Slice CG / VE-6 +
     await strangerClient.disconnect()
   })
 
-  it('space-rotate rejects skip-ahead with AUTH_INVALID and handles installed-generation material-bound retries', async () => {
+  it('space-rotate rejects skip-ahead with GENERATION_GAP and handles installed-generation material-bound retries', async () => {
     const docId = randomUUID()
     const admin = await makeRawIdentity('gen-admin')
     const gen0 = await makeSpaceCapabilityKeypair()
@@ -533,7 +533,7 @@ describe('space-rotate + admin-add/remove over the real relay (Slice CG / VE-6 +
         newSpaceCapabilityVerificationKey: skip.verificationKey,
         newGeneration: 2,
       }),
-    ).toMatchObject({ error: 'AUTH_INVALID', thid: docId }) // SR-4 / F1: thid==docId on the mismatch reject
+    ).toMatchObject({ error: 'GENERATION_GAP', thid: docId }) // SR-4 / F1: thid==docId on the mismatch reject
     expect(docLogOf(server).getSpace(docId)?.generation).toBe(0)
 
     // Install generation 1, then retry it byte-identically: lost confirmation is
@@ -560,8 +560,31 @@ describe('space-rotate + admin-add/remove over the real relay (Slice CG / VE-6 +
         newSpaceCapabilityVerificationKey: competing.verificationKey, newGeneration: 1,
       }),
     ).toMatchObject({ error: 'GENERATION_TAKEN', thid: docId })
-    expect(docLogOf(server).getSpace(docId)?.generation).toBe(1)
-    expect(docLogOf(server).getSpace(docId)?.verificationKey).toBe(installed.verificationKey)
+    // Historischer Retry: nach Weiterrotation auf Gen 2 ist auch das seinerzeit
+    // identische Gen-1-Material GENERATION_TAKEN (Idempotenz gilt NUR fuer den
+    // aktuell installierten Zustand).
+    const gen2 = await makeSpaceCapabilityKeypair()
+    expect(
+      await adminClient.sendSpaceRotate({
+        signer: admin, spaceId: docId,
+        newSpaceCapabilityVerificationKey: gen2.verificationKey, newGeneration: 2,
+      }),
+    ).toMatchObject({ messageId: docId, status: 'delivered' })
+    expect(
+      await adminClient.sendSpaceRotate({
+        signer: admin, spaceId: docId,
+        newSpaceCapabilityVerificationKey: installed.verificationKey, newGeneration: 1,
+      }),
+    ).toMatchObject({ error: 'GENERATION_TAKEN', thid: docId })
+    // GENERATION_GAP: newGeneration > current+1 ist ein dedizierter Code, kein AUTH_INVALID.
+    expect(
+      await adminClient.sendSpaceRotate({
+        signer: admin, spaceId: docId,
+        newSpaceCapabilityVerificationKey: (await makeSpaceCapabilityKeypair()).verificationKey, newGeneration: 5,
+      }),
+    ).toMatchObject({ error: 'GENERATION_GAP', thid: docId })
+    expect(docLogOf(server).getSpace(docId)?.generation).toBe(2)
+    expect(docLogOf(server).getSpace(docId)?.verificationKey).toBe(gen2.verificationKey)
 
     await adminClient.disconnect()
   })
