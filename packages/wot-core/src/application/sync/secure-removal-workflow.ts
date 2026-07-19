@@ -131,7 +131,7 @@ export interface SecureRemovalDeps {
 export async function runTwoPhaseRemoval(
   deps: SecureRemovalDeps,
   removedDid: string,
-  opts?: { activityEntry?: Record<string, unknown> },
+  opts?: { activityEntry?: Record<string, unknown>, kind?: 'canonical-self-removal-rotation', targetGeneration?: number },
 ): Promise<void> {
   // ── MULTI-BROKER GUARD (MUSS): no silent half-enforcement ──────────────────
   // A real multi-broker space-rotate transport (broadcast to several authoritative
@@ -149,7 +149,7 @@ export async function runTwoPhaseRemoval(
 
   // ── IDEMPOTENCY: reuse an existing staging record (no second rotate) ────────
   const existing = await deps.docLogStore.getPendingRemoval(spaceId, removedDid)
-  const removal = existing ?? (await stageRemoval(deps, removedDid, opts?.activityEntry))
+  const removal = existing ?? (await stageRemoval(deps, removedDid, opts?.activityEntry, opts?.kind, opts?.targetGeneration))
 
   // First-attempt semantics: a hard space-rotate reject (AUTH_INVALID) is a real
   // admin-authority bug and MUST propagate (see driveRemovalToCompletion).
@@ -211,7 +211,13 @@ export async function recoverPendingRemovals(
 // ───────────────────────────────────────────────────────────────────────────
 
 /** STAGE: generate next-gen material (NOT persisted to the key store) + durably stage the intent. */
-async function stageRemoval(deps: SecureRemovalDeps, removedDid: string, activityEntry?: Record<string, unknown>): Promise<PendingRemoval> {
+async function stageRemoval(
+  deps: SecureRemovalDeps,
+  removedDid: string,
+  activityEntry?: Record<string, unknown>,
+  kind?: 'canonical-self-removal-rotation',
+  targetGeneration?: number,
+): Promise<PendingRemoval> {
   const staged: StagedRotationMaterial = await stageRotateSpaceKey({
     crypto: deps.crypto,
     keyPort: deps.keyPort,
@@ -225,6 +231,9 @@ async function stageRemoval(deps: SecureRemovalDeps, removedDid: string, activit
     capSigningSeed: staged.capabilitySigningSeed,
     capVerificationKey: staged.capabilityVerificationKey,
   }
+  if (targetGeneration !== undefined && staged.newGeneration < targetGeneration) {
+    throw new Error(`cannot enforce canonical self-removal at generation ${targetGeneration} while local generation is behind (${staged.newGeneration - 1})`)
+  }
   const removal: PendingRemoval = {
     spaceId: deps.spaceId,
     removedDid,
@@ -234,6 +243,7 @@ async function stageRemoval(deps: SecureRemovalDeps, removedDid: string, activit
     stagedKeyMaterial,
     createdAt: (deps.now ?? (() => new Date()))().getTime(),
     activityEntry,
+    kind,
   }
   // Durable BEFORE any space-rotate send: a crash after this point recovers the
   // intent + key material and retries (VE-C3); a crash before it leaves no trace

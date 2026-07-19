@@ -23,6 +23,7 @@ import type {
   MemberUpdatePendingStore,
   WireMessage,
   DocLogStore,
+  PendingRemoval,
 } from '@web_of_trust/core/ports'
 import type { IdentitySession, MessageEnvelope, SpaceInfo, SpaceDocMeta, SpaceMemberChange, IncomingSpaceInvite, ReplicationState } from '@web_of_trust/core/types'
 import { SPACE_SYNC_REQUEST_MESSAGE_TYPE } from '@web_of_trust/core/types'
@@ -45,6 +46,7 @@ import {
   SPACE_INVITE_MESSAGE_TYPE, MEMBER_UPDATE_MESSAGE_TYPE, KEY_ROTATION_MESSAGE_TYPE,
   isDidcommMessage, isEncryptedInboxMessageType, INBOX_MESSAGE_TYPE,
   createAckMessage, evaluateInboxAckDisposition, createDidKeyResolver,
+  encryptionKeyMultibaseFromDidDocument, x25519MultibaseToPublicKeyBytes,
   formatMembershipEventKey, parseMembershipEventKey, resolveActiveMembers, resolveMembershipWinner, assertMembershipEvent,
   resolveActiveAdmins, assertAdminEntry,
   LogSyncCoordinator, AuthorMismatchError, LocalAppendFailedError, createSpaceCapabilityJws,
@@ -1111,7 +1113,9 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
       // addressed ECIES delivery to the own DID, never a broadcast to others.
       if (did === myDid && memberDid !== myDid) continue
 
-      const encPub = did === memberDid ? removedMemberEncryptionKey : state.memberEncryptionKeys.get(did)
+      const encPub = did === memberDid
+        ? (removedMemberEncryptionKey ?? await this.resolveMemberEncryptionKey(state, did))
+        : await this.resolveMemberEncryptionKey(state, did)
       if (!encPub) {
         // Ohne Empfänger-Encryption-Key keine spec-konforme Zustellung möglich —
         // kein Klartext-Fallback (Sync 003 Z.500). Key-Discovery via Sync 004
@@ -1140,6 +1144,24 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
     }
   }
 
+  /** Resolve ECIES delivery keys through the same DID keyAgreement path as invites. */
+  private async resolveMemberEncryptionKey(state: YjsSpaceState, did: string): Promise<Uint8Array | undefined> {
+    if (did === this.identity.getDid()) return this.identity.getEncryptionPublicKeyBytes()
+    const cached = state.memberEncryptionKeys.get(did)
+    if (cached) return cached
+    try {
+      const document = await this.didResolver.resolve(did)
+      const encoded = encryptionKeyMultibaseFromDidDocument(document)
+      if (!encoded) return undefined
+      const key = x25519MultibaseToPublicKeyBytes(encoded)
+      state.memberEncryptionKeys.set(did, key)
+      return key
+    } catch (err) {
+      console.warn('[YjsReplication] Failed to resolve encryption key for', did, err)
+      return undefined
+    }
+  }
+
   /**
    * Slice SR / VE-C1 — two-phase secure removal over the log-sync path. Stages the
    * removal + next-gen key material durably, sends a space-rotate to every home
@@ -1161,6 +1183,44 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
   }
 
   /**
+   * Sync 005 self-leave enforcement: only an active remaining admin reacts to a
+   * canonical removed event that still lacks its declared-generation rotation.
+   * A member-update never enters this path.  The regular two-phase machinery is
+   * reused, but its commit callback deliberately omits the already-canonical
+   * removal and the member-update broadcast.
+   */
+  private async enforceCanonicalSelfRemovalRotation(
+    state: YjsSpaceState,
+    events: readonly MembershipEvent[],
+  ): Promise<void> {
+    if (!this.logSyncEnabled) return
+    const myDid = this.identity.getDid()
+    const active = new Set(resolveActiveMembers(events))
+    if (!active.has(myDid) || !this.spaceAdminDids(state).includes(myDid)) return
+
+    const currentGeneration = await this.keyManagement.getCurrentGeneration(state.info.id)
+    const candidates = events.filter((event) =>
+      event.status === 'removed' &&
+      resolveMembershipWinner(events, event.did)?.status === 'removed' &&
+      event.did !== myDid &&
+      currentGeneration < event.sinceGeneration,
+    )
+    for (const event of candidates) {
+      // Existing staging is the cross-observer/recovery dedup key.  A current
+      // generation at or past the declaration is already enforced (or superseded).
+      const store = await this.ensureDocLogStore()
+      if (!store || (await this.keyManagement.getCurrentGeneration(state.info.id)) >= event.sinceGeneration) continue
+      const existing = await store.getPendingRemoval(state.info.id, event.did)
+      if (existing && existing.kind !== 'canonical-self-removal-rotation') continue
+      await runTwoPhaseRemoval(
+        this.buildSecureRemovalDeps(state, undefined, 'canonical-self-removal-rotation'),
+        event.did,
+        { kind: 'canonical-self-removal-rotation', targetGeneration: event.sinceGeneration },
+      )
+    }
+  }
+
+  /**
    * VE-C3 crash-recovery: resume every durable pending removal whose space is
    * currently loaded. Resolves the engine-neutral deps per removal (capturing the
    * removed member's still-present encryption key before commit deletes it) and
@@ -1175,7 +1235,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
       const state = this.spaces.get(removal.spaceId)
       if (!state) return null // space not loaded (yet) — retry on a later pass
       const removedEncKey = state.memberEncryptionKeys.get(removal.removedDid)
-      return this.buildSecureRemovalDeps(state, removedEncKey)
+      return this.buildSecureRemovalDeps(state, removedEncKey, removal.kind)
     }).catch((err) => {
       console.debug('[YjsReplication] pending-removal recovery pass failed (retry later):', err)
     })
@@ -1192,6 +1252,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
   private buildSecureRemovalDeps(
     state: YjsSpaceState,
     removedEncKey: Uint8Array | undefined,
+    kind?: PendingRemoval['kind'],
   ): SecureRemovalDeps {
     const spaceId = state.info.id
     const myDid = this.identity.getDid()
@@ -1243,10 +1304,14 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
         // durable append throws, this rejects → driveRemovalToCompletion does NOT delete
         // the PendingRemoval (it stays for VE-C3 recovery), so a removal can never end
         // up broker-enforced + distributed without a durable membership-removal record.
-        await this.commitMembershipEventDurable(state, { did: removedDid, status: 'removed', sinceGeneration: newGeneration }, activityEntry)
+        if (kind !== 'canonical-self-removal-rotation') {
+          await this.commitMembershipEventDurable(state, { did: removedDid, status: 'removed', sinceGeneration: newGeneration }, activityEntry)
+        }
         await this.persistRotatedKeyToPersonalDoc(spaceId, newGeneration)
         await this.distributeKeyRotation(state, newGeneration)
-        await this.distributeMemberRemovedUpdate(state, removedDid, newGeneration, removedEncKey)
+        if (kind !== 'canonical-self-removal-rotation') {
+          await this.distributeMemberRemovedUpdate(state, removedDid, newGeneration, removedEncKey)
+        }
         await this.saveSpaceMetadata(state)
         this._scheduleVaultImmediate(state)
         for (const cb of this.memberChangeListeners) {
@@ -1913,6 +1978,15 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
     // Retrying leave must finish that durable event + cleanup, not rotate or
     // emit another removal transition.
     if (existingSelf?.status === 'removed') {
+      // A removed event that is still locally present can be the retry intent of
+      // a failed durable append.  For a shared non-admin self-leave, re-run both
+      // required side effects before personal-doc recording or local cleanup.
+      if (members.length > 0 && !this.spaceAdminDids(state).includes(selfDid)) {
+        const selfEncryptionKey = await this.identity.getEncryptionPublicKeyBytes()
+        await this.commitMembershipEventDurable(state, existingSelf)
+        await this.distributeMemberRemovedUpdate(state, selfDid, existingSelf.sinceGeneration, selfEncryptionKey)
+        await this.saveSpaceMetadata(state)
+      }
       await this.recordConfirmedMembershipRemoval({
         spaceId,
         action: 'removed',
@@ -1953,7 +2027,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
     // secure-removal flow below.
     if (!this.spaceAdminDids(state).includes(selfDid)) {
       const generation = (await this.keyManagement.getCurrentGeneration(spaceId)) + 1
-      const selfEncryptionKey = state.memberEncryptionKeys.get(selfDid)
+      const selfEncryptionKey = await this.identity.getEncryptionPublicKeyBytes()
       await this.commitMembershipEventDurable(state, {
         did: selfDid,
         status: 'removed',
@@ -2778,6 +2852,10 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
         .catch(() => {})
         .then(() => this.saveSpaceMetadata(state))
         .then(() => this.resolvePendingMemberUpdates(state))
+        // Only the canonical _members log projection is an enforcement trigger.
+        // This sits after projection so the active-admin test uses `_admins ∩
+        // _members`; member-update pending signals never reach this observer.
+        .then(() => this.enforceCanonicalSelfRemovalRotation(state, events))
         .catch((err) => console.warn('[YjsReplication] member-update resolution failed:', err))
     }
     membersMap.observe(membersHandler)

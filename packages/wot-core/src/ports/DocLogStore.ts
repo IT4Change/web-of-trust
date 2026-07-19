@@ -178,6 +178,12 @@ export interface PendingRemoval {
   createdAt: number
   /** Plain JSON activity committed atomically with the membership event, if requested. */
   activityEntry?: Record<string, unknown>
+  /**
+   * A canonical non-admin self-removal is already in the membership log.  Its
+   * staging record therefore carries only the follow-up rotation/distribution,
+   * never a second removal commit.
+   */
+  kind?: 'canonical-self-removal-rotation'
 }
 
 /**

@@ -9,7 +9,7 @@ import {
   InMemoryKeyManagementAdapter,
   InMemoryDocLogStore,
 } from '@web_of_trust/core/adapters'
-import { KEY_ROTATION_MESSAGE_TYPE, MEMBER_UPDATE_MESSAGE_TYPE } from '@web_of_trust/core/protocol'
+import { KEY_ROTATION_MESSAGE_TYPE, MEMBER_UPDATE_MESSAGE_TYPE, resolveDidKey, x25519PublicKeyToMultibase } from '@web_of_trust/core/protocol'
 import type { WireMessage, PendingRemoval } from '@web_of_trust/core/ports'
 import { stageRotateSpaceKey, createSpaceKey, rotateSpaceKey, buildKeyRotationBody, deliverInboxMessage } from '@web_of_trust/core/application'
 import { WebCryptoProtocolCryptoAdapter } from '@web_of_trust/core/protocol-adapters'
@@ -113,6 +113,20 @@ describe('YjsReplicationAdapter — Slice SR secure removal (VE-C1 wiring)', () 
       enableLogSync: true,
       deviceId,
       flushPersonalDoc: async () => {},
+      // Mirrors Sync-004 discovery: an invitee starts with an empty local
+      // member-key cache, then resolves remaining recipients from DID keyAgreement.
+      didResolver: {
+        resolve: async (did) => {
+          const known = did === alice.getDid() ? alice : did === bob.getDid() ? bob : undefined
+          if (!known) return resolveDidKey(did)
+          return resolveDidKey(did, {
+            keyAgreement: [{
+              id: `${did}#enc-0`, type: 'X25519KeyAgreementKey2020', controller: did,
+              publicKeyMultibase: x25519PublicKeyToMultibase(await known.getEncryptionPublicKeyBytes()),
+            }],
+          })
+        },
+      },
     })
   }
 
@@ -258,14 +272,13 @@ describe('YjsReplicationAdapter — Slice SR secure removal (VE-C1 wiring)', () 
     // DocLogStore + control frames + broker), not the legacy content path.
     const spaceId = await createSharedSpace()
     await initYjsPersonalDoc(bob)
-    // An invited device learns recipient keys through the normal metadata/key
-    // discovery path. Seed that resolved cache here so this regression can prove
-    // addressed delivery both to Bob's sibling DID and the remaining admin.
+    // The real invite path deliberately leaves this cache empty.  Delivery must
+    // resolve Alice through DID keyAgreement and get Bob's own key from Identity.
     const bobState = (bobAdapter as unknown as { spaces: Map<string, { memberEncryptionKeys: Map<string, Uint8Array> }> }).spaces.get(spaceId)!
-    bobState.memberEncryptionKeys.set(bob.getDid(), await bob.getEncryptionPublicKeyBytes())
-    bobState.memberEncryptionKeys.set(alice.getDid(), await alice.getEncryptionPublicKeyBytes())
+    expect(bobState.memberEncryptionKeys.size).toBe(0)
     const entriesBefore = brokerEntryCount(broker, spaceId)
     const sentMemberUpdates: WireMessage[] = []
+    const sentKeyRotations: WireMessage[] = []
     const controlFrames: unknown[] = []
     const baseSend = bobMessaging.send.bind(bobMessaging)
     const baseControl = bobMessaging.sendControlFrame!.bind(bobMessaging)
@@ -280,6 +293,11 @@ describe('YjsReplicationAdapter — Slice SR secure removal (VE-C1 wiring)', () 
       if ((frame as { type?: unknown }).type === 'space-rotate') throw new Error('AUTH_INVALID: non-admin rotate')
       return baseControl(frame)
     }
+    const aliceBaseSend = aliceMessaging.send.bind(aliceMessaging)
+    ;(aliceMessaging as unknown as { send: typeof aliceMessaging.send }).send = async (message) => {
+      if ((message as { type?: unknown }).type === KEY_ROTATION_MESSAGE_TYPE) sentKeyRotations.push(message)
+      return aliceBaseSend(message)
+    }
 
     await bobAdapter.leaveSpace(spaceId)
 
@@ -290,6 +308,20 @@ describe('YjsReplicationAdapter — Slice SR secure removal (VE-C1 wiring)', () 
     expect(await pendingRemoval(bobAdapter, spaceId, bob.getDid())).toBeNull()
     expect(await bobAdapter.getSpace(spaceId)).toBeNull() // post-flush local cleanup
 
+    // #298: Alice observes the canonical (not merely pending) self-removal and
+    // performs the pure enforcement flow once.  Bob itself remains non-admin and
+    // never sent a rotate or minted the follow-up key material.
+    await wait(250)
+    expect(brokerGeneration(broker, spaceId)).toBe(1)
+    expect(await adapterGeneration(aliceAdapter, spaceId)).toBe(1)
+    expect(sentKeyRotations).toHaveLength(1)
+    // A repeated observer pass sees generation >= declaration and is a no-op.
+    const aliceState = (aliceAdapter as unknown as { spaces: Map<string, { doc: any }> }).spaces.get(spaceId)!
+    await (aliceAdapter as unknown as { enforceCanonicalSelfRemovalRotation: (state: unknown, events: unknown[]) => Promise<void>, readMembershipEvents: (doc: unknown) => unknown[] })
+      .enforceCanonicalSelfRemovalRotation(aliceState, (aliceAdapter as unknown as { readMembershipEvents: (doc: unknown) => unknown[] }).readMembershipEvents(aliceState.doc))
+    expect(brokerGeneration(broker, spaceId)).toBe(1)
+    expect(sentKeyRotations).toHaveLength(1)
+
     const removals = Object.values(getYjsPersonalDoc().membershipRemovals ?? {})
       .filter(removal => removal.spaceId === spaceId)
     expect(removals).toHaveLength(1)
@@ -298,6 +330,38 @@ describe('YjsReplicationAdapter — Slice SR secure removal (VE-C1 wiring)', () 
       generation: 1,
       byDid: bob.getDid(),
     })
+    await resetYjsPersonalDoc()
+  })
+
+  it('B1: non-admin self-leave retries an applied-but-unlogged removal before cleanup', async () => {
+    const spaceId = await createSharedSpace()
+    await initYjsPersonalDoc(bob)
+    const store = (bobAdapter as unknown as { docLogStore: InMemoryDocLogStore }).docLogStore
+    const realAppend = store.appendLocalEntry.bind(store)
+    let failOnce = true
+    ;(store as unknown as { appendLocalEntry: typeof store.appendLocalEntry }).appendLocalEntry = (async (params: any) => {
+      if (failOnce) {
+        failOnce = false
+        throw new Error('simulated self-leave append failure')
+      }
+      return realAppend(params)
+    }) as typeof store.appendLocalEntry
+
+    await expect(bobAdapter.leaveSpace(spaceId)).rejects.toThrow('simulated self-leave append failure')
+    expect(await bobAdapter.getSpace(spaceId)).not.toBeNull()
+    expect(Object.values(getYjsPersonalDoc().membershipRemovals ?? {}).filter((entry) => entry.spaceId === spaceId)).toHaveLength(0)
+
+    ;(store as unknown as { appendLocalEntry: typeof store.appendLocalEntry }).appendLocalEntry = realAppend
+    const beforeRetry = brokerEntryCount(broker, spaceId)
+    await bobAdapter.leaveSpace(spaceId)
+    await wait(200)
+
+    expect(brokerEntryCount(broker, spaceId)).toBeGreaterThan(beforeRetry)
+    expect(await bobAdapter.getSpace(spaceId)).toBeNull()
+    const removals = Object.values(getYjsPersonalDoc().membershipRemovals ?? {})
+      .filter((entry) => entry.spaceId === spaceId)
+    expect(removals).toHaveLength(1)
+    expect(removals[0]).toMatchObject({ removedDid: bob.getDid(), generation: 1 })
     await resetYjsPersonalDoc()
   })
 
