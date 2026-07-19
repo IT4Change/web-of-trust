@@ -545,7 +545,13 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
       }
       const envelope = message as MessageEnvelope
 
-      // Verify envelope signature — reject forged messages (CRDT-Sync-Kanal)
+      // Verify envelope signature — reject forged messages (CRDT-Sync-Kanal).
+      // space-sync-request is an authorization-bearing request: unlike legacy
+      // content it must never reach its full-state response path unsigned.
+      if (envelope.type === SPACE_SYNC_REQUEST_MESSAGE_TYPE && !envelope.signature) {
+        console.warn('[YjsReplication] Rejected unsigned space-sync-request from', envelope.fromDid)
+        return
+      }
       if (envelope.signature) {
         const valid = await verifyEnvelope(envelope)
         if (!valid) {
@@ -2542,6 +2548,11 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
     }
   }
 
+  /** Isolated so authorization tests can prove rejected requests do no encoding work. */
+  private encodeFullSpaceState(state: YjsSpaceState): Uint8Array {
+    return Y.encodeStateAsUpdate(state.doc)
+  }
+
   /**
    * VE-2 write path: route a local Yjs update through the LogSyncCoordinator
    * (ensurePublished → appendLocalEntry → log-entry envelope). A hard
@@ -3069,7 +3080,14 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
       // Full-State-Tausch) approximiert den normativen sync-request/1.0-Flow
       // (Sync 005 Z.183-184/Z.204 "Space-Catch-Up ausloesen") bis zum
       // Sync-002-Schreibpfad-Slice.
-      void this.sendSpaceSyncRequest(body.spaceId).catch(() => {})
+      // The canonical state belongs to the verified member-update sender. Keep
+      // own-device recovery as a deduplicated fallback: space-sync-request is
+      // deliberately not queueable, so an offline sender must not make a second
+      // local device with the canonical state unreachable.
+      void this.sendSpaceSyncRequest(body.spaceId, decoded.senderDid).catch(() => {})
+      if (decoded.senderDid !== this.identity.getDid()) {
+        void this.sendSpaceSyncRequest(body.spaceId).catch(() => {})
+      }
     }
     console.debug('[YjsReplication] member-update disposition:', result.disposition)
     // Alle Workflow-Dispositionen sind ackable (Signal via memberUpdateStore
@@ -3321,19 +3339,29 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
   }
 
   /**
-   * Handle sync request from another device: respond with full state for the requested space.
+   * Handle sync request: respond with full state to the requesting DID.
    */
   private async handleSpaceSyncRequest(envelope: MessageEnvelope): Promise<void> {
     try {
+      // Defense in depth for direct/internal callers: ingress also makes this
+      // mandatory before dispatch. verifyEnvelope binds its signer key to
+      // envelope.fromDid through the signed canonical envelope fields.
+      if (!envelope.signature || !await verifyEnvelope(envelope)) return
       const payload = JSON.parse(envelope.payload)
       const spaceId = payload.spaceId
       const state = this.spaces.get(spaceId)
       if (!state) return
 
+      // State.info.members is a projection cache. Authorize against the
+      // canonical grow-only event set so a removed DID is denied even before
+      // asynchronous metadata projection catches up.
+      const activeMembers = resolveActiveMembers(this.readMembershipEvents(state.doc))
+      if (!activeMembers.includes(envelope.fromDid)) return
+
       const groupKey = await this.keyManagement.getCurrentKey(spaceId)
       if (!groupKey) return
 
-      const fullState = Y.encodeStateAsUpdate(state.doc)
+      const fullState = this.encodeFullSpaceState(state)
       const generation = await this.keyManagement.getCurrentGeneration(spaceId)
       const myDid = this.identity.getDid()
       const encrypted = await encryptOneShot({ crypto: this.crypto, spaceContentKey: groupKey, plaintext: fullState })
@@ -3346,11 +3374,17 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
       }
       const responseEnvelope: MessageEnvelope = {
         v: 1, id: crypto.randomUUID(), type: 'content',
-        fromDid: myDid, toDid: myDid,
+        fromDid: myDid, toDid: envelope.fromDid,
         createdAt: new Date().toISOString(), encoding: 'json',
         payload: JSON.stringify(responsePayload), signature: '',
       }
       const signed = await signEnvelope(responseEnvelope, (data) => this.identity.sign(data))
+      // TOCTOU-Grenze: zwischen der Autorisierung oben und diesem Punkt liegen
+      // mehrere await-Grenzen (Key, Generation, Encrypt, Sign). Der Requester
+      // kann inzwischen kanonisch entfernt worden sein — unmittelbar vor dem
+      // Send erneut gegen den AKTUELLEN Event-Stand binden.
+      const stillActive = resolveActiveMembers(this.readMembershipEvents(state.doc))
+      if (!stillActive.includes(envelope.fromDid)) return
       this.sentMessageIds.add(signed.id)
       setTimeout(() => this.sentMessageIds.delete(signed.id), 30_000)
       try { await this.messaging.send(signed) } catch { /* offline */ }
@@ -3360,19 +3394,24 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
   }
 
   /**
-   * Send a sync request for a specific space to own DID (multi-device).
-   * Other devices that have this space will respond with their full state.
+   * Send a sync request for a specific space. The default remains own DID for
+   * multi-device recovery; a member-update asks its verified sender directly.
+   *
+   * Mixed-Version-Grenze (Rollout): Clients bis adapter-yjs 0.1.5 routen ihre
+   * ANTWORT an die eigene DID — fragt ein neuer Client einen alten Sender,
+   * kommt die Antwort erst nach dessen Update an. Der Own-DID-Fallback unten
+   * überbrückt das, sobald ein eigenes Gerät den Stand besitzt.
    */
   /** Local first-seen per space metadata — the ghost grace period must not
    *  trust origin-device timestamps (seed recovery!). Per instance: every
    *  session re-arms the grace, which only delays true-ghost cleanup. */
   private metadataFirstSeenAt = new Map<string, number>()
 
-  private async sendSpaceSyncRequest(spaceId: string): Promise<void> {
+  private async sendSpaceSyncRequest(spaceId: string, recipientDid = this.identity.getDid()): Promise<void> {
     const myDid = this.identity.getDid()
     const envelope: MessageEnvelope = {
       v: 1, id: crypto.randomUUID(), type: SPACE_SYNC_REQUEST_MESSAGE_TYPE,
-      fromDid: myDid, toDid: myDid,
+      fromDid: myDid, toDid: recipientDid,
       createdAt: new Date().toISOString(), encoding: 'json',
       payload: JSON.stringify({ spaceId }), signature: '',
     }
