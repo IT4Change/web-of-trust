@@ -839,6 +839,11 @@ export async function initYjsPersonalDoc(identity: IdentitySession, messaging?: 
 /**
  * Get the current personal document snapshot.
  */
+/** Explizite Verdrahtungs-Sonde statt String-Match auf Fehlermeldungen. */
+export function isYjsPersonalDocInitialized(): boolean {
+  return ydoc !== null
+}
+
 export function getYjsPersonalDoc(): PersonalDoc {
   if (!ydoc) throw new Error('Yjs personal doc not initialized. Call initYjsPersonalDoc() first.')
   return snapshotDoc()

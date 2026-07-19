@@ -72,7 +72,7 @@ import {
 import {
   traceAsync,
 } from '@web_of_trust/core/storage'
-import { changeYjsPersonalDoc } from './YjsPersonalDocManager'
+import { changeYjsPersonalDoc, isYjsPersonalDocInitialized } from './YjsPersonalDocManager'
 import type { MembershipRemovalDoc } from './types'
 
 /**
@@ -2054,7 +2054,12 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
       byDid: signal.signerDid,
     }
 
-    try {
+    if (!isYjsPersonalDocInitialized()) {
+      // Isolierte Adapter-Tests booten das globale PersonalDoc bewusst nicht.
+      // In produktiver Verdrahtung ist das ein Wiring-Fehler: das bestaetigte
+      // Removal ginge verloren — laut sichtbar machen statt still schlucken.
+      console.error('[YjsReplication] membershipRemoval NICHT persistiert (PersonalDoc nicht initialisiert):', entry.eventId)
+    } else {
       changeYjsPersonalDoc(doc => {
         const removals = doc.membershipRemovals ?? (doc.membershipRemovals = {}, doc.membershipRemovals!)
         // Replay and redelivery are idempotent by stable event identity.  Keep the
@@ -2069,11 +2074,6 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
           delete removals[oldest.eventId]
         }
       })
-    } catch (error) {
-      // Isolated adapter tests intentionally do not boot the global PersonalDoc.
-      // Production wiring always initializes it; every other mutation failure is
-      // significant and must prevent the cleanup below.
-      if (!(error instanceof Error) || !error.message.includes('personal doc not initialized')) throw error
     }
 
     if (this.flushPersonalDoc) await this.flushPersonalDoc()
