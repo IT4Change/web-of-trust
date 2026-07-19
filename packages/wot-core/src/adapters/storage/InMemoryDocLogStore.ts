@@ -452,5 +452,6 @@ function cloneRemoval(removal: PendingRemoval): PendingRemoval {
     },
     createdAt: removal.createdAt,
     activityEntry: removal.activityEntry === undefined ? undefined : JSON.parse(JSON.stringify(removal.activityEntry)),
+    kind: removal.kind,
   }
 }

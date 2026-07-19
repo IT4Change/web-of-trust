@@ -18,7 +18,7 @@ import { ControlFrameRejectedError, type ControlFrame } from '../src/protocol'
 //   stage != commit · enforced <=> all home brokers confirmed · no pre-confirm side
 //   effects · durable pending (RemovalPendingNotEnforcedError) · hard reject
 //   propagates · multi-broker hard-gate · idempotent re-run (no double rotate) ·
-//   crash-recovery (resume, AUTH_INVALID-as-already-enforced, still-pending, skip).
+//   crash-recovery (resume, AUTH_INVALID convergence without unsafe commit, still-pending, skip).
 
 const crypto = new WebCryptoProtocolCryptoAdapter()
 const SPACE = '33333333-3333-4333-8333-333333333333'
@@ -47,11 +47,13 @@ interface Harness {
 async function makeHarness(opts: {
   homeBrokerSet?: readonly string[]
   sendSpaceRotate?: (brokerUrl: string, frame: ControlFrame) => Promise<void>
+  ownerDid?: string
 } = {}): Promise<Harness> {
   const keyPort = new InMemoryKeyManagementAdapter()
   const docLogStore = new InMemoryDocLogStore()
   await docLogStore.init()
-  await createSpaceKey({ crypto, keyPort, spaceId: SPACE, ownerDid: OWNER }) // gen 0
+  const ownerDid = opts.ownerDid ?? OWNER
+  await createSpaceKey({ crypto, keyPort, spaceId: SPACE, ownerDid }) // gen 0
 
   const createRotateFrame = vi.fn(
     async (newGeneration: number, capKey: Uint8Array): Promise<ControlFrame> => ({
@@ -68,7 +70,7 @@ async function makeHarness(opts: {
     keyPort,
     docLogStore,
     spaceId: SPACE,
-    ownerDid: OWNER,
+    ownerDid,
     homeBrokerSet: opts.homeBrokerSet ?? [BROKER],
     createRotateFrame,
     sendSpaceRotate,
@@ -166,10 +168,7 @@ describe('runTwoPhaseRemoval — VE-C1 two-phase secure removal', () => {
     expect(await h.docLogStore.getPendingRemoval(SPACE, REMOVED)).not.toBeNull()
   })
 
-  it('a HARD space-rotate reject (AUTH_INVALID on a first attempt) PROPAGATES raw — not a pending removal', async () => {
-    // Regression guard: AUTH_INVALID must be classified hard for a space-rotate, even
-    // though the log-entry VE-4 disposition table maps it to `unknown`. A first-attempt
-    // AUTH_INVALID is a real admin-authority/sequencing bug, never a "retry later".
+  it('an AUTH_INVALID never commits ambiguous staged material and replaces it for a later retry', async () => {
     const h = await makeHarness({
       sendSpaceRotate: async () => {
         throw reject('AUTH_INVALID')
@@ -177,12 +176,10 @@ describe('runTwoPhaseRemoval — VE-C1 two-phase secure removal', () => {
     })
 
     const err = await runTwoPhaseRemoval(h.deps, REMOVED).catch((e) => e)
-    expect(err).toBeInstanceOf(ControlFrameRejectedError)
-    expect(err).not.toBeInstanceOf(RemovalPendingNotEnforcedError)
-    expect((err as ControlFrameRejectedError).code).toBe('AUTH_INVALID')
+    expect(err).toBeInstanceOf(RemovalPendingNotEnforcedError)
     expect(h.commitRemoval).not.toHaveBeenCalled()
     expect(await h.keyPort.getCurrentGeneration(SPACE)).toBe(0)
-    // the staging persists (durable); a hard reject is an admin bug to fix, not data loss
+    // The staging persists with fresh material; rejected material can never be committed.
     expect(await h.docLogStore.getPendingRemoval(SPACE, REMOVED)).not.toBeNull()
   })
 
@@ -247,7 +244,7 @@ describe('recoverPendingRemovals — VE-C3 crash-recovery (single home broker)',
     expect(await h.docLogStore.getPendingRemoval(SPACE, REMOVED)).toBeNull()
   })
 
-  it('treats AUTH_INVALID during recovery as already-enforced (the broker rotated on a lost-confirmation earlier attempt) → commit', async () => {
+  it('never commits staged material after an ambiguous AUTH_INVALID during recovery', async () => {
     // First attempt: stage, then the rotate is APPLIED at the broker but its
     // confirmation is lost (modelled as a transient transport failure so the local
     // record stays pending).
@@ -263,11 +260,50 @@ describe('recoverPendingRemovals — VE-C3 crash-recovery (single home broker)',
     firstAttempt = false
     h.commitRemoval.mockClear()
 
+    const before = await h.docLogStore.getPendingRemoval(SPACE, REMOVED)
     const committed = await recoverPendingRemovals(h.docLogStore, async () => h.deps)
 
-    expect(committed).toBe(1)
-    expect(h.commitRemoval).toHaveBeenCalledTimes(1)
-    expect(await h.docLogStore.getPendingRemoval(SPACE, REMOVED)).toBeNull()
+    expect(committed).toBe(0)
+    expect(h.commitRemoval).not.toHaveBeenCalled()
+    const after = await h.docLogStore.getPendingRemoval(SPACE, REMOVED)
+    expect(after).not.toBeNull()
+    expect(hex(after!.stagedKeyMaterial.contentKey)).not.toBe(hex(before!.stagedKeyMaterial.contentKey))
+  })
+
+  it('two independent admin stores never commit the loser material; canonical rotation converges after the winner arrives', async () => {
+    let brokerGeneration = 0
+    const winner = await makeHarness({
+      ownerDid: 'did:key:z6MkAdminA',
+      sendSpaceRotate: async () => { brokerGeneration = 1 },
+    })
+    const loser = await makeHarness({
+      ownerDid: 'did:key:z6MkAdminB',
+      sendSpaceRotate: async () => {
+        if (brokerGeneration >= 1) throw reject('AUTH_INVALID')
+      },
+    })
+
+    await runTwoPhaseRemoval(winner.deps, REMOVED, {
+      kind: 'canonical-self-removal-rotation', targetGeneration: 1,
+    })
+    await expect(runTwoPhaseRemoval(loser.deps, REMOVED, {
+      kind: 'canonical-self-removal-rotation', targetGeneration: 1,
+    })).rejects.toBeInstanceOf(RemovalPendingNotEnforcedError)
+
+    expect(loser.commitRemoval).not.toHaveBeenCalled()
+    expect(await loser.keyPort.getCurrentGeneration(SPACE)).toBe(0)
+    expect(await loser.docLogStore.getPendingRemoval(SPACE, REMOVED)).not.toBeNull()
+
+    // The winner's key-rotation reaches the losing admin. Its own staged material
+    // is discarded; recovery observes the fulfilled declared generation and no-ops.
+    const winnerKey = (await winner.keyPort.getKeyByGeneration(SPACE, 1))!
+    await loser.keyPort.saveKey(SPACE, 1, winnerKey)
+    const committed = await recoverPendingRemovals(loser.docLogStore, async () => loser.deps)
+
+    expect(committed).toBe(0)
+    expect(loser.commitRemoval).not.toHaveBeenCalled()
+    expect(await loser.docLogStore.getPendingRemoval(SPACE, REMOVED)).toBeNull()
+    expect(hex((await loser.keyPort.getKeyByGeneration(SPACE, 1))!)).toBe(hex(winnerKey))
   })
 
   it('a still-unreachable broker leaves the removal staged and recovery never throws (returns 0)', async () => {

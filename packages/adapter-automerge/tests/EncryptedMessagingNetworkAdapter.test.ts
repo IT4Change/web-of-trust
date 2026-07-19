@@ -68,6 +68,10 @@ class RotationInjectingKeyManagement implements KeyManagementPort {
   getOwnCapability(spaceId: string, generation: number): Promise<string | null> {
     return this.inner.getOwnCapability(spaceId, generation)
   }
+
+  deleteSpaceKeys(spaceId: string): Promise<void> {
+    return this.inner.deleteSpaceKeys(spaceId)
+  }
 }
 
 const ALICE_DID = 'did:key:z6MkpTHR8VNsBxYAAWHut2Geadd9jSwuBV8xRoAnwWsdvktH'

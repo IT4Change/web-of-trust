@@ -1307,8 +1307,11 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
         if (kind !== 'canonical-self-removal-rotation') {
           await this.commitMembershipEventDurable(state, { did: removedDid, status: 'removed', sinceGeneration: newGeneration }, activityEntry)
         }
-        await this.persistRotatedKeyToPersonalDoc(spaceId, newGeneration)
-        await this.distributeKeyRotation(state, newGeneration)
+        const departingSelf = removedDid === myDid
+        // A self-leaving admin must distribute the follow-up generation to the
+        // remaining members, but must neither retain nor persist it for own devices.
+        if (!departingSelf) await this.persistRotatedKeyToPersonalDoc(spaceId, newGeneration)
+        await this.distributeKeyRotation(state, newGeneration, departingSelf ? myDid : undefined)
         if (kind !== 'canonical-self-removal-rotation') {
           await this.distributeMemberRemovedUpdate(state, removedDid, newGeneration, removedEncKey)
         }
@@ -1318,6 +1321,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
           cb({ spaceId, did: removedDid, action: 'removed' })
         }
         this.notifySpaceListeners()
+        if (departingSelf) await this.keyManagement.deleteSpaceKeys(spaceId)
       },
     }
   }
@@ -1422,10 +1426,11 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
    * that map (deleted before the commit), so it never receives key material — only
    * its member-update. Shared by the legacy path and the Slice SR commit path.
    */
-  private async distributeKeyRotation(state: YjsSpaceState, newGen: number): Promise<void> {
+  private async distributeKeyRotation(state: YjsSpaceState, newGen: number, excludeDid?: string): Promise<void> {
     const spaceId = state.info.id
     const myDid = this.identity.getDid()
     for (const [did, encPub] of state.memberEncryptionKeys) {
+      if (did === excludeDid) continue
       const rotationBody = await buildKeyRotationBody({
         keyPort: this.keyManagement,
         spaceId,
@@ -1973,6 +1978,29 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
     const members = activeMembers.length > 0 ? activeMembers : state.info.members
     const existingSelf = resolveMembershipWinner(this.readMembershipEvents(state.doc), selfDid)
 
+    // A broker-enforced admin self-removal can have its durable membership append
+    // fail after rotation. Complete that exact staged transaction before the generic
+    // "already removed" retry path decides authority from active members.
+    const pendingStore = this.logSyncEnabled ? await this.ensureDocLogStore() : null
+    const securePending = pendingStore && await pendingStore.getPendingRemoval(spaceId, selfDid)
+    if (securePending) {
+      const selfEncryptionKey = await this.identity.getEncryptionPublicKeyBytes()
+      await runTwoPhaseRemoval(
+        this.buildSecureRemovalDeps(state, selfEncryptionKey, securePending.kind),
+        selfDid,
+        { kind: securePending.kind },
+      )
+      const confirmed = resolveMembershipWinner(this.readMembershipEvents(state.doc), selfDid)
+      if (confirmed?.status !== 'removed') return
+      await this.recordConfirmedMembershipRemoval({
+        spaceId, action: 'removed', memberDid: selfDid,
+        effectiveKeyGeneration: confirmed.sinceGeneration, signerDid: selfDid,
+        receivedAt: new Date().toISOString(),
+      })
+      await this.cleanupSpaceLocally(spaceId)
+      return
+    }
+
     // A previous last-member attempt may already have committed the canonical
     // local removal and then failed while persisting/flushing the PersonalDoc.
     // Retrying leave must finish that durable event + cleanup, not rotate or
@@ -2103,6 +2131,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
       await this.metadataStorage.deleteSpaceMetadata(spaceId)
       await this.metadataStorage.deleteGroupKeys(spaceId)
     }
+    await this.keyManagement.deleteSpaceKeys(spaceId)
     await this.deletePendingMessagesForSpace(spaceId)
     if (this.compactStore && 'delete' in this.compactStore) {
       await (this.compactStore as any).delete(spaceId)

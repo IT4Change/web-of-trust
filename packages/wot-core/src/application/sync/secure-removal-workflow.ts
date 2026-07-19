@@ -33,8 +33,8 @@ import { commitStagedRotation, stageRotateSpaceKey, type StagedRotationMaterial 
  * `removeMember` resolves IFF the removal was enforced + committed. If staging
  * succeeded but enforcement did not complete (a broker is offline / a transient
  * space-rotate reject), the caller throws {@link RemovalPendingNotEnforcedError} —
- * the staging is durable, so VE-C3 crash-recovery retries it later. A HARD
- * space-rotate reject (e.g. AUTH_INVALID — a real admin bug) propagates raw.
+ * the staging is durable, so VE-C3 crash-recovery retries it later. AUTH_INVALID
+ * is deliberately ambiguous: it never authorizes committing staged material.
  */
 
 /**
@@ -125,8 +125,8 @@ export interface SecureRemovalDeps {
  *
  * @throws RemovalPendingNotEnforcedError if staging succeeded but not every home
  *   broker confirmed (durable — retried by VE-C3).
- * @throws Error (hard) on a `multi-broker` guard violation, or a hard
- *   `space-rotate` reject (e.g. AUTH_INVALID) — those propagate raw.
+ * @throws Error (hard) on a `multi-broker` guard violation or a non-retryable
+ *   `space-rotate` reject.
  */
 export async function runTwoPhaseRemoval(
   deps: SecureRemovalDeps,
@@ -151,9 +151,7 @@ export async function runTwoPhaseRemoval(
   const existing = await deps.docLogStore.getPendingRemoval(spaceId, removedDid)
   const removal = existing ?? (await stageRemoval(deps, removedDid, opts?.activityEntry, opts?.kind, opts?.targetGeneration))
 
-  // First-attempt semantics: a hard space-rotate reject (AUTH_INVALID) is a real
-  // admin-authority bug and MUST propagate (see driveRemovalToCompletion).
-  await driveRemovalToCompletion(deps, removal, { treatAuthInvalidAsEnforced: false })
+  await driveRemovalToCompletion(deps, removal)
 }
 
 /**
@@ -185,12 +183,9 @@ export async function recoverPendingRemovals(
     }
     if (!deps) continue
     try {
-      // Recovery mode: a re-sent space-rotate for an already-applied generation
-      // returns an AUTH_INVALID/stale reject (the broker is past this generation).
-      // In recovery that means "already enforced" → drive to commit; on the first
-      // attempt (below) the same code is a hard admin bug and propagates.
-      await driveRemovalToCompletion(deps, removal, { treatAuthInvalidAsEnforced: true })
-      committed += 1
+      // A canonical self-removal can converge on another admin's rotation without
+      // committing this device's staged material. Count only an actual local COMMIT.
+      if (await driveRemovalToCompletion(deps, removal)) committed += 1
     } catch (err) {
       // RemovalPendingNotEnforcedError = still waiting on a broker → keep staged,
       // try again next recovery pass. A hard error (admin bug) is logged but does
@@ -260,8 +255,7 @@ async function stageRemoval(
 async function driveRemovalToCompletion(
   deps: SecureRemovalDeps,
   removal: PendingRemoval,
-  opts: { treatAuthInvalidAsEnforced: boolean },
-): Promise<void> {
+): Promise<boolean> {
   // The home-broker set is FIXED in the durable record (captured at stage time).
   // Use it, not deps.homeBrokerSet, so a config change mid-flight cannot move the
   // enforcement goalposts for an in-progress removal.
@@ -280,18 +274,21 @@ async function driveRemovalToCompletion(
       await deps.docLogStore.markBrokerConfirmed(deps.spaceId, removal.removedDid, brokerUrl)
       confirmed.add(brokerUrl)
     } catch (err) {
-      if (isAlreadyEnforcedReject(err, opts.treatAuthInvalidAsEnforced)) {
+      if (isAlreadyEnforcedReject(err)) {
         // VE-C3 idempotent retry: the broker already rotated to (or past) this
         // generation on an earlier (lost-confirmation) attempt. Treat as confirmed
-        // and continue toward commit — re-sending an already-applied space-rotate
-        // is a stale/auth reject, NOT a hard failure.
+        // and continue toward commit — an explicit stale reject proves this
+        // generation is already broker-enforced.
         await deps.docLogStore.markBrokerConfirmed(deps.spaceId, removal.removedDid, brokerUrl)
         confirmed.add(brokerUrl)
         continue
       }
+      if (err instanceof ControlFrameRejectedError && err.code === 'AUTH_INVALID') {
+        if (await handleAmbiguousAuthInvalid(deps, removal)) return false
+        throw new RemovalPendingNotEnforcedError(deps.spaceId, removal.removedDid, removal.newGeneration)
+      }
       if (err instanceof ControlFrameRejectedError && isHardSpaceRotateReject(err.code)) {
-        // A HARD broker reject (AUTH_INVALID on a FIRST attempt = a real
-        // admin-authority bug) must surface — it is not a "retry later" condition.
+        // A non-retryable broker reject must surface — it is not a pending condition.
         throw err
       }
       // Otherwise (a transient broker reject such as RATE_LIMITED / INTERNAL_ERROR,
@@ -326,6 +323,7 @@ async function driveRemovalToCompletion(
   if (removal.activityEntry === undefined) await deps.commitRemoval(removal.removedDid, removal.newGeneration)
   else await deps.commitRemoval(removal.removedDid, removal.newGeneration, removal.activityEntry)
   await deps.docLogStore.deletePendingRemoval(deps.spaceId, removal.removedDid)
+  return true
 }
 
 /**
@@ -333,17 +331,38 @@ async function driveRemovalToCompletion(
  * newer) generation — so a VE-C3 retry should treat the broker as confirmed.
  *
  * The explicit stale signals (CAPABILITY_GENERATION_STALE / KEY_GENERATION_STALE)
- * unambiguously mean "you are behind", so they count as already-enforced in BOTH
- * the first-attempt and recovery paths. AUTH_INVALID is ambiguous — it is a real
- * admin-authority bug on a first attempt, but on a VE-C3 retry of an
- * already-applied generation it is the broker rejecting a rotate that is no longer
- * the strict next one. We therefore only treat AUTH_INVALID as already-enforced
- * when the caller opts in (the recovery path).
+ * unambiguously mean "you are behind", so they count as already-enforced. AUTH_INVALID
+ * is intentionally excluded: it does not prove which key material won the generation.
  */
-function isAlreadyEnforcedReject(err: unknown, treatAuthInvalidAsEnforced: boolean): boolean {
+function isAlreadyEnforcedReject(err: unknown): boolean {
   if (!(err instanceof ControlFrameRejectedError)) return false
   if (err.code === 'CAPABILITY_GENERATION_STALE' || err.code === 'KEY_GENERATION_STALE') return true
-  if (treatAuthInvalidAsEnforced && err.code === 'AUTH_INVALID') return true
+  return false
+}
+
+/**
+ * AUTH_INVALID does not prove that this staged key was accepted: another admin may
+ * already have claimed the generation with different material. Never turn that
+ * ambiguous reject into a commit. A canonical self-removal is fulfilled once its
+ * declared generation arrived locally; otherwise replace (never reuse) the rejected
+ * material so a later retry targets the then-current next generation.
+ */
+async function handleAmbiguousAuthInvalid(deps: SecureRemovalDeps, removal: PendingRemoval): Promise<boolean> {
+  const current = await deps.keyPort.getCurrentGeneration(deps.spaceId)
+  if (removal.kind === 'canonical-self-removal-rotation' && current >= removal.newGeneration) {
+    await deps.docLogStore.deletePendingRemoval(deps.spaceId, removal.removedDid)
+    return true
+  }
+  const replacement = await stageRemoval(
+    deps,
+    removal.removedDid,
+    removal.activityEntry,
+    removal.kind,
+    removal.kind === 'canonical-self-removal-rotation' ? removal.newGeneration : undefined,
+  )
+  // stageRemoval writes the replacement atomically under the same durable key.
+  // Keep TypeScript from treating this as an unused safety-critical result.
+  void replacement
   return false
 }
 
@@ -351,14 +370,9 @@ function isAlreadyEnforcedReject(err: unknown, treatAuthInvalidAsEnforced: boole
  * A `space-rotate` reject that can NEVER succeed by retrying — it must surface raw
  * rather than be parked as a pending (retryable) removal.
  *
- * For a space-rotate, AUTH_INVALID means the relay refused the rotation as
- * unauthorized: either the signer is not a registered admin OR `newGeneration` was
- * not exactly `current + 1` (Sync 003 handleSpaceRotate). On a FIRST attempt that
- * is a real admin-authority / sequencing bug, not a transient transport failure —
- * so it propagates (matching VE-C1 step 5). On a VE-C3 recovery retry the SAME code
- * instead means the broker already rotated past this generation, which is handled
- * earlier by {@link isAlreadyEnforcedReject} and never reaches here. AUTHOR_MISMATCH
- * is the coordinator's hard-stop bug class.
+ * AUTHOR_MISMATCH is the coordinator's hard-stop bug class. AUTH_INVALID is handled
+ * separately because it may mean a concurrent admin already installed different
+ * material for this generation.
  *
  * NOTE: this is deliberately NOT {@link classifyRejectDisposition} — that table is
  * the log-entry WRITE-path (VE-4) disposition, where AUTH_INVALID is not even a
@@ -366,6 +380,5 @@ function isAlreadyEnforcedReject(err: unknown, treatAuthInvalidAsEnforced: boole
  * silently downgrades a hard rotate reject to a pending removal.
  */
 function isHardSpaceRotateReject(code: ControlFrameRejectedError['code']): boolean {
-  if (code === 'AUTH_INVALID') return true
   return classifyRejectDisposition(code) === 'hard-stop'
 }

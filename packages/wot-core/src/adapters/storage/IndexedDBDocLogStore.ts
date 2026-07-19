@@ -659,6 +659,7 @@ interface StoredPendingRemoval {
   }
   createdAt: number
   activityEntry?: Record<string, unknown>
+  kind?: 'canonical-self-removal-rotation'
 }
 
 function toStoredRemoval(removal: PendingRemoval): StoredPendingRemoval {
@@ -677,6 +678,7 @@ function toStoredRemoval(removal: PendingRemoval): StoredPendingRemoval {
     },
     createdAt: removal.createdAt,
     activityEntry: removal.activityEntry === undefined ? undefined : JSON.parse(JSON.stringify(removal.activityEntry)),
+    kind: removal.kind,
   }
 }
 
@@ -695,6 +697,7 @@ function fromStoredRemoval(stored: StoredPendingRemoval): PendingRemoval {
     stagedKeyMaterial,
     createdAt: stored.createdAt,
     activityEntry: stored.activityEntry === undefined ? undefined : JSON.parse(JSON.stringify(stored.activityEntry)),
+    kind: stored.kind,
   }
 }
 
