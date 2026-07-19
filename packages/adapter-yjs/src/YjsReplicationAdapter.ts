@@ -1810,7 +1810,8 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
   /**
    * Slice SR / B3 — write a membership event AND durably persist its log entry
    * BEFORE returning, propagating any append failure. Used by the secure-removal
-   * COMMIT so the canonical `removed@newGeneration` log entry is durable before the
+   * COMMIT and by the non-admin self-leave path, so the canonical
+   * `removed@newGeneration` log entry is durable before the
    * PendingRemoval staging is deleted (a crash/append-failure after broker
    * enforcement must NOT leave the removal enforced with no membership-removal record).
    *
@@ -1868,7 +1869,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
     const update = captured ?? Y.encodeStateAsUpdate(state.doc)
     const coordinator = await this.getOrCreateCoordinator(state)
     if (!coordinator) {
-      throw new Error('secure removal commit requires a log-sync coordinator to durably record the membership removal')
+      throw new Error('membership removal commit requires a log-sync coordinator to durably record the membership removal')
     }
     // B3: the space-rotate that just enforced this removal invalidated our OWN
     // old-generation scope at the relay. Re-present the (now new-generation) capability
@@ -1945,9 +1946,33 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
       return
     }
 
-    // Self-leave is the regular removal transition: commit first, then write and
-    // flush the confirmed personal event, then clean up local space state.
-    await this.removeMemberInternal(spaceId, selfDid)
+    // Self-leave has a separate authority rule from removing somebody else. A
+    // non-admin is still a canonical member at this point and may therefore write
+    // their own removed event to the regular log, but MUST NOT mint material or ask
+    // the broker for a space-rotate. An active admin keeps the existing enforced
+    // secure-removal flow below.
+    if (!this.spaceAdminDids(state).includes(selfDid)) {
+      const generation = (await this.keyManagement.getCurrentGeneration(spaceId)) + 1
+      const selfEncryptionKey = state.memberEncryptionKeys.get(selfDid)
+      await this.commitMembershipEventDurable(state, {
+        did: selfDid,
+        status: 'removed',
+        sinceGeneration: generation,
+      })
+      // No key rotation: this is the self-signed pending signal which lets own
+      // devices and remaining members resolve the canonical removal independently.
+      await this.distributeMemberRemovedUpdate(state, selfDid, generation, selfEncryptionKey)
+      await this.saveSpaceMetadata(state)
+      this._scheduleVaultImmediate(state)
+      for (const cb of this.memberChangeListeners) {
+        cb({ spaceId, did: selfDid, action: 'removed' })
+      }
+      this.notifySpaceListeners()
+    } else {
+      // Existing admin self-leave: stage -> broker enforcement -> commit + key
+      // rotation. The departing admin never retains the next-generation material.
+      await this.removeMemberInternal(spaceId, selfDid)
+    }
     const confirmed = resolveMembershipWinner(this.readMembershipEvents(state.doc), selfDid)
     if (confirmed?.status !== 'removed') return
     await this.recordConfirmedMembershipRemoval({

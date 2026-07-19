@@ -9,11 +9,12 @@ import {
   InMemoryKeyManagementAdapter,
   InMemoryDocLogStore,
 } from '@web_of_trust/core/adapters'
-import { KEY_ROTATION_MESSAGE_TYPE } from '@web_of_trust/core/protocol'
+import { KEY_ROTATION_MESSAGE_TYPE, MEMBER_UPDATE_MESSAGE_TYPE } from '@web_of_trust/core/protocol'
 import type { WireMessage, PendingRemoval } from '@web_of_trust/core/ports'
 import { stageRotateSpaceKey, createSpaceKey, rotateSpaceKey, buildKeyRotationBody, deliverInboxMessage } from '@web_of_trust/core/application'
 import { WebCryptoProtocolCryptoAdapter } from '@web_of_trust/core/protocol-adapters'
 import { YjsReplicationAdapter } from '../src/YjsReplicationAdapter'
+import { getYjsPersonalDoc, initYjsPersonalDoc, resetYjsPersonalDoc } from '../src/YjsPersonalDocManager'
 
 const protocolCrypto = new WebCryptoProtocolCryptoAdapter()
 
@@ -111,6 +112,7 @@ describe('YjsReplicationAdapter — Slice SR secure removal (VE-C1 wiring)', () 
       docLogStore,
       enableLogSync: true,
       deviceId,
+      flushPersonalDoc: async () => {},
     })
   }
 
@@ -248,6 +250,55 @@ describe('YjsReplicationAdapter — Slice SR secure removal (VE-C1 wiring)', () 
     expect((await aliceAdapter.getSpace(spaceId))!.members).not.toContain(bob.getDid())
     // ...and the durable staging record was cleaned up (removal complete, not pending).
     expect(await pendingRemoval(aliceAdapter, spaceId, bob.getDid())).toBeNull()
+  })
+
+  it('non-admin self-leave commits and publishes removed@next-generation without sending space-rotate', async () => {
+    // Alice created the space and is its only registered admin; Bob is merely an
+    // active member. This is deliberately the real log-sync harness (durable
+    // DocLogStore + control frames + broker), not the legacy content path.
+    const spaceId = await createSharedSpace()
+    await initYjsPersonalDoc(bob)
+    // An invited device learns recipient keys through the normal metadata/key
+    // discovery path. Seed that resolved cache here so this regression can prove
+    // addressed delivery both to Bob's sibling DID and the remaining admin.
+    const bobState = (bobAdapter as unknown as { spaces: Map<string, { memberEncryptionKeys: Map<string, Uint8Array> }> }).spaces.get(spaceId)!
+    bobState.memberEncryptionKeys.set(bob.getDid(), await bob.getEncryptionPublicKeyBytes())
+    bobState.memberEncryptionKeys.set(alice.getDid(), await alice.getEncryptionPublicKeyBytes())
+    const entriesBefore = brokerEntryCount(broker, spaceId)
+    const sentMemberUpdates: WireMessage[] = []
+    const controlFrames: unknown[] = []
+    const baseSend = bobMessaging.send.bind(bobMessaging)
+    const baseControl = bobMessaging.sendControlFrame!.bind(bobMessaging)
+    ;(bobMessaging as unknown as { send: typeof bobMessaging.send }).send = async (message) => {
+      if ((message as { type?: unknown }).type === MEMBER_UPDATE_MESSAGE_TYPE) sentMemberUpdates.push(message)
+      return baseSend(message)
+    }
+    ;(bobMessaging as unknown as { sendControlFrame: NonNullable<typeof bobMessaging.sendControlFrame> }).sendControlFrame = async (frame) => {
+      controlFrames.push(frame)
+      // A real broker would reject this with AUTH_INVALID because Bob is not an
+      // admin. The assertion below proves the new path never attempts it.
+      if ((frame as { type?: unknown }).type === 'space-rotate') throw new Error('AUTH_INVALID: non-admin rotate')
+      return baseControl(frame)
+    }
+
+    await bobAdapter.leaveSpace(spaceId)
+
+    expect(controlFrames.filter(frame => (frame as { type?: unknown }).type === 'space-rotate')).toHaveLength(0)
+    expect(sentMemberUpdates).toHaveLength(2) // own DID (sibling devices) + remaining admin
+    expect(brokerEntryCount(broker, spaceId)).toBeGreaterThan(entriesBefore)
+    expect(await adapterGeneration(bobAdapter, spaceId)).toBe(0) // no local rotation / new key material
+    expect(await pendingRemoval(bobAdapter, spaceId, bob.getDid())).toBeNull()
+    expect(await bobAdapter.getSpace(spaceId)).toBeNull() // post-flush local cleanup
+
+    const removals = Object.values(getYjsPersonalDoc().membershipRemovals ?? {})
+      .filter(removal => removal.spaceId === spaceId)
+    expect(removals).toHaveLength(1)
+    expect(removals[0]).toMatchObject({
+      removedDid: bob.getDid(),
+      generation: 1,
+      byDid: bob.getDid(),
+    })
+    await resetYjsPersonalDoc()
   })
 
   it('B3: if the durable membership-removal log append FAILS during commit, removeMember rejects and the PendingRemoval staging is PRESERVED (not deleted)', async () => {

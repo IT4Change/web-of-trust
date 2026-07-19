@@ -39,6 +39,24 @@ describe('InMemoryMemberUpdatePendingStore', () => {
     expect(list[0].signerDid).toBe('did:key:z6MkUpgrader')
   })
 
+  it('upgradePending clears optional receipt provenance omitted by the authorized signal', async () => {
+    const store = new InMemoryMemberUpdatePendingStore()
+    await store.savePending({
+      ...seen('store-unverified-pending-and-sync'),
+      outerId: 'untrusted-outer-id',
+      receivedAt: '2026-07-19T10:00:00.000Z',
+    })
+    await store.upgradePending({
+      ...seen('store-pending-and-sync', { signerDid: 'did:key:z6MkUpgrader' }),
+      outerId: undefined,
+      receivedAt: undefined,
+    })
+
+    const [upgraded] = await store.listSeenForSpace(SPACE)
+    expect(upgraded.outerId).toBeUndefined()
+    expect(upgraded.receivedAt).toBeUndefined()
+  })
+
   it('bufferFuture stores separately from seen (no storedDisposition leaks into seen)', async () => {
     const store = new InMemoryMemberUpdatePendingStore()
     await store.bufferFuture(signal({ effectiveKeyGeneration: 5 }))

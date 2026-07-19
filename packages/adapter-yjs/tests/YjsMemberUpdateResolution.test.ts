@@ -296,12 +296,11 @@ describe('P0b membershipRemovals — confirmed cleanup boundary', () => {
   it('blocks cleanup when the PersonalDoc durability wiring is absent', async () => {
     const h = await setup({ passphrase: 'p0b-no-personal-flush' })
     const space = await h.adapter.createSpace<TestDoc>('shared', { items: {} }, { name: 'S' })
-    await resetYjsPersonalDoc()
     ;(h.adapter as any).flushPersonalDoc = undefined
     await expect((h.adapter as any).recordConfirmedMembershipRemoval({
       spaceId: space.id, action: 'removed', memberDid: h.alice.getDid(),
       effectiveKeyGeneration: 1, signerDid: ADMIN,
-    })).rejects.toThrow('initialized PersonalDoc')
+    })).rejects.toThrow('flushPersonalDoc durability wiring')
     expect(spaceState(h.adapter, space.id)).toBeDefined()
   })
 
