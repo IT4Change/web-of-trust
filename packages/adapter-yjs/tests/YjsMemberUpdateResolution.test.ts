@@ -212,13 +212,16 @@ describe('P0b membershipRemovals — confirmed cleanup boundary', () => {
     await sibling.start()
     Y.applyUpdate(spaceState(sibling, space.id).doc, Y.encodeStateAsUpdate(spaceState(h.adapter, space.id).doc), 'remote')
 
+    const senderSavePending = vi.spyOn(h.memberUpdateStore, 'savePending')
     await h.adapter.leaveSpace(space.id)
 
     await waitUntil(async () => (await siblingPending.listSeenForSpace(space.id)).length === 1)
     expect(spaceState(sibling, space.id).pendingRemoval).toEqual({ effectiveKeyGeneration: 1 })
     // Echo-Guard: das SENDENDE Gerät bekommt die Own-DID-Zustellung ebenfalls
-    // ausgeliefert, darf sein eigenes Signal aber nie als Pending verarbeiten.
-    expect(await h.memberUpdateStore.listSeenForSpace(space.id)).toHaveLength(0)
+    // ausgeliefert, darf sein eigenes Signal aber NIE verarbeiten. Der Spy (statt
+    // End-Zustand) trägt die Beweislast: ohne Guard würde savePending gerufen,
+    // auch wenn eine spätere Resolution das Pending wieder auflöste.
+    expect(senderSavePending).not.toHaveBeenCalled()
 
     // The next canonical Space sync answers the pending self-signed removal.
     applyRemoteMembershipEvent(sibling, space.id, { did: h.alice.getDid(), status: 'removed', sinceGeneration: 1 })
