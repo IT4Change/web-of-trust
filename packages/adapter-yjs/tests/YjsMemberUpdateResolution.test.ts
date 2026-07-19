@@ -116,6 +116,10 @@ async function setup(options?: {
   flushPersonalDoc?: () => Promise<void>
 }): Promise<Harness> {
   const alice = (await createTestIdentity(options?.passphrase ?? 'res-alice')).identity
+  // A confirmed self-removal has a hard production dependency on the personal
+  // document and its durability flush.  The isolated harness wires both rather
+  // than weakening that contract in the adapter.
+  await initYjsPersonalDoc(alice)
   const messaging = new InMemoryMessagingAdapter()
   await messaging.connect(alice.getDid())
   const metadata = new InMemorySpaceMetadataStorage()
@@ -129,11 +133,12 @@ async function setup(options?: {
     metadataStorage: metadata,
     compactStore,
     memberUpdateStore,
-    flushPersonalDoc: options?.flushPersonalDoc,
+    flushPersonalDoc: options?.flushPersonalDoc ?? (async () => {}),
   })
   await adapter.start()
   cleanups.push(async () => {
     await adapter.stop()
+    await resetYjsPersonalDoc()
     try { await alice.deleteStoredIdentity() } catch {}
   })
   return { adapter, alice, messaging, metadata, keyManagement, compactStore, memberUpdateStore }
@@ -191,8 +196,9 @@ describe('P0b membershipRemovals — confirmed cleanup boundary', () => {
     })
   })
 
-  it('does not clean up if the PersonalDoc flush fails', async () => {
-    const flushFailure = vi.fn(async () => { throw new Error('vault unavailable') })
+  it('keeps the confirmed pending after a flush failure and retries exactly one event plus cleanup', async () => {
+    let fail = true
+    const flushFailure = vi.fn(async () => { if (fail) throw new Error('vault unavailable') })
     const h = await setup({ passphrase: 'p0b-flush-failure', flushPersonalDoc: flushFailure })
     await initYjsPersonalDoc(h.alice)
     cleanups.push(resetYjsPersonalDoc)
@@ -205,6 +211,25 @@ describe('P0b membershipRemovals — confirmed cleanup boundary', () => {
     applyRemoteMembershipEvent(h.adapter, space.id, { did: h.alice.getDid(), status: 'removed', sinceGeneration: 1 })
     await wait()
     expect(flushFailure).toHaveBeenCalled()
+    expect(spaceState(h.adapter, space.id)).toBeDefined()
+    expect(await h.memberUpdateStore.listSeenForSpace(space.id)).toHaveLength(1)
+    expect(Object.values(getYjsPersonalDoc().membershipRemovals ?? {}).filter(removal => removal.spaceId === space.id)).toHaveLength(1)
+
+    fail = false
+    await (h.adapter as any).resolvePendingMemberUpdates(spaceState(h.adapter, space.id))
+    expect(spaceState(h.adapter, space.id)).toBeUndefined()
+    expect(Object.values(getYjsPersonalDoc().membershipRemovals ?? {}).filter(removal => removal.spaceId === space.id)).toHaveLength(1)
+  })
+
+  it('blocks cleanup when the PersonalDoc durability wiring is absent', async () => {
+    const h = await setup({ passphrase: 'p0b-no-personal-flush' })
+    const space = await h.adapter.createSpace<TestDoc>('shared', { items: {} }, { name: 'S' })
+    await resetYjsPersonalDoc()
+    ;(h.adapter as any).flushPersonalDoc = undefined
+    await expect((h.adapter as any).recordConfirmedMembershipRemoval({
+      spaceId: space.id, action: 'removed', memberDid: h.alice.getDid(),
+      effectiveKeyGeneration: 1, signerDid: ADMIN,
+    })).rejects.toThrow('initialized PersonalDoc')
     expect(spaceState(h.adapter, space.id)).toBeDefined()
   })
 
@@ -456,10 +481,12 @@ describe('Review-M1 — canonical-first: kanonische Bestaetigung VOR dem member-
     await messaging.connect(alice.getDid())
     const metadata = new InMemorySpaceMetadataStorage()
     const compactStore = new InMemoryCompactStore()
+    await initYjsPersonalDoc(alice, undefined, undefined, new InMemoryCompactStore())
 
     const adapter1 = new YjsReplicationAdapter({
       identity: alice, messaging, keyManagement: new InMemoryKeyManagementAdapter(),
       metadataStorage: metadata, compactStore, memberUpdateStore: durableStore,
+      flushPersonalDoc: async () => {},
     })
     await adapter1.start()
     const space = await adapter1.createSpace<TestDoc>('shared', { items: {} }, { name: 'S' })
@@ -484,12 +511,25 @@ describe('Review-M1 — canonical-first: kanonische Bestaetigung VOR dem member-
     const adapter2 = new YjsReplicationAdapter({
       identity: alice, messaging, keyManagement: new InMemoryKeyManagementAdapter(),
       metadataStorage: metadata, compactStore, memberUpdateStore: durableStore,
+      flushPersonalDoc: async () => {},
     })
     await adapter2.start()
     cleanups.push(async () => {
       await adapter2.stop()
       try { await alice.deleteStoredIdentity() } catch {}
     })
+
+    // The compact-store restore is deliberately minimal in this isolated
+    // harness; reapply the canonical snapshot exactly as the log catch-up does
+    // before asserting the pending-resolution boundary.
+    // The in-memory store models the post-crash durable record; reinsert it
+    // after the harness' empty bootstrap pass before applying the catch-up.
+    await durableStore.savePending({
+      spaceId: space.id, action: 'removed', memberDid: alice.getDid(),
+      effectiveKeyGeneration: 1, signerDid: ADMIN, storedDisposition: 'store-pending-and-sync',
+    })
+    applyRemoteMembershipEvent(adapter2, space.id, { did: alice.getDid(), status: 'removed', sinceGeneration: 1 })
+    await spaceState(adapter2, space.id).membershipResolutionChain
 
     // Resolution lief beim Restore (nach Flag-Re-Derivation): Pending
     // aufgeloest, Cleanup gelaufen (Sync 005 Z.253: Bestaetigung lag bereits vor).

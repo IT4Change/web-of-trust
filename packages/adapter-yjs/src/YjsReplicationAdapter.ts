@@ -85,6 +85,8 @@ import type { MembershipRemovalDoc } from './types'
  * skip exactly this mutation without affecting normal local edits or the remote path.
  */
 const MEMBERSHIP_COMMIT_ORIGIN = 'wot:membership-commit-durable'
+/** A last-member self-leave is local state disposal, never a space-sync delta. */
+const LOCAL_ONLY_MEMBERSHIP_ORIGIN = 'wot:membership-local-only'
 
 /** Duck-typed interface for CompactStorageManager / InMemoryCompactStore */
 export interface YjsCompactStore {
@@ -167,6 +169,8 @@ interface YjsSpaceState {
   // nicht das gleich gespeicherte Pending aufloest (Z.194: die Aufloesung
   // gehoert dem NAECHSTEN Space-Sync, nicht dem vorherigen).
   membershipResolutionChain?: Promise<void>
+  /** Serializes membership transitions for one (space, DID) commit decision. */
+  membershipTransitions?: Map<string, Promise<void>>
 }
 
 interface YjsReplicationConfig {
@@ -883,19 +887,21 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
   }
 
   async addMember(spaceId: string, memberDid: string, memberEncryptionPublicKey: Uint8Array): Promise<void> {
-    await this.addMemberInternal(spaceId, memberDid, memberEncryptionPublicKey)
+    await this.serializeMembershipTransition(spaceId, memberDid, () => this.addMemberInternal(spaceId, memberDid, memberEncryptionPublicKey))
   }
 
   async addMemberWithActivity(spaceId: string, memberDid: string, memberEncryptionPublicKey: Uint8Array, opts?: { activityEntry?: Record<string, unknown> }): Promise<{ changed: boolean }> {
     const activityEntry = this.validateActivityEntry(opts?.activityEntry)
-    const state = this.spaces.get(spaceId)
-    if (!state) throw new Error(`Space ${spaceId} not found`)
-    if (resolveMembershipWinner(this.readMembershipEvents(state.doc), memberDid)?.status === 'active') return { changed: false }
-    await this.addMemberInternal(spaceId, memberDid, memberEncryptionPublicKey, activityEntry)
-    return { changed: true }
+    return this.serializeMembershipTransition(spaceId, memberDid, async () => {
+      const state = this.spaces.get(spaceId)
+      if (!state) throw new Error(`Space ${spaceId} not found`)
+      if (resolveMembershipWinner(this.readMembershipEvents(state.doc), memberDid)?.status === 'active') return { changed: false }
+      const changed = await this.addMemberInternal(spaceId, memberDid, memberEncryptionPublicKey, activityEntry)
+      return { changed }
+    })
   }
 
-  private async addMemberInternal(spaceId: string, memberDid: string, memberEncryptionPublicKey: Uint8Array, activityEntry?: Record<string, unknown>): Promise<void> {
+  private async addMemberInternal(spaceId: string, memberDid: string, memberEncryptionPublicKey: Uint8Array, activityEntry?: Record<string, unknown>): Promise<boolean> {
     const state = this.spaces.get(spaceId)
     if (!state) throw new Error(`Space ${spaceId} not found`)
 
@@ -933,12 +939,13 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
     // Liste durch die aktiven DIDs aus dem Event-Set — hier nur der Invitee).
     // Bewusster Bruch, Alt-Spaces sind neu zu erstellen
     // (Anton-Entscheid 2026-06-11).
-    this.writeMembershipEvent(state, {
+    const changed = this.writeMembershipEvent(state, {
       did: memberDid,
       status: 'active',
       sinceGeneration: currentGeneration,
       addedBy: myDid,
     }, activityEntry)
+    if (!changed) return false
 
     // Spec-conformant invite body (Sync 005 Z.62-103): all content keys + capability +
     // signing key. VE-2: adminDids = volle AKTIVE Admin-Liste aus dem _admins-Set
@@ -993,23 +1000,26 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
       cb({ spaceId, did: memberDid, action: 'added' })
     }
     this.notifySpaceListeners()
+    return true
   }
 
   async removeMember(spaceId: string, memberDid: string): Promise<void> {
-    await this.removeMemberInternal(spaceId, memberDid)
+    await this.serializeMembershipTransition(spaceId, memberDid, () => this.removeMemberInternal(spaceId, memberDid))
   }
 
   async removeMemberWithActivity(spaceId: string, memberDid: string, opts?: { activityEntry?: Record<string, unknown> }): Promise<{ changed: boolean }> {
     const activityEntry = this.validateActivityEntry(opts?.activityEntry)
-    const state = this.spaces.get(spaceId)
-    if (!state || resolveMembershipWinner(this.readMembershipEvents(state.doc), memberDid)?.status !== 'active') return { changed: false }
-    await this.removeMemberInternal(spaceId, memberDid, activityEntry)
-    return { changed: true }
+    return this.serializeMembershipTransition(spaceId, memberDid, async () => {
+      const state = this.spaces.get(spaceId)
+      if (!state || resolveMembershipWinner(this.readMembershipEvents(state.doc), memberDid)?.status !== 'active') return { changed: false }
+      const changed = await this.removeMemberInternal(spaceId, memberDid, activityEntry)
+      return { changed }
+    })
   }
 
-  private async removeMemberInternal(spaceId: string, memberDid: string, activityEntry?: Record<string, unknown>): Promise<void> {
+  private async removeMemberInternal(spaceId: string, memberDid: string, activityEntry?: Record<string, unknown>): Promise<boolean> {
     const state = this.spaces.get(spaceId)
-    if (!state) return
+    if (!state) return false
 
     const myDid = this.identity.getDid()
 
@@ -1029,7 +1039,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
     // single-phase rotate-and-distribute below, UNCHANGED.
     if (this.logSyncEnabled) {
       await this.removeMemberSecure(state, memberDid, activityEntry)
-      return
+      return true
     }
 
     // Den Encryption-Key des Entfernten VOR dem Löschen sichern — er bekommt unten
@@ -1046,7 +1056,8 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
     // aktiven DIDs aus dem Event-Set ersetzt — hier leer). Bewusster Bruch,
     // Alt-Spaces sind neu zu erstellen (Anton-Entscheid 2026-06-11).
     const newGen = (await this.keyManagement.getCurrentGeneration(spaceId)) + 1
-    this.writeMembershipEvent(state, { did: memberDid, status: 'removed', sinceGeneration: newGen }, activityEntry)
+    const changed = this.writeMembershipEvent(state, { did: memberDid, status: 'removed', sinceGeneration: newGen }, activityEntry)
+    if (!changed) return false
 
     // Rotate group key + fresh capability key pair + self-capability und an die
     // REMAINING members verteilen (Sync 005 Z.230/Z.276). The removed member
@@ -1066,6 +1077,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
       cb({ spaceId, did: memberDid, action: 'removed' })
     }
     this.notifySpaceListeners()
+    return true
   }
 
   /**
@@ -1724,14 +1736,35 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
    * ueberschrieben oder geloescht — konkurrierende Schreiber treffen verschiedene
    * Keys, derselbe Key traegt denselben semantischen Inhalt (idempotent).
    */
-  private writeMembershipEvent(state: YjsSpaceState, event: MembershipEvent, activityEntry?: Record<string, unknown>): void {
+  private writeMembershipEvent(state: YjsSpaceState, event: MembershipEvent, activityEntry?: Record<string, unknown>): boolean {
     const key = formatMembershipEventKey(event)
     const map = this.membersEventMap(state.doc)
-    if (map.has(key)) return
+    if (map.has(key)) return false
     state.doc.transact(() => {
       map.set(key, event)
       if (activityEntry) this.writeActivityEntry(state.doc, activityEntry)
     }, 'local')
+    return true
+  }
+
+  /** Run a membership transition after all earlier transitions for this DID. */
+  private async serializeMembershipTransition<T>(spaceId: string, did: string, operation: () => Promise<T>): Promise<T> {
+    const state = this.spaces.get(spaceId)
+    if (!state) return operation()
+    const transitions = state.membershipTransitions ?? (state.membershipTransitions = new Map())
+    const key = `${spaceId}\u0000${did}`
+    const previous = transitions.get(key) ?? Promise.resolve()
+    let release!: () => void
+    const current = new Promise<void>(resolve => { release = resolve })
+    const queued = previous.catch(() => {}).then(() => current)
+    transitions.set(key, queued)
+    await previous.catch(() => {})
+    try {
+      return await operation()
+    } finally {
+      release()
+      if (transitions.get(key) === queued) transitions.delete(key)
+    }
   }
 
   /** Validate before a Yjs transaction: the following single Set cannot partly fail. */
@@ -1755,6 +1788,11 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
       data.set('activity', activity)
     }
     activity.set(entry.id as string, entry)
+  }
+
+  private hasActivityEntry(doc: Y.Doc, id: string): boolean {
+    const activity = doc.getMap('data').get('activity')
+    return activity instanceof Y.Map && activity.has(id)
   }
 
   /**
@@ -1788,14 +1826,15 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
 
     // On the first apply, capture EXACTLY the update this membership mutation produces.
     let captured: Uint8Array | null = null
-    if (!alreadyApplied) {
+    const needsActivityRepair = activityEntry !== undefined && !this.hasActivityEntry(state.doc, activityEntry.id as string)
+    if (!alreadyApplied || needsActivityRepair) {
       const captureHandler = (update: Uint8Array, origin: any) => {
         if (origin === MEMBERSHIP_COMMIT_ORIGIN) captured = update
       }
       state.doc.on('update', captureHandler)
       try {
         state.doc.transact(() => {
-          map.set(key, event)
+          if (!alreadyApplied) map.set(key, event)
           if (activityEntry) this.writeActivityEntry(state.doc, activityEntry)
         }, MEMBERSHIP_COMMIT_ORIGIN)
       } finally {
@@ -1854,13 +1893,34 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
     const selfDid = this.identity.getDid()
     const activeMembers = resolveActiveMembers(this.readMembershipEvents(state.doc))
     const members = activeMembers.length > 0 ? activeMembers : state.info.members
+    const existingSelf = resolveMembershipWinner(this.readMembershipEvents(state.doc), selfDid)
+
+    // A previous last-member attempt may already have committed the canonical
+    // local removal and then failed while persisting/flushing the PersonalDoc.
+    // Retrying leave must finish that durable event + cleanup, not rotate or
+    // emit another removal transition.
+    if (existingSelf?.status === 'removed') {
+      await this.recordConfirmedMembershipRemoval({
+        spaceId,
+        action: 'removed',
+        memberDid: selfDid,
+        effectiveKeyGeneration: existingSelf.sinceGeneration,
+        signerDid: selfDid,
+        receivedAt: new Date().toISOString(),
+      })
+      await this.cleanupSpaceLocally(spaceId)
+      return
+    }
 
     // A private/last-member space has nobody to notify or rotate a key for.  Keep
     // this branch entirely local, but still make the canonical self-removal and
     // personal inbox record durable before deleting the space.
     if (members.length <= 1 && members.includes(selfDid)) {
       const generation = (await this.keyManagement.getCurrentGeneration(spaceId)) + 1
-      this.writeMembershipEvent(state, { did: selfDid, status: 'removed', sinceGeneration: generation })
+      const event = { did: selfDid, status: 'removed' as const, sinceGeneration: generation }
+      state.doc.transact(() => {
+        this.membersEventMap(state.doc).set(formatMembershipEventKey(event), event)
+      }, LOCAL_ONLY_MEMBERSHIP_ORIGIN)
       await this.recordConfirmedMembershipRemoval({
         spaceId,
         action: 'removed',
@@ -2013,8 +2073,13 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
       canonicalActiveMembers,
       localDid: this.identity.getDid(),
     })
+    // Consume ordinary confirmations immediately.  The confirmed local removal
+    // is different: its pending record is the durable retry intent for writing
+    // the personal inbox event and must survive any write/flush failure.
     for (const signal of resolution.confirmed) {
-      await this.memberUpdateStore.resolvePending(spaceId, signal)
+      if (signal !== resolution.confirmedLocalRemovalSignal) {
+        await this.memberUpdateStore.resolvePending(spaceId, signal)
+      }
     }
     for (const signal of resolution.discarded) {
       await this.memberUpdateStore.resolvePending(spaceId, signal)
@@ -2032,6 +2097,10 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
       // the PersonalDoc flush here makes a flush failure abort cleanup, so page
       // unload cannot lose the confirmed removal.
       await this.recordConfirmedMembershipRemoval(resolution.confirmedLocalRemovalSignal)
+      // Only now may the signal be consumed: an exception above intentionally
+      // leaves it in the store so the next observer/restore pass retries.
+      await this.memberUpdateStore.resolvePending(spaceId, resolution.confirmedLocalRemovalSignal)
+      await this.derivePendingMemberUpdateFlags(state)
       await this.cleanupSpaceLocally(spaceId)
     }
   }
@@ -2055,12 +2124,12 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
     }
 
     if (!isYjsPersonalDocInitialized()) {
-      // Isolierte Adapter-Tests booten das globale PersonalDoc bewusst nicht.
-      // In produktiver Verdrahtung ist das ein Wiring-Fehler: das bestaetigte
-      // Removal ginge verloren — laut sichtbar machen statt still schlucken.
-      console.error('[YjsReplication] membershipRemoval NICHT persistiert (PersonalDoc nicht initialisiert):', entry.eventId)
-    } else {
-      changeYjsPersonalDoc(doc => {
+      throw new Error('confirmed membership removal requires an initialized PersonalDoc')
+    }
+    if (!this.flushPersonalDoc) {
+      throw new Error('confirmed membership removal requires flushPersonalDoc durability wiring')
+    }
+    changeYjsPersonalDoc(doc => {
         const removals = doc.membershipRemovals ?? (doc.membershipRemovals = {}, doc.membershipRemovals!)
         // Replay and redelivery are idempotent by stable event identity.  Keep the
         // first canonical record rather than letting a later delivery change it.
@@ -2073,10 +2142,8 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
           const oldest = retained.shift()!
           delete removals[oldest.eventId]
         }
-      })
-    }
-
-    if (this.flushPersonalDoc) await this.flushPersonalDoc()
+    })
+    await this.flushPersonalDoc()
   }
 
   /**
@@ -2569,6 +2636,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
       // so the observer must NOT also fire a (fire-and-forget) write for it, which would
       // create a SECOND log entry / seq for the same membership op.
       if (origin === MEMBERSHIP_COMMIT_ORIGIN) return
+      if (origin === LOCAL_ONLY_MEMBERSHIP_ORIGIN) return
       // VE-2: when the log path is the primary steady-state path, local updates are
       // written as encrypted log entries (NOT content broadcasts). The legacy
       // content path stays available for the non-log-sync configuration (VE-7
