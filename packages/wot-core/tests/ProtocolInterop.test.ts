@@ -86,6 +86,22 @@ function loadSpecVector(relativePath: string): any {
   return JSON.parse(loadSpecFixtureText(relativePath))
 }
 
+function spaceRotateVectorOutcome(installed: { generation: number, verificationKey: string }, incoming: { newGeneration: number, newSpaceCapabilityVerificationKey: string }): 'success' | 'GENERATION_TAKEN' {
+  if (incoming.newGeneration === installed.generation) {
+    return incoming.newSpaceCapabilityVerificationKey === installed.verificationKey ? 'success' : 'GENERATION_TAKEN'
+  }
+  if (incoming.newGeneration < installed.generation) return 'GENERATION_TAKEN'
+  throw new Error('vector does not cover a new rotation')
+}
+
+describe('Sync 003 material-bound space-rotate response vectors', () => {
+  it('executes every space_rotate_response_cases fixture', () => {
+    for (const testCase of phase1.space_rotate_response_cases.cases) {
+      expect(spaceRotateVectorOutcome(testCase.installed, testCase.incoming), testCase.name).toBe(testCase.expected)
+    }
+  })
+})
+
 function bytesToHex(bytes: Uint8Array): string {
   return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('')
 }

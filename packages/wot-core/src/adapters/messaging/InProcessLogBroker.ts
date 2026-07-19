@@ -63,6 +63,8 @@ interface DocLog {
   /** registrationJws holder = first writer. */
   registered: boolean
   registrationAdminDids: string[]
+  /** Current verification key, retained for material-bound rotate retries. */
+  verificationKey: string | null
   /** entries keyed by `${deviceId}:${seq}`. */
   entries: Map<string, StoredLogEntry>
   /** broker heads: max seq per deviceId. */
@@ -231,6 +233,7 @@ export class InProcessLogBroker implements InProcessLogBrokerControls {
     }
     log.registered = true
     log.registrationAdminDids = [...parsed.payload.adminDids]
+    log.verificationKey = parsed.payload.spaceCapabilityVerificationKey
     return this.receipt(docId)
   }
 
@@ -238,12 +241,30 @@ export class InProcessLogBroker implements InProcessLogBrokerControls {
     const parsed = parseSpaceRotateMessage(frame)
     const docId = parsed.payload.spaceId
     const log = this.ensureDoc(docId)
+    if (parsed.payload.newGeneration === log.generation) {
+      if (parsed.payload.newSpaceCapabilityVerificationKey === log.verificationKey) return this.receipt(docId)
+      throw new ControlFrameRejectedError({
+        code: 'GENERATION_TAKEN',
+        message: 'space-rotate generation is already installed with different key material',
+      })
+    }
+    if (parsed.payload.newGeneration < log.generation) {
+      throw new ControlFrameRejectedError({
+        code: 'GENERATION_TAKEN',
+        message: 'space-rotate generation has already been superseded',
+      })
+    }
+    if (parsed.payload.newGeneration !== log.generation + 1) {
+      throw new ControlFrameRejectedError({
+        code: 'AUTH_INVALID',
+        message: 'space-rotate newGeneration must be exactly the current generation plus one',
+      })
+    }
     // Slice SR / VE-R1 mirror: advance the durable generation so subsequent
     // stale-generation log-entries (the removed member's old-gen writes) are gated
     // out. Monotonic — never moves backward on a duplicate/stale rotate.
-    if (parsed.payload.newGeneration > log.generation) {
-      log.generation = parsed.payload.newGeneration
-    }
+    log.generation = parsed.payload.newGeneration
+    log.verificationKey = parsed.payload.newSpaceCapabilityVerificationKey
     // After a rotate the relay clears the scope cache hard across all sockets.
     for (const key of [...this.scopes]) {
       if (key.endsWith(`:${docId}`)) this.scopes.delete(key)
@@ -469,7 +490,7 @@ export class InProcessLogBroker implements InProcessLogBrokerControls {
   private ensureDoc(docId: string): DocLog {
     let log = this.docs.get(docId)
     if (!log) {
-      log = { registered: false, registrationAdminDids: [], entries: new Map(), heads: new Map(), generation: 0 }
+      log = { registered: false, registrationAdminDids: [], verificationKey: null, entries: new Map(), heads: new Map(), generation: 0 }
       this.docs.set(docId, log)
     }
     return log

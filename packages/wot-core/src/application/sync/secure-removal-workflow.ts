@@ -33,8 +33,8 @@ import { commitStagedRotation, stageRotateSpaceKey, type StagedRotationMaterial 
  * `removeMember` resolves IFF the removal was enforced + committed. If staging
  * succeeded but enforcement did not complete (a broker is offline / a transient
  * space-rotate reject), the caller throws {@link RemovalPendingNotEnforcedError} —
- * the staging is durable, so VE-C3 crash-recovery retries it later. AUTH_INVALID
- * is deliberately ambiguous: it never authorizes committing staged material.
+ * the staging is durable, so VE-C3 crash-recovery retries it later. Only an
+ * idempotent success for the exact staged material authorizes committing it.
  */
 
 /**
@@ -274,17 +274,8 @@ async function driveRemovalToCompletion(
       await deps.docLogStore.markBrokerConfirmed(deps.spaceId, removal.removedDid, brokerUrl)
       confirmed.add(brokerUrl)
     } catch (err) {
-      if (isAlreadyEnforcedReject(err)) {
-        // VE-C3 idempotent retry: the broker already rotated to (or past) this
-        // generation on an earlier (lost-confirmation) attempt. Treat as confirmed
-        // and continue toward commit — an explicit stale reject proves this
-        // generation is already broker-enforced.
-        await deps.docLogStore.markBrokerConfirmed(deps.spaceId, removal.removedDid, brokerUrl)
-        confirmed.add(brokerUrl)
-        continue
-      }
-      if (err instanceof ControlFrameRejectedError && err.code === 'AUTH_INVALID') {
-        if (await handleAmbiguousAuthInvalid(deps, removal)) return false
+      if (err instanceof ControlFrameRejectedError && err.code === 'GENERATION_TAKEN') {
+        if (await handleGenerationTaken(deps, removal)) return false
         throw new RemovalPendingNotEnforcedError(deps.spaceId, removal.removedDid, removal.newGeneration)
       }
       if (err instanceof ControlFrameRejectedError && isHardSpaceRotateReject(err.code)) {
@@ -327,42 +318,25 @@ async function driveRemovalToCompletion(
 }
 
 /**
- * A `space-rotate` reject that means the broker has ALREADY enforced this (or a
- * newer) generation — so a VE-C3 retry should treat the broker as confirmed.
- *
- * The explicit stale signals (CAPABILITY_GENERATION_STALE / KEY_GENERATION_STALE)
- * unambiguously mean "you are behind", so they count as already-enforced. AUTH_INVALID
- * is intentionally excluded: it does not prove which key material won the generation.
+ * GENERATION_TAKEN proves that another admin owns this generation. Never commit
+ * this staged material. A canonical self-removal is fulfilled once that winner's
+ * key-rotation arrived locally. A regular removal waits for the same local
+ * convergence, then stages fresh material for current+1; this is the ONLY path
+ * that replaces material. AUTH_INVALID and stale codes deliberately do not enter
+ * this path: they are not material-bound proof and cannot authorize replacement.
  */
-function isAlreadyEnforcedReject(err: unknown): boolean {
-  if (!(err instanceof ControlFrameRejectedError)) return false
-  if (err.code === 'CAPABILITY_GENERATION_STALE' || err.code === 'KEY_GENERATION_STALE') return true
-  return false
-}
-
-/**
- * AUTH_INVALID does not prove that this staged key was accepted: another admin may
- * already have claimed the generation with different material. Never turn that
- * ambiguous reject into a commit. A canonical self-removal is fulfilled once its
- * declared generation arrived locally; otherwise replace (never reuse) the rejected
- * material so a later retry targets the then-current next generation.
- */
-async function handleAmbiguousAuthInvalid(deps: SecureRemovalDeps, removal: PendingRemoval): Promise<boolean> {
+async function handleGenerationTaken(deps: SecureRemovalDeps, removal: PendingRemoval): Promise<boolean> {
   const current = await deps.keyPort.getCurrentGeneration(deps.spaceId)
   if (removal.kind === 'canonical-self-removal-rotation' && current >= removal.newGeneration) {
     await deps.docLogStore.deletePendingRemoval(deps.spaceId, removal.removedDid)
     return true
   }
-  const replacement = await stageRemoval(
-    deps,
-    removal.removedDid,
-    removal.activityEntry,
-    removal.kind,
-    removal.kind === 'canonical-self-removal-rotation' ? removal.newGeneration : undefined,
-  )
-  // stageRemoval writes the replacement atomically under the same durable key.
-  // Keep TypeScript from treating this as an unused safety-critical result.
-  void replacement
+  if (removal.kind !== 'canonical-self-removal-rotation' && current >= removal.newGeneration) {
+    // A different rotation has arrived locally. Continue this still-uncommitted
+    // removal at the actual next generation with new material, never by reusing
+    // the foreign winner's slot.
+    await stageRemoval(deps, removal.removedDid, removal.activityEntry, removal.kind)
+  }
   return false
 }
 
@@ -370,9 +344,9 @@ async function handleAmbiguousAuthInvalid(deps: SecureRemovalDeps, removal: Pend
  * A `space-rotate` reject that can NEVER succeed by retrying — it must surface raw
  * rather than be parked as a pending (retryable) removal.
  *
- * AUTHOR_MISMATCH is the coordinator's hard-stop bug class. AUTH_INVALID is handled
- * separately because it may mean a concurrent admin already installed different
- * material for this generation.
+ * AUTHOR_MISMATCH is the coordinator's hard-stop bug class. AUTH_INVALID is a
+ * genuine signature/authorization failure and remains retryable here; it never
+ * authorizes commit or material replacement.
  *
  * NOTE: this is deliberately NOT {@link classifyRejectDisposition} — that table is
  * the log-entry WRITE-path (VE-4) disposition, where AUTH_INVALID is not even a

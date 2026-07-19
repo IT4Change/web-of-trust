@@ -510,7 +510,7 @@ describe('space-rotate + admin-add/remove over the real relay (Slice CG / VE-6 +
     await strangerClient.disconnect()
   })
 
-  it('space-rotate rejects newGeneration != current+1 (skip-ahead AND repeat) with AUTH_INVALID', async () => {
+  it('space-rotate rejects skip-ahead with AUTH_INVALID and handles installed-generation material-bound retries', async () => {
     const docId = randomUUID()
     const admin = await makeRawIdentity('gen-admin')
     const gen0 = await makeSpaceCapabilityKeypair()
@@ -536,17 +536,32 @@ describe('space-rotate + admin-add/remove over the real relay (Slice CG / VE-6 +
     ).toMatchObject({ error: 'AUTH_INVALID', thid: docId }) // SR-4 / F1: thid==docId on the mismatch reject
     expect(docLogOf(server).getSpace(docId)?.generation).toBe(0)
 
-    // newGeneration = 0 (== current, not +1) → AUTH_INVALID.
+    // Install generation 1, then retry it byte-identically: lost confirmation is
+    // idempotent success; different material for the installed generation is taken.
+    const installed = await makeSpaceCapabilityKeypair()
     expect(
       await adminClient.sendSpaceRotate({
         signer: admin,
         spaceId: docId,
-        newSpaceCapabilityVerificationKey: skip.verificationKey,
-        newGeneration: 0,
+        newSpaceCapabilityVerificationKey: installed.verificationKey,
+        newGeneration: 1,
       }),
-    ).toMatchObject({ error: 'AUTH_INVALID', thid: docId }) // SR-4 / F1: thid==docId on the repeat-gen reject
-    expect(docLogOf(server).getSpace(docId)?.generation).toBe(0)
-    expect(docLogOf(server).getSpace(docId)?.verificationKey).toBe(gen0.verificationKey)
+    ).toMatchObject({ messageId: docId, status: 'delivered' })
+    expect(
+      await adminClient.sendSpaceRotate({
+        signer: admin, spaceId: docId,
+        newSpaceCapabilityVerificationKey: installed.verificationKey, newGeneration: 1,
+      }),
+    ).toMatchObject({ messageId: docId, status: 'delivered' })
+    const competing = await makeSpaceCapabilityKeypair()
+    expect(
+      await adminClient.sendSpaceRotate({
+        signer: admin, spaceId: docId,
+        newSpaceCapabilityVerificationKey: competing.verificationKey, newGeneration: 1,
+      }),
+    ).toMatchObject({ error: 'GENERATION_TAKEN', thid: docId })
+    expect(docLogOf(server).getSpace(docId)?.generation).toBe(1)
+    expect(docLogOf(server).getSpace(docId)?.verificationKey).toBe(installed.verificationKey)
 
     await adminClient.disconnect()
   })

@@ -168,31 +168,38 @@ describe('runTwoPhaseRemoval — VE-C1 two-phase secure removal', () => {
     expect(await h.docLogStore.getPendingRemoval(SPACE, REMOVED)).not.toBeNull()
   })
 
-  it('an AUTH_INVALID never commits ambiguous staged material and replaces it for a later retry', async () => {
+  it('an AUTH_INVALID never commits or replaces staged material, leaving it for retry', async () => {
+    let authInvalid = false
     const h = await makeHarness({
       sendSpaceRotate: async () => {
-        throw reject('AUTH_INVALID')
+        if (authInvalid) throw reject('AUTH_INVALID')
+        throw new Error('offline before retry')
       },
     })
 
+    await expect(runTwoPhaseRemoval(h.deps, REMOVED)).rejects.toBeInstanceOf(RemovalPendingNotEnforcedError)
+    const before = await h.docLogStore.getPendingRemoval(SPACE, REMOVED)
+    authInvalid = true
     const err = await runTwoPhaseRemoval(h.deps, REMOVED).catch((e) => e)
     expect(err).toBeInstanceOf(RemovalPendingNotEnforcedError)
     expect(h.commitRemoval).not.toHaveBeenCalled()
     expect(await h.keyPort.getCurrentGeneration(SPACE)).toBe(0)
-    // The staging persists with fresh material; rejected material can never be committed.
-    expect(await h.docLogStore.getPendingRemoval(SPACE, REMOVED)).not.toBeNull()
+    // AUTH_INVALID is an actual signature/authorization failure, not a winner proof.
+    const after = await h.docLogStore.getPendingRemoval(SPACE, REMOVED)
+    expect(after).not.toBeNull()
+    expect(hex(after!.stagedKeyMaterial.contentKey)).toBe(hex(before!.stagedKeyMaterial.contentKey))
   })
 
-  it('a CAPABILITY_GENERATION_STALE reject means the broker is already at/past this generation → commit (catch up locally)', async () => {
+  it.each(['CAPABILITY_GENERATION_STALE', 'KEY_GENERATION_STALE'] as const)('%s never proves staged material won', async (code) => {
     const h = await makeHarness({
       sendSpaceRotate: async () => {
-        throw reject('CAPABILITY_GENERATION_STALE')
+        throw reject(code)
       },
     })
-    await runTwoPhaseRemoval(h.deps, REMOVED)
-    expect(h.commitRemoval).toHaveBeenCalledTimes(1)
-    expect(await h.keyPort.getCurrentGeneration(SPACE)).toBe(1)
-    expect(await h.docLogStore.getPendingRemoval(SPACE, REMOVED)).toBeNull()
+    await expect(runTwoPhaseRemoval(h.deps, REMOVED)).rejects.toBeInstanceOf(RemovalPendingNotEnforcedError)
+    expect(h.commitRemoval).not.toHaveBeenCalled()
+    expect(await h.keyPort.getCurrentGeneration(SPACE)).toBe(0)
+    expect(await h.docLogStore.getPendingRemoval(SPACE, REMOVED)).not.toBeNull()
   })
 
   it('idempotent re-run reuses the staged record (same generation + material, no double rotate)', async () => {
@@ -244,30 +251,31 @@ describe('recoverPendingRemovals — VE-C3 crash-recovery (single home broker)',
     expect(await h.docLogStore.getPendingRemoval(SPACE, REMOVED)).toBeNull()
   })
 
-  it('never commits staged material after an ambiguous AUTH_INVALID during recovery', async () => {
-    // First attempt: stage, then the rotate is APPLIED at the broker but its
-    // confirmation is lost (modelled as a transient transport failure so the local
-    // record stays pending).
+  it('lost confirmation: identical retry proves its material won and commits it', async () => {
+    // Shared broker durable state: the first frame installs Key A, then only its
+    // confirmation is lost. The retry sees the same Key A and succeeds idempotently.
+    let installedKey: Uint8Array | null = null
     let firstAttempt = true
     const h = await makeHarness({
-      sendSpaceRotate: async () => {
-        if (firstAttempt) throw new Error('confirmation lost')
-        // recovery re-send of an already-applied generation → relay AUTH_INVALID
-        throw reject('AUTH_INVALID')
+      sendSpaceRotate: async (_broker, frame) => {
+        const key = (frame as unknown as { __capKey: Uint8Array }).__capKey
+        if (installedKey === null) {
+          installedKey = key.slice()
+          throw new Error('confirmation lost')
+        }
+        if (hex(key) !== hex(installedKey)) throw reject('GENERATION_TAKEN')
       },
     })
     await expect(runTwoPhaseRemoval(h.deps, REMOVED)).rejects.toBeInstanceOf(RemovalPendingNotEnforcedError)
     firstAttempt = false
     h.commitRemoval.mockClear()
 
-    const before = await h.docLogStore.getPendingRemoval(SPACE, REMOVED)
     const committed = await recoverPendingRemovals(h.docLogStore, async () => h.deps)
 
-    expect(committed).toBe(0)
-    expect(h.commitRemoval).not.toHaveBeenCalled()
-    const after = await h.docLogStore.getPendingRemoval(SPACE, REMOVED)
-    expect(after).not.toBeNull()
-    expect(hex(after!.stagedKeyMaterial.contentKey)).not.toBe(hex(before!.stagedKeyMaterial.contentKey))
+    expect(committed).toBe(1)
+    expect(h.commitRemoval).toHaveBeenCalledTimes(1)
+    expect(hex((await h.keyPort.getCapabilityVerificationKey(SPACE, 1))!)).toBe(hex(installedKey!))
+    expect(await h.docLogStore.getPendingRemoval(SPACE, REMOVED)).toBeNull()
   })
 
   it('two independent admin stores never commit the loser material; canonical rotation converges after the winner arrives', async () => {
@@ -279,7 +287,7 @@ describe('recoverPendingRemovals — VE-C3 crash-recovery (single home broker)',
     const loser = await makeHarness({
       ownerDid: 'did:key:z6MkAdminB',
       sendSpaceRotate: async () => {
-        if (brokerGeneration >= 1) throw reject('AUTH_INVALID')
+        if (brokerGeneration >= 1) throw reject('GENERATION_TAKEN')
       },
     })
 
@@ -304,6 +312,29 @@ describe('recoverPendingRemovals — VE-C3 crash-recovery (single home broker)',
     expect(loser.commitRemoval).not.toHaveBeenCalled()
     expect(await loser.docLogStore.getPendingRemoval(SPACE, REMOVED)).toBeNull()
     expect(hex((await loser.keyPort.getKeyByGeneration(SPACE, 1))!)).toBe(hex(winnerKey))
+  })
+
+  it('GENERATION_TAKEN restages a regular pending removal with fresh material only after winner convergence', async () => {
+    let brokerGeneration = 1
+    const h = await makeHarness({
+      sendSpaceRotate: async () => {
+        if (brokerGeneration >= 1) throw reject('GENERATION_TAKEN')
+      },
+    })
+    await expect(runTwoPhaseRemoval(h.deps, REMOVED)).rejects.toBeInstanceOf(RemovalPendingNotEnforcedError)
+    const before = await h.docLogStore.getPendingRemoval(SPACE, REMOVED)
+    expect(before!.newGeneration).toBe(1)
+
+    // The winning key-rotation reaches this admin. Only this proved-taken path may
+    // replace material, and it must now target the next generation.
+    await h.keyPort.saveKey(SPACE, 1, new Uint8Array(32).fill(7))
+    const committed = await recoverPendingRemovals(h.docLogStore, async () => h.deps)
+    const after = await h.docLogStore.getPendingRemoval(SPACE, REMOVED)
+
+    expect(committed).toBe(0)
+    expect(h.commitRemoval).not.toHaveBeenCalled()
+    expect(after!.newGeneration).toBe(2)
+    expect(hex(after!.stagedKeyMaterial.contentKey)).not.toBe(hex(before!.stagedKeyMaterial.contentKey))
   })
 
   it('a still-unreachable broker leaves the removal staged and recovery never throws (returns 0)', async () => {
