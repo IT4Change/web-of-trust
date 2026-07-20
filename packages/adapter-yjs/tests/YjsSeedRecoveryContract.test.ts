@@ -188,7 +188,9 @@ describe('Seed-recovery contract — seed + relay log + PersonalDoc keys', () =>
     const coordinator = await internals.getOrCreateCoordinator(internals.spaces.get(space.id)!)
     await a2Adapter.requestSync(space.id) // explicit Space catch-up; no reconnect event follows.
 
-    const deadline = Date.now() + 3_000
+    // Grosszuegige Deadline: unter Voll-Suite-CPU-Last ist der Recovery-Catch-up
+    // langsamer; ein knappes Fenster flaket (isoliert immer gruen).
+    const deadline = Date.now() + 15_000
     while (Date.now() < deadline && expected.size !== Object.keys(a2Handle.getDoc().items).length) await wait()
     const actual = a2Handle.getDoc().items
     const missing = await Promise.all([...expected].filter(([id]) => !actual[id]).map(async ([id, generation]) =>
