@@ -474,6 +474,10 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
    */
   private replayBlockedInFlight = new Set<string>()
   private replayBlockedDirty = new Set<string>()
+  /** Spaces whose capability-gated catch-up could not run until PersonalDoc key material arrives. */
+  private capabilityCatchUpBlocked = new Set<string>()
+  private capabilityCatchUpInFlight = new Set<string>()
+  private capabilityCatchUpDirty = new Set<string>()
 
   constructor(config: YjsReplicationConfig) {
     this.identity = config.identity
@@ -2038,14 +2042,20 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
     const state = this.spaces.get(spaceId)
     if (!state) return
 
+    // Inspect a terminal removal intent BEFORE treating a keyless ghost as an
+    // abandonable space. Its staged material is still needed by finalizeSelfLeave.
+    const selfDid = this.identity.getDid()
+    const pendingStore = this.logSyncEnabled ? await this.ensureDocLogStore() : null
+    const securePending = pendingStore && await pendingStore.getPendingRemoval(spaceId, selfDid)
+
     // A reseed ghost has metadata/doc state but no local group keys yet. It cannot
     // create a valid membership event or capability, so disposal is strictly local.
     if (await this.keyManagement.getCurrentGeneration(spaceId) < 0) {
+      if (!securePending) await this.abortPendingRemovalsForAbandonedSpace(spaceId)
       await this.cleanupSpaceLocally(spaceId)
       return
     }
 
-    const selfDid = this.identity.getDid()
     const activeMembers = resolveActiveMembers(this.readMembershipEvents(state.doc))
     const members = activeMembers.length > 0 ? activeMembers : state.info.members
     const existingSelf = resolveMembershipWinner(this.readMembershipEvents(state.doc), selfDid)
@@ -2053,8 +2063,6 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
     // A broker-enforced admin self-removal can have its durable membership append
     // fail after rotation. Complete that exact staged transaction before the generic
     // "already removed" retry path decides authority from active members.
-    const pendingStore = this.logSyncEnabled ? await this.ensureDocLogStore() : null
-    const securePending = pendingStore && await pendingStore.getPendingRemoval(spaceId, selfDid)
     if (securePending) {
       const selfEncryptionKey = await this.identity.getEncryptionPublicKeyBytes()
       await runTwoPhaseRemoval(
@@ -2162,7 +2170,19 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
 
   /** Public local-only disposal for reseed ghosts and callers that intentionally abandon a space. */
   async forgetSpaceLocally(spaceId: string): Promise<void> {
+    await this.abortPendingRemovalsForAbandonedSpace(spaceId)
     await this.cleanupSpaceLocally(spaceId)
+  }
+
+  /** Abort only explicitly abandoned/keyless removal intents; terminal removal cleanup keeps its record. */
+  private async abortPendingRemovalsForAbandonedSpace(spaceId: string): Promise<void> {
+    if (!this.logSyncEnabled) return
+    const store = await this.ensureDocLogStore()
+    if (!store) return
+    const removals = await store.listPendingRemovals()
+    await Promise.all(removals
+      .filter((removal) => removal.spaceId === spaceId)
+      .map((removal) => store.deletePendingRemoval(removal.spaceId, removal.removedDid)))
   }
 
   /**
@@ -2196,6 +2216,9 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
     this.coordinators.delete(spaceId)
     this.replayBlockedInFlight.delete(spaceId)
     this.replayBlockedDirty.delete(spaceId)
+    this.capabilityCatchUpBlocked.delete(spaceId)
+    this.capabilityCatchUpInFlight.delete(spaceId)
+    this.capabilityCatchUpDirty.delete(spaceId)
 
     // Clean up schedulers
     this.vaultSchedulers.get(spaceId)?.destroy()
@@ -2441,7 +2464,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
         if (this.logSyncEnabled) {
           const coordinator = await this.getOrCreateCoordinator(state)
           if (coordinator) {
-            await coordinator.catchUp().catch((e) => {
+            await this.catchUpTrackingCapabilityBlock(spaceId, coordinator).catch((e) => {
               // E1: surface a non-transient append failure (e.g. a restore-clone
               // re-write triggered by catch-up) loudly — never a silent defer.
               if (e instanceof LocalAppendFailedError) {
@@ -2567,6 +2590,45 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
       await importKey(this.keyManagement, k.spaceId, k.generation, k.key)
     }
     await this._reloadCapabilitySeeds(spaceId)
+    await this.retryCapabilityBlockedCatchUp(spaceId)
+  }
+
+  /**
+   * A blocked initial catch-up has not presented a capability or sent a sync-request.
+   * Once PersonalDoc supplies both ingredients, retry exactly once per import cycle.
+   */
+  private async retryCapabilityBlockedCatchUp(spaceId: string): Promise<void> {
+    if (!this.logSyncEnabled || !this.capabilityCatchUpBlocked.has(spaceId) || !this.spaces.has(spaceId)) return
+    if (this.messaging.getState() !== 'connected') return
+    const generation = await this.keyManagement.getCurrentGeneration(spaceId)
+    const seed = generation >= 0 ? await this.keyManagement.getCapabilitySigningSeed(spaceId, generation) : null
+    if (generation < 0 || !seed) {
+      console.error(`[YjsReplication] capability catch-up for ${spaceId} remains blocked: PersonalDoc imported a content key without a usable capability seed`)
+      return
+    }
+    if (this.capabilityCatchUpInFlight.has(spaceId)) {
+      this.capabilityCatchUpDirty.add(spaceId)
+      return
+    }
+    const coordinator = this.coordinators.get(spaceId)
+    if (!coordinator) return
+    this.capabilityCatchUpInFlight.add(spaceId)
+    try {
+      const result = await coordinator.catchUp()
+      if (result.incomplete === 'blocked-by-key') this.capabilityCatchUpBlocked.add(spaceId)
+      else this.capabilityCatchUpBlocked.delete(spaceId)
+    } catch (err) {
+      console.warn(`[YjsReplication] capability catch-up retry failed for ${spaceId}:`, err)
+    } finally {
+      this.capabilityCatchUpInFlight.delete(spaceId)
+    }
+    if (this.capabilityCatchUpDirty.delete(spaceId)) await this.retryCapabilityBlockedCatchUp(spaceId)
+  }
+
+  private async catchUpTrackingCapabilityBlock(spaceId: string, coordinator: LogSyncCoordinator) {
+    const result = await coordinator.catchUp()
+    if (result.incomplete === 'blocked-by-key') this.capabilityCatchUpBlocked.add(spaceId)
+    return result
   }
 
   /**

@@ -2227,7 +2227,19 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
 
   /** Public local-only disposal; mirrors the Yjs adapter's recovery/abandon flow. */
   async forgetSpaceLocally(spaceId: string): Promise<void> {
+    await this.abortPendingRemovalsForAbandonedSpace(spaceId)
     await this.cleanupSpaceLocally(spaceId)
+  }
+
+  /** Explicit local abandon only; a terminal secure-removal keeps its record until finalization. */
+  private async abortPendingRemovalsForAbandonedSpace(spaceId: string): Promise<void> {
+    if (!this.logSyncEnabled) return
+    const store = await this.ensureDocLogStore()
+    if (!store) return
+    const removals = await store.listPendingRemovals()
+    await Promise.all(removals
+      .filter((removal) => removal.spaceId === spaceId)
+      .map((removal) => store.deletePendingRemoval(removal.spaceId, removal.removedDid)))
   }
 
   /**
@@ -2282,6 +2294,7 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
       await this.metadataStorage.deleteSpaceMetadata(spaceId)
       await this.metadataStorage.deleteGroupKeys(spaceId)
     }
+    await this.keyManagement.deleteSpaceKeys(spaceId)
     await this.deletePendingMessagesForSpace(spaceId)
     if (this.compactStore) {
       await this.compactStore.delete(spaceId).catch(() => {})
