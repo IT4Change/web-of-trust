@@ -1134,7 +1134,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
   ): Promise<void> {
     const spaceId = state.info.id
     const myDid = this.identity.getDid()
-    const notifyDids = [...state.info.members, memberDid]
+    const notifyDids = [...(state.info.members ?? []), memberDid]
     const clearBody = {
       spaceId,
       memberDid,
@@ -1435,7 +1435,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
 
     // (1) Ziel MUSS aktiver Member sein.
     const activeMembers = resolveActiveMembers(this.readMembershipEvents(state.doc))
-    const activeSet = new Set(activeMembers.length > 0 ? activeMembers : state.info.members)
+    const activeSet = new Set(activeMembers.length > 0 ? activeMembers : (state.info.members ?? []))
     if (!activeSet.has(memberDid)) {
       throw new Error('promoteToAdmin target must be an active member (Sync 005 Z.130)')
     }
@@ -1708,7 +1708,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
       // VE-2: log entries are broadcast to all active space members (the relay
       // delivers to each member's sockets). state.info.members is the projection
       // of the canonical _members event set.
-      getRecipients: () => state.info.members,
+      getRecipients: () => state.info.members ?? [],
       getContentKey: async () => {
         const generation = await this.keyManagement.getCurrentGeneration(spaceId)
         const key = await this.keyManagement.getKeyByGeneration(spaceId, generation)
@@ -2082,7 +2082,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
     }
 
     const activeMembers = resolveActiveMembers(this.readMembershipEvents(state.doc))
-    const members = activeMembers.length > 0 ? activeMembers : state.info.members
+    const members = activeMembers.length > 0 ? activeMembers : (state.info.members ?? [])
     const existingSelf = resolveMembershipWinner(this.readMembershipEvents(state.doc), selfDid)
 
     // A broker-enforced admin self-removal can have its durable membership append
@@ -2739,7 +2739,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
       }
 
       // Send to ALL members (not just self) so offline changes propagate on reconnect
-      await Promise.all(state.info.members.map(async (memberDid) => {
+      await Promise.all((state.info.members ?? []).map(async (memberDid) => {
         const envelope: MessageEnvelope = {
           v: 1, id: crypto.randomUUID(), type: 'content',
           fromDid: myDid, toDid: memberDid,
@@ -3196,7 +3196,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
     if (!state) return
 
 
-    await Promise.all(state.info.members.map(async (memberDid) => {
+    await Promise.all((state.info.members ?? []).map(async (memberDid) => {
       const envelope: MessageEnvelope = {
         v: 1, id: crypto.randomUUID(), type: 'content',
         fromDid: myDid, toDid: memberDid,
@@ -3592,7 +3592,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
         localKeyGeneration: await this.keyManagement.getCurrentGeneration(body.spaceId),
         // VE-2: Authority aus der echten aktiven Admin-Liste (war [createdBy]).
         knownAdminDids: this.spaceAdminDids(state),
-        knownMemberDids: state.info.members,
+        knownMemberDids: state.info.members ?? [],
         seenUpdates: await this.memberUpdateStore.listSeenForSpace(body.spaceId),
       },
       store: this.memberUpdateStore,
@@ -3682,7 +3682,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
           localKeyGeneration: await this.keyManagement.getCurrentGeneration(spaceId),
           // VE-2: Authority aus der echten aktiven Admin-Liste (war [createdBy]).
           knownAdminDids: this.spaceAdminDids(state),
-          knownMemberDids: state.info.members,
+          knownMemberDids: state.info.members ?? [],
           seenUpdates: await this.memberUpdateStore.listSeenForSpace(spaceId),
         },
         store: this.memberUpdateStore,
@@ -4251,7 +4251,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
     // (Sync 003 Z.500 MUSS) — der Group-Key-OneShot-Pfad ist tot.
     const clearBody = { spaceId, memberDid, action, effectiveKeyGeneration: generation }
 
-    for (const did of state.info.members) {
+    for (const did of (state.info.members ?? [])) {
       if (did === myDid || did === memberDid) continue
 
       const encPub = state.memberEncryptionKeys.get(did)
