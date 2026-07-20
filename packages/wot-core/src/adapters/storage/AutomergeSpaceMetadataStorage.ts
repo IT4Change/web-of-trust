@@ -33,7 +33,7 @@ export class PersonalDocSpaceMetadataStorage implements SpaceMetadataStorage {
         type: meta.info.type,
         name: meta.info.name ?? null,
         description: meta.info.description ?? null,
-        members: [...meta.info.members],
+        members: [...(meta.info.members ?? [])],
         createdAt: meta.info.createdAt,
       }
       if (meta.info.appTag != null) info.appTag = meta.info.appTag
@@ -172,7 +172,7 @@ export class PersonalDocSpaceMetadataStorage implements SpaceMetadataStorage {
         ...(stored.info.appTag != null ? { appTag: stored.info.appTag } : {}),
         ...(stored.info.createdBy != null ? { createdBy: stored.info.createdBy } : {}),
         ...(stored.info.admins != null ? { admins: [...stored.info.admins] } : {}),
-        members: [...stored.info.members],
+        members: [...(stored.info.members ?? [])],
         createdAt: stored.info.createdAt,
       },
       documentId: stored.documentId,
