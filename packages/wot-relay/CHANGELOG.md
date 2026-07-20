@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.1.4](https://github.com/real-life-org/web-of-trust/compare/relay-v0.1.3...relay-v0.1.4) (2026-07-20)
+
+
+### Features
+
+* **sync:** GENERATION_GAP + Historical-Retry nach Spec R5/R6 ([0bb62d6](https://github.com/real-life-org/web-of-trust/commit/0bb62d632dbcbfab151ad59cc547a2cf0806000b))
+* **sync:** P0b — MembershipActivityCapable + membershipRemovals (Membership-Schnitt) ([c161b7c](https://github.com/real-life-org/web-of-trust/commit/c161b7cd7e6882f35d72b9cbda4b3794c76f4647))
+
+
+### Bug Fixes
+
+* **sync:** bind space rotation retries to key material ([a35748d](https://github.com/real-life-org/web-of-trust/commit/a35748dae1797eeee201b7b44ccd8a302573b1ac))
+* **sync:** make generation gap recovery broker-authoritative ([1db6150](https://github.com/real-life-org/web-of-trust/commit/1db6150f49ec6e774393a8333668aad08d09c9ce))
+* **sync:** recover generation gaps and revoke self admin ([25a4dac](https://github.com/real-life-org/web-of-trust/commit/25a4dac66e27a98e08256c7bad7b254597be91ac))
+
 ## [0.1.3](https://github.com/real-life-org/web-of-trust/compare/relay-v0.1.2...relay-v0.1.3) (2026-07-15)
 
 

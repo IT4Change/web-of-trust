@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.1.7](https://github.com/real-life-org/web-of-trust/compare/adapter-yjs-v0.1.6...adapter-yjs-v0.1.7) (2026-07-20)
+
+
+### Features
+
+* add yjs membership activity capability ([7609e82](https://github.com/real-life-org/web-of-trust/commit/7609e8250674197d66a40fd5a6c136065a9f9494))
+* persist confirmed membership removals ([d46903d](https://github.com/real-life-org/web-of-trust/commit/d46903d76291246498670484b394128406facb53))
+* **sync:** P0b — MembershipActivityCapable + membershipRemovals (Membership-Schnitt) ([c161b7c](https://github.com/real-life-org/web-of-trust/commit/c161b7cd7e6882f35d72b9cbda4b3794c76f4647))
+
+
+### Bug Fixes
+
+* converge secure removal recovery ([0d13b4d](https://github.com/real-life-org/web-of-trust/commit/0d13b4d9df626962b6d6d0561de30191cfbb1673))
+* enforce durable self-leave removal flow ([79045c1](https://github.com/real-life-org/web-of-trust/commit/79045c1123db857199e7bc044abcbfea51c62ae9))
+* gate secure self-leave by durable capabilities ([f5a67c8](https://github.com/real-life-org/web-of-trust/commit/f5a67c8f16aa10979e888158edef881716cf6793))
+* **sync:** make generation gap recovery broker-authoritative ([1db6150](https://github.com/real-life-org/web-of-trust/commit/1db6150f49ec6e774393a8333668aad08d09c9ce))
+* **sync:** recover generation gaps and revoke self admin ([25a4dac](https://github.com/real-life-org/web-of-trust/commit/25a4dac66e27a98e08256c7bad7b254597be91ac))
+* **sync:** Removal-Persistenz — explizite Init-Sonde statt String-Match, Wiring-Fehler laut ([08f005c](https://github.com/real-life-org/web-of-trust/commit/08f005cbc8b38b1d8abb9604f5dcc58c0d6f824a))
+* **sync:** resolve multi-device self-leave ([0e29e41](https://github.com/real-life-org/web-of-trust/commit/0e29e413637900d40527ebbd77cd7467122374e8))
+* **sync:** Self-Removal-Echo — Own-DID-Zustellung wird beim Sender nicht verarbeitet (sentMessageIds-Guard) ([d635351](https://github.com/real-life-org/web-of-trust/commit/d635351cd6958e1232b7261e86f65dae5ea58f3d))
+* **sync:** support non-admin self leave ([63dd3ed](https://github.com/real-life-org/web-of-trust/commit/63dd3eddb28802ce9c7b4bd5341bbd62cddc5bb8))
+* **yjs:** make membership cleanup durable and serialized ([4b46113](https://github.com/real-life-org/web-of-trust/commit/4b4611386f560801e481cc248bbbfc789c200087))
+
 ## [0.1.6](https://github.com/real-life-org/web-of-trust/compare/adapter-yjs-v0.1.5...adapter-yjs-v0.1.6) (2026-07-19)
 
 
