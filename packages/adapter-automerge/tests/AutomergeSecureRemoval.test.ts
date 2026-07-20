@@ -142,6 +142,13 @@ describe('AutomergeReplicationAdapter — Slice SR secure removal (VE-C1 wiring)
     return space.id
   }
 
+  it('SELF-LEAVE capability: rejects before staging because Automerge has no durable admin-remove capability', async () => {
+    const spaceId = await createSharedSpace()
+    await expect(aliceAdapter.removeMember(spaceId, alice.getDid()))
+      .rejects.toThrow('secure self-leave is not supported by the Automerge adapter: durable admin-remove capability is unavailable')
+    expect(await pendingRemoval(aliceAdapter, spaceId, alice.getDid())).toBeNull()
+  })
+
   it('WIRING (I-READ): a DUPLICATE key-rotation drives the coordinator blocked-by-key replay (ignore-stale-or-duplicate call-site)', async () => {
     // Automerge parity with the Yjs wiring test: exercise the actual ignore-stale-or-duplicate
     // CALL-SITE end-to-end so removing the replayBlockedByKeyForSpace wiring would be caught.

@@ -93,3 +93,12 @@ export function hasMembershipActivity(value: unknown): value is MembershipActivi
   return typeof (value as MembershipActivityCapable | null)?.addMemberWithActivity === 'function'
     && typeof (value as MembershipActivityCapable | null)?.removeMemberWithActivity === 'function'
 }
+
+/** Optional capability: secure self-leave is fully wired, including durable recovery. */
+export interface SecureSelfLeaveCapable {
+  supportsSecureSelfLeave(): boolean
+}
+
+export function hasSecureSelfLeave(value: unknown): value is SecureSelfLeaveCapable {
+  return typeof (value as SecureSelfLeaveCapable | null)?.supportsSecureSelfLeave === 'function'
+}

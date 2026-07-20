@@ -74,6 +74,8 @@ async function makeHarness(opts: {
     spaceId: SPACE,
     ownerDid,
     homeBrokerSet: opts.homeBrokerSet ?? [BROKER],
+    catchUpGeneration: async () => ({ complete: false }),
+    adminRemove: null,
     createRotateFrame,
     sendSpaceRotate,
     commitRemoval,
@@ -233,6 +235,20 @@ describe('runTwoPhaseRemoval — VE-C1 two-phase secure removal', () => {
 })
 
 describe('recoverPendingRemovals — VE-C3 crash-recovery (single home broker)', () => {
+  it('recovers complete → delete with TerminalCleanupDeps only, even when no space can be loaded', async () => {
+    const h = await makeHarness()
+    await h.docLogStore.putPendingRemoval({
+      phase: 'complete', spaceId: SPACE, removedDid: REMOVED, homeBrokerSet: [BROKER],
+      confirmedBrokerUrls: [BROKER], newGeneration: 1,
+      stagedKeyMaterial: { contentKey: new Uint8Array(32), capSigningSeed: new Uint8Array(32), capVerificationKey: new Uint8Array(32) },
+      createdAt: Date.now(),
+    })
+    const resolveDeps = vi.fn(async () => null)
+    expect(await recoverPendingRemovals(h.docLogStore, resolveDeps)).toBe(1)
+    expect(resolveDeps).not.toHaveBeenCalled()
+    expect(await h.docLogStore.getPendingRemoval(SPACE, REMOVED)).toBeNull()
+  })
+
   it.each([
     ['staged→broker-confirmed', 'broker-confirmed'],
     ['broker-confirmed→committed', 'committed'],
@@ -249,9 +265,11 @@ describe('recoverPendingRemovals — VE-C3 crash-recovery (single home broker)',
       personalDocEntries.set(`${SPACE}:${REMOVED}:${generation}`, generation)
     })
     const sendAdminRemove = vi.fn(async () => {})
-    h.deps.createSelfAdminRemoveFrame = async () => ({ type: 'admin-remove' })
-    h.deps.sendAdminRemove = sendAdminRemove
-    h.deps.finalizeSelfLeave = finalizeSelfLeave
+    h.deps.adminRemove = {
+      createSelfAdminRemoveFrame: async () => ({ type: 'admin-remove' }),
+      sendAdminRemove,
+      finalizeSelfLeave,
+    }
 
     const realPut = h.docLogStore.putPendingRemoval.bind(h.docLogStore)
     let armed = true
@@ -279,11 +297,13 @@ describe('recoverPendingRemovals — VE-C3 crash-recovery (single home broker)',
     let adminRemoveOnline = false
     const h = await makeHarness({ ownerDid: REMOVED })
     const finalizeSelfLeave = vi.fn(async () => {})
-    h.deps.createSelfAdminRemoveFrame = async () => ({ type: 'admin-remove' })
-    h.deps.sendAdminRemove = async () => {
-      if (!adminRemoveOnline) throw new Error('app died while awaiting admin-remove')
+    h.deps.adminRemove = {
+      createSelfAdminRemoveFrame: async () => ({ type: 'admin-remove' }),
+      sendAdminRemove: async () => {
+        if (!adminRemoveOnline) throw new Error('app died while awaiting admin-remove')
+      },
+      finalizeSelfLeave,
     }
-    h.deps.finalizeSelfLeave = finalizeSelfLeave
 
     await expect(runTwoPhaseRemoval(h.deps, REMOVED)).rejects.toBeInstanceOf(RemovalPendingNotEnforcedError)
     expect(finalizeSelfLeave).not.toHaveBeenCalled()

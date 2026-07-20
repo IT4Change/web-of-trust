@@ -35,7 +35,7 @@ import {
   runTwoPhaseRemoval, recoverPendingRemovals,
 } from '@web_of_trust/core/application'
 import type { LocalImpact, SecureRemovalDeps } from '@web_of_trust/core/application'
-import type { MembershipActivityCapable } from '@web_of_trust/core/ports'
+import type { MembershipActivityCapable, SecureSelfLeaveCapable } from '@web_of_trust/core/ports'
 import type {
   ProtocolCryptoAdapter, MemberUpdateSignal, SeenMemberUpdateSignal, SpaceInviteBody, KeyRotationBody,
   DidResolver, DidcommPlaintextMessage, InboxAckLocalOutcome, InboxMessageKind,
@@ -414,7 +414,7 @@ function applyInitialDoc(doc: Y.Doc, initialDoc: Record<string, any>): void {
 
 // --- YjsReplicationAdapter ---
 
-export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActivityCapable {
+export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActivityCapable, SecureSelfLeaveCapable {
   private identity: IdentitySession
   private messaging: MessagingAdapter
   private readonly keyManagement: KeyManagementPort
@@ -1009,6 +1009,8 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
     await this.serializeMembershipTransition(spaceId, memberDid, () => this.removeMemberInternal(spaceId, memberDid))
   }
 
+  supportsSecureSelfLeave(): boolean { return true }
+
   async removeMemberWithActivity(spaceId: string, memberDid: string, opts?: { activityEntry?: Record<string, unknown> }): Promise<{ changed: boolean }> {
     const activityEntry = this.validateActivityEntry(opts?.activityEntry)
     return this.serializeMembershipTransition(spaceId, memberDid, async () => {
@@ -1236,13 +1238,9 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
       if (!state) {
         // Durable terminal cleanup must survive the earlier metadata deletion:
         // it is the only recovery phase deliberately independent of a loaded space.
-        const phase = (removal as PendingRemoval & { phase?: string }).phase
-        if (phase === 'admin-removed' || phase === 'local-cleanup') {
+        if (removal.phase === 'admin-removed' || removal.phase === 'local-cleanup') {
           return {
             docLogStore,
-            spaceId: removal.spaceId,
-            ownerDid: this.identity.getDid(),
-            homeBrokerSet: removal.homeBrokerSet,
             finalizeSelfLeave: async (newGeneration: number) => {
               await this.recordConfirmedMembershipRemoval({
                 spaceId: removal.spaceId, action: 'removed', memberDid: this.identity.getDid(),
@@ -1250,7 +1248,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
               })
               await this.cleanupSpaceLocally(removal.spaceId)
             },
-          } as unknown as SecureRemovalDeps
+          }
         }
         return null // space not loaded (yet) — retry on a later pass
       }
@@ -1320,6 +1318,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
         // A partial catch-up cannot authorize replacing staged removal material.
         return coordinator.catchUp()
       },
+      adminRemove: {
       createSelfAdminRemoveFrame: async () => createAdminRemoveMessageWithSigner({
         spaceId,
         removedAdminDid: myDid,
@@ -1343,6 +1342,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
           receivedAt: new Date().toISOString(),
         })
         await this.cleanupSpaceLocally(spaceId)
+      },
       },
       commitRemoval: async (removedDid, newGeneration, activityEntry) => {
         // Drop the removed member from the encryption-key cache so it receives NO

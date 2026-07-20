@@ -85,7 +85,8 @@ export class GenerationGapSplitBrainError extends Error {
  * here is engine-neutral EXCEPT {@link commitRemoval}, which the adapter implements
  * over its concrete CRDT.
  */
-export interface SecureRemovalDeps {
+/** Effects needed before and through the rotation/commit phase. */
+export interface RotationDeps {
   crypto: ProtocolCryptoAdapter
   keyPort: KeyManagementPort
   docLogStore: DocLogStore
@@ -95,6 +96,10 @@ export interface SecureRemovalDeps {
   /** Capability validity window for the committed generation (Sync 003 Z.249). */
   validityDurationMs?: number
   now?: () => Date
+}
+
+/** Engine-specific effects that are legal only after rotation enforcement. */
+export interface CommitDeps {
   /**
    * The authoritative home brokers, captured at removal start and FIXED for the
    * lifetime of the removal. A single-element set is the festival/single-home-broker
@@ -120,12 +125,7 @@ export interface SecureRemovalDeps {
    */
   sendSpaceRotate: (brokerUrl: string, frame: ControlFrame) => Promise<void>
   /** Trigger and await Sync-002 catch-up after a GENERATION_GAP. */
-  catchUpGeneration?: () => Promise<boolean | { complete: boolean }>
-  /** Build/send the self-signed admin-remove after commit + distribution. */
-  createSelfAdminRemoveFrame?: () => Promise<ControlFrame>
-  sendAdminRemove?: (brokerUrl: string, frame: ControlFrame) => Promise<void>
-  /** Runs only after every home broker acknowledged the self admin-remove. */
-  finalizeSelfLeave?: (newGeneration: number) => Promise<void>
+  catchUpGeneration: () => Promise<boolean | { complete: boolean }>
   /**
    * Engine-specific COMMIT side effects, run ONLY after the staged generation has
    * been activated and enforcement is complete: write the `removed@newGeneration`
@@ -134,6 +134,29 @@ export interface SecureRemovalDeps {
    * and push the re-encrypted snapshot. Receives the committed `newGeneration`.
    */
   commitRemoval: (removedDid: string, newGeneration: number, activityEntry?: Record<string, unknown>) => Promise<void>
+}
+
+/** Durable, post-commit authority needed exclusively for an admin self-leave. */
+export interface AdminRemoveDeps {
+  createSelfAdminRemoveFrame: () => Promise<ControlFrame>
+  sendAdminRemove: (brokerUrl: string, frame: ControlFrame) => Promise<void>
+  finalizeSelfLeave: (newGeneration: number) => Promise<void>
+}
+
+/** Store-only dependency for terminal cleanup and its restart recovery. */
+export interface TerminalCleanupDeps {
+  docLogStore: DocLogStore
+}
+
+/** Store-only terminal recovery that still has the durable local finalizer. */
+export interface TerminalFinalizationDeps extends TerminalCleanupDeps {
+  finalizeSelfLeave: (newGeneration: number) => Promise<void>
+}
+
+/** Full dependency set for a removal that can still enter rotation/commit. */
+export interface SecureRemovalDeps extends RotationDeps, CommitDeps, TerminalCleanupDeps {
+  /** Null means this adapter deliberately does not offer secure self-leave. */
+  adminRemove: AdminRemoveDeps | null
 }
 
 /**
@@ -191,12 +214,21 @@ export async function runTwoPhaseRemoval(
  */
 export async function recoverPendingRemovals(
   docLogStore: DocLogStore,
-  resolveDeps: (removal: PendingRemoval) => Promise<SecureRemovalDeps | null>,
+  resolveDeps: (removal: PendingRemoval) => Promise<SecureRemovalDeps | TerminalCleanupDeps | TerminalFinalizationDeps | null>,
 ): Promise<number> {
   const open = await docLogStore.listPendingRemovals()
   let committed = 0
   for (const removal of open) {
-    let deps: SecureRemovalDeps | null
+    // `complete` is deliberately recoverable with the store alone.  This is the
+    // crash window after persisting complete and before deleting the record.
+    if (removal.phase === 'complete') {
+      try {
+        await docLogStore.deletePendingRemoval(removal.spaceId, removal.removedDid)
+        committed += 1
+      } catch { /* retry on the next pass */ }
+      continue
+    }
+    let deps: SecureRemovalDeps | TerminalCleanupDeps | TerminalFinalizationDeps | null
     try {
       deps = await resolveDeps(removal)
     } catch {
@@ -275,22 +307,30 @@ async function stageRemoval(
  * the staged generation and run the engine-specific commit + delete the record.
  */
 async function driveRemovalToCompletion(
-  deps: SecureRemovalDeps,
+  deps: SecureRemovalDeps | TerminalCleanupDeps | TerminalFinalizationDeps,
   removal: PendingRemoval,
 ): Promise<boolean> {
+  assertKnownRemovalPhase(removal.phase)
   // Cleanup recovery intentionally has no loaded CRDT-space dependency.  Once
   // admin-remove is durable, only the stable PersonalDoc event and idempotent
   // local artifact cleanup remain.
+  if (removal.phase === 'complete') {
+    await deps.docLogStore.deletePendingRemoval(removal.spaceId, removal.removedDid)
+    return true
+  }
   if (removal.phase === 'admin-removed') {
-    await deps.finalizeSelfLeave?.(removal.newGeneration)
+    await requireTerminalFinalizer(deps, removal)(removal.newGeneration)
     removal = { ...removal, phase: 'local-cleanup' }
     await deps.docLogStore.putPendingRemoval(removal)
   }
   if (removal.phase === 'local-cleanup') {
     removal = { ...removal, phase: 'complete' }
     await deps.docLogStore.putPendingRemoval(removal)
-    await deps.docLogStore.deletePendingRemoval(deps.spaceId, removal.removedDid)
+    await deps.docLogStore.deletePendingRemoval(removal.spaceId, removal.removedDid)
     return true
+  }
+  if (!hasRotationDeps(deps)) {
+    throw new Error(`secure removal phase ${removal.phase} requires rotation dependencies before any effect`)
   }
   // The home-broker set is FIXED in the durable record (captured at stage time).
   // Use it, not deps.homeBrokerSet, so a config change mid-flight cannot move the
@@ -373,15 +413,13 @@ async function driveRemovalToCompletion(
   // Sync 005 Self-Leave: the departing admin remains durably staged after
   // commit/distribution until its own broker authority is removed everywhere.
   if (removal.removedDid === deps.ownerDid && removal.phase === 'committed') {
-    if (!deps.createSelfAdminRemoveFrame || !deps.sendAdminRemove || !deps.finalizeSelfLeave) {
-      throw new Error('admin self-leave requires durable admin-remove dependencies')
-    }
-    const adminFrame = await deps.createSelfAdminRemoveFrame()
+    const admin = requireAdminRemoveDeps(deps, removal)
+    const adminFrame = await admin.createSelfAdminRemoveFrame()
     const adminConfirmed = new Set(removal.adminRemoveConfirmedBrokerUrls ?? [])
     for (const brokerUrl of homeBrokerSet) {
       if (adminConfirmed.has(brokerUrl)) continue
       try {
-        await deps.sendAdminRemove(brokerUrl, adminFrame)
+        await admin.sendAdminRemove(brokerUrl, adminFrame)
       } catch {
         throw new RemovalPendingNotEnforcedError(deps.spaceId, removal.removedDid, removal.newGeneration)
       }
@@ -396,7 +434,7 @@ async function driveRemovalToCompletion(
     // `finalizeSelfLeave` is independently idempotent (stable PersonalDoc event
     // identity plus idempotent artifact deletes). A failed cleanup leaves this
     // exact durable phase for recovery, even when the Yjs space was unloaded.
-    await deps.finalizeSelfLeave!(removal.newGeneration)
+    await requireAdminRemoveDeps(deps, removal).finalizeSelfLeave(removal.newGeneration)
     removal = { ...removal, phase: 'local-cleanup' }
     await deps.docLogStore.putPendingRemoval(removal)
   }
@@ -406,6 +444,39 @@ async function driveRemovalToCompletion(
   }
   await deps.docLogStore.deletePendingRemoval(deps.spaceId, removal.removedDid)
   return true
+}
+
+/** Keeps the durable phase vocabulary closed when PendingRemoval evolves. */
+function assertKnownRemovalPhase(phase: PendingRemoval['phase']): void {
+  switch (phase) {
+    case 'staged': return
+    case 'broker-confirmed': return
+    case 'committed': return
+    case 'admin-removed': return
+    case 'local-cleanup': return
+    case 'complete': return
+    default: {
+      const exhaustive: never = phase
+      throw new Error(`unknown secure-removal phase ${String(exhaustive)}`)
+    }
+  }
+}
+
+function hasRotationDeps(deps: SecureRemovalDeps | TerminalCleanupDeps | TerminalFinalizationDeps): deps is SecureRemovalDeps {
+  return 'crypto' in deps
+}
+
+function requireAdminRemoveDeps(deps: SecureRemovalDeps | TerminalCleanupDeps | TerminalFinalizationDeps, removal: PendingRemoval): AdminRemoveDeps {
+  if (!hasRotationDeps(deps) || deps.adminRemove === null) {
+    throw new Error(`secure removal phase ${removal.phase} requires durable admin-remove dependencies before any effect`)
+  }
+  return deps.adminRemove
+}
+
+function requireTerminalFinalizer(deps: SecureRemovalDeps | TerminalCleanupDeps | TerminalFinalizationDeps, removal: PendingRemoval): (newGeneration: number) => Promise<void> {
+  if (hasRotationDeps(deps)) return requireAdminRemoveDeps(deps, removal).finalizeSelfLeave
+  if ('finalizeSelfLeave' in deps) return deps.finalizeSelfLeave
+  throw new Error(`secure removal phase ${removal.phase} requires terminal finalization dependencies before any effect`)
 }
 
 /** A gap is wire-authoritative: catch up to the reported broker generation, then restage exactly its successor. */
@@ -422,7 +493,6 @@ async function handleGenerationGap(
     // durable staging untouched; blindly replacing it would destroy evidence/material.
     throw new GenerationGapSplitBrainError(deps.spaceId, localGeneration, brokerGeneration)
   }
-  if (!deps.catchUpGeneration) return null
   const catchUp = await deps.catchUpGeneration()
   if (catchUp === false || (typeof catchUp === 'object' && !catchUp.complete)) return null
   // Generate and validate off-record.  The old staged bytes are untouched until
