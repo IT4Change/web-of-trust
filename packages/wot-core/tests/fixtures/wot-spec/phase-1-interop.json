@@ -32,8 +32,50 @@
       }
     }
   },
+  "space_rotate_response_cases": {
+    "description": "Materialgebundene space-rotate-Antworten (Sync 003): idempotente byte-identische Wiederholung vs. GENERATION_TAKEN bei fremdem Material.",
+    "cases": [
+      {
+        "name": "idempotent-identical-retry-succeeds-after-lost-confirmation",
+        "installed": { "generation": 1, "verificationKey": "dGVzdC1rZXktQQ" },
+        "incoming": { "newGeneration": 1, "newSpaceCapabilityVerificationKey": "dGVzdC1rZXktQQ" },
+        "expected": "success"
+      },
+      {
+        "name": "different-material-for-installed-generation-is-generation-taken",
+        "installed": { "generation": 1, "verificationKey": "dGVzdC1rZXktQQ" },
+        "incoming": { "newGeneration": 1, "newSpaceCapabilityVerificationKey": "dGVzdC1rZXktQg" },
+        "expected": "GENERATION_TAKEN"
+      },
+      {
+        "name": "historical-identical-retry-is-generation-taken",
+        "installed": { "generation": 2, "verificationKey": "dGVzdC1rZXktQg", "history": [ { "generation": 1, "verificationKey": "dGVzdC1rZXktQQ" } ] },
+        "incoming": { "newGeneration": 1, "newSpaceCapabilityVerificationKey": "dGVzdC1rZXktQQ" },
+        "expected": "GENERATION_TAKEN"
+      },
+      {
+        "name": "future-generation-beyond-next-is-generation-gap",
+        "installed": { "generation": 1, "verificationKey": "dGVzdC1rZXktQQ" },
+        "incoming": { "newGeneration": 3, "newSpaceCapabilityVerificationKey": "dGVzdC1rZXktQw" },
+        "expected": "GENERATION_GAP",
+        "expectedErrorFrame": {
+          "type": "error/1.0",
+          "thid": "<spaceId>",
+          "body": { "code": "GENERATION_GAP", "currentGeneration": 1 }
+        }
+      },
+      {
+        "name": "generation-gap-recovery-restages-at-broker-current-plus-one",
+        "installed": { "generation": 0, "verificationKey": "dGVzdC1rZXktQQ" },
+        "sequence": [
+          { "incoming": { "newGeneration": 2, "newSpaceCapabilityVerificationKey": "dGVzdC1rZXktQg" }, "expected": "GENERATION_GAP", "expectedErrorFrame": { "type": "error/1.0", "thid": "<spaceId>", "body": { "code": "GENERATION_GAP", "currentGeneration": 0 } } },
+          { "incoming": { "newGeneration": 1, "newSpaceCapabilityVerificationKey": "dGVzdC1rZXktQw" }, "expected": "success" }
+        ]
+      }
+    ]
+  },
   "broker_registration_control_frames": {
-    "notes": "Closes wot-spec#54 via wot-spec#56. Vectors for the Broker Control-Frame family defined in 03-wot-sync/003-transport-und-broker.md (register, challenge, challenge-response, registered). Identity material is shared with the top-level `identity` vector; the deviceId and nonce are deterministic fixtures for byte-identical reproduction across implementations.",
+    "notes": "Closes wot-spec#54. Vectors for the Broker Control-Frame family defined in 03-wot-sync/003-transport-und-broker.md (register, challenge, challenge-response, registered). Identity material is shared with the top-level `identity` vector; the deviceId and nonce are deterministic fixtures for byte-identical reproduction across implementations.",
     "identity_ref": "identity",
     "device_id": "550e8400-e29b-41d4-a716-446655440000",
     "nonce": {
@@ -384,7 +426,7 @@
         "expectedDisposition": "store-pending-and-sync"
       },
       {
-        "name": "member-signed-removal-is-unverified-pending",
+        "name": "self-signed-removal-is-actionable-pending",
         "localKeyGeneration": 3,
         "knownAdminDids": ["did:key:z6MkvLMiE11z8wXjNScxqjcMJHNfNyc8XqDT4aGzry4pFTTd"],
         "knownMemberDids": ["did:key:z6MkpTHR8VNsBxYAAWHut2Geadd9jSwuBV8xRoAnwWsdvktH"],
@@ -393,6 +435,21 @@
           "spaceId": "7f3a2b10-4c5d-4e6f-8a7b-9c0d1e2f3a4b",
           "action": "removed",
           "memberDid": "did:key:z6MkpTHR8VNsBxYAAWHut2Geadd9jSwuBV8xRoAnwWsdvktH",
+          "effectiveKeyGeneration": 4,
+          "signerDid": "did:key:z6MkpTHR8VNsBxYAAWHut2Geadd9jSwuBV8xRoAnwWsdvktH"
+        },
+        "expectedDisposition": "store-pending-and-sync"
+      },
+      {
+        "name": "member-signed-foreign-removal-is-unverified-pending",
+        "localKeyGeneration": 3,
+        "knownAdminDids": ["did:key:z6MkvLMiE11z8wXjNScxqjcMJHNfNyc8XqDT4aGzry4pFTTd"],
+        "knownMemberDids": ["did:key:z6MkpTHR8VNsBxYAAWHut2Geadd9jSwuBV8xRoAnwWsdvktH"],
+        "seenUpdates": [],
+        "incomingUpdate": {
+          "spaceId": "7f3a2b10-4c5d-4e6f-8a7b-9c0d1e2f3a4b",
+          "action": "removed",
+          "memberDid": "did:key:z6MkfM9GtNJyBX92hL8CZXVQyHypcuUdFCcf4Kox9xDcJRSe",
           "effectiveKeyGeneration": 4,
           "signerDid": "did:key:z6MkpTHR8VNsBxYAAWHut2Geadd9jSwuBV8xRoAnwWsdvktH"
         },
@@ -612,17 +669,13 @@
     "invalid_head_seq_cases": [
       {
         "name": "negative-seq-is-rejected",
-        "heads": {
-          "550e8400-e29b-41d4-a716-446655440000": -1
-        },
+        "heads": { "550e8400-e29b-41d4-a716-446655440000": -1 },
         "deviceId": "550e8400-e29b-41d4-a716-446655440000",
         "expected_error": "invalid-head-seq"
       },
       {
         "name": "fractional-seq-is-rejected",
-        "heads": {
-          "550e8400-e29b-41d4-a716-446655440000": 1.5
-        },
+        "heads": { "550e8400-e29b-41d4-a716-446655440000": 1.5 },
         "deviceId": "550e8400-e29b-41d4-a716-446655440000",
         "expected_error": "invalid-head-seq"
       }
@@ -630,9 +683,7 @@
     "derive_start_seq_overflow_cases": [
       {
         "name": "max-safe-integer-overflow-guard",
-        "heads": {
-          "550e8400-e29b-41d4-a716-446655440000": 9007199254740991
-        },
+        "heads": { "550e8400-e29b-41d4-a716-446655440000": 9007199254740991 },
         "deviceId": "550e8400-e29b-41d4-a716-446655440000",
         "expected_error": "sync-head-seq-overflow",
         "note": "Deriving start seq N+1 from Number.MAX_SAFE_INTEGER would leave the JS safe-integer range and is therefore rejected. The seq value itself is a valid JSON integer; only the N+1 derivation is guarded."
@@ -641,16 +692,12 @@
     "response_truncation_cases": [
       {
         "name": "truncated-true-requires-another-request",
-        "response": {
-          "truncated": true
-        },
+        "response": { "truncated": true },
         "expected_disposition": "request-next-page"
       },
       {
         "name": "truncated-false-is-complete",
-        "response": {
-          "truncated": false
-        },
+        "response": { "truncated": false },
         "expected_disposition": "complete"
       }
     ],
@@ -728,7 +775,34 @@
     ],
     "disclosure_digest": "IgJ4myRVC6HCY4dk1zsagaGdOlXsm_21Uj7EFPQ74sY",
     "issuer_signed_jwt": "eyJhbGciOiJFZERTQSIsImtpZCI6ImRpZDprZXk6ejZNa28zWkVqS0pXUUFNNW5EWEtvWjlqRXJ2dnhiV2JZZ1M4S0pYWXBDNUhidThhI3NpZy0wIiwidHlwIjoidmMrc2Qtand0In0.eyJfc2RfYWxnIjoic2hhLTI1NiIsImVudHJpZXMiOlt7Il9zZCI6WyJJZ0o0bXlSVkM2SENZNGRrMXpzYWdhR2RPbFhzbV8yMVVqN0VGUFE3NHNZIl19XSwiZXhwIjoxODA4MDUwODAwLCJpYXQiOjE3NzY1MTQ4MDAsImlzcyI6ImRpZDprZXk6ejZNa28zWkVqS0pXUUFNNW5EWEtvWjlqRXJ2dnhiV2JZZ1M4S0pYWXBDNUhidThhIiwidmN0IjoiaHR0cHM6Ly9odW1hbm1vbmV5LmV4YW1wbGUvY3JlZGVudGlhbHMvVHJ1c3RMaXN0L3YxIiwidmVyc2lvbiI6MTJ9.yDMUg74umfxSnD7RJUSIj3NYu7ml6wSv9W7tLocVdPBIJ0hil-QuIT9lkAFSyGV9Qa2ctEBTon8wxNvbUwuRCg",
-    "sd_jwt_compact": "eyJhbGciOiJFZERTQSIsImtpZCI6ImRpZDprZXk6ejZNa28zWkVqS0pXUUFNNW5EWEtvWjlqRXJ2dnhiV2JZZ1M4S0pYWXBDNUhidThhI3NpZy0wIiwidHlwIjoidmMrc2Qtand0In0.eyJfc2RfYWxnIjoic2hhLTI1NiIsImVudHJpZXMiOlt7Il9zZCI6WyJJZ0o0bXlSVkM2SENZNGRrMXpzYWdhR2RPbFhzbV8yMVVqN0VGUFE3NHNZIl19XSwiZXhwIjoxODA4MDUwODAwLCJpYXQiOjE3NzY1MTQ4MDAsImlzcyI6ImRpZDprZXk6ejZNa28zWkVqS0pXUUFNNW5EWEtvWjlqRXJ2dnhiV2JZZ1M4S0pYWXBDNUhidThhIiwidmN0IjoiaHR0cHM6Ly9odW1hbm1vbmV5LmV4YW1wbGUvY3JlZGVudGlhbHMvVHJ1c3RMaXN0L3YxIiwidmVyc2lvbiI6MTJ9.yDMUg74umfxSnD7RJUSIj3NYu7ml6wSv9W7tLocVdPBIJ0hil-QuIT9lkAFSyGV9Qa2ctEBTon8wxNvbUwuRCg~WyJzYWx0LTAwMDEiLCJlbnRyeSIseyJob3BMaW1pdCI6MiwiaWQiOiJkaWQ6a2V5Ono2TWtvM1pFaktKV1FBTTVuRFhLb1o5akVydnZ4YldiWWdTOEtKWFlwQzVIYnU4YSIsImxpYWJpbGl0eSI6IjQuMGgiLCJ0cnVzdExldmVsIjozfV0~"
+    "sd_jwt_compact": "eyJhbGciOiJFZERTQSIsImtpZCI6ImRpZDprZXk6ejZNa28zWkVqS0pXUUFNNW5EWEtvWjlqRXJ2dnhiV2JZZ1M4S0pYWXBDNUhidThhI3NpZy0wIiwidHlwIjoidmMrc2Qtand0In0.eyJfc2RfYWxnIjoic2hhLTI1NiIsImVudHJpZXMiOlt7Il9zZCI6WyJJZ0o0bXlSVkM2SENZNGRrMXpzYWdhR2RPbFhzbV8yMVVqN0VGUFE3NHNZIl19XSwiZXhwIjoxODA4MDUwODAwLCJpYXQiOjE3NzY1MTQ4MDAsImlzcyI6ImRpZDprZXk6ejZNa28zWkVqS0pXUUFNNW5EWEtvWjlqRXJ2dnhiV2JZZ1M4S0pYWXBDNUhidThhIiwidmN0IjoiaHR0cHM6Ly9odW1hbm1vbmV5LmV4YW1wbGUvY3JlZGVudGlhbHMvVHJ1c3RMaXN0L3YxIiwidmVyc2lvbiI6MTJ9.yDMUg74umfxSnD7RJUSIj3NYu7ml6wSv9W7tLocVdPBIJ0hil-QuIT9lkAFSyGV9Qa2ctEBTon8wxNvbUwuRCg~WyJzYWx0LTAwMDEiLCJlbnRyeSIseyJob3BMaW1pdCI6MiwiaWQiOiJkaWQ6a2V5Ono2TWtvM1pFaktKV1FBTTVuRFhLb1o5akVydnZ4YldiWWdTOEtKWFlwQzVIYnU4YSIsImxpYWJpbGl0eSI6IjQuMGgiLCJ0cnVzdExldmVsIjozfV0~",
+    "numericdate_semantics": {
+      "notes": "Closes real-life-org/wot-spec#40. Pure HMC H01 Trust List exp/iat claim-shape and boundary disposition vectors. Payloads here are exercised against the H01 #sd-jwt-vc-validation-muss exp/iat checks only; they are not re-signed and do not exercise JWT signature verification, _sd_alg, vct, or disclosure verification. Verifier time is the floor-of-milliseconds Unix-seconds value below.",
+      "verification_time_unix_seconds": 1776852000,
+      "valid_payload_signed_vector": { "iat": 1776514800, "exp": 1808050800 },
+      "boundary_cases": [
+        {
+          "name": "iat-equal-verification-time-is-accepted",
+          "payload": { "iat": 1776852000, "exp": 1776852001 },
+          "expected_disposition": "accept"
+        }
+      ],
+      "invalid_claim_cases": [
+        { "name": "missing-exp", "payload": { "iat": 1776514800 }, "expected_error": "missing-exp" },
+        { "name": "missing-iat", "payload": { "exp": 1808050800 }, "expected_error": "missing-iat" },
+        { "name": "string-exp", "payload": { "iat": 1776514800, "exp": "1808050800" }, "expected_error": "invalid-exp" },
+        { "name": "boolean-exp", "payload": { "iat": 1776514800, "exp": true }, "expected_error": "invalid-exp" },
+        { "name": "fractional-exp", "payload": { "iat": 1776514800, "exp": 1808050800.5 }, "expected_error": "invalid-exp" },
+        { "name": "negative-exp", "payload": { "iat": 1776514800, "exp": -1 }, "expected_error": "invalid-exp" },
+        { "name": "expired-exp", "payload": { "iat": 1776514800, "exp": 1776851999 }, "expected_error": "expired-exp" },
+        { "name": "exp-equal-verification-time-is-expired", "payload": { "iat": 1776514800, "exp": 1776852000 }, "expected_error": "expired-exp" },
+        { "name": "string-iat", "payload": { "iat": "1776514800", "exp": 1808050800 }, "expected_error": "invalid-iat" },
+        { "name": "boolean-iat", "payload": { "iat": false, "exp": 1808050800 }, "expected_error": "invalid-iat" },
+        { "name": "fractional-iat", "payload": { "iat": 1776514800.5, "exp": 1808050800 }, "expected_error": "invalid-iat" },
+        { "name": "negative-iat", "payload": { "iat": -1, "exp": 1808050800 }, "expected_error": "invalid-iat" },
+        { "name": "future-iat", "payload": { "iat": 1776852001, "exp": 1808050800 }, "expected_error": "future-iat" }
+      ]
+    }
   },
   "verification_vc_jws": {
     "header": {

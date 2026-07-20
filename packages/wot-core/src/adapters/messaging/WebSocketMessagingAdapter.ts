@@ -298,6 +298,11 @@ export class WebSocketMessagingAdapter implements MessagingAdapter {
               this.handleControlFrameError(msg)
             }
             break
+
+          case 'error/1.0':
+            // Spec error/1.0 keeps structured details in body, never top-level.
+            this.handleControlFrameError({ thid: msg.thid, ...((msg.body && typeof msg.body === 'object') ? msg.body as Record<string, unknown> : {}) })
+            break
         }
       }
 
@@ -647,7 +652,7 @@ export class WebSocketMessagingAdapter implements MessagingAdapter {
    * waiter — so the coordinator never acts on the reject (the in-process broker feeds
    * the same path as `message`, which is why it was masked in unit tests).
    */
-  private handleControlFrameError(msg: { thid?: unknown; code?: unknown; message?: unknown }): void {
+  private handleControlFrameError(msg: { thid?: unknown; code?: unknown; message?: unknown; currentGeneration?: unknown }): void {
     const docId = typeof msg.thid === 'string' ? msg.thid : undefined
     const code = msg.code
     const waiter = docId ? this.pendingControlFrames.get(docId) : undefined
@@ -658,6 +663,7 @@ export class WebSocketMessagingAdapter implements MessagingAdapter {
           new ControlFrameRejectedError({
             code,
             message: typeof msg.message === 'string' ? msg.message : code,
+            currentGeneration: typeof msg.currentGeneration === 'number' ? msg.currentGeneration : undefined,
           }),
         )
       } else {

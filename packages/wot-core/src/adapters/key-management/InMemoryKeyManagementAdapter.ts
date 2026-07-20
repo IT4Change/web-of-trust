@@ -103,4 +103,18 @@ export class InMemoryKeyManagementAdapter implements KeyManagementPort {
   async getOwnCapability(spaceId: string, generation: number): Promise<string | null> {
     return this.ownCapabilities.get(this.capKey(spaceId, generation)) ?? null
   }
+
+  async deleteSpaceKeys(spaceId: string): Promise<void> {
+    this.spaces.delete(spaceId)
+    const prefix = `${spaceId}:`
+    for (const key of this.capabilitySigningSeeds.keys()) {
+      if (key.startsWith(prefix)) this.capabilitySigningSeeds.delete(key)
+    }
+    for (const key of this.capabilityVerificationKeys.keys()) {
+      if (key.startsWith(prefix)) this.capabilityVerificationKeys.delete(key)
+    }
+    for (const key of this.ownCapabilities.keys()) {
+      if (key.startsWith(prefix)) this.ownCapabilities.delete(key)
+    }
+  }
 }

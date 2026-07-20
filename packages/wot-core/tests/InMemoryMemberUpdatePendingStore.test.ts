@@ -29,14 +29,32 @@ describe('InMemoryMemberUpdatePendingStore', () => {
     expect(await store.listSeenForSpace(SPACE)).toHaveLength(1)
   })
 
-  it('upgradePending lifts the disposition but preserves the original signer provenance', async () => {
+  it('upgradePending replaces provenance with the authorized signal', async () => {
     const store = new InMemoryMemberUpdatePendingStore()
     await store.savePending(seen('store-unverified-pending-and-sync')) // signer ADMIN (helper default)
     await store.upgradePending({ ...signal({ signerDid: 'did:key:z6MkUpgrader' }), storedDisposition: 'store-pending-and-sync' })
     const list = await store.listSeenForSpace(SPACE)
     expect(list).toHaveLength(1)
     expect(list[0].storedDisposition).toBe('store-pending-and-sync')
-    expect(list[0].signerDid).toBe(ADMIN) // provenance not overwritten
+    expect(list[0].signerDid).toBe('did:key:z6MkUpgrader')
+  })
+
+  it('upgradePending clears optional receipt provenance omitted by the authorized signal', async () => {
+    const store = new InMemoryMemberUpdatePendingStore()
+    await store.savePending({
+      ...seen('store-unverified-pending-and-sync'),
+      outerId: 'untrusted-outer-id',
+      receivedAt: '2026-07-19T10:00:00.000Z',
+    })
+    await store.upgradePending({
+      ...seen('store-pending-and-sync', { signerDid: 'did:key:z6MkUpgrader' }),
+      outerId: undefined,
+      receivedAt: undefined,
+    })
+
+    const [upgraded] = await store.listSeenForSpace(SPACE)
+    expect(upgraded.outerId).toBeUndefined()
+    expect(upgraded.receivedAt).toBeUndefined()
   })
 
   it('bufferFuture stores separately from seen (no storedDisposition leaks into seen)', async () => {

@@ -1335,8 +1335,9 @@ export class RelayServer {
    * registered admin of the space (else AUTH_INVALID).
    *
    * After cryptographic verification the relay enforces the spec invariant
-   * `newGeneration === current + 1` EXACTLY (else AUTH_INVALID — a malformed
-   * generation step is treated as an unauthorized rotation), applies the rotation
+   * `newGeneration === current + 1` for a new rotation. An exact retry of the
+   * installed generation succeeds only with byte-identical material; divergent or
+   * superseded material is GENERATION_TAKEN. It then applies the rotation
    * to the durable registry (new verification key + generation), and then —
    * IMMEDIATELY and sicherheitskritisch — invalidates every cached capability scope
    * for this spaceId with `generation < newGeneration` across ALL open WebSockets of
@@ -1398,10 +1399,44 @@ export class RelayServer {
 
     const { spaceId, newSpaceCapabilityVerificationKey, newGeneration } = result.payload
 
-    // Spec invariant (Sync 003): newGeneration MUST be EXACTLY current + 1. A space
-    // record always exists here (isSpaceRegistered passed under the single shared
-    // connection). A wrong step is an unauthorized rotation → AUTH_INVALID.
+    // Material-bound retry semantics (Sync 003): an exact repeat of installed
+    // material proves the caller's earlier rotation won. It is a no-op, including
+    // no redundant cache invalidation. Different material cannot claim that slot.
     const space = this.docLog.getSpace(spaceId)
+    if (space !== null && newGeneration === space.generation) {
+      if (newSpaceCapabilityVerificationKey === space.verificationKey) {
+        this.sendTo(ws, {
+          type: 'receipt',
+          receipt: { messageId: spaceId, status: 'delivered', timestamp: new Date().toISOString() },
+        })
+        return
+      }
+      this.sendTo(ws, {
+        type: 'error', thid: spaceId, code: 'GENERATION_TAKEN',
+        message: 'space-rotate generation is already installed with different key material.',
+      })
+      return
+    }
+    if (space !== null && newGeneration < space.generation) {
+      this.sendTo(ws, {
+        type: 'error', thid: spaceId, code: 'GENERATION_TAKEN',
+        message: 'space-rotate generation has already been superseded.',
+      })
+      return
+    }
+    if (space !== null && newGeneration > space.generation + 1) {
+      // Sync 003: der Absender ist dem Broker-Zustand vorausgeeilt bzw. hat
+      // Rotationen verpasst — dedizierter Code, Client macht Catch-Up + Restage.
+      this.sendTo(ws, {
+        type: 'error/1.0', thid: spaceId,
+        body: {
+          code: 'GENERATION_GAP',
+          message: 'space-rotate newGeneration is beyond the current generation plus one.',
+          currentGeneration: space.generation,
+        },
+      })
+      return
+    }
     if (space === null || newGeneration !== space.generation + 1) {
       this.sendTo(ws, {
         type: 'error',
@@ -1517,8 +1552,23 @@ export class RelayServer {
       return
     }
 
-    const signer = this.resolveAdminSigner(ws, parsed.adminChangeJws, 'adminChangeJws')
-    if (signer === null) return
+    // A byte-identical self-remove retry is safe after the first accepted frame:
+    // verify its signature against the removed DID, then acknowledge the no-op.
+    const claimedSignerDid = typeof parsed.header.kid === 'string' ? didOrKidToDid(parsed.header.kid) : ''
+    const admins = this.docLog.getSpaceAdmins(parsed.payload.spaceId)
+    const selfRetry = claimedSignerDid === parsed.payload.removedAdminDid && !admins.includes(claimedSignerDid)
+    let signer: { spaceId: string; adminDid: string; adminPublicKey: Uint8Array } | null
+    if (selfRetry) {
+      try {
+        signer = { spaceId: parsed.payload.spaceId, adminDid: claimedSignerDid, adminPublicKey: didKeyToPublicKeyBytes(claimedSignerDid) }
+      } catch {
+        this.sendTo(ws, { type: 'error', thid: parsed.payload.spaceId, code: 'AUTH_INVALID', message: 'Admin signer DID is not a resolvable did:key.' })
+        return
+      }
+    } else {
+      signer = this.resolveAdminSigner(ws, parsed.adminChangeJws, 'adminChangeJws')
+      if (signer === null) return
+    }
 
     let result
     try {
@@ -1545,7 +1595,7 @@ export class RelayServer {
       return
     }
 
-    this.docLog.removeAdmin(result.payload.spaceId, result.payload.removedAdminDid)
+    if (!selfRetry) this.docLog.removeAdmin(result.payload.spaceId, result.payload.removedAdminDid)
 
     this.sendTo(ws, {
       type: 'receipt',

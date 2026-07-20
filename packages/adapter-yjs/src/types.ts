@@ -105,6 +105,16 @@ export interface NotificationStateDoc {
   mutedGroupIds?: Record<string, true>
 }
 
+/** Confirmed personal inbox record for a canonical removal. */
+export interface MembershipRemovalDoc {
+  eventId: string
+  spaceId: string
+  removedDid: string
+  generation: number
+  ts: string
+  byDid: string
+}
+
 export interface PersonalDoc {
   profile: ProfileDoc | null
   contacts: Record<string, ContactDoc>
@@ -116,4 +126,5 @@ export interface PersonalDoc {
   capabilitySigningSeeds: Record<string, CapabilitySigningSeedDoc>
   dismissedNotifications: Record<string, DismissedNotificationDoc>
   notificationState?: NotificationStateDoc
+  membershipRemovals?: Record<string, MembershipRemovalDoc>
 }

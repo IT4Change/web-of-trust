@@ -23,6 +23,7 @@ import type {
   MemberUpdatePendingStore,
   WireMessage,
   DocLogStore,
+  PendingRemoval,
 } from '@web_of_trust/core/ports'
 import type { IdentitySession, MessageEnvelope, SpaceInfo, SpaceDocMeta, SpaceMemberChange, IncomingSpaceInvite, ReplicationState } from '@web_of_trust/core/types'
 import { SPACE_SYNC_REQUEST_MESSAGE_TYPE } from '@web_of_trust/core/types'
@@ -34,6 +35,7 @@ import {
   runTwoPhaseRemoval, recoverPendingRemovals,
 } from '@web_of_trust/core/application'
 import type { LocalImpact, SecureRemovalDeps } from '@web_of_trust/core/application'
+import type { MembershipActivityCapable, SecureSelfLeaveCapable } from '@web_of_trust/core/ports'
 import type {
   ProtocolCryptoAdapter, MemberUpdateSignal, SeenMemberUpdateSignal, SpaceInviteBody, KeyRotationBody,
   DidResolver, DidcommPlaintextMessage, InboxAckLocalOutcome, InboxMessageKind,
@@ -44,10 +46,11 @@ import {
   SPACE_INVITE_MESSAGE_TYPE, MEMBER_UPDATE_MESSAGE_TYPE, KEY_ROTATION_MESSAGE_TYPE,
   isDidcommMessage, isEncryptedInboxMessageType, INBOX_MESSAGE_TYPE,
   createAckMessage, evaluateInboxAckDisposition, createDidKeyResolver,
+  encryptionKeyMultibaseFromDidDocument, x25519MultibaseToPublicKeyBytes,
   formatMembershipEventKey, parseMembershipEventKey, resolveActiveMembers, resolveMembershipWinner, assertMembershipEvent,
   resolveActiveAdmins, assertAdminEntry,
   LogSyncCoordinator, AuthorMismatchError, LocalAppendFailedError, createSpaceCapabilityJws,
-  createSpaceRegisterMessageWithSigner, createSpaceRotateMessageWithSigner,
+  createSpaceRegisterMessageWithSigner, createSpaceRotateMessageWithSigner, createAdminRemoveMessageWithSigner,
   LOG_ENTRY_MESSAGE_TYPE, SYNC_RESPONSE_MESSAGE_TYPE,
 } from '@web_of_trust/core/protocol'
 import type { LogSyncEngineHooks, CapabilitySource, ControlFrameReceipt, WriteRejectHandler } from '@web_of_trust/core/protocol'
@@ -71,6 +74,8 @@ import {
 import {
   traceAsync,
 } from '@web_of_trust/core/storage'
+import { changeYjsPersonalDoc, isYjsPersonalDocInitialized } from './YjsPersonalDocManager'
+import type { MembershipRemovalDoc } from './types'
 
 /**
  * Slice SR / B3 — the Y.Doc transaction origin used by the secure-removal COMMIT so
@@ -82,6 +87,8 @@ import {
  * skip exactly this mutation without affecting normal local edits or the remote path.
  */
 const MEMBERSHIP_COMMIT_ORIGIN = 'wot:membership-commit-durable'
+/** A last-member self-leave is local state disposal, never a space-sync delta. */
+const LOCAL_ONLY_MEMBERSHIP_ORIGIN = 'wot:membership-local-only'
 
 /** Duck-typed interface for CompactStorageManager / InMemoryCompactStore */
 export interface YjsCompactStore {
@@ -164,6 +171,8 @@ interface YjsSpaceState {
   // nicht das gleich gespeicherte Pending aufloest (Z.194: die Aufloesung
   // gehoert dem NAECHSTEN Space-Sync, nicht dem vorherigen).
   membershipResolutionChain?: Promise<void>
+  /** Serializes membership transitions for one (space, DID) commit decision. */
+  membershipTransitions?: Map<string, Promise<void>>
 }
 
 interface YjsReplicationConfig {
@@ -405,7 +414,7 @@ function applyInitialDoc(doc: Y.Doc, initialDoc: Record<string, any>): void {
 
 // --- YjsReplicationAdapter ---
 
-export class YjsReplicationAdapter implements ReplicationAdapter {
+export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActivityCapable, SecureSelfLeaveCapable {
   private identity: IdentitySession
   private messaging: MessagingAdapter
   private readonly keyManagement: KeyManagementPort
@@ -880,6 +889,21 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
   }
 
   async addMember(spaceId: string, memberDid: string, memberEncryptionPublicKey: Uint8Array): Promise<void> {
+    await this.serializeMembershipTransition(spaceId, memberDid, () => this.addMemberInternal(spaceId, memberDid, memberEncryptionPublicKey))
+  }
+
+  async addMemberWithActivity(spaceId: string, memberDid: string, memberEncryptionPublicKey: Uint8Array, opts?: { activityEntry?: Record<string, unknown> }): Promise<{ changed: boolean }> {
+    const activityEntry = this.validateActivityEntry(opts?.activityEntry)
+    return this.serializeMembershipTransition(spaceId, memberDid, async () => {
+      const state = this.spaces.get(spaceId)
+      if (!state) throw new Error(`Space ${spaceId} not found`)
+      if (resolveMembershipWinner(this.readMembershipEvents(state.doc), memberDid)?.status === 'active') return { changed: false }
+      const changed = await this.addMemberInternal(spaceId, memberDid, memberEncryptionPublicKey, activityEntry)
+      return { changed }
+    })
+  }
+
+  private async addMemberInternal(spaceId: string, memberDid: string, memberEncryptionPublicKey: Uint8Array, activityEntry?: Record<string, unknown>): Promise<boolean> {
     const state = this.spaces.get(spaceId)
     if (!state) throw new Error(`Space ${spaceId} not found`)
 
@@ -917,12 +941,13 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
     // Liste durch die aktiven DIDs aus dem Event-Set — hier nur der Invitee).
     // Bewusster Bruch, Alt-Spaces sind neu zu erstellen
     // (Anton-Entscheid 2026-06-11).
-    this.writeMembershipEvent(state, {
+    const changed = this.writeMembershipEvent(state, {
       did: memberDid,
       status: 'active',
       sinceGeneration: currentGeneration,
       addedBy: myDid,
-    })
+    }, activityEntry)
+    if (!changed) return false
 
     // Spec-conformant invite body (Sync 005 Z.62-103): all content keys + capability +
     // signing key. VE-2: adminDids = volle AKTIVE Admin-Liste aus dem _admins-Set
@@ -977,11 +1002,28 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
       cb({ spaceId, did: memberDid, action: 'added' })
     }
     this.notifySpaceListeners()
+    return true
   }
 
   async removeMember(spaceId: string, memberDid: string): Promise<void> {
+    await this.serializeMembershipTransition(spaceId, memberDid, () => this.removeMemberInternal(spaceId, memberDid))
+  }
+
+  supportsSecureSelfLeave(): boolean { return true }
+
+  async removeMemberWithActivity(spaceId: string, memberDid: string, opts?: { activityEntry?: Record<string, unknown> }): Promise<{ changed: boolean }> {
+    const activityEntry = this.validateActivityEntry(opts?.activityEntry)
+    return this.serializeMembershipTransition(spaceId, memberDid, async () => {
+      const state = this.spaces.get(spaceId)
+      if (!state || resolveMembershipWinner(this.readMembershipEvents(state.doc), memberDid)?.status !== 'active') return { changed: false }
+      const changed = await this.removeMemberInternal(spaceId, memberDid, activityEntry)
+      return { changed }
+    })
+  }
+
+  private async removeMemberInternal(spaceId: string, memberDid: string, activityEntry?: Record<string, unknown>): Promise<boolean> {
     const state = this.spaces.get(spaceId)
-    if (!state) return
+    if (!state) return false
 
     const myDid = this.identity.getDid()
 
@@ -1000,8 +1042,8 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
     // → commit). The legacy content path (enableLogSync=false) keeps the original
     // single-phase rotate-and-distribute below, UNCHANGED.
     if (this.logSyncEnabled) {
-      await this.removeMemberSecure(state, memberDid)
-      return
+      await this.removeMemberSecure(state, memberDid, activityEntry)
+      return true
     }
 
     // Den Encryption-Key des Entfernten VOR dem Löschen sichern — er bekommt unten
@@ -1018,7 +1060,8 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
     // aktiven DIDs aus dem Event-Set ersetzt — hier leer). Bewusster Bruch,
     // Alt-Spaces sind neu zu erstellen (Anton-Entscheid 2026-06-11).
     const newGen = (await this.keyManagement.getCurrentGeneration(spaceId)) + 1
-    this.writeMembershipEvent(state, { did: memberDid, status: 'removed', sinceGeneration: newGen })
+    const changed = this.writeMembershipEvent(state, { did: memberDid, status: 'removed', sinceGeneration: newGen }, activityEntry)
+    if (!changed) return false
 
     // Rotate group key + fresh capability key pair + self-capability und an die
     // REMAINING members verteilen (Sync 005 Z.230/Z.276). The removed member
@@ -1038,6 +1081,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
       cb({ spaceId, did: memberDid, action: 'removed' })
     }
     this.notifySpaceListeners()
+    return true
   }
 
   /**
@@ -1064,9 +1108,16 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
     }
 
     for (const did of notifyDids) {
-      if (did === myDid) continue
+      // Own-DID delivery is normally skipped because this device already made
+      // the change.  A self-removal is different: another device of the same
+      // identity needs the signed inbox signal to create its pending record and
+      // resolve it against the canonical membership event.  This remains
+      // addressed ECIES delivery to the own DID, never a broadcast to others.
+      if (did === myDid && memberDid !== myDid) continue
 
-      const encPub = did === memberDid ? removedMemberEncryptionKey : state.memberEncryptionKeys.get(did)
+      const encPub = did === memberDid
+        ? (removedMemberEncryptionKey ?? await this.resolveMemberEncryptionKey(state, did))
+        : await this.resolveMemberEncryptionKey(state, did)
       if (!encPub) {
         // Ohne Empfänger-Encryption-Key keine spec-konforme Zustellung möglich —
         // kein Klartext-Fallback (Sync 003 Z.500). Key-Discovery via Sync 004
@@ -1084,7 +1135,32 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
         sign: (input) => this.identity.signEd25519(input),
         crypto: this.crypto,
       })
+      // Multi-Device-Regel: die Own-DID-Zustellung (Self-Removal) kommt als
+      // Echo auch beim SENDENDEN Gerät an — das darf sein eigenes Signal
+      // weder verarbeiten noch ACKen (nur Geschwistergeräte brauchen es).
+      if (did === myDid) {
+        this.sentMessageIds.add(envelope.id)
+        setTimeout(() => this.sentMessageIds.delete(envelope.id), 30_000)
+      }
       try { await this.messaging.send(envelope) } catch { /* offline */ }
+    }
+  }
+
+  /** Resolve ECIES delivery keys through the same DID keyAgreement path as invites. */
+  private async resolveMemberEncryptionKey(state: YjsSpaceState, did: string): Promise<Uint8Array | undefined> {
+    if (did === this.identity.getDid()) return this.identity.getEncryptionPublicKeyBytes()
+    const cached = state.memberEncryptionKeys.get(did)
+    if (cached) return cached
+    try {
+      const document = await this.didResolver.resolve(did)
+      const encoded = encryptionKeyMultibaseFromDidDocument(document)
+      if (!encoded) return undefined
+      const key = x25519MultibaseToPublicKeyBytes(encoded)
+      state.memberEncryptionKeys.set(did, key)
+      return key
+    } catch (err) {
+      console.warn('[YjsReplication] Failed to resolve encryption key for', did, err)
+      return undefined
     }
   }
 
@@ -1095,7 +1171,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
    * ONLY once all brokers confirm. Throws {@link RemovalPendingNotEnforcedError} if
    * staging succeeded but enforcement did not complete (durable; retried by VE-C3).
    */
-  private async removeMemberSecure(state: YjsSpaceState, memberDid: string): Promise<void> {
+  private async removeMemberSecure(state: YjsSpaceState, memberDid: string, activityEntry?: Record<string, unknown>): Promise<void> {
     // Ensure the durable log store is initialized (it owns the pending-removal
     // staging area used by the two-phase workflow).
     const docLogStore = await this.ensureDocLogStore()
@@ -1105,7 +1181,45 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
     // (spaceId, removedDid) so a crash-recovery commit on a fresh instance can also
     // reach it (it is re-derivable from the still-present invite key otherwise).
     const removedEncKey = state.memberEncryptionKeys.get(memberDid)
-    await runTwoPhaseRemoval(this.buildSecureRemovalDeps(state, removedEncKey), memberDid)
+    await runTwoPhaseRemoval(this.buildSecureRemovalDeps(state, removedEncKey), memberDid, { activityEntry })
+  }
+
+  /**
+   * Sync 005 self-leave enforcement: only an active remaining admin reacts to a
+   * canonical removed event that still lacks its declared-generation rotation.
+   * A member-update never enters this path.  The regular two-phase machinery is
+   * reused, but its commit callback deliberately omits the already-canonical
+   * removal and the member-update broadcast.
+   */
+  private async enforceCanonicalSelfRemovalRotation(
+    state: YjsSpaceState,
+    events: readonly MembershipEvent[],
+  ): Promise<void> {
+    if (!this.logSyncEnabled) return
+    const myDid = this.identity.getDid()
+    const active = new Set(resolveActiveMembers(events))
+    if (!active.has(myDid) || !this.spaceAdminDids(state).includes(myDid)) return
+
+    const currentGeneration = await this.keyManagement.getCurrentGeneration(state.info.id)
+    const candidates = events.filter((event) =>
+      event.status === 'removed' &&
+      resolveMembershipWinner(events, event.did)?.status === 'removed' &&
+      event.did !== myDid &&
+      currentGeneration < event.sinceGeneration,
+    )
+    for (const event of candidates) {
+      // Existing staging is the cross-observer/recovery dedup key.  A current
+      // generation at or past the declaration is already enforced (or superseded).
+      const store = await this.ensureDocLogStore()
+      if (!store || (await this.keyManagement.getCurrentGeneration(state.info.id)) >= event.sinceGeneration) continue
+      const existing = await store.getPendingRemoval(state.info.id, event.did)
+      if (existing && existing.kind !== 'canonical-self-removal-rotation') continue
+      await runTwoPhaseRemoval(
+        this.buildSecureRemovalDeps(state, undefined, 'canonical-self-removal-rotation'),
+        event.did,
+        { kind: 'canonical-self-removal-rotation', targetGeneration: event.sinceGeneration },
+      )
+    }
   }
 
   /**
@@ -1121,9 +1235,25 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
     if (!docLogStore) return
     await recoverPendingRemovals(docLogStore, async (removal) => {
       const state = this.spaces.get(removal.spaceId)
-      if (!state) return null // space not loaded (yet) — retry on a later pass
+      if (!state) {
+        // Durable terminal cleanup must survive the earlier metadata deletion:
+        // it is the only recovery phase deliberately independent of a loaded space.
+        if (removal.phase === 'admin-removed' || removal.phase === 'local-cleanup') {
+          return {
+            docLogStore,
+            finalizeSelfLeave: async (newGeneration: number) => {
+              await this.recordConfirmedMembershipRemoval({
+                spaceId: removal.spaceId, action: 'removed', memberDid: this.identity.getDid(),
+                effectiveKeyGeneration: newGeneration, signerDid: this.identity.getDid(), receivedAt: new Date().toISOString(),
+              })
+              await this.cleanupSpaceLocally(removal.spaceId)
+            },
+          }
+        }
+        return null // space not loaded (yet) — retry on a later pass
+      }
       const removedEncKey = state.memberEncryptionKeys.get(removal.removedDid)
-      return this.buildSecureRemovalDeps(state, removedEncKey)
+      return this.buildSecureRemovalDeps(state, removedEncKey, removal.kind)
     }).catch((err) => {
       console.debug('[YjsReplication] pending-removal recovery pass failed (retry later):', err)
     })
@@ -1140,6 +1270,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
   private buildSecureRemovalDeps(
     state: YjsSpaceState,
     removedEncKey: Uint8Array | undefined,
+    kind?: PendingRemoval['kind'],
   ): SecureRemovalDeps {
     const spaceId = state.info.id
     const myDid = this.identity.getDid()
@@ -1181,7 +1312,39 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
         // serialized control tail guarantees no docId-equal frame races it (VE-9).
         await coordinator.sendSpaceRotate(frame)
       },
-      commitRemoval: async (removedDid, newGeneration) => {
+      catchUpGeneration: async () => {
+        const coordinator = await this.getOrCreateCoordinator(state)
+        if (!coordinator) return { complete: false }
+        // A partial catch-up cannot authorize replacing staged removal material.
+        return coordinator.catchUp()
+      },
+      adminRemove: {
+      createSelfAdminRemoveFrame: async () => createAdminRemoveMessageWithSigner({
+        spaceId,
+        removedAdminDid: myDid,
+        kid: this.authorKid(),
+        sign: (input) => this.identity.signEd25519(input),
+      }),
+      sendAdminRemove: async (brokerUrl, frame) => {
+        const activeBroker = this.brokerUrls[0]
+        if (brokerUrl !== activeBroker) throw new Error('admin-remove broker is not active')
+        const coordinator = await this.getOrCreateCoordinator(state)
+        if (!coordinator) throw new Error('admin self-leave requires a log-sync coordinator')
+        await coordinator.sendSpaceRotate(frame)
+      },
+      finalizeSelfLeave: async (newGeneration) => {
+        // This is deliberately part of the durable pending-removal transaction:
+        // PersonalDoc entry + flush must succeed before local cleanup, and the core
+        // deletes PendingRemoval only after this hook resolves.
+        await this.recordConfirmedMembershipRemoval({
+          spaceId, action: 'removed', memberDid: myDid,
+          effectiveKeyGeneration: newGeneration, signerDid: myDid,
+          receivedAt: new Date().toISOString(),
+        })
+        await this.cleanupSpaceLocally(spaceId)
+      },
+      },
+      commitRemoval: async (removedDid, newGeneration, activityEntry) => {
         // Drop the removed member from the encryption-key cache so it receives NO
         // key-rotation (only its member-update). The staged generation is already
         // activated by the workflow — persist + distribute it, do NOT re-rotate.
@@ -1191,16 +1354,25 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
         // durable append throws, this rejects → driveRemovalToCompletion does NOT delete
         // the PendingRemoval (it stays for VE-C3 recovery), so a removal can never end
         // up broker-enforced + distributed without a durable membership-removal record.
-        await this.commitMembershipEventDurable(state, { did: removedDid, status: 'removed', sinceGeneration: newGeneration })
-        await this.persistRotatedKeyToPersonalDoc(spaceId, newGeneration)
-        await this.distributeKeyRotation(state, newGeneration)
-        await this.distributeMemberRemovedUpdate(state, removedDid, newGeneration, removedEncKey)
+        if (kind !== 'canonical-self-removal-rotation') {
+          await this.commitMembershipEventDurable(state, { did: removedDid, status: 'removed', sinceGeneration: newGeneration }, activityEntry)
+        }
+        const departingSelf = removedDid === myDid
+        // A self-leaving admin must distribute the follow-up generation to the
+        // remaining members, but must neither retain nor persist it for own devices.
+        if (!departingSelf) await this.persistRotatedKeyToPersonalDoc(spaceId, newGeneration)
+        await this.distributeKeyRotation(state, newGeneration, departingSelf ? myDid : undefined)
+        if (kind !== 'canonical-self-removal-rotation') {
+          await this.distributeMemberRemovedUpdate(state, removedDid, newGeneration, removedEncKey)
+        }
         await this.saveSpaceMetadata(state)
         this._scheduleVaultImmediate(state)
         for (const cb of this.memberChangeListeners) {
           cb({ spaceId, did: removedDid, action: 'removed' })
         }
         this.notifySpaceListeners()
+        // The self-leaver keeps the staged material until broker admin-remove is
+        // acknowledged; finalizeSelfLeave performs the irreversible deletion.
       },
     }
   }
@@ -1305,10 +1477,11 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
    * that map (deleted before the commit), so it never receives key material — only
    * its member-update. Shared by the legacy path and the Slice SR commit path.
    */
-  private async distributeKeyRotation(state: YjsSpaceState, newGen: number): Promise<void> {
+  private async distributeKeyRotation(state: YjsSpaceState, newGen: number, excludeDid?: string): Promise<void> {
     const spaceId = state.info.id
     const myDid = this.identity.getDid()
     for (const [did, encPub] of state.memberEncryptionKeys) {
+      if (did === excludeDid) continue
       const rotationBody = await buildKeyRotationBody({
         keyPort: this.keyManagement,
         spaceId,
@@ -1573,6 +1746,8 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
    * VE-1/VE-2 (Sync 005 Z.111-130/Z.221): die kanonische AKTIVE Admin-Liste —
    * `resolveActiveAdmins(_admins, aktive _members)`. Speist die client-enforced
    * Authority-Checks (knownAdminDids) in applyKeyRotationBody/processMemberUpdate.
+   * Removal authority means: the affected DID itself, or a DID from the active
+   * `_admins ∩ _members` projection; legacy spaces fall back via spaceAdminDids().
    *
    * Alt-Space-Fallback (Spaces vor diesem Slice ohne _admins-Eintraege): faellt
    * auf `[createdBy ?? members[0]] ∩ active` zurueck (genau die alte
@@ -1694,17 +1869,70 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
    * ueberschrieben oder geloescht — konkurrierende Schreiber treffen verschiedene
    * Keys, derselbe Key traegt denselben semantischen Inhalt (idempotent).
    */
-  private writeMembershipEvent(state: YjsSpaceState, event: MembershipEvent): void {
+  private writeMembershipEvent(state: YjsSpaceState, event: MembershipEvent, activityEntry?: Record<string, unknown>): boolean {
     const key = formatMembershipEventKey(event)
     const map = this.membersEventMap(state.doc)
-    if (map.has(key)) return
-    state.doc.transact(() => { map.set(key, event) }, 'local')
+    if (map.has(key)) return false
+    state.doc.transact(() => {
+      map.set(key, event)
+      if (activityEntry) this.writeActivityEntry(state.doc, activityEntry)
+    }, 'local')
+    return true
+  }
+
+  /** Run a membership transition after all earlier transitions for this DID. */
+  private async serializeMembershipTransition<T>(spaceId: string, did: string, operation: () => Promise<T>): Promise<T> {
+    const state = this.spaces.get(spaceId)
+    if (!state) return operation()
+    const transitions = state.membershipTransitions ?? (state.membershipTransitions = new Map())
+    const key = `${spaceId}\u0000${did}`
+    const previous = transitions.get(key) ?? Promise.resolve()
+    let release!: () => void
+    const current = new Promise<void>(resolve => { release = resolve })
+    const queued = previous.catch(() => {}).then(() => current)
+    transitions.set(key, queued)
+    await previous.catch(() => {})
+    try {
+      return await operation()
+    } finally {
+      release()
+      if (transitions.get(key) === queued) transitions.delete(key)
+    }
+  }
+
+  /** Validate before a Yjs transaction: the following single Set cannot partly fail. */
+  private validateActivityEntry(entry: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
+    if (entry === undefined) return undefined
+    if (typeof entry.id !== 'string' || entry.id.trim().length === 0) throw new Error('activityEntry.id must be a non-empty string')
+    try {
+      const json = JSON.stringify(entry)
+      if (json === undefined) throw new Error('not JSON')
+      return JSON.parse(json) as Record<string, unknown>
+    } catch {
+      throw new Error('activityEntry must be JSON-roundtrip-safe')
+    }
+  }
+
+  private writeActivityEntry(doc: Y.Doc, entry: Record<string, unknown>): void {
+    const data = doc.getMap('data')
+    let activity = data.get('activity') as Y.Map<any> | undefined
+    if (!(activity instanceof Y.Map)) {
+      activity = new Y.Map()
+      data.set('activity', activity)
+    }
+    activity.set(entry.id as string, entry)
+  }
+
+  private hasActivityEntry(doc: Y.Doc, id: string): boolean {
+    const activity = doc.getMap('data').get('activity')
+    return activity instanceof Y.Map && activity.has(id)
   }
 
   /**
    * Slice SR / B3 — write a membership event AND durably persist its log entry
    * BEFORE returning, propagating any append failure. Used by the secure-removal
-   * COMMIT so the canonical `removed@newGeneration` log entry is durable before the
+   * COMMIT and by the non-admin self-leave path, so the canonical
+   * `removed@newGeneration` log entry is durable before the
    * PendingRemoval staging is deleted (a crash/append-failure after broker
    * enforcement must NOT leave the removal enforced with no membership-removal record).
    *
@@ -1718,7 +1946,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
    * the method returns cleanly (the membership op is already durable from the first
    * commit; Sync-002 seq/engine-dedup makes any earlier in-flight write harmless).
    */
-  private async commitMembershipEventDurable(state: YjsSpaceState, event: MembershipEvent): Promise<void> {
+  private async commitMembershipEventDurable(state: YjsSpaceState, event: MembershipEvent, activityEntry?: Record<string, unknown>): Promise<void> {
     const key = formatMembershipEventKey(event)
     const map = this.membersEventMap(state.doc)
     // B3 retry-hole (loop-review): `map.has(key)` proves the event is LOCALLY applied,
@@ -1732,13 +1960,17 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
 
     // On the first apply, capture EXACTLY the update this membership mutation produces.
     let captured: Uint8Array | null = null
-    if (!alreadyApplied) {
+    const needsActivityRepair = activityEntry !== undefined && !this.hasActivityEntry(state.doc, activityEntry.id as string)
+    if (!alreadyApplied || needsActivityRepair) {
       const captureHandler = (update: Uint8Array, origin: any) => {
         if (origin === MEMBERSHIP_COMMIT_ORIGIN) captured = update
       }
       state.doc.on('update', captureHandler)
       try {
-        state.doc.transact(() => { map.set(key, event) }, MEMBERSHIP_COMMIT_ORIGIN)
+        state.doc.transact(() => {
+          if (!alreadyApplied) map.set(key, event)
+          if (activityEntry) this.writeActivityEntry(state.doc, activityEntry)
+        }, MEMBERSHIP_COMMIT_ORIGIN)
       } finally {
         state.doc.off('update', captureHandler)
       }
@@ -1758,7 +1990,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
     const update = captured ?? Y.encodeStateAsUpdate(state.doc)
     const coordinator = await this.getOrCreateCoordinator(state)
     if (!coordinator) {
-      throw new Error('secure removal commit requires a log-sync coordinator to durably record the membership removal')
+      throw new Error('membership removal commit requires a log-sync coordinator to durably record the membership removal')
     }
     // B3: the space-rotate that just enforced this removal invalidated our OWN
     // old-generation scope at the relay. Re-present the (now new-generation) capability
@@ -1789,6 +2021,121 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
 
   /** Leave a space (User-Flow): clean up local state, metadata, group keys, compact store */
   async leaveSpace(spaceId: string): Promise<void> {
+    const state = this.spaces.get(spaceId)
+    if (!state) return
+
+    const selfDid = this.identity.getDid()
+    const activeMembers = resolveActiveMembers(this.readMembershipEvents(state.doc))
+    const members = activeMembers.length > 0 ? activeMembers : state.info.members
+    const existingSelf = resolveMembershipWinner(this.readMembershipEvents(state.doc), selfDid)
+
+    // A broker-enforced admin self-removal can have its durable membership append
+    // fail after rotation. Complete that exact staged transaction before the generic
+    // "already removed" retry path decides authority from active members.
+    const pendingStore = this.logSyncEnabled ? await this.ensureDocLogStore() : null
+    const securePending = pendingStore && await pendingStore.getPendingRemoval(spaceId, selfDid)
+    if (securePending) {
+      const selfEncryptionKey = await this.identity.getEncryptionPublicKeyBytes()
+      await runTwoPhaseRemoval(
+        this.buildSecureRemovalDeps(state, selfEncryptionKey, securePending.kind),
+        selfDid,
+        { kind: securePending.kind },
+      )
+      const confirmed = resolveMembershipWinner(this.readMembershipEvents(state.doc), selfDid)
+      if (confirmed?.status !== 'removed') return
+      await this.recordConfirmedMembershipRemoval({
+        spaceId, action: 'removed', memberDid: selfDid,
+        effectiveKeyGeneration: confirmed.sinceGeneration, signerDid: selfDid,
+        receivedAt: new Date().toISOString(),
+      })
+      await this.cleanupSpaceLocally(spaceId)
+      return
+    }
+
+    // A previous last-member attempt may already have committed the canonical
+    // local removal and then failed while persisting/flushing the PersonalDoc.
+    // Retrying leave must finish that durable event + cleanup, not rotate or
+    // emit another removal transition.
+    if (existingSelf?.status === 'removed') {
+      // A removed event that is still locally present can be the retry intent of
+      // a failed durable append.  For a shared non-admin self-leave, re-run both
+      // required side effects before personal-doc recording or local cleanup.
+      if (members.length > 0 && !this.spaceAdminDids(state).includes(selfDid)) {
+        const selfEncryptionKey = await this.identity.getEncryptionPublicKeyBytes()
+        await this.commitMembershipEventDurable(state, existingSelf)
+        await this.distributeMemberRemovedUpdate(state, selfDid, existingSelf.sinceGeneration, selfEncryptionKey)
+        await this.saveSpaceMetadata(state)
+      }
+      await this.recordConfirmedMembershipRemoval({
+        spaceId,
+        action: 'removed',
+        memberDid: selfDid,
+        effectiveKeyGeneration: existingSelf.sinceGeneration,
+        signerDid: selfDid,
+        receivedAt: new Date().toISOString(),
+      })
+      await this.cleanupSpaceLocally(spaceId)
+      return
+    }
+
+    // A private/last-member space has nobody to notify or rotate a key for.  Keep
+    // this branch entirely local, but still make the canonical self-removal and
+    // personal inbox record durable before deleting the space.
+    if (members.length <= 1 && members.includes(selfDid)) {
+      const generation = (await this.keyManagement.getCurrentGeneration(spaceId)) + 1
+      const event = { did: selfDid, status: 'removed' as const, sinceGeneration: generation }
+      state.doc.transact(() => {
+        this.membersEventMap(state.doc).set(formatMembershipEventKey(event), event)
+      }, LOCAL_ONLY_MEMBERSHIP_ORIGIN)
+      await this.recordConfirmedMembershipRemoval({
+        spaceId,
+        action: 'removed',
+        memberDid: selfDid,
+        effectiveKeyGeneration: generation,
+        signerDid: selfDid,
+        receivedAt: new Date().toISOString(),
+      })
+      await this.cleanupSpaceLocally(spaceId)
+      return
+    }
+
+    // Self-leave has a separate authority rule from removing somebody else. A
+    // non-admin is still a canonical member at this point and may therefore write
+    // their own removed event to the regular log, but MUST NOT mint material or ask
+    // the broker for a space-rotate. An active admin keeps the existing enforced
+    // secure-removal flow below.
+    if (!this.spaceAdminDids(state).includes(selfDid)) {
+      const generation = (await this.keyManagement.getCurrentGeneration(spaceId)) + 1
+      const selfEncryptionKey = await this.identity.getEncryptionPublicKeyBytes()
+      await this.commitMembershipEventDurable(state, {
+        did: selfDid,
+        status: 'removed',
+        sinceGeneration: generation,
+      })
+      // No key rotation: this is the self-signed pending signal which lets own
+      // devices and remaining members resolve the canonical removal independently.
+      await this.distributeMemberRemovedUpdate(state, selfDid, generation, selfEncryptionKey)
+      await this.saveSpaceMetadata(state)
+      this._scheduleVaultImmediate(state)
+      for (const cb of this.memberChangeListeners) {
+        cb({ spaceId, did: selfDid, action: 'removed' })
+      }
+      this.notifySpaceListeners()
+    } else {
+      // Existing admin self-leave: stage -> broker enforcement -> commit + key
+      // rotation. The departing admin never retains the next-generation material.
+      await this.removeMemberInternal(spaceId, selfDid)
+    }
+    const confirmed = resolveMembershipWinner(this.readMembershipEvents(state.doc), selfDid)
+    if (confirmed?.status !== 'removed') return
+    await this.recordConfirmedMembershipRemoval({
+      spaceId,
+      action: 'removed',
+      memberDid: selfDid,
+      effectiveKeyGeneration: confirmed.sinceGeneration,
+      signerDid: selfDid,
+      receivedAt: new Date().toISOString(),
+    })
     await this.cleanupSpaceLocally(spaceId)
   }
 
@@ -1835,6 +2182,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
       await this.metadataStorage.deleteSpaceMetadata(spaceId)
       await this.metadataStorage.deleteGroupKeys(spaceId)
     }
+    await this.keyManagement.deleteSpaceKeys(spaceId)
     await this.deletePendingMessagesForSpace(spaceId)
     if (this.compactStore && 'delete' in this.compactStore) {
       await (this.compactStore as any).delete(spaceId)
@@ -1916,22 +2264,87 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
       canonicalActiveMembers,
       localDid: this.identity.getDid(),
     })
+    // Consume ordinary confirmations immediately.  The confirmed local removal
+    // is different: its pending record is the durable retry intent for writing
+    // the personal inbox event and must survive any write/flush failure.
     for (const signal of resolution.confirmed) {
-      await this.memberUpdateStore.resolvePending(spaceId, signal)
+      if (signal !== resolution.confirmedLocalRemovalSignal) {
+        await this.memberUpdateStore.resolvePending(spaceId, signal)
+      }
     }
     for (const signal of resolution.discarded) {
       await this.memberUpdateStore.resolvePending(spaceId, signal)
     }
     await this.derivePendingMemberUpdateFlags(state)
 
-    if (resolution.localRemovalConfirmed) {
+    if (resolution.confirmedLocalRemovalSignal) {
       // Sync 005 Z.253 Weg (a): erst die kanonische Bestaetigung der eigenen
       // Entfernung macht den lokalen Austritt dauerhaft — Cleanup ueber die
       // leaveSpace-Mechanik, AUSSCHLIESSLICH aus diesem Resolution-Pfad.
       // Bestaetigungsweg (b) CAPABILITY_GENERATION_STALE ist SPEC-DEFERRED
       // (Broker-Runtime-Check fehlt, Broker-Conformance-Slice).
+      // The personal event is deliberately written at the canonical boundary:
+      // a member-update alone is pending and never reaches this point.  Awaiting
+      // the PersonalDoc flush here makes a flush failure abort cleanup, so page
+      // unload cannot lose the confirmed removal.
+      await this.recordConfirmedMembershipRemoval(resolution.confirmedLocalRemovalSignal)
+      // Only now may the signal be consumed: an exception above intentionally
+      // leaves it in the store so the next observer/restore pass retries.
+      await this.memberUpdateStore.resolvePending(spaceId, resolution.confirmedLocalRemovalSignal)
+      await this.derivePendingMemberUpdateFlags(state)
       await this.cleanupSpaceLocally(spaceId)
     }
+  }
+
+  /**
+   * Persists one confirmed local membership-removal inbox entry.  The PersonalDoc
+   * mutation uses the existing notification-state mechanism (the shared mutable
+   * PersonalDoc proxy); no replication port is introduced for this personal data.
+   */
+  private async recordConfirmedMembershipRemoval(signal: MemberUpdateSignal): Promise<void> {
+    // Each recipient gets its own outer inbox envelope.  For a self-leave those
+    // envelope ids differ across the leaver's devices, while the canonical
+    // removal is one event.  Derive its identity from the stable tuple so the
+    // shared PersonalDoc deduplicates sibling-device resolution.  Admin removal
+    // provenance continues to use the verified outer inbox id.
+    const stableSelfRemovalId = signal.action === 'removed' && signal.signerDid === signal.memberDid
+      ? JSON.stringify([
+          'membership-removal', signal.spaceId, signal.memberDid, signal.effectiveKeyGeneration,
+        ])
+      : undefined
+    const eventId = stableSelfRemovalId ?? signal.outerId ?? JSON.stringify([
+      'membership-removal', signal.spaceId, signal.memberDid, signal.effectiveKeyGeneration,
+    ])
+    const entry: MembershipRemovalDoc = {
+      eventId,
+      spaceId: signal.spaceId,
+      removedDid: signal.memberDid,
+      generation: signal.effectiveKeyGeneration,
+      ts: signal.receivedAt ?? new Date().toISOString(),
+      byDid: signal.signerDid,
+    }
+
+    if (!isYjsPersonalDocInitialized()) {
+      throw new Error('confirmed membership removal requires an initialized PersonalDoc')
+    }
+    if (!this.flushPersonalDoc) {
+      throw new Error('confirmed membership removal requires flushPersonalDoc durability wiring')
+    }
+    changeYjsPersonalDoc(doc => {
+        const removals = doc.membershipRemovals ?? (doc.membershipRemovals = {}, doc.membershipRemovals!)
+        // Replay and redelivery are idempotent by stable event identity.  Keep the
+        // first canonical record rather than letting a later delivery change it.
+        if (removals[eventId]) return
+        removals[eventId] = entry
+
+        const retained = Object.values(removals).sort((left, right) =>
+          left.ts.localeCompare(right.ts) || left.eventId.localeCompare(right.eventId))
+        while (retained.length > 50) {
+          const oldest = retained.shift()!
+          delete removals[oldest.eventId]
+        }
+    })
+    await this.flushPersonalDoc()
   }
 
   /**
@@ -2424,6 +2837,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
       // so the observer must NOT also fire a (fire-and-forget) write for it, which would
       // create a SECOND log entry / seq for the same membership op.
       if (origin === MEMBERSHIP_COMMIT_ORIGIN) return
+      if (origin === LOCAL_ONLY_MEMBERSHIP_ORIGIN) return
       // VE-2: when the log path is the primary steady-state path, local updates are
       // written as encrypted log entries (NOT content broadcasts). The legacy
       // content path stays available for the non-log-sync configuration (VE-7
@@ -2518,6 +2932,10 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
         .catch(() => {})
         .then(() => this.saveSpaceMetadata(state))
         .then(() => this.resolvePendingMemberUpdates(state))
+        // Only the canonical _members log projection is an enforcement trigger.
+        // This sits after projection so the active-admin test uses `_admins ∩
+        // _members`; member-update pending signals never reach this observer.
+        .then(() => this.enforceCanonicalSelfRemovalRotation(state, events))
         .catch((err) => console.warn('[YjsReplication] member-update resolution failed:', err))
     }
     membersMap.observe(membersHandler)
@@ -3044,6 +3462,8 @@ export class YjsReplicationAdapter implements ReplicationAdapter {
       // Sync 003 Z.460-464: signerDid aus verifiziertem Inner-JWS, nicht aus
       // Envelope-Routing. Löst #189-SPEC-DEFERRED S1 auf.
       signerDid: decoded.senderDid,
+      outerId: decoded.outerId,
+      receivedAt: new Date().toISOString(),
     }
     const result = await processMemberUpdate({
       signal,

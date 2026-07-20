@@ -647,6 +647,7 @@ function fromStored(stored: StoredLogEntry): LocalLogEntry {
  * out-of-line by pendingRemovalKey(spaceId, removedDid).
  */
 interface StoredPendingRemoval {
+  phase?: PendingRemoval['phase']
   spaceId: string
   removedDid: string
   homeBrokerSet: string[]
@@ -658,10 +659,15 @@ interface StoredPendingRemoval {
     capVerificationKey: string
   }
   createdAt: number
+  activityEntry?: Record<string, unknown>
+  kind?: 'canonical-self-removal-rotation'
+  committed?: boolean
+  adminRemoveConfirmedBrokerUrls?: string[]
 }
 
 function toStoredRemoval(removal: PendingRemoval): StoredPendingRemoval {
   return {
+    phase: removal.phase,
     spaceId: removal.spaceId,
     removedDid: removal.removedDid,
     // Defensive copy + normalize to string[] (if a caller passed something
@@ -675,6 +681,10 @@ function toStoredRemoval(removal: PendingRemoval): StoredPendingRemoval {
       capVerificationKey: encodeBase64Url(removal.stagedKeyMaterial.capVerificationKey),
     },
     createdAt: removal.createdAt,
+    activityEntry: removal.activityEntry === undefined ? undefined : JSON.parse(JSON.stringify(removal.activityEntry)),
+    kind: removal.kind,
+    committed: removal.committed,
+    adminRemoveConfirmedBrokerUrls: removal.adminRemoveConfirmedBrokerUrls === undefined ? undefined : [...removal.adminRemoveConfirmedBrokerUrls],
   }
 }
 
@@ -685,6 +695,9 @@ function fromStoredRemoval(stored: StoredPendingRemoval): PendingRemoval {
     capVerificationKey: decodeBase64Url(stored.stagedKeyMaterial.capVerificationKey),
   }
   return {
+    // v3/v4 records predate phases.  Infer the furthest durable boundary; this
+    // migration is deliberately read-time so old databases need no rewrite pass.
+    phase: stored.phase ?? (stored.committed ? 'committed' : stored.confirmedBrokerUrls.length > 0 ? 'broker-confirmed' : 'staged'),
     spaceId: stored.spaceId,
     removedDid: stored.removedDid,
     homeBrokerSet: [...stored.homeBrokerSet],
@@ -692,6 +705,10 @@ function fromStoredRemoval(stored: StoredPendingRemoval): PendingRemoval {
     newGeneration: stored.newGeneration,
     stagedKeyMaterial,
     createdAt: stored.createdAt,
+    activityEntry: stored.activityEntry === undefined ? undefined : JSON.parse(JSON.stringify(stored.activityEntry)),
+    kind: stored.kind,
+    committed: stored.committed,
+    adminRemoveConfirmedBrokerUrls: stored.adminRemoveConfirmedBrokerUrls === undefined ? undefined : [...stored.adminRemoveConfirmedBrokerUrls],
   }
 }
 

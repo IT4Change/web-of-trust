@@ -86,6 +86,40 @@ function loadSpecVector(relativePath: string): any {
   return JSON.parse(loadSpecFixtureText(relativePath))
 }
 
+function spaceRotateVectorOutcome(installed: { generation: number, verificationKey: string }, incoming: { newGeneration: number, newSpaceCapabilityVerificationKey: string }): 'success' | 'GENERATION_TAKEN' | 'GENERATION_GAP' {
+  if (incoming.newGeneration === installed.generation) {
+    return incoming.newSpaceCapabilityVerificationKey === installed.verificationKey ? 'success' : 'GENERATION_TAKEN'
+  }
+  if (incoming.newGeneration < installed.generation) return 'GENERATION_TAKEN'
+  if (incoming.newGeneration > installed.generation + 1) return 'GENERATION_GAP'
+  return 'success'
+}
+
+describe('Sync 003 material-bound space-rotate response vectors', () => {
+  it('executes every space_rotate_response_cases fixture', () => {
+    for (const testCase of phase1.space_rotate_response_cases.cases.filter((item: { incoming?: unknown }) => item.incoming)) {
+      expect(spaceRotateVectorOutcome(testCase.installed, testCase.incoming), testCase.name).toBe(testCase.expected)
+    }
+  })
+
+  it('executes the stateful generation-gap recovery vector', () => {
+    for (const testCase of phase1.space_rotate_response_cases.cases.filter((item: { sequence?: unknown }) => Array.isArray(item.sequence))) {
+      let installed = testCase.installed
+      for (const step of testCase.sequence) {
+        expect(spaceRotateVectorOutcome(installed, step.incoming), `${testCase.name}:${step.incoming.newGeneration}`).toBe(step.expected)
+        if (step.expected === 'GENERATION_GAP') {
+          expect(step.expectedErrorFrame).toMatchObject({
+            type: 'error/1.0', thid: '<spaceId>',
+            body: { code: 'GENERATION_GAP', currentGeneration: installed.generation },
+          })
+        } else {
+          installed = { generation: step.incoming.newGeneration, verificationKey: step.incoming.newSpaceCapabilityVerificationKey }
+        }
+      }
+    }
+  })
+})
+
 function bytesToHex(bytes: Uint8Array): string {
   return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('')
 }

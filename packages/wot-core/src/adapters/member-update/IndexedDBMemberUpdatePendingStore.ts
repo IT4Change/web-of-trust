@@ -64,8 +64,8 @@ export class IndexedDBMemberUpdatePendingStore implements MemberUpdatePendingSto
     const tx = db.transaction(SEEN_STORE, 'readwrite')
     const existing = (await tx.store.get(seenKey(signal))) as SeenMemberUpdateSignal | undefined
     if (existing !== undefined) {
-      // Upgrade ONLY the disposition; preserve the original signer provenance.
-      await tx.store.put({ ...existing, storedDisposition: signal.storedDisposition })
+      // The authorized signal replaces signer and receipt provenance.
+      await tx.store.put(toSeenRecord(signal))
     }
     await tx.done
   }
@@ -152,6 +152,8 @@ function toSeenRecord(signal: SeenMemberUpdateSignal): SeenMemberUpdateSignal {
     memberDid: signal.memberDid,
     effectiveKeyGeneration: signal.effectiveKeyGeneration,
     signerDid: signal.signerDid,
+    outerId: signal.outerId,
+    receivedAt: signal.receivedAt,
     storedDisposition: signal.storedDisposition,
   }
 }
@@ -163,6 +165,8 @@ function toFutureRecord(signal: MemberUpdateSignal): MemberUpdateSignal {
     memberDid: signal.memberDid,
     effectiveKeyGeneration: signal.effectiveKeyGeneration,
     signerDid: signal.signerDid,
+    outerId: signal.outerId,
+    receivedAt: signal.receivedAt,
   }
 }
 

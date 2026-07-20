@@ -142,6 +142,13 @@ describe('AutomergeReplicationAdapter — Slice SR secure removal (VE-C1 wiring)
     return space.id
   }
 
+  it('SELF-LEAVE capability: rejects before staging because Automerge has no durable admin-remove capability', async () => {
+    const spaceId = await createSharedSpace()
+    await expect(aliceAdapter.removeMember(spaceId, alice.getDid()))
+      .rejects.toThrow('secure self-leave is not supported by the Automerge adapter: durable admin-remove capability is unavailable')
+    expect(await pendingRemoval(aliceAdapter, spaceId, alice.getDid())).toBeNull()
+  })
+
   it('WIRING (I-READ): a DUPLICATE key-rotation drives the coordinator blocked-by-key replay (ignore-stale-or-duplicate call-site)', async () => {
     // Automerge parity with the Yjs wiring test: exercise the actual ignore-stale-or-duplicate
     // CALL-SITE end-to-end so removing the replayBlockedByKeyForSpace wiring would be caught.
@@ -218,6 +225,56 @@ describe('AutomergeReplicationAdapter — Slice SR secure removal (VE-C1 wiring)
     await aliceAdapter.removeMember(spaceId, bob.getDid())
     await wait(250)
 
+    expect(await adapterGeneration(aliceAdapter, spaceId)).toBe(1)
+    expect(brokerGeneration(broker, spaceId)).toBe(1)
+    expect((await aliceAdapter.getSpace(spaceId))!.members).not.toContain(bob.getDid())
+    expect(await pendingRemoval(aliceAdapter, spaceId, bob.getDid())).toBeNull()
+  })
+
+  it('GENERATION_GAP: catches up to the broker generation, restages its successor, and completes a foreign-member removal', async () => {
+    const spaceId = await createSharedSpace()
+    const remoteKeys = new InMemoryKeyManagementAdapter()
+
+    // There is no direct broker-generation test control. An interrupted earlier
+    // removal left a real stale stage for generation 2, while Alice and the broker
+    // are both still at 0. The first space-rotate thus gets GENERATION_GAP with
+    // body.currentGeneration=0. Recovery must call the real coordinator, then
+    // discard that stale material and stage the broker successor (generation 1).
+    await createSpaceKey({ crypto: protocolCrypto, keyPort: remoteKeys, spaceId, ownerDid: alice.getDid() })
+    await rotateSpaceKey({ crypto: protocolCrypto, keyPort: remoteKeys, spaceId, ownerDid: alice.getDid() })
+    const staleStage = await stageRotateSpaceKey({ crypto: protocolCrypto, keyPort: remoteKeys, spaceId, ownerDid: alice.getDid() })
+    const store = (aliceAdapter as unknown as { docLogStore: InMemoryDocLogStore }).docLogStore
+    await store.putPendingRemoval({
+      spaceId,
+      removedDid: bob.getDid(),
+      homeBrokerSet: BROKER_URLS,
+      confirmedBrokerUrls: [],
+      newGeneration: staleStage.newGeneration,
+      stagedKeyMaterial: {
+        contentKey: staleStage.contentKey,
+        capSigningSeed: staleStage.capabilitySigningSeed,
+        capVerificationKey: staleStage.capabilityVerificationKey,
+      },
+      createdAt: Date.now(),
+    })
+    expect(staleStage.newGeneration).toBe(2)
+    expect(brokerGeneration(broker, spaceId) ?? 0).toBe(0)
+    expect(await adapterGeneration(aliceAdapter, spaceId)).toBe(0)
+
+    const coordinator = (aliceAdapter as unknown as {
+      coordinators: Map<string, { catchUp: () => Promise<{ complete: boolean }> }>
+    }).coordinators.get(spaceId)!
+    const realCatchUp = coordinator.catchUp.bind(coordinator)
+    let catchUpCalls = 0
+    coordinator.catchUp = async () => {
+      catchUpCalls += 1
+      return realCatchUp()
+    }
+
+    await (aliceAdapter as unknown as { recoverPendingRemovalsOnce: () => Promise<void> }).recoverPendingRemovalsOnce()
+    await wait(300)
+
+    expect(catchUpCalls).toBeGreaterThanOrEqual(1)
     expect(await adapterGeneration(aliceAdapter, spaceId)).toBe(1)
     expect(brokerGeneration(broker, spaceId)).toBe(1)
     expect((await aliceAdapter.getSpace(spaceId))!.members).not.toContain(bob.getDid())

@@ -27,6 +27,7 @@ import { MEMBER_UPDATE_MESSAGE_TYPE, formatMembershipEventKey } from '@web_of_tr
 import type { MembershipEvent, AdminEntry } from '@web_of_trust/core/protocol'
 import type { MessagingAdapter, WireMessage } from '@web_of_trust/core/ports'
 import { YjsReplicationAdapter } from '../src/YjsReplicationAdapter'
+import { changeYjsPersonalDoc, flushYjsPersonalDoc, initYjsPersonalDoc, getYjsPersonalDoc, resetYjsPersonalDoc } from '../src/YjsPersonalDocManager'
 
 const ADMIN = 'did:key:z6MkAdminAdminAdmin'
 const TARGET = 'did:key:z6MkTargetTargetTarget'
@@ -112,8 +113,14 @@ async function setup(options?: {
   passphrase?: string
   memberUpdateStore?: InMemoryMemberUpdatePendingStore
   messagingOverride?: MessagingAdapter
+  flushPersonalDoc?: () => Promise<void>
+  brokerUrls?: string[]
 }): Promise<Harness> {
   const alice = (await createTestIdentity(options?.passphrase ?? 'res-alice')).identity
+  // A confirmed self-removal has a hard production dependency on the personal
+  // document and its durability flush.  The isolated harness wires both rather
+  // than weakening that contract in the adapter.
+  await initYjsPersonalDoc(alice)
   const messaging = new InMemoryMessagingAdapter()
   await messaging.connect(alice.getDid())
   const metadata = new InMemorySpaceMetadataStorage()
@@ -127,10 +134,13 @@ async function setup(options?: {
     metadataStorage: metadata,
     compactStore,
     memberUpdateStore,
+    brokerUrls: options?.brokerUrls,
+    flushPersonalDoc: options?.flushPersonalDoc ?? (async () => {}),
   })
   await adapter.start()
   cleanups.push(async () => {
     await adapter.stop()
+    await resetYjsPersonalDoc()
     try { await alice.deleteStoredIdentity() } catch {}
   })
   return { adapter, alice, messaging, metadata, keyManagement, compactStore, memberUpdateStore }
@@ -161,6 +171,152 @@ describe('Pflicht-Test 4 — kanonische Bestaetigung add (Sync 005 Z.196)', () =
     expect(spaceState(h.adapter, space.id).pendingAddition).toBeUndefined()
     // Bestaetigung ist KEIN Cleanup-Anlass fuer added — Space bleibt.
     expect(spaceState(h.adapter, space.id)).toBeDefined()
+  })
+})
+
+describe('P0b membershipRemovals — confirmed cleanup boundary', () => {
+  it('two devices: self-leave reaches the sibling as authorized pending, then canonical resolution cleans it up with one stable PersonalDoc removal', async () => {
+    const h = await setup({ passphrase: 'p0b-self-leave-two-devices', brokerUrls: ['wss://broker.example.com'] })
+    const target = (await createTestIdentity('p0b-self-leave-target')).identity
+    const siblingMessaging = new InMemoryMessagingAdapter()
+    await siblingMessaging.connect(h.alice.getDid())
+    const siblingMetadata = new InMemorySpaceMetadataStorage()
+    const siblingKeys = new InMemoryKeyManagementAdapter()
+    const siblingPending = new InMemoryMemberUpdatePendingStore()
+    const siblingFlush = vi.fn(async () => {})
+    const sibling = new YjsReplicationAdapter({
+      identity: h.alice,
+      messaging: siblingMessaging,
+      metadataStorage: siblingMetadata,
+      keyManagement: siblingKeys,
+      compactStore: new InMemoryCompactStore(),
+      memberUpdateStore: siblingPending,
+      brokerUrls: ['wss://broker.example.com'],
+      flushPersonalDoc: siblingFlush,
+    })
+    cleanups.push(async () => {
+      await sibling.stop()
+      try { await target.deleteStoredIdentity() } catch {}
+    })
+
+    const space = await h.adapter.createSpace<TestDoc>('shared', { items: {} }, { name: 'S' })
+    await h.adapter.addMember(space.id, target.getDid(), await target.getEncryptionPublicKeyBytes())
+
+    // PersonalDoc metadata/key sync gives the sibling device a local copy; the
+    // canonical Space update itself deliberately arrives later than the inbox
+    // signal, exercising Pending -> canonical resolution.
+    const metadata = (await h.metadata.loadAllSpaceMetadata()).find(item => item.info.id === space.id)!
+    await siblingMetadata.saveSpaceMetadata(metadata)
+    for (const key of await h.metadata.loadGroupKeys(space.id)) await siblingMetadata.saveGroupKey(key)
+    for (const seed of await h.metadata.loadCapabilitySigningSeeds(space.id)) await siblingMetadata.saveCapabilitySigningSeed(seed)
+    await sibling.start()
+    Y.applyUpdate(spaceState(sibling, space.id).doc, Y.encodeStateAsUpdate(spaceState(h.adapter, space.id).doc), 'remote')
+
+    const senderSavePending = vi.spyOn(h.memberUpdateStore, 'savePending')
+    await h.adapter.leaveSpace(space.id)
+
+    await waitUntil(async () => (await siblingPending.listSeenForSpace(space.id)).length === 1)
+    expect(spaceState(sibling, space.id).pendingRemoval).toEqual({ effectiveKeyGeneration: 1 })
+    // Echo-Guard: das SENDENDE Gerät bekommt die Own-DID-Zustellung ebenfalls
+    // ausgeliefert, darf sein eigenes Signal aber NIE verarbeiten. Der Spy (statt
+    // End-Zustand) trägt die Beweislast: ohne Guard würde savePending gerufen,
+    // auch wenn eine spätere Resolution das Pending wieder auflöste.
+    expect(senderSavePending).not.toHaveBeenCalled()
+
+    // The next canonical Space sync answers the pending self-signed removal.
+    applyRemoteMembershipEvent(sibling, space.id, { did: h.alice.getDid(), status: 'removed', sinceGeneration: 1 })
+    await waitUntil(() => spaceState(sibling, space.id) === undefined)
+
+    const removals = Object.values(getYjsPersonalDoc().membershipRemovals ?? {})
+      .filter(removal => removal.spaceId === space.id)
+    expect(removals).toHaveLength(1)
+    expect(removals[0]).toMatchObject({
+      eventId: JSON.stringify(['membership-removal', space.id, h.alice.getDid(), 1]),
+      removedDid: h.alice.getDid(),
+      generation: 1,
+      byDid: h.alice.getDid(),
+    })
+    expect(siblingFlush).toHaveBeenCalled()
+
+    // This suite shares the module-scoped PersonalDoc manager.  Remove the
+    // deliberately persisted E2E fixture again so later cases start from their
+    // own identity's empty PersonalDoc, as the production devices would.
+    changeYjsPersonalDoc(doc => { delete doc.membershipRemovals?.[removals[0].eventId] })
+    await flushYjsPersonalDoc()
+  })
+
+  it('writes the authorized confirmed signal once, flushes it, then cleans up', async () => {
+    const h = await setup({ passphrase: 'p0b-confirmed-removal' })
+    await initYjsPersonalDoc(h.alice)
+    cleanups.push(resetYjsPersonalDoc)
+    const space = await h.adapter.createSpace<TestDoc>('shared', { items: {} }, { name: 'S' })
+    seedMembership(h.adapter, space.id, ADMIN, [ADMIN, h.alice.getDid()])
+    const outerId = 'confirmed-removal-id'
+
+    await (h.adapter as any).handleMemberUpdate({
+      type: MEMBER_UPDATE_MESSAGE_TYPE,
+      senderDid: ADMIN,
+      body: { spaceId: space.id, action: 'removed', memberDid: h.alice.getDid(), effectiveKeyGeneration: 1 },
+      outerId,
+      extensionFields: {},
+    })
+    applyRemoteMembershipEvent(h.adapter, space.id, { did: h.alice.getDid(), status: 'removed', sinceGeneration: 1 })
+    await waitUntil(() => spaceState(h.adapter, space.id) === undefined)
+
+    expect(getYjsPersonalDoc().membershipRemovals?.[outerId]).toEqual(
+      expect.objectContaining({ eventId: outerId, spaceId: space.id, removedDid: h.alice.getDid(), generation: 1, byDid: ADMIN }),
+    )
+  })
+
+  it('keeps the confirmed pending after a flush failure and retries exactly one event plus cleanup', async () => {
+    let fail = true
+    const flushFailure = vi.fn(async () => { if (fail) throw new Error('vault unavailable') })
+    const h = await setup({ passphrase: 'p0b-flush-failure', flushPersonalDoc: flushFailure })
+    await initYjsPersonalDoc(h.alice)
+    cleanups.push(resetYjsPersonalDoc)
+    const space = await h.adapter.createSpace<TestDoc>('shared', { items: {} }, { name: 'S' })
+    seedMembership(h.adapter, space.id, ADMIN, [ADMIN, h.alice.getDid()])
+    await (h.adapter as any).handleMemberUpdate(memberUpdateDecoded(ADMIN, {
+      spaceId: space.id, action: 'removed', memberDid: h.alice.getDid(), effectiveKeyGeneration: 1,
+    }))
+
+    applyRemoteMembershipEvent(h.adapter, space.id, { did: h.alice.getDid(), status: 'removed', sinceGeneration: 1 })
+    await wait()
+    expect(flushFailure).toHaveBeenCalled()
+    expect(spaceState(h.adapter, space.id)).toBeDefined()
+    expect(await h.memberUpdateStore.listSeenForSpace(space.id)).toHaveLength(1)
+    expect(Object.values(getYjsPersonalDoc().membershipRemovals ?? {}).filter(removal => removal.spaceId === space.id)).toHaveLength(1)
+
+    fail = false
+    await (h.adapter as any).resolvePendingMemberUpdates(spaceState(h.adapter, space.id))
+    expect(spaceState(h.adapter, space.id)).toBeUndefined()
+    expect(Object.values(getYjsPersonalDoc().membershipRemovals ?? {}).filter(removal => removal.spaceId === space.id)).toHaveLength(1)
+  })
+
+  it('blocks cleanup when the PersonalDoc durability wiring is absent', async () => {
+    const h = await setup({ passphrase: 'p0b-no-personal-flush' })
+    const space = await h.adapter.createSpace<TestDoc>('shared', { items: {} }, { name: 'S' })
+    ;(h.adapter as any).flushPersonalDoc = undefined
+    await expect((h.adapter as any).recordConfirmedMembershipRemoval({
+      spaceId: space.id, action: 'removed', memberDid: h.alice.getDid(),
+      effectiveKeyGeneration: 1, signerDid: ADMIN,
+    })).rejects.toThrow('flushPersonalDoc durability wiring')
+    expect(spaceState(h.adapter, space.id)).toBeDefined()
+  })
+
+  it('leaveSpace records exactly one self-removal and keeps a last-member space local', async () => {
+    const h = await setup({ passphrase: 'p0b-self-leave' })
+    await initYjsPersonalDoc(h.alice)
+    cleanups.push(resetYjsPersonalDoc)
+    const space = await h.adapter.createSpace<TestDoc>('shared', { items: {} }, { name: 'S' })
+    const send = vi.spyOn(h.messaging, 'send')
+
+    await h.adapter.leaveSpace(space.id)
+    const removals = Object.values(getYjsPersonalDoc().membershipRemovals ?? {})
+      .filter(removal => removal.spaceId === space.id)
+    expect(removals).toHaveLength(1)
+    expect(removals[0]).toMatchObject({ spaceId: space.id, removedDid: h.alice.getDid(), byDid: h.alice.getDid() })
+    expect(send).not.toHaveBeenCalled()
   })
 })
 
@@ -396,10 +552,12 @@ describe('Review-M1 — canonical-first: kanonische Bestaetigung VOR dem member-
     await messaging.connect(alice.getDid())
     const metadata = new InMemorySpaceMetadataStorage()
     const compactStore = new InMemoryCompactStore()
+    await initYjsPersonalDoc(alice, undefined, undefined, new InMemoryCompactStore())
 
     const adapter1 = new YjsReplicationAdapter({
       identity: alice, messaging, keyManagement: new InMemoryKeyManagementAdapter(),
       metadataStorage: metadata, compactStore, memberUpdateStore: durableStore,
+      flushPersonalDoc: async () => {},
     })
     await adapter1.start()
     const space = await adapter1.createSpace<TestDoc>('shared', { items: {} }, { name: 'S' })
@@ -424,12 +582,25 @@ describe('Review-M1 — canonical-first: kanonische Bestaetigung VOR dem member-
     const adapter2 = new YjsReplicationAdapter({
       identity: alice, messaging, keyManagement: new InMemoryKeyManagementAdapter(),
       metadataStorage: metadata, compactStore, memberUpdateStore: durableStore,
+      flushPersonalDoc: async () => {},
     })
     await adapter2.start()
     cleanups.push(async () => {
       await adapter2.stop()
       try { await alice.deleteStoredIdentity() } catch {}
     })
+
+    // The compact-store restore is deliberately minimal in this isolated
+    // harness; reapply the canonical snapshot exactly as the log catch-up does
+    // before asserting the pending-resolution boundary.
+    // The in-memory store models the post-crash durable record; reinsert it
+    // after the harness' empty bootstrap pass before applying the catch-up.
+    await durableStore.savePending({
+      spaceId: space.id, action: 'removed', memberDid: alice.getDid(),
+      effectiveKeyGeneration: 1, signerDid: ADMIN, storedDisposition: 'store-pending-and-sync',
+    })
+    applyRemoteMembershipEvent(adapter2, space.id, { did: alice.getDid(), status: 'removed', sinceGeneration: 1 })
+    await spaceState(adapter2, space.id).membershipResolutionChain
 
     // Resolution lief beim Restore (nach Flag-Re-Derivation): Pending
     // aufgeloest, Cleanup gelaufen (Sync 005 Z.253: Bestaetigung lag bereits vor).

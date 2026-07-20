@@ -94,9 +94,12 @@ describe('member-update disposition invariants', () => {
     expect(evaluate(update({ effectiveKeyGeneration: 6 }))).toBe('buffer-future-and-catch-up')
   })
 
-  it('accepts member-signed additions but not member-signed removals as authorized', () => {
+  it('accepts member-signed additions and self-signed removals as authorized', () => {
     expect(evaluate(update({ action: 'added', signerDid: MEMBER_SIGNER_DID }))).toBe('store-pending-and-sync')
-    expect(evaluate(update({ action: 'removed', signerDid: MEMBER_SIGNER_DID }))).toBe(
+    expect(evaluate(update({ action: 'removed', memberDid: MEMBER_SIGNER_DID, signerDid: MEMBER_SIGNER_DID }))).toBe(
+      'store-pending-and-sync',
+    )
+    expect(evaluate(update({ action: 'removed', memberDid: MEMBER_DID, signerDid: MEMBER_SIGNER_DID }))).toBe(
       'store-unverified-pending-and-sync',
     )
   })

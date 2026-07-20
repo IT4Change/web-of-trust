@@ -29,4 +29,7 @@ export interface KeyManagementPort {
   saveOwnCapability(spaceId: string, generation: number, capabilityJws: string): Promise<void>
   /** The local user's own capability JWS for a generation, or null if unknown. */
   getOwnCapability(spaceId: string, generation: number): Promise<string | null>
+
+  /** Irrevocably remove every content/capability key and own capability for a space. */
+  deleteSpaceKeys(spaceId: string): Promise<void>
 }

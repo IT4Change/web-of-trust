@@ -15,7 +15,8 @@ import {
   type ControlFrameReceipt,
 } from '../../protocol/sync/control-frame-transport'
 import { parsePresentCapabilityControlFrame, PRESENT_CAPABILITY_CONTROL_FRAME_TYPE } from '../../protocol/sync/present-capability-control-frame'
-import { parseSpaceRegisterMessage, SPACE_REGISTER_MESSAGE_TYPE, SPACE_ROTATE_MESSAGE_TYPE, parseSpaceRotateMessage } from '../../protocol/sync/broker-admin-messages'
+import { parseSpaceRegisterMessage, SPACE_REGISTER_MESSAGE_TYPE, SPACE_ROTATE_MESSAGE_TYPE, parseSpaceRotateMessage, ADMIN_REMOVE_MESSAGE_TYPE, parseAdminRemoveMessage, verifyAdminRemoveMessage } from '../../protocol/sync/broker-admin-messages'
+import { didKeyToPublicKeyBytes, didOrKidToDid } from '../../protocol/identity/did-key'
 import { controlFrameDocId } from '../../protocol/sync/control-frame-doc-id'
 import { WebCryptoProtocolCryptoAdapter } from '../protocol-crypto'
 import type { BrokerErrorCode } from '../../protocol/sync/broker-error'
@@ -63,6 +64,8 @@ interface DocLog {
   /** registrationJws holder = first writer. */
   registered: boolean
   registrationAdminDids: string[]
+  /** Current verification key, retained for material-bound rotate retries. */
+  verificationKey: string | null
   /** entries keyed by `${deviceId}:${seq}`. */
   entries: Map<string, StoredLogEntry>
   /** broker heads: max seq per deviceId. */
@@ -204,6 +207,8 @@ export class InProcessLogBroker implements InProcessLogBrokerControls {
         return this.handleSpaceRegister(frame)
       case SPACE_ROTATE_MESSAGE_TYPE:
         return this.handleSpaceRotate(socketId, frame)
+      case ADMIN_REMOVE_MESSAGE_TYPE:
+        return this.handleAdminRemove(frame)
       case PRESENT_CAPABILITY_CONTROL_FRAME_TYPE:
         return this.handlePresentCapability(socketId, frame)
       default:
@@ -231,6 +236,7 @@ export class InProcessLogBroker implements InProcessLogBrokerControls {
     }
     log.registered = true
     log.registrationAdminDids = [...parsed.payload.adminDids]
+    log.verificationKey = parsed.payload.spaceCapabilityVerificationKey
     return this.receipt(docId)
   }
 
@@ -238,17 +244,64 @@ export class InProcessLogBroker implements InProcessLogBrokerControls {
     const parsed = parseSpaceRotateMessage(frame)
     const docId = parsed.payload.spaceId
     const log = this.ensureDoc(docId)
+    if (parsed.payload.newGeneration === log.generation) {
+      if (parsed.payload.newSpaceCapabilityVerificationKey === log.verificationKey) return this.receipt(docId)
+      throw new ControlFrameRejectedError({
+        code: 'GENERATION_TAKEN',
+        message: 'space-rotate generation is already installed with different key material',
+      })
+    }
+    if (parsed.payload.newGeneration < log.generation) {
+      throw new ControlFrameRejectedError({
+        code: 'GENERATION_TAKEN',
+        message: 'space-rotate generation has already been superseded',
+      })
+    }
+    if (parsed.payload.newGeneration > log.generation + 1) {
+      throw new ControlFrameRejectedError({
+        code: 'GENERATION_GAP',
+        message: 'space-rotate newGeneration is beyond the current generation plus one',
+        currentGeneration: log.generation,
+      })
+    }
+    if (parsed.payload.newGeneration !== log.generation + 1) {
+      throw new ControlFrameRejectedError({
+        code: 'AUTH_INVALID',
+        message: 'space-rotate newGeneration must be exactly the current generation plus one',
+      })
+    }
     // Slice SR / VE-R1 mirror: advance the durable generation so subsequent
     // stale-generation log-entries (the removed member's old-gen writes) are gated
     // out. Monotonic — never moves backward on a duplicate/stale rotate.
-    if (parsed.payload.newGeneration > log.generation) {
-      log.generation = parsed.payload.newGeneration
-    }
+    log.generation = parsed.payload.newGeneration
+    log.verificationKey = parsed.payload.newSpaceCapabilityVerificationKey
     // After a rotate the relay clears the scope cache hard across all sockets.
     for (const key of [...this.scopes]) {
       if (key.endsWith(`:${docId}`)) this.scopes.delete(key)
     }
     return this.receipt(docId)
+  }
+
+  private async handleAdminRemove(frame: ControlFrame): Promise<ControlFrameReceipt> {
+    const parsed = parseAdminRemoveMessage(frame)
+    const log = this.ensureDoc(parsed.payload.spaceId)
+    const signerDid = didOrKidToDid(String(parsed.header.kid ?? ''))
+    let publicKey: Uint8Array
+    try { publicKey = didKeyToPublicKeyBytes(signerDid) } catch {
+      throw new ControlFrameRejectedError({ code: 'AUTH_INVALID', message: 'admin signer is invalid' })
+    }
+    const verified = await verifyAdminRemoveMessage({ frame, adminDid: signerDid, adminPublicKey: publicKey, crypto: this.crypto })
+    if (verified.disposition === 'rejected') {
+      throw new ControlFrameRejectedError({ code: verified.errorCode, message: 'admin-remove rejected' })
+    }
+    const signerRegistered = log.registrationAdminDids.includes(signerDid)
+    const alreadyRemoved = !log.registrationAdminDids.includes(parsed.payload.removedAdminDid)
+    if (!signerRegistered) {
+      if (signerDid === parsed.payload.removedAdminDid && alreadyRemoved) return this.receipt(parsed.payload.spaceId)
+      throw new ControlFrameRejectedError({ code: 'AUTH_INVALID', message: 'admin signer is not registered' })
+    }
+    log.registrationAdminDids = log.registrationAdminDids.filter((did) => did !== parsed.payload.removedAdminDid)
+    return this.receipt(parsed.payload.spaceId)
   }
 
   private async handlePresentCapability(socketId: string, frame: ControlFrame): Promise<ControlFrameReceipt> {
@@ -469,7 +522,7 @@ export class InProcessLogBroker implements InProcessLogBrokerControls {
   private ensureDoc(docId: string): DocLog {
     let log = this.docs.get(docId)
     if (!log) {
-      log = { registered: false, registrationAdminDids: [], entries: new Map(), heads: new Map(), generation: 0 }
+      log = { registered: false, registrationAdminDids: [], verificationKey: null, entries: new Map(), heads: new Map(), generation: 0 }
       this.docs.set(docId, log)
     }
     return log

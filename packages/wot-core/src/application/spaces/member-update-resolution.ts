@@ -15,7 +15,10 @@ export interface MemberUpdateResolution {
   /** Sync 005 Z.198: widersprochene Pending-Updates — verwerfen, kanonischen State behalten */
   discarded: MemberUpdateSignal[]
   /** Sync 005 Z.253 Weg (a): eigene Entfernung kanonisch bestaetigt → Cleanup-Trigger */
+  /** Legacy boolean retained for existing consumers. */
   localRemovalConfirmed: boolean
+  /** The authorized canonical signal used for provenance-sensitive cleanup. */
+  confirmedLocalRemovalSignal?: MemberUpdateSignal
 }
 
 /**
@@ -48,22 +51,30 @@ export function resolveMemberUpdatesAgainstCanonical(
   const canonical = new Set(input.canonicalActiveMembers)
   const confirmed: MemberUpdateSignal[] = []
   const discarded: MemberUpdateSignal[] = []
-  let localRemovalConfirmed = false
+  let confirmedLocalRemovalSignal: MemberUpdateSignal | undefined
 
   for (const signal of input.pending) {
     const isCanonicalMember = canonical.has(signal.memberDid)
     const isConfirmed = signal.action === 'added' ? isCanonicalMember : !isCanonicalMember
+    // An unverified signal is deliberately retained even when the current
+    // canonical projection happens to agree with it.  It may later be upgraded
+    // by an authorized message; until then it must neither supply provenance
+    // nor be consumed, otherwise an attacker-controlled first signal could
+    // determine the personal removal record.
+    if (isConfirmed && signal.storedDisposition === 'store-unverified-pending-and-sync') {
+      continue
+    }
     if (isConfirmed) {
       confirmed.push(signal)
-      if (signal.action === 'removed' && signal.memberDid === input.localDid) {
-        localRemovalConfirmed = true
+      if (signal.action === 'removed' && signal.memberDid === input.localDid && signal.storedDisposition === 'store-pending-and-sync') {
+        confirmedLocalRemovalSignal = signal
       }
     } else {
       discarded.push(signal)
     }
   }
 
-  return { confirmed, discarded, localRemovalConfirmed }
+  return { confirmed, discarded, localRemovalConfirmed: confirmedLocalRemovalSignal !== undefined, confirmedLocalRemovalSignal }
 }
 
 /**

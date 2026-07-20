@@ -202,6 +202,14 @@ export interface CreateSpaceRotateMessageWithSignerOptions {
   sign: JcsEd25519SignFn
 }
 
+/** Operation-shaped variant of {@link CreateAdminRemoveMessageOptions}. */
+export interface CreateAdminRemoveMessageWithSignerOptions {
+  spaceId: string
+  removedAdminDid: string
+  kid: string
+  sign: JcsEd25519SignFn
+}
+
 // ---------------------------------------------------------------------------
 // Verify option shapes + result
 // ---------------------------------------------------------------------------
@@ -507,6 +515,24 @@ export async function createAdminRemoveMessage(
     { alg: 'EdDSA', kid: options.kid },
     payload as unknown as JsonValue,
     options.signingSeed,
+  )
+  return { type: ADMIN_REMOVE_MESSAGE_TYPE, adminChangeJws }
+}
+
+/** Create a self-admin-remove without exposing the admin signing seed. */
+export async function createAdminRemoveMessageWithSigner(
+  options: CreateAdminRemoveMessageWithSignerOptions,
+): Promise<AdminRemoveMessage> {
+  const payload = parseAdminRemovePayload({
+    type: ADMIN_REMOVE_MESSAGE_TYPE,
+    spaceId: options.spaceId,
+    removedAdminDid: options.removedAdminDid,
+  })
+  assertAdminKid(options.kid)
+  const adminChangeJws = await createJcsEd25519JwsWithSigner(
+    { alg: 'EdDSA', kid: options.kid },
+    payload as unknown as JsonValue,
+    options.sign,
   )
   return { type: ADMIN_REMOVE_MESSAGE_TYPE, adminChangeJws }
 }

@@ -17,6 +17,10 @@ export interface MemberUpdateSignal {
   memberDid: string
   effectiveKeyGeneration: number
   signerDid: string
+  /** Verified outer inbox id, used as stable removal provenance. */
+  outerId?: string
+  /** Receipt time in canonical ISO form. */
+  receivedAt?: string
 }
 
 export interface SeenMemberUpdateSignal extends MemberUpdateSignal {
@@ -60,6 +64,10 @@ function memberUpdateAuthorityLevel(
   update: MemberUpdateSignal,
   input: Pick<EvaluateMemberUpdateDispositionInput, 'knownAdminDids' | 'knownMemberDids'>,
 ): number {
+  // P0b: a member may authorize their own removal.  This is intentionally
+  // narrower than general member authority: additions still require an active
+  // member or admin, and removals of somebody else still require an admin.
+  if (update.action === 'removed' && update.signerDid === update.memberDid) return 1
   if (input.knownAdminDids.includes(update.signerDid)) return 1
   if (update.action === 'added' && input.knownMemberDids.includes(update.signerDid)) return 1
   return 0

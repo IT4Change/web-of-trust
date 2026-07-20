@@ -33,8 +33,8 @@ import { commitStagedRotation, stageRotateSpaceKey, type StagedRotationMaterial 
  * `removeMember` resolves IFF the removal was enforced + committed. If staging
  * succeeded but enforcement did not complete (a broker is offline / a transient
  * space-rotate reject), the caller throws {@link RemovalPendingNotEnforcedError} —
- * the staging is durable, so VE-C3 crash-recovery retries it later. A HARD
- * space-rotate reject (e.g. AUTH_INVALID — a real admin bug) propagates raw.
+ * the staging is durable, so VE-C3 crash-recovery retries it later. Only an
+ * idempotent success for the exact staged material authorizes committing it.
  */
 
 /**
@@ -66,12 +66,27 @@ export class RemovalPendingNotEnforcedError extends Error {
   }
 }
 
+/** The local key state is ahead of the broker state reported in GENERATION_GAP. */
+export class GenerationGapSplitBrainError extends Error {
+  readonly spaceId: string
+  readonly localGeneration: number
+  readonly brokerGeneration: number
+  constructor(spaceId: string, localGeneration: number, brokerGeneration: number) {
+    super(`GENERATION_GAP split-brain for ${spaceId}: local generation ${localGeneration} is ahead of broker generation ${brokerGeneration}`)
+    this.name = 'GenerationGapSplitBrainError'
+    this.spaceId = spaceId
+    this.localGeneration = localGeneration
+    this.brokerGeneration = brokerGeneration
+  }
+}
+
 /**
  * Dependencies the adapter injects for one space's two-phase removal. Everything
  * here is engine-neutral EXCEPT {@link commitRemoval}, which the adapter implements
  * over its concrete CRDT.
  */
-export interface SecureRemovalDeps {
+/** Effects needed before and through the rotation/commit phase. */
+export interface RotationDeps {
   crypto: ProtocolCryptoAdapter
   keyPort: KeyManagementPort
   docLogStore: DocLogStore
@@ -81,6 +96,10 @@ export interface SecureRemovalDeps {
   /** Capability validity window for the committed generation (Sync 003 Z.249). */
   validityDurationMs?: number
   now?: () => Date
+}
+
+/** Engine-specific effects that are legal only after rotation enforcement. */
+export interface CommitDeps {
   /**
    * The authoritative home brokers, captured at removal start and FIXED for the
    * lifetime of the removal. A single-element set is the festival/single-home-broker
@@ -105,6 +124,8 @@ export interface SecureRemovalDeps {
    * coordinator's serialized control tail (receipt.messageId == docId).
    */
   sendSpaceRotate: (brokerUrl: string, frame: ControlFrame) => Promise<void>
+  /** Trigger and await Sync-002 catch-up after a GENERATION_GAP. */
+  catchUpGeneration: () => Promise<boolean | { complete: boolean }>
   /**
    * Engine-specific COMMIT side effects, run ONLY after the staged generation has
    * been activated and enforcement is complete: write the `removed@newGeneration`
@@ -112,7 +133,30 @@ export interface SecureRemovalDeps {
    * the remaining members and the member-update to remaining + removed members,
    * and push the re-encrypted snapshot. Receives the committed `newGeneration`.
    */
-  commitRemoval: (removedDid: string, newGeneration: number) => Promise<void>
+  commitRemoval: (removedDid: string, newGeneration: number, activityEntry?: Record<string, unknown>) => Promise<void>
+}
+
+/** Durable, post-commit authority needed exclusively for an admin self-leave. */
+export interface AdminRemoveDeps {
+  createSelfAdminRemoveFrame: () => Promise<ControlFrame>
+  sendAdminRemove: (brokerUrl: string, frame: ControlFrame) => Promise<void>
+  finalizeSelfLeave: (newGeneration: number) => Promise<void>
+}
+
+/** Store-only dependency for terminal cleanup and its restart recovery. */
+export interface TerminalCleanupDeps {
+  docLogStore: DocLogStore
+}
+
+/** Store-only terminal recovery that still has the durable local finalizer. */
+export interface TerminalFinalizationDeps extends TerminalCleanupDeps {
+  finalizeSelfLeave: (newGeneration: number) => Promise<void>
+}
+
+/** Full dependency set for a removal that can still enter rotation/commit. */
+export interface SecureRemovalDeps extends RotationDeps, CommitDeps, TerminalCleanupDeps {
+  /** Null means this adapter deliberately does not offer secure self-leave. */
+  adminRemove: AdminRemoveDeps | null
 }
 
 /**
@@ -125,12 +169,13 @@ export interface SecureRemovalDeps {
  *
  * @throws RemovalPendingNotEnforcedError if staging succeeded but not every home
  *   broker confirmed (durable — retried by VE-C3).
- * @throws Error (hard) on a `multi-broker` guard violation, or a hard
- *   `space-rotate` reject (e.g. AUTH_INVALID) — those propagate raw.
+ * @throws Error (hard) on a `multi-broker` guard violation or a non-retryable
+ *   `space-rotate` reject.
  */
 export async function runTwoPhaseRemoval(
   deps: SecureRemovalDeps,
   removedDid: string,
+  opts?: { activityEntry?: Record<string, unknown>, kind?: 'canonical-self-removal-rotation', targetGeneration?: number },
 ): Promise<void> {
   // ── MULTI-BROKER GUARD (MUSS): no silent half-enforcement ──────────────────
   // A real multi-broker space-rotate transport (broadcast to several authoritative
@@ -146,13 +191,22 @@ export async function runTwoPhaseRemoval(
 
   const { spaceId } = deps
 
+  // ── SELF-LEAVE PREFLIGHT (MUSS, vor JEDER Staging-/Broker-Wirkung) ──────────
+  // Ein Self-Removal braucht die durable Admin-Remove-/Finalizer-Autoritaet, um
+  // ueberhaupt bis zum lokalen Austritt zu konvergieren. Fehlt sie (adminRemove
+  // === null, z.B. ein Adapter ohne SecureSelfLeaveCapable), MUSS der Workflow
+  // HIER hart ablehnen — nicht erst nach Rotation + Commit (sonst bliebe ein
+  // phase:committed-Waise ohne Weg zum admin-remove). Der Adapter-Guard schuetzt
+  // nur den jeweiligen Adapter; diese Pruefung schuetzt den exportierten Core.
+  if (removedDid === deps.ownerDid && deps.adminRemove === null) {
+    throw new Error('admin self-leave requires durable admin-remove dependencies')
+  }
+
   // ── IDEMPOTENCY: reuse an existing staging record (no second rotate) ────────
   const existing = await deps.docLogStore.getPendingRemoval(spaceId, removedDid)
-  const removal = existing ?? (await stageRemoval(deps, removedDid))
+  const removal = existing ?? (await stageRemoval(deps, removedDid, opts?.activityEntry, opts?.kind, opts?.targetGeneration))
 
-  // First-attempt semantics: a hard space-rotate reject (AUTH_INVALID) is a real
-  // admin-authority bug and MUST propagate (see driveRemovalToCompletion).
-  await driveRemovalToCompletion(deps, removal, { treatAuthInvalidAsEnforced: false })
+  await driveRemovalToCompletion(deps, removal)
 }
 
 /**
@@ -171,12 +225,21 @@ export async function runTwoPhaseRemoval(
  */
 export async function recoverPendingRemovals(
   docLogStore: DocLogStore,
-  resolveDeps: (removal: PendingRemoval) => Promise<SecureRemovalDeps | null>,
+  resolveDeps: (removal: PendingRemoval) => Promise<SecureRemovalDeps | TerminalCleanupDeps | TerminalFinalizationDeps | null>,
 ): Promise<number> {
   const open = await docLogStore.listPendingRemovals()
   let committed = 0
   for (const removal of open) {
-    let deps: SecureRemovalDeps | null
+    // `complete` is deliberately recoverable with the store alone.  This is the
+    // crash window after persisting complete and before deleting the record.
+    if (removal.phase === 'complete') {
+      try {
+        await docLogStore.deletePendingRemoval(removal.spaceId, removal.removedDid)
+        committed += 1
+      } catch { /* retry on the next pass */ }
+      continue
+    }
+    let deps: SecureRemovalDeps | TerminalCleanupDeps | TerminalFinalizationDeps | null
     try {
       deps = await resolveDeps(removal)
     } catch {
@@ -184,12 +247,9 @@ export async function recoverPendingRemovals(
     }
     if (!deps) continue
     try {
-      // Recovery mode: a re-sent space-rotate for an already-applied generation
-      // returns an AUTH_INVALID/stale reject (the broker is past this generation).
-      // In recovery that means "already enforced" → drive to commit; on the first
-      // attempt (below) the same code is a hard admin bug and propagates.
-      await driveRemovalToCompletion(deps, removal, { treatAuthInvalidAsEnforced: true })
-      committed += 1
+      // A canonical self-removal can converge on another admin's rotation without
+      // committing this device's staged material. Count only an actual local COMMIT.
+      if (await driveRemovalToCompletion(deps, removal)) committed += 1
     } catch (err) {
       // RemovalPendingNotEnforcedError = still waiting on a broker → keep staged,
       // try again next recovery pass. A hard error (admin bug) is logged but does
@@ -210,7 +270,13 @@ export async function recoverPendingRemovals(
 // ───────────────────────────────────────────────────────────────────────────
 
 /** STAGE: generate next-gen material (NOT persisted to the key store) + durably stage the intent. */
-async function stageRemoval(deps: SecureRemovalDeps, removedDid: string): Promise<PendingRemoval> {
+async function stageRemoval(
+  deps: SecureRemovalDeps,
+  removedDid: string,
+  activityEntry?: Record<string, unknown>,
+  kind?: 'canonical-self-removal-rotation',
+  targetGeneration?: number,
+): Promise<PendingRemoval> {
   const staged: StagedRotationMaterial = await stageRotateSpaceKey({
     crypto: deps.crypto,
     keyPort: deps.keyPort,
@@ -224,7 +290,11 @@ async function stageRemoval(deps: SecureRemovalDeps, removedDid: string): Promis
     capSigningSeed: staged.capabilitySigningSeed,
     capVerificationKey: staged.capabilityVerificationKey,
   }
+  if (targetGeneration !== undefined && staged.newGeneration < targetGeneration) {
+    throw new Error(`cannot enforce canonical self-removal at generation ${targetGeneration} while local generation is behind (${staged.newGeneration - 1})`)
+  }
   const removal: PendingRemoval = {
+    phase: 'staged',
     spaceId: deps.spaceId,
     removedDid,
     homeBrokerSet: [...deps.homeBrokerSet],
@@ -232,6 +302,8 @@ async function stageRemoval(deps: SecureRemovalDeps, removedDid: string): Promis
     newGeneration: staged.newGeneration,
     stagedKeyMaterial,
     createdAt: (deps.now ?? (() => new Date()))().getTime(),
+    activityEntry,
+    kind,
   }
   // Durable BEFORE any space-rotate send: a crash after this point recovers the
   // intent + key material and retries (VE-C3); a crash before it leaves no trace
@@ -246,15 +318,39 @@ async function stageRemoval(deps: SecureRemovalDeps, removedDid: string): Promis
  * the staged generation and run the engine-specific commit + delete the record.
  */
 async function driveRemovalToCompletion(
-  deps: SecureRemovalDeps,
+  deps: SecureRemovalDeps | TerminalCleanupDeps | TerminalFinalizationDeps,
   removal: PendingRemoval,
-  opts: { treatAuthInvalidAsEnforced: boolean },
-): Promise<void> {
+): Promise<boolean> {
+  assertKnownRemovalPhase(removal.phase)
+  // Cleanup recovery intentionally has no loaded CRDT-space dependency.  Once
+  // admin-remove is durable, only the stable PersonalDoc event and idempotent
+  // local artifact cleanup remain.
+  if (removal.phase === 'complete') {
+    await deps.docLogStore.deletePendingRemoval(removal.spaceId, removal.removedDid)
+    return true
+  }
+  if (removal.phase === 'admin-removed') {
+    await requireTerminalFinalizer(deps, removal)(removal.newGeneration)
+    removal = { ...removal, phase: 'local-cleanup' }
+    await deps.docLogStore.putPendingRemoval(removal)
+  }
+  if (removal.phase === 'local-cleanup') {
+    removal = { ...removal, phase: 'complete' }
+    await deps.docLogStore.putPendingRemoval(removal)
+    await deps.docLogStore.deletePendingRemoval(removal.spaceId, removal.removedDid)
+    return true
+  }
+  if (!hasRotationDeps(deps)) {
+    throw new Error(`secure removal phase ${removal.phase} requires rotation dependencies before any effect`)
+  }
   // The home-broker set is FIXED in the durable record (captured at stage time).
   // Use it, not deps.homeBrokerSet, so a config change mid-flight cannot move the
   // enforcement goalposts for an in-progress removal.
   const homeBrokerSet = removal.homeBrokerSet
 
+  // Every branch below is driven exclusively by `removal.phase` and durable
+  // fields. Effects precede the single successor write; replaying an old phase
+  // is therefore required to be idempotent.
   const frame = await deps.createRotateFrame(
     removal.newGeneration,
     removal.stagedKeyMaterial.capVerificationKey,
@@ -268,18 +364,17 @@ async function driveRemovalToCompletion(
       await deps.docLogStore.markBrokerConfirmed(deps.spaceId, removal.removedDid, brokerUrl)
       confirmed.add(brokerUrl)
     } catch (err) {
-      if (isAlreadyEnforcedReject(err, opts.treatAuthInvalidAsEnforced)) {
-        // VE-C3 idempotent retry: the broker already rotated to (or past) this
-        // generation on an earlier (lost-confirmation) attempt. Treat as confirmed
-        // and continue toward commit — re-sending an already-applied space-rotate
-        // is a stale/auth reject, NOT a hard failure.
-        await deps.docLogStore.markBrokerConfirmed(deps.spaceId, removal.removedDid, brokerUrl)
-        confirmed.add(brokerUrl)
-        continue
+      if (err instanceof ControlFrameRejectedError && err.code === 'GENERATION_GAP') {
+        const restaged = await handleGenerationGap(deps, removal, err.currentGeneration)
+        if (restaged) return driveRemovalToCompletion(deps, restaged)
+        throw new RemovalPendingNotEnforcedError(deps.spaceId, removal.removedDid, removal.newGeneration)
+      }
+      if (err instanceof ControlFrameRejectedError && err.code === 'GENERATION_TAKEN') {
+        if (await handleGenerationTaken(deps, removal)) return false
+        throw new RemovalPendingNotEnforcedError(deps.spaceId, removal.removedDid, removal.newGeneration)
       }
       if (err instanceof ControlFrameRejectedError && isHardSpaceRotateReject(err.code)) {
-        // A HARD broker reject (AUTH_INVALID on a FIRST attempt = a real
-        // admin-authority bug) must surface — it is not a "retry later" condition.
+        // A non-retryable broker reject must surface — it is not a pending condition.
         throw err
       }
       // Otherwise (a transient broker reject such as RATE_LIMITED / INTERNAL_ERROR,
@@ -295,9 +390,18 @@ async function driveRemovalToCompletion(
     throw new RemovalPendingNotEnforcedError(deps.spaceId, removal.removedDid, removal.newGeneration)
   }
 
+  if (removal.phase === 'staged' || removal.phase === 'broker-confirmed') {
+    // `markBrokerConfirmed` persists each acknowledgement before this successor
+    // phase write. Carry that monotonic durable set forward as well: otherwise a
+    // crash/fault between the effect and the phase write would overwrite the
+    // confirmation with this stale in-memory snapshot and re-send the rotate.
+    removal = { ...removal, confirmedBrokerUrls: [...confirmed], phase: 'broker-confirmed' }
+    await deps.docLogStore.putPendingRemoval(removal)
+  }
+
   // ── COMMIT (only now): activate the staged generation, then run the
   //    engine-specific membership-event + distribution, then drop the record. ──
-  await commitStagedRotation({
+  if (removal.phase === 'broker-confirmed') await commitStagedRotation({
     crypto: deps.crypto,
     keyPort: deps.keyPort,
     spaceId: deps.spaceId,
@@ -311,26 +415,143 @@ async function driveRemovalToCompletion(
       capabilityVerificationKey: removal.stagedKeyMaterial.capVerificationKey,
     },
   })
-  await deps.commitRemoval(removal.removedDid, removal.newGeneration)
+  if (removal.phase === 'broker-confirmed') {
+    if (removal.activityEntry === undefined) await deps.commitRemoval(removal.removedDid, removal.newGeneration)
+    else await deps.commitRemoval(removal.removedDid, removal.newGeneration, removal.activityEntry)
+    removal = { ...removal, committed: true, phase: removal.removedDid === deps.ownerDid ? 'committed' : 'local-cleanup' }
+    await deps.docLogStore.putPendingRemoval(removal)
+  }
+  // Sync 005 Self-Leave: the departing admin remains durably staged after
+  // commit/distribution until its own broker authority is removed everywhere.
+  if (removal.removedDid === deps.ownerDid && removal.phase === 'committed') {
+    const admin = requireAdminRemoveDeps(deps, removal)
+    const adminFrame = await admin.createSelfAdminRemoveFrame()
+    const adminConfirmed = new Set(removal.adminRemoveConfirmedBrokerUrls ?? [])
+    for (const brokerUrl of homeBrokerSet) {
+      if (adminConfirmed.has(brokerUrl)) continue
+      try {
+        await admin.sendAdminRemove(brokerUrl, adminFrame)
+      } catch {
+        throw new RemovalPendingNotEnforcedError(deps.spaceId, removal.removedDid, removal.newGeneration)
+      }
+      adminConfirmed.add(brokerUrl)
+      removal = { ...removal, adminRemoveConfirmedBrokerUrls: [...adminConfirmed] }
+      await deps.docLogStore.putPendingRemoval(removal)
+    }
+    removal = { ...removal, phase: 'admin-removed' }
+    await deps.docLogStore.putPendingRemoval(removal)
+  }
+  if (removal.removedDid === deps.ownerDid && removal.phase === 'admin-removed') {
+    // `finalizeSelfLeave` is independently idempotent (stable PersonalDoc event
+    // identity plus idempotent artifact deletes). A failed cleanup leaves this
+    // exact durable phase for recovery, even when the Yjs space was unloaded.
+    await requireAdminRemoveDeps(deps, removal).finalizeSelfLeave(removal.newGeneration)
+    removal = { ...removal, phase: 'local-cleanup' }
+    await deps.docLogStore.putPendingRemoval(removal)
+  }
+  if (removal.phase === 'local-cleanup') {
+    removal = { ...removal, phase: 'complete' }
+    await deps.docLogStore.putPendingRemoval(removal)
+  }
   await deps.docLogStore.deletePendingRemoval(deps.spaceId, removal.removedDid)
+  return true
+}
+
+/** Keeps the durable phase vocabulary closed when PendingRemoval evolves. */
+function assertKnownRemovalPhase(phase: PendingRemoval['phase']): void {
+  switch (phase) {
+    case 'staged': return
+    case 'broker-confirmed': return
+    case 'committed': return
+    case 'admin-removed': return
+    case 'local-cleanup': return
+    case 'complete': return
+    default: {
+      const exhaustive: never = phase
+      throw new Error(`unknown secure-removal phase ${String(exhaustive)}`)
+    }
+  }
+}
+
+function hasRotationDeps(deps: SecureRemovalDeps | TerminalCleanupDeps | TerminalFinalizationDeps): deps is SecureRemovalDeps {
+  return 'crypto' in deps
+}
+
+function requireAdminRemoveDeps(deps: SecureRemovalDeps | TerminalCleanupDeps | TerminalFinalizationDeps, removal: PendingRemoval): AdminRemoveDeps {
+  if (!hasRotationDeps(deps) || deps.adminRemove === null) {
+    throw new Error(`secure removal phase ${removal.phase} requires durable admin-remove dependencies before any effect`)
+  }
+  return deps.adminRemove
+}
+
+function requireTerminalFinalizer(deps: SecureRemovalDeps | TerminalCleanupDeps | TerminalFinalizationDeps, removal: PendingRemoval): (newGeneration: number) => Promise<void> {
+  if (hasRotationDeps(deps)) return requireAdminRemoveDeps(deps, removal).finalizeSelfLeave
+  if ('finalizeSelfLeave' in deps) return deps.finalizeSelfLeave
+  throw new Error(`secure removal phase ${removal.phase} requires terminal finalization dependencies before any effect`)
+}
+
+/** A gap is wire-authoritative: catch up to the reported broker generation, then restage exactly its successor. */
+async function handleGenerationGap(
+  deps: SecureRemovalDeps,
+  removal: PendingRemoval,
+  currentGeneration: number | undefined,
+): Promise<PendingRemoval | null> {
+  if (typeof currentGeneration !== 'number' || !Number.isSafeInteger(currentGeneration) || currentGeneration < 0) return null
+  const brokerGeneration = currentGeneration
+  const localGeneration = await deps.keyPort.getCurrentGeneration(deps.spaceId)
+  if (localGeneration > brokerGeneration) {
+    // The broker has lost state or belongs to a different branch. Keep the original
+    // durable staging untouched; blindly replacing it would destroy evidence/material.
+    throw new GenerationGapSplitBrainError(deps.spaceId, localGeneration, brokerGeneration)
+  }
+  const catchUp = await deps.catchUpGeneration()
+  if (catchUp === false || (typeof catchUp === 'object' && !catchUp.complete)) return null
+  // Generate and validate off-record.  The old staged bytes are untouched until
+  // this candidate has demonstrably converged to brokerGeneration + 1.
+  const restaged = await stageRemovalCandidate(deps, removal.removedDid, removal.activityEntry, removal.kind)
+  if (restaged.newGeneration !== brokerGeneration + 1) {
+    // Do not overwrite the original staging when local catch-up did not actually
+    // converge to the broker's reported branch.
+    throw new Error(`GENERATION_GAP catch-up did not converge to broker generation ${brokerGeneration}`)
+  }
+  // `putPendingRemoval` overwrites the old record, including confirmations, so the
+  // rejected frame can never be retried after successful convergence.
+  await deps.docLogStore.putPendingRemoval(restaged)
+  return restaged
+}
+
+/** Generate material without writing durable state (used by gap convergence). */
+async function stageRemovalCandidate(
+  deps: SecureRemovalDeps, removedDid: string, activityEntry?: Record<string, unknown>, kind?: 'canonical-self-removal-rotation',
+): Promise<PendingRemoval> {
+  const staged = await stageRotateSpaceKey({ crypto: deps.crypto, keyPort: deps.keyPort, spaceId: deps.spaceId, ownerDid: deps.ownerDid, validityDurationMs: deps.validityDurationMs, now: deps.now })
+  return {
+    phase: 'staged', spaceId: deps.spaceId, removedDid, homeBrokerSet: [...deps.homeBrokerSet], confirmedBrokerUrls: [], newGeneration: staged.newGeneration,
+    stagedKeyMaterial: { contentKey: staged.contentKey, capSigningSeed: staged.capabilitySigningSeed, capVerificationKey: staged.capabilityVerificationKey },
+    createdAt: (deps.now ?? (() => new Date()))().getTime(), activityEntry, kind,
+  }
 }
 
 /**
- * A `space-rotate` reject that means the broker has ALREADY enforced this (or a
- * newer) generation — so a VE-C3 retry should treat the broker as confirmed.
- *
- * The explicit stale signals (CAPABILITY_GENERATION_STALE / KEY_GENERATION_STALE)
- * unambiguously mean "you are behind", so they count as already-enforced in BOTH
- * the first-attempt and recovery paths. AUTH_INVALID is ambiguous — it is a real
- * admin-authority bug on a first attempt, but on a VE-C3 retry of an
- * already-applied generation it is the broker rejecting a rotate that is no longer
- * the strict next one. We therefore only treat AUTH_INVALID as already-enforced
- * when the caller opts in (the recovery path).
+ * GENERATION_TAKEN proves that another admin owns this generation. Never commit
+ * this staged material. A canonical self-removal is fulfilled once that winner's
+ * key-rotation arrived locally. A regular removal waits for the same local
+ * convergence, then stages fresh material for current+1; this is the ONLY path
+ * that replaces material. AUTH_INVALID and stale codes deliberately do not enter
+ * this path: they are not material-bound proof and cannot authorize replacement.
  */
-function isAlreadyEnforcedReject(err: unknown, treatAuthInvalidAsEnforced: boolean): boolean {
-  if (!(err instanceof ControlFrameRejectedError)) return false
-  if (err.code === 'CAPABILITY_GENERATION_STALE' || err.code === 'KEY_GENERATION_STALE') return true
-  if (treatAuthInvalidAsEnforced && err.code === 'AUTH_INVALID') return true
+async function handleGenerationTaken(deps: SecureRemovalDeps, removal: PendingRemoval): Promise<boolean> {
+  const current = await deps.keyPort.getCurrentGeneration(deps.spaceId)
+  if (removal.kind === 'canonical-self-removal-rotation' && current >= removal.newGeneration) {
+    await deps.docLogStore.deletePendingRemoval(deps.spaceId, removal.removedDid)
+    return true
+  }
+  if (removal.kind !== 'canonical-self-removal-rotation' && current >= removal.newGeneration) {
+    // A different rotation has arrived locally. Continue this still-uncommitted
+    // removal at the actual next generation with new material, never by reusing
+    // the foreign winner's slot.
+    await stageRemoval(deps, removal.removedDid, removal.activityEntry, removal.kind)
+  }
   return false
 }
 
@@ -338,14 +559,9 @@ function isAlreadyEnforcedReject(err: unknown, treatAuthInvalidAsEnforced: boole
  * A `space-rotate` reject that can NEVER succeed by retrying — it must surface raw
  * rather than be parked as a pending (retryable) removal.
  *
- * For a space-rotate, AUTH_INVALID means the relay refused the rotation as
- * unauthorized: either the signer is not a registered admin OR `newGeneration` was
- * not exactly `current + 1` (Sync 003 handleSpaceRotate). On a FIRST attempt that
- * is a real admin-authority / sequencing bug, not a transient transport failure —
- * so it propagates (matching VE-C1 step 5). On a VE-C3 recovery retry the SAME code
- * instead means the broker already rotated past this generation, which is handled
- * earlier by {@link isAlreadyEnforcedReject} and never reaches here. AUTHOR_MISMATCH
- * is the coordinator's hard-stop bug class.
+ * AUTHOR_MISMATCH is the coordinator's hard-stop bug class. AUTH_INVALID is a
+ * genuine signature/authorization failure and remains retryable here; it never
+ * authorizes commit or material replacement.
  *
  * NOTE: this is deliberately NOT {@link classifyRejectDisposition} — that table is
  * the log-entry WRITE-path (VE-4) disposition, where AUTH_INVALID is not even a
@@ -353,6 +569,5 @@ function isAlreadyEnforcedReject(err: unknown, treatAuthInvalidAsEnforced: boole
  * silently downgrades a hard rotate reject to a pending removal.
  */
 function isHardSpaceRotateReject(code: ControlFrameRejectedError['code']): boolean {
-  if (code === 'AUTH_INVALID') return true
   return classifyRejectDisposition(code) === 'hard-stop'
 }

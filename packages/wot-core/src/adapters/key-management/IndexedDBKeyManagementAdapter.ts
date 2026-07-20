@@ -128,6 +128,24 @@ export class IndexedDBKeyManagementAdapter implements KeyManagementPort {
     return record ? record.capabilityJws : null
   }
 
+  async deleteSpaceKeys(spaceId: string): Promise<void> {
+    const db = await this.db()
+    const tx = db.transaction(
+      [CONTENT_KEYS_STORE, CAP_KEYPAIRS_STORE, OWN_CAPABILITIES_STORE],
+      'readwrite',
+    )
+    for (const storeName of [CONTENT_KEYS_STORE, CAP_KEYPAIRS_STORE, OWN_CAPABILITIES_STORE]) {
+      const store = tx.objectStore(storeName)
+      const range = IDBKeyRange.bound([spaceId], [spaceId, []])
+      let cursor = await store.openCursor(range)
+      while (cursor) {
+        await cursor.delete()
+        cursor = await cursor.continue()
+      }
+    }
+    await tx.done
+  }
+
   /** Drop ALL key material — test/reset helper; the production wipe deleteDatabase's the DID-aware DB. */
   async clear(): Promise<void> {
     const db = await this.db()
