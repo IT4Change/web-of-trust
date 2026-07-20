@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.1.4](https://github.com/real-life-org/web-of-trust/compare/adapter-automerge-v0.1.3...adapter-automerge-v0.1.4) (2026-07-20)
+
+
+### Features
+
+* **sync:** P0b — MembershipActivityCapable + membershipRemovals (Membership-Schnitt) ([c161b7c](https://github.com/real-life-org/web-of-trust/commit/c161b7cd7e6882f35d72b9cbda4b3794c76f4647))
+
+
+### Bug Fixes
+
+* converge secure removal recovery ([0d13b4d](https://github.com/real-life-org/web-of-trust/commit/0d13b4d9df626962b6d6d0561de30191cfbb1673))
+* gate secure self-leave by durable capabilities ([f5a67c8](https://github.com/real-life-org/web-of-trust/commit/f5a67c8f16aa10979e888158edef881716cf6793))
+* **sync:** Automerge catchUpGeneration an echten Coordinator statt Stub — Fremd-Removal konvergiert nach GENERATION_GAP ([49996d2](https://github.com/real-life-org/web-of-trust/commit/49996d277a5ab2f800fbf598c504c9f7649df08d))
+
 ## [0.1.3](https://github.com/real-life-org/web-of-trust/compare/adapter-automerge-v0.1.2...adapter-automerge-v0.1.3) (2026-07-15)
 
 

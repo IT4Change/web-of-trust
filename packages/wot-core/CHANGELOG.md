@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.4.0](https://github.com/real-life-org/web-of-trust/compare/core-v0.3.0...core-v0.4.0) (2026-07-20)
+
+
+### ⚠ BREAKING CHANGES
+
+* **sync:** Der Secure-Removal-Typ-Kontrakt wurde fuer die durable Phasen-Maschine geaendert. `PendingRemoval.phase` ist jetzt Pflichtfeld (alte Records werden beim Laden migriert). `SecureRemovalDeps` verlangt `catchUpGeneration` sowie das phasenscharfe `adminRemove` (`RotationDeps`/`CommitDeps`/`AdminRemoveDeps`/`TerminalCleanupDeps`); die frueheren optionalen Self-Leave-Callbacks (`finalizeSelfLeave?`, `createSelfAdminRemoveFrame?`, `sendAdminRemove?`) sind ersetzt. Migration: Adapter, die Secure-Removal nutzen, muessen die neuen Dependencies verdrahten oder `SecureSelfLeaveCapable` bewusst nicht anbieten (feature-detected via `hasSecureSelfLeave()`).
+
+
+### Features
+
+* add yjs membership activity capability ([7609e82](https://github.com/real-life-org/web-of-trust/commit/7609e8250674197d66a40fd5a6c136065a9f9494))
+* **sync:** GENERATION_GAP + Historical-Retry nach Spec R5/R6 ([0bb62d6](https://github.com/real-life-org/web-of-trust/commit/0bb62d632dbcbfab151ad59cc547a2cf0806000b))
+* **sync:** P0b — MembershipActivityCapable + membershipRemovals (Membership-Schnitt) ([c161b7c](https://github.com/real-life-org/web-of-trust/commit/c161b7cd7e6882f35d72b9cbda4b3794c76f4647))
+
+
+### Bug Fixes
+
+* converge secure removal recovery ([0d13b4d](https://github.com/real-life-org/web-of-trust/commit/0d13b4d9df626962b6d6d0561de30191cfbb1673))
+* **core:** retain unverified removal pending provenance ([5c3757e](https://github.com/real-life-org/web-of-trust/commit/5c3757ee368ca75af2d7a7b37e461cd6b6f8d3ab))
+* enforce durable self-leave removal flow ([79045c1](https://github.com/real-life-org/web-of-trust/commit/79045c1123db857199e7bc044abcbfea51c62ae9))
+* gate secure self-leave by durable capabilities ([f5a67c8](https://github.com/real-life-org/web-of-trust/commit/f5a67c8f16aa10979e888158edef881716cf6793))
+* **sync:** bind space rotation retries to key material ([a35748d](https://github.com/real-life-org/web-of-trust/commit/a35748dae1797eeee201b7b44ccd8a302573b1ac))
+* **sync:** make generation gap recovery broker-authoritative ([1db6150](https://github.com/real-life-org/web-of-trust/commit/1db6150f49ec6e774393a8333668aad08d09c9ce))
+* **sync:** recover generation gaps and revoke self admin ([25a4dac](https://github.com/real-life-org/web-of-trust/commit/25a4dac66e27a98e08256c7bad7b254597be91ac))
+* **sync:** resolve multi-device self-leave ([0e29e41](https://github.com/real-life-org/web-of-trust/commit/0e29e413637900d40527ebbd77cd7467122374e8))
+* **sync:** Self-Leave-Preflight im Core-Workflow vor jeder Staging-/Broker-Wirkung ([6b6caea](https://github.com/real-life-org/web-of-trust/commit/6b6caea56463dbde31d9bd6e5775b3db877e2f8e))
+* **sync:** support non-admin self leave ([63dd3ed](https://github.com/real-life-org/web-of-trust/commit/63dd3eddb28802ce9c7b4bd5341bbd62cddc5bb8))
+
 ## [0.3.0](https://github.com/real-life-org/web-of-trust/compare/core-v0.2.2...core-v0.3.0) (2026-07-15)
 
 
