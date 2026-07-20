@@ -2783,6 +2783,11 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
     const allMeta = await this.metadataStorage.loadAllSpaceMetadata()
     console.debug(`[YjsReplication] restoreSpacesFromMetadata: ${allMeta.length} spaces from metadata, ${this.spaces.size} already loaded`)
     for (const meta of allMeta) {
+      // Resilienz: ein einzelner malformter Metadata-Record (Teilzustand aus
+      // Reseed-/Rotations-Churn — z. B. fehlende Felder) darf NIE den gesamten
+      // Restore und damit den Unlock blockieren. Ein Space, dessen Restore
+      // wirft, wird uebersprungen und laut geloggt; die uebrigen Spaces laden.
+      try {
       console.debug(`[YjsReplication]   space: ${meta.info.id} name=${meta.info.name} type=${meta.info.type}`)
 
       if (this.spaces.has(meta.info.id)) {
@@ -2943,6 +2948,10 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
       void this.sendSpaceSyncRequest(meta.info.id).catch(() => {})
 
       // Vault pull happens later in _pullAllFromVault() with concurrency limit
+      } catch (err) {
+        console.error(`[YjsReplication] restore skipped malformed space ${meta?.info?.id}:`, err)
+        continue
+      }
     }
 
     this.notifySpaceListeners()
