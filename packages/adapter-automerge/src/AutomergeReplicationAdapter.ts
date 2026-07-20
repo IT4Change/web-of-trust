@@ -2225,6 +2225,11 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
     await this.cleanupSpaceLocally(spaceId)
   }
 
+  /** Public local-only disposal; mirrors the Yjs adapter's recovery/abandon flow. */
+  async forgetSpaceLocally(spaceId: string): Promise<void> {
+    await this.cleanupSpaceLocally(spaceId)
+  }
+
   /**
    * Gemeinsame Cleanup-Mechanik fuer den User-Flow (leaveSpace) und den
    * Resolution-Pfad (kanonisch bestaetigte eigene Entfernung, Sync 005 Z.253

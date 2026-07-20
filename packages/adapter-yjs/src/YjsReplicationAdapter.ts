@@ -49,7 +49,7 @@ import {
   encryptionKeyMultibaseFromDidDocument, x25519MultibaseToPublicKeyBytes,
   formatMembershipEventKey, parseMembershipEventKey, resolveActiveMembers, resolveMembershipWinner, assertMembershipEvent,
   resolveActiveAdmins, assertAdminEntry,
-  LogSyncCoordinator, AuthorMismatchError, LocalAppendFailedError, createSpaceCapabilityJws,
+  LogSyncCoordinator, AuthorMismatchError, LocalAppendFailedError, CapabilityKeysUnavailableError, createSpaceCapabilityJws,
   createSpaceRegisterMessageWithSigner, createSpaceRotateMessageWithSigner, createAdminRemoveMessageWithSigner,
   LOG_ENTRY_MESSAGE_TYPE, SYNC_RESPONSE_MESSAGE_TYPE,
 } from '@web_of_trust/core/protocol'
@@ -1025,6 +1025,13 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
     const state = this.spaces.get(spaceId)
     if (!state) return false
 
+    // Member removal always reaches capability-gated rotation/commit machinery.
+    // A recovery ghost cannot safely perform that distributed operation before
+    // its PersonalDoc group keys arrive.
+    if (await this.keyManagement.getCurrentGeneration(spaceId) < 0) {
+      throw new CapabilityKeysUnavailableError(spaceId)
+    }
+
     const myDid = this.identity.getDid()
 
     // Admin-Guard (Sync 005 Z.229-234 "ein Admin", VE-3): nur ein Admin darf
@@ -1555,8 +1562,12 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
     return {
       getCapabilityJws: async () => {
         const generation = await this.keyManagement.getCurrentGeneration(spaceId)
+        // During recovery metadata can be restored before the PersonalDoc group
+        // keys. Map that expected state to the coordinator's retryable defer path;
+        // never pass -1 into the validated key-management API.
+        if (generation < 0) throw new CapabilityKeysUnavailableError(spaceId)
         const signingSeed = await this.keyManagement.getCapabilitySigningSeed(spaceId, generation)
-        if (!signingSeed) throw new Error(`No capability signing seed for space ${spaceId} @ gen ${generation}`)
+        if (!signingSeed) throw new CapabilityKeysUnavailableError(spaceId)
         const now = Date.now()
         const validityMs = this.capabilityValidityMs ?? 6 * 30 * 24 * 60 * 60 * 1000
         return createSpaceCapabilityJws({
@@ -1947,6 +1958,9 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
    * commit; Sync-002 seq/engine-dedup makes any earlier in-flight write harmless).
    */
   private async commitMembershipEventDurable(state: YjsSpaceState, event: MembershipEvent, activityEntry?: Record<string, unknown>): Promise<void> {
+    if (await this.keyManagement.getCurrentGeneration(state.info.id) < 0) {
+      throw new CapabilityKeysUnavailableError(state.info.id)
+    }
     const key = formatMembershipEventKey(event)
     const map = this.membersEventMap(state.doc)
     // B3 retry-hole (loop-review): `map.has(key)` proves the event is LOCALLY applied,
@@ -2023,6 +2037,13 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
   async leaveSpace(spaceId: string): Promise<void> {
     const state = this.spaces.get(spaceId)
     if (!state) return
+
+    // A reseed ghost has metadata/doc state but no local group keys yet. It cannot
+    // create a valid membership event or capability, so disposal is strictly local.
+    if (await this.keyManagement.getCurrentGeneration(spaceId) < 0) {
+      await this.cleanupSpaceLocally(spaceId)
+      return
+    }
 
     const selfDid = this.identity.getDid()
     const activeMembers = resolveActiveMembers(this.readMembershipEvents(state.doc))
@@ -2136,6 +2157,11 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
       signerDid: selfDid,
       receivedAt: new Date().toISOString(),
     })
+    await this.cleanupSpaceLocally(spaceId)
+  }
+
+  /** Public local-only disposal for reseed ghosts and callers that intentionally abandon a space. */
+  async forgetSpaceLocally(spaceId: string): Promise<void> {
     await this.cleanupSpaceLocally(spaceId)
   }
 

@@ -68,6 +68,8 @@ export interface ReplicationAdapter {
    * Nicht-Ziel of this slice; this writes only the doc-internal `_admins` set.
    */
   promoteToAdmin(spaceId: string, memberDid: string): Promise<void>
+  /** Remove local space state only; does not mutate membership or contact the broker. */
+  forgetSpaceLocally(spaceId: string): Promise<void>
   leaveSpace(spaceId: string): Promise<void>
   onMemberChange(callback: (change: SpaceMemberChange) => void): () => void
   /**

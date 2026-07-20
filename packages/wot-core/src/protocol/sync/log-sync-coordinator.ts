@@ -315,6 +315,18 @@ export interface CapabilitySource {
   getCapabilityJws(): Promise<string>
 }
 
+/**
+ * The local device knows about a space but has not imported its group keys yet.
+ * This is expected during recovery: the PersonalDoc may restore metadata before
+ * its key material. Catch-up must defer until the key import, not fail fatally.
+ */
+export class CapabilityKeysUnavailableError extends Error {
+  constructor(readonly docId: string) {
+    super(`No capability signing seed for space ${docId}: local keys are not available yet`)
+    this.name = 'CapabilityKeysUnavailableError'
+  }
+}
+
 /** Engine-specific encode/apply (Yjs/Automerge supply these). */
 export interface LogSyncEngineHooks {
   /** The CRDT engine identifier carried for engine-foreign skip (VE-3). */
@@ -1365,7 +1377,18 @@ export class LogSyncCoordinator {
       await this.driveGapRepairs().catch((err) => {
         console.debug('[LogSyncCoordinator] GapRepair drive deferred:', err)
       })
-      const result = await this.catchUpInternal({ presentCapabilityFirst: true })
+      let result: CatchUpResult
+      try {
+        result = await this.catchUpInternal({ presentCapabilityFirst: true })
+      } catch (err) {
+        // Recovery can restore a Space metadata record before its PersonalDoc group
+        // keys. Defer the capability-gated catch-up; _reloadGroupKeys will trigger
+        // the normal retry once the keys arrive.
+        if (err instanceof CapabilityKeysUnavailableError) {
+          return { restoreCloneRequired: false, complete: false, incomplete: 'blocked-by-key' }
+        }
+        throw err
+      }
       await this.actOnRestoreDisposition(result)
       return result
     })()
