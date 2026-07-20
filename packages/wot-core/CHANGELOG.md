@@ -1,6 +1,11 @@
 # Changelog
 
-## [0.3.1](https://github.com/real-life-org/web-of-trust/compare/core-v0.3.0...core-v0.3.1) (2026-07-20)
+## [0.4.0](https://github.com/real-life-org/web-of-trust/compare/core-v0.3.0...core-v0.4.0) (2026-07-20)
+
+
+### ⚠ BREAKING CHANGES
+
+* **sync:** Der Secure-Removal-Typ-Kontrakt wurde fuer die durable Phasen-Maschine geaendert. `PendingRemoval.phase` ist jetzt Pflichtfeld (alte Records werden beim Laden migriert). `SecureRemovalDeps` verlangt `catchUpGeneration` sowie das phasenscharfe `adminRemove` (`RotationDeps`/`CommitDeps`/`AdminRemoveDeps`/`TerminalCleanupDeps`); die frueheren optionalen Self-Leave-Callbacks (`finalizeSelfLeave?`, `createSelfAdminRemoveFrame?`, `sendAdminRemove?`) sind ersetzt. Migration: Adapter, die Secure-Removal nutzen, muessen die neuen Dependencies verdrahten oder `SecureSelfLeaveCapable` bewusst nicht anbieten (feature-detected via `hasSecureSelfLeave()`).
 
 
 ### Features
