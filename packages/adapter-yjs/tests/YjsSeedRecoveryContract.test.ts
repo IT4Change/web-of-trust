@@ -208,6 +208,81 @@ describe('Seed-recovery contract — seed + relay log + PersonalDoc keys', () =>
     a1Handle.close()
     a2Handle.close()
   })
+
+  it('catches up a space restored from PersonalDoc after the adapter is already connected', async () => {
+    InMemoryMessagingAdapter.resetAll()
+    const broker = new InProcessLogBroker()
+    const created = await createTestIdentity('late-space-recovery')
+    const a1 = created.identity
+    const a2 = await recoverTestIdentity(created.mnemonic, 'late-space-recovery')
+    cleanup.push(async () => { await a1.deleteStoredIdentity() })
+    cleanup.push(async () => { await a2.deleteStoredIdentity() })
+
+    const a1Messaging = new InMemoryMessagingAdapter({ broker, socketId: 'late-space-a1' })
+    await a1Messaging.connect(a1.getDid())
+    const personalA1Messaging = new InMemoryMessagingAdapter({ broker, socketId: 'late-space-personal-a1' })
+    await personalA1Messaging.connect(a1.getDid())
+    const personalA1Doc = new Y.Doc()
+    const metaA1 = metadataInPersonalDoc(personalA1Doc)
+    const personalKey = await a1.deriveFrameworkKey('personal-doc-v1')
+    const personalDocId = personalDocIdFromKey(personalKey)
+    const personalA1 = new YjsPersonalLogSyncAdapter({
+      doc: personalA1Doc, messaging: personalA1Messaging, identity: a1, personalKey, docId: personalDocId,
+      docLogStore: await makeDocLogStore(PERSONAL_A1_DEVICE), deviceId: PERSONAL_A1_DEVICE,
+    })
+    personalA1.start()
+    cleanup.push(async () => { personalA1.destroy(); personalA1Doc.destroy(); await personalA1Messaging.disconnect() })
+
+    const a1Adapter = await makeSpaceAdapter(a1, a1Messaging, metaA1, new InMemoryKeyManagementAdapter(), new InMemoryCompactStore(), A1_DEVICE)
+    await a1Adapter.start()
+    cleanup.push(async () => { await a1Adapter.stop(); await a1Messaging.disconnect() })
+
+    const space = await a1Adapter.createSpace<TestDoc>('shared', { items: {} }, { name: 'Late metadata recovery' })
+    const a1Handle = await a1Adapter.openSpace<TestDoc>(space.id)
+    const expected = ['late-0', 'late-1', 'late-2']
+    for (const id of expected) {
+      a1Handle.transact((doc) => { doc.items[id] = { title: id } })
+      await waitUntil(() => brokerEntryCount(broker, space.id) >= expected.indexOf(id) + 2, `broker entry ${id}`)
+    }
+    await waitUntil(async () => (await metaA1.loadGroupKeys(space.id)).length > 0, 'A1 PersonalDoc group key')
+    // The source device is now offline. This keeps the content exclusively in
+    // the relay log: no direct legacy full-state response may satisfy recovery.
+    await a1Messaging.disconnect()
+
+    // Start the recovered space adapter on an already-connected broker socket while
+    // its PersonalDoc is still empty. Its initial catch-up therefore sees zero spaces.
+    const a2Messaging = new InMemoryMessagingAdapter({ broker, socketId: 'late-space-a2' })
+    await a2Messaging.connect(a2.getDid())
+    const personalA2Messaging = new InMemoryMessagingAdapter({ broker, socketId: 'late-space-personal-a2' })
+    await personalA2Messaging.connect(a2.getDid())
+    const personalA2Doc = new Y.Doc()
+    const metaA2 = metadataInPersonalDoc(personalA2Doc)
+    const a2Adapter = await makeSpaceAdapter(a2, a2Messaging, metaA2, new InMemoryKeyManagementAdapter(), new InMemoryCompactStore(), A2_DEVICE)
+    await a2Adapter.start()
+    cleanup.push(async () => { await a2Adapter.stop(); await a2Messaging.disconnect() })
+    expect(await a2Adapter.getSpaces()).toEqual([])
+
+    // This is the RLS connector's path: PersonalDoc sync makes metadata and keys
+    // visible only after start(), then it asks the adapter to restore them. Do not
+    // manually requestSync(space.id): the restore itself must start relay-log catch-up.
+    const personalA2 = new YjsPersonalLogSyncAdapter({
+      doc: personalA2Doc, messaging: personalA2Messaging, identity: a2,
+      personalKey: await a2.deriveFrameworkKey('personal-doc-v1'), docId: personalDocId,
+      docLogStore: await makeDocLogStore(PERSONAL_A2_DEVICE), deviceId: PERSONAL_A2_DEVICE,
+    })
+    personalA2.start()
+    cleanup.push(async () => { personalA2.destroy(); personalA2Doc.destroy(); await personalA2Messaging.disconnect() })
+    await waitUntil(async () => (await metaA2.loadGroupKeys(space.id)).length > 0, 'A2 PersonalDoc metadata catch-up')
+    await a2Adapter.restoreSpacesFromMetadata()
+
+    const a2Handle = await a2Adapter.openSpace<TestDoc>(space.id)
+    const deadline = Date.now() + 15_000
+    while (Date.now() < deadline && expected.length !== Object.keys(a2Handle.getDoc().items ?? {}).length) await wait()
+    expect(Object.keys(a2Handle.getDoc().items ?? {}).sort()).toEqual(expected)
+
+    a1Handle.close()
+    a2Handle.close()
+  }, 20_000)
 })
 
 function brokerEntryCount(broker: InProcessLogBroker, docId: string): number {

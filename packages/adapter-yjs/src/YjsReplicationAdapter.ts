@@ -454,6 +454,8 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
   /** Overlapping initial/reconnect catch-ups share one final space-list wake-up. */
   private pendingSpaceCatchUpBatches = 0
   private catchUpAppliedWithoutHandle = false
+  /** Avoid duplicate relay catch-ups when restore and a connected event overlap. */
+  private spaceCatchUpsInFlight = new Set<string>()
   private started = false
   private sentMessageIds = new Set<string>()
 
@@ -723,9 +725,22 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
 
   /** Start the log catch-up for every restored space without changing connection epochs. */
   private requestCatchUpForAllSpaces(): void {
+    this.requestCatchUpForSpaces(this.spaces.keys())
+  }
+
+  /**
+   * Start relay-log catch-up for loaded spaces and coalesce the one post-catch-up
+   * listener wake-up. A space can be selected by both metadata restore and the
+   * connected handler; its in-flight catch-up is deliberately shared.
+   */
+  private requestCatchUpForSpaces(spaceIds: Iterable<string>): void {
     const revisionsBefore = new Map(
-      Array.from(this.spaces.entries(), ([spaceId, state]) => [spaceId, state.unobservedRemoteUpdateRevision ?? 0]),
+      Array.from(spaceIds)
+        .filter((spaceId) => this.spaces.has(spaceId) && !this.spaceCatchUpsInFlight.has(spaceId))
+        .map((spaceId) => [spaceId, this.spaces.get(spaceId)!.unobservedRemoteUpdateRevision ?? 0]),
     )
+    if (revisionsBefore.size === 0) return
+    for (const spaceId of revisionsBefore.keys()) this.spaceCatchUpsInFlight.add(spaceId)
     this.pendingSpaceCatchUpBatches += 1
     void Promise.all(
       Array.from(revisionsBefore.keys(), (spaceId) => this.requestSync(spaceId).catch(() => {})),
@@ -736,6 +751,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
         (this.spaces.get(spaceId)?.unobservedRemoteUpdateRevision ?? 0) > before,
       )
     }).finally(() => {
+      for (const spaceId of revisionsBefore.keys()) this.spaceCatchUpsInFlight.delete(spaceId)
       this.pendingSpaceCatchUpBatches -= 1
       if (this.pendingSpaceCatchUpBatches !== 0 || !this.catchUpAppliedWithoutHandle) return
       this.catchUpAppliedWithoutHandle = false
@@ -2811,6 +2827,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
     if (!this.metadataStorage) return
 
     const allMeta = await this.metadataStorage.loadAllSpaceMetadata()
+    const newlyLoadedSpaceIds: string[] = []
     console.debug(`[YjsReplication] restoreSpacesFromMetadata: ${allMeta.length} spaces from metadata, ${this.spaces.size} already loaded`)
     for (const meta of allMeta) {
       // Resilienz: ein einzelner malformter Metadata-Record (Teilzustand aus
@@ -2964,6 +2981,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
       // Pendings bleiben offen und triggern unten den Catch-up.
       await this.resolveCanonicallyAnsweredMemberUpdates(state)
       if (!this.spaces.has(meta.info.id)) continue // Restore-Resolution hat den Space aufgeraeumt
+      newlyLoadedSpaceIds.push(meta.info.id)
       if (state.pendingRemoval || state.pendingAddition) {
         void this.requestSync(meta.info.id).catch(() => {})
       }
@@ -2985,6 +3003,14 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
     }
 
     this.notifySpaceListeners()
+    // A PersonalDoc update can reveal a space only after the transport has
+    // connected. Its content may still exist solely in the relay log, so catch
+    // it up now rather than waiting for a reload. start() normally restores
+    // before connect; the strict state gate keeps that path with the connected
+    // handler, while the in-flight set prevents overlap with that handler.
+    if (this.messaging.getState() === 'connected') {
+      this.requestCatchUpForSpaces(newlyLoadedSpaceIds)
+    }
   }
 
   // --- Internal: Encrypted Space Sync ---
