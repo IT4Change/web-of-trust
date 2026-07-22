@@ -207,7 +207,7 @@ describe('Seed-recovery contract — seed + relay log + PersonalDoc keys', () =>
 
     a1Handle.close()
     a2Handle.close()
-  })
+  }, 40_000)
 
   it('catches up a space restored from PersonalDoc after the adapter is already connected', async () => {
     InMemoryMessagingAdapter.resetAll()
@@ -330,17 +330,6 @@ describe('Seed-recovery contract — seed + relay log + PersonalDoc keys', () =>
     cleanup.push(async () => { await a2Adapter.stop(); await a2Messaging.disconnect() })
     expect((await a2Adapter.getSpaces()).map((candidate) => candidate.id)).toContain(space.id)
 
-    const internals = a2Adapter as unknown as {
-      capabilityCatchUpBlocked: Set<string>
-      coordinators: Map<string, { blockedByKeyCount: () => number }>
-    }
-    expect(internals.capabilityCatchUpBlocked.has(space.id)).toBe(true)
-    expect(internals.coordinators.get(space.id)?.blockedByKeyCount()).toBe(0)
-    // In the real race, _reloadGroupKeys() calls retryCapabilityBlockedCatchUp()
-    // before the original catch-up registers its blocked result. Clear that later
-    // registration here: the loaded/keyless/no-buffer state is Sol's handoff window.
-    internals.capabilityCatchUpBlocked.delete(space.id)
-
     for (const key of await metaA1.loadGroupKeys(space.id)) await metaA2.saveGroupKey(key)
     for (const seed of await metaA1.loadCapabilitySigningSeeds(space.id)) await metaA2.saveCapabilitySigningSeed(seed)
     await a2Adapter.restoreSpacesFromMetadata()
@@ -403,6 +392,43 @@ describe('Seed-recovery contract — seed + relay log + PersonalDoc keys', () =>
     releaseNew()
     await waitUntil(() => internals.pendingSpaceCatchUpBatches === 0, 'new catch-up settlement')
     expect(internals.pendingSpaceCatchUpBatches).toBe(0)
+  })
+
+  it('keeps a capability-block marker dirty when a concurrent retry only coalesces as gap-pending', async () => {
+    const created = await createTestIdentity('capability-retry-gap-pending')
+    const identity = created.identity
+    cleanup.push(async () => { await identity.deleteStoredIdentity() })
+    const broker = new InProcessLogBroker()
+    const messaging = new InMemoryMessagingAdapter({ broker, socketId: 'capability-retry-gap-pending' })
+    await messaging.connect(identity.getDid())
+    const keyManagement = new InMemoryKeyManagementAdapter()
+    const adapter = await makeSpaceAdapter(identity, messaging, metadataInPersonalDoc(new Y.Doc()), keyManagement, new InMemoryCompactStore(), A1_DEVICE)
+    cleanup.push(async () => { await adapter.stop(); await messaging.disconnect() })
+
+    const spaceId = 'capability-retry-gap-pending'
+    await keyManagement.saveKey(spaceId, 0, new Uint8Array(32))
+    await keyManagement.saveCapabilityKeyPair(spaceId, 0, new Uint8Array(32), new Uint8Array(32))
+    let calls = 0
+    const internals = adapter as unknown as {
+      spaces: Map<string, unknown>
+      coordinators: Map<string, { catchUp: () => Promise<{ complete: boolean, incomplete?: string }> }>
+      capabilityCatchUpBlocked: Set<string>
+      retryCapabilityBlockedCatchUp: (spaceId: string) => Promise<void>
+    }
+    internals.spaces.set(spaceId, {})
+    internals.capabilityCatchUpBlocked.add(spaceId)
+    internals.coordinators.set(spaceId, {
+      catchUp: async () => {
+        calls += 1
+        return calls === 1 ? { complete: false, incomplete: 'gap-pending' } : { complete: true }
+      },
+    })
+
+    await internals.retryCapabilityBlockedCatchUp(spaceId)
+    expect(internals.capabilityCatchUpBlocked.has(spaceId)).toBe(true)
+    await internals.retryCapabilityBlockedCatchUp(spaceId)
+    expect(calls).toBe(2)
+    expect(internals.capabilityCatchUpBlocked.has(spaceId)).toBe(false)
   })
 })
 

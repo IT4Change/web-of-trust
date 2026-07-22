@@ -2710,8 +2710,10 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
     this.capabilityCatchUpInFlight.add(spaceId)
     try {
       const result = await coordinator.catchUp()
-      if (result.incomplete === 'blocked-by-key') this.capabilityCatchUpBlocked.add(spaceId)
-      else this.capabilityCatchUpBlocked.delete(spaceId)
+      // The marker means "dirty until an actual successful catch-up proved
+      // otherwise". A coalesced/gap-pending result did not make that proof.
+      if (result.complete) this.capabilityCatchUpBlocked.delete(spaceId)
+      else if (result.incomplete === 'blocked-by-key') this.capabilityCatchUpBlocked.add(spaceId)
     } catch (err) {
       console.warn(`[YjsReplication] capability catch-up retry failed for ${spaceId}:`, err)
     } finally {
@@ -2722,7 +2724,8 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
 
   private async catchUpTrackingCapabilityBlock(spaceId: string, coordinator: LogSyncCoordinator) {
     const result = await coordinator.catchUp()
-    if (result.incomplete === 'blocked-by-key') this.capabilityCatchUpBlocked.add(spaceId)
+    if (result.complete) this.capabilityCatchUpBlocked.delete(spaceId)
+    else if (result.incomplete === 'blocked-by-key') this.capabilityCatchUpBlocked.add(spaceId)
     return result
   }
 
