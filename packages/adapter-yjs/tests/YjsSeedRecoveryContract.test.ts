@@ -190,7 +190,7 @@ describe('Seed-recovery contract — seed + relay log + PersonalDoc keys', () =>
 
     // Grosszuegige Deadline: unter Voll-Suite-CPU-Last ist der Recovery-Catch-up
     // langsamer; ein knappes Fenster flaket (isoliert immer gruen).
-    const deadline = Date.now() + 15_000
+    const deadline = Date.now() + 30_000
     // Vor dem Catch-up hat der recoverte Doc noch kein items-Root; die Warte-
     // bedingung darf daran NICHT werfen (`Object.keys(undefined)`), sondern muss
     // weiter pollen. Unter Voll-Suite-Last trat der Doc sonst als TypeError auf.
@@ -276,7 +276,7 @@ describe('Seed-recovery contract — seed + relay log + PersonalDoc keys', () =>
     await a2Adapter.restoreSpacesFromMetadata()
 
     const a2Handle = await a2Adapter.openSpace<TestDoc>(space.id)
-    const deadline = Date.now() + 15_000
+    const deadline = Date.now() + 30_000
     while (Date.now() < deadline && expected.length !== Object.keys(a2Handle.getDoc().items ?? {}).length) await wait()
     expect(Object.keys(a2Handle.getDoc().items ?? {}).sort()).toEqual(expected)
 
