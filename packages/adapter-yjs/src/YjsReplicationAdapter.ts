@@ -2694,6 +2694,8 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
    */
   private async retryCapabilityBlockedCatchUp(spaceId: string): Promise<void> {
     if (!this.logSyncEnabled || !this.capabilityCatchUpBlocked.has(spaceId) || !this.spaces.has(spaceId)) return
+    const catchUpEpoch = this.catchUpEpoch
+    const wasCatchUpReady = this.catchUpReady
     if (this.messaging.getState() !== 'connected') return
     const generation = await this.keyManagement.getCurrentGeneration(spaceId)
     const seed = generation >= 0 ? await this.keyManagement.getCapabilitySigningSeed(spaceId, generation) : null
@@ -2714,12 +2716,24 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
       // otherwise". A coalesced/gap-pending result did not make that proof.
       if (result.complete) this.capabilityCatchUpBlocked.delete(spaceId)
       else if (result.incomplete === 'blocked-by-key') this.capabilityCatchUpBlocked.add(spaceId)
+      else if (result.incomplete === 'gap-pending' && this.capabilityCatchUpBlocked.has(spaceId)) {
+        // catchUp() returns gap-pending immediately when a real flight owns this
+        // coordinator. Wait for that flight, then retry once through this same
+        // chained path. There is no timer/poll loop: a further coalescence can only
+        // chain behind another actually existing flight.
+        await coordinator.waitForCatchUpSettlement()
+        if (catchUpEpoch !== this.catchUpEpoch || (wasCatchUpReady && !this.catchUpReady)) return
+        if (!this.capabilityCatchUpBlocked.has(spaceId) || !this.spaces.has(spaceId)) return
+        await this.retryCapabilityBlockedCatchUp(spaceId)
+      }
     } catch (err) {
       console.warn(`[YjsReplication] capability catch-up retry failed for ${spaceId}:`, err)
     } finally {
       this.capabilityCatchUpInFlight.delete(spaceId)
     }
-    if (this.capabilityCatchUpDirty.delete(spaceId)) await this.retryCapabilityBlockedCatchUp(spaceId)
+    if (catchUpEpoch === this.catchUpEpoch && (!wasCatchUpReady || this.catchUpReady) && this.capabilityCatchUpDirty.delete(spaceId)) {
+      await this.retryCapabilityBlockedCatchUp(spaceId)
+    }
   }
 
   private async catchUpTrackingCapabilityBlock(spaceId: string, coordinator: LogSyncCoordinator) {

@@ -1335,7 +1335,7 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
     // Self-removal is a local abandon, matching the Yjs keyless leave path.
     if (await this.keyManagement.getCurrentGeneration(spaceId) < 0) {
       if (memberDid === myDid) {
-        await this.cleanupSpaceLocally(spaceId)
+        await this.forgetSpaceLocally(spaceId)
         return
       }
       throw new CapabilityKeysUnavailableError(spaceId)
@@ -2236,6 +2236,12 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
 
   /** Leave a space (User-Flow): clean up local state, metadata, group keys, compact store */
   async leaveSpace(spaceId: string): Promise<void> {
+    // A keyless recovery ghost is an explicit local abandon. It may have a
+    // pre-existing staged removal, which must not survive without a loaded space.
+    if (await this.keyManagement.getCurrentGeneration(spaceId) < 0) {
+      await this.forgetSpaceLocally(spaceId)
+      return
+    }
     await this.cleanupSpaceLocally(spaceId)
   }
 

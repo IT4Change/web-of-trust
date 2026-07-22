@@ -1408,6 +1408,16 @@ export class LogSyncCoordinator {
   }
 
   /**
+   * Wait for the currently running catch-up, if any, to settle. This deliberately
+   * exposes settlement only: callers still use {@link catchUp} for its existing
+   * result contract and receive the same gap-pending coalescing disposition.
+   */
+  async waitForCatchUpSettlement(): Promise<void> {
+    const inFlight = this.catchUpInFlight
+    if (inFlight) await inFlight
+  }
+
+  /**
    * BLOCKER-1b: drive a real restore-clone when the broker-head-abgleich detected
    * broker_seq>local_seq. Routed through the SAME machinery as a write-path
    * SEQ_COLLISION_DETECTED reject (mint a new deviceId via the WriteRejectHandler,
