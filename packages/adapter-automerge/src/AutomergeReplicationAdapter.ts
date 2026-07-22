@@ -25,7 +25,7 @@ import {
   createAckMessage, evaluateInboxAckDisposition, createDidKeyResolver,
   formatMembershipEventKey, parseMembershipEventKey, resolveActiveMembers, resolveMembershipWinner, assertMembershipEvent,
   resolveActiveAdmins, assertAdminEntry,
-  LogSyncCoordinator, AuthorMismatchError, LocalAppendFailedError, createSpaceCapabilityJws,
+  LogSyncCoordinator, AuthorMismatchError, LocalAppendFailedError, CapabilityKeysUnavailableError, createSpaceCapabilityJws,
   createSpaceRegisterMessageWithSigner, createSpaceRotateMessageWithSigner,
   LOG_ENTRY_MESSAGE_TYPE, SYNC_RESPONSE_MESSAGE_TYPE,
 } from '@web_of_trust/core/protocol'
@@ -1330,6 +1330,17 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
 
     const myDid = this.identity.getDid()
 
+    // A reseed ghost has metadata/doc state but no usable group generation. It
+    // must never enter a distributed membership transition or capability path.
+    // Self-removal is a local abandon, matching the Yjs keyless leave path.
+    if (await this.keyManagement.getCurrentGeneration(spaceId) < 0) {
+      if (memberDid === myDid) {
+        await this.forgetSpaceLocally(spaceId)
+        return
+      }
+      throw new CapabilityKeysUnavailableError(spaceId)
+    }
+
     // VE-3 (Sync 005 Z.229 "ein Admin"): removeMember ist Admin-Recht. Der Guard
     // sitzt VOR jeder Doc-Mutation/Rotation (Risk 4) — ein Nicht-Admin darf weder
     // ein removed-Event schreiben noch den Key rotieren (CRDT-Vandalismus-Fläche).
@@ -1826,6 +1837,9 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
    * change, so no second log entry is appended and the method returns cleanly.
    */
   private async commitMembershipEventDurable(space: SpaceState, event: MembershipEvent): Promise<void> {
+    if (await this.keyManagement.getCurrentGeneration(space.info.id) < 0) {
+      throw new CapabilityKeysUnavailableError(space.info.id)
+    }
     const docHandle = this.repo.handles[space.documentId]
     const doc = docHandle?.doc() as { _members?: Record<string, unknown> } | undefined
     if (!docHandle || !doc) throw new Error(`Cannot access doc for space: ${space.info.id}`)
@@ -2222,7 +2236,30 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
 
   /** Leave a space (User-Flow): clean up local state, metadata, group keys, compact store */
   async leaveSpace(spaceId: string): Promise<void> {
+    // A keyless recovery ghost is an explicit local abandon. It may have a
+    // pre-existing staged removal, which must not survive without a loaded space.
+    if (await this.keyManagement.getCurrentGeneration(spaceId) < 0) {
+      await this.forgetSpaceLocally(spaceId)
+      return
+    }
     await this.cleanupSpaceLocally(spaceId)
+  }
+
+  /** Public local-only disposal; mirrors the Yjs adapter's recovery/abandon flow. */
+  async forgetSpaceLocally(spaceId: string): Promise<void> {
+    await this.abortPendingRemovalsForAbandonedSpace(spaceId)
+    await this.cleanupSpaceLocally(spaceId)
+  }
+
+  /** Explicit local abandon only; a terminal secure-removal keeps its record until finalization. */
+  private async abortPendingRemovalsForAbandonedSpace(spaceId: string): Promise<void> {
+    if (!this.logSyncEnabled) return
+    const store = await this.ensureDocLogStore()
+    if (!store) return
+    const removals = await store.listPendingRemovals()
+    await Promise.all(removals
+      .filter((removal) => removal.spaceId === spaceId)
+      .map((removal) => store.deletePendingRemoval(removal.spaceId, removal.removedDid)))
   }
 
   /**
@@ -2277,6 +2314,7 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
       await this.metadataStorage.deleteSpaceMetadata(spaceId)
       await this.metadataStorage.deleteGroupKeys(spaceId)
     }
+    await this.keyManagement.deleteSpaceKeys(spaceId)
     await this.deletePendingMessagesForSpace(spaceId)
     if (this.compactStore) {
       await this.compactStore.delete(spaceId).catch(() => {})
@@ -2684,8 +2722,9 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
     return {
       getCapabilityJws: async () => {
         const generation = await this.keyManagement.getCurrentGeneration(spaceId)
+        if (generation < 0) throw new CapabilityKeysUnavailableError(spaceId)
         const signingSeed = await this.keyManagement.getCapabilitySigningSeed(spaceId, generation)
-        if (!signingSeed) throw new Error(`No capability signing seed for space ${spaceId} @ gen ${generation}`)
+        if (!signingSeed) throw new CapabilityKeysUnavailableError(spaceId)
         const now = Date.now()
         const validityMs = this.capabilityValidityMs ?? 6 * 30 * 24 * 60 * 60 * 1000
         return createSpaceCapabilityJws({

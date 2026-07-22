@@ -9,6 +9,7 @@ import {
   AuthorMismatchError,
   PersonalDocOwnerMismatchError,
   LocalAppendFailedError,
+  CapabilityKeysUnavailableError,
   classifyRejectDisposition,
   createSpaceCapabilityJws,
   createSpaceRegisterMessage,
@@ -243,6 +244,21 @@ afterEach(() => {
 })
 
 describe('LogSyncCoordinator — VE-2/3/4/8/9', () => {
+  it('defers catch-up as blocked-by-key when capability keys are not restored yet', async () => {
+    const identity = (await createTestIdentity('capability-keys-pending')).identity
+    const broker = new InProcessLogBroker()
+    const h = await makeHarness(identity, DEVICE_A, broker)
+    const capabilities = (h.coordinator as unknown as { config: { capabilities: { getCapabilityJws: () => Promise<string> } } }).config.capabilities
+    capabilities.getCapabilityJws = async () => { throw new CapabilityKeysUnavailableError(SPACE_ID) }
+
+    await expect(h.coordinator.catchUp()).resolves.toEqual({
+      restoreCloneRequired: false,
+      complete: false,
+      incomplete: 'blocked-by-key',
+    })
+
+    await h.messaging.disconnect()
+  })
   // ── Test 1: Write path ──────────────────────────────────────────────────────
   it('Test 1 — write path: one local change → exactly one log-entry envelope with correct payload, persisted before send', async () => {
     const broker = new InProcessLogBroker()

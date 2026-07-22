@@ -84,6 +84,10 @@ export class SpacesWorkflow {
     return this.replication.leaveSpace(requireValue(spaceId, 'spaceId'))
   }
 
+  forgetSpaceLocally(spaceId: string): Promise<void> {
+    return this.replication.forgetSpaceLocally(requireValue(spaceId, 'spaceId'))
+  }
+
   requestSync(spaceId = '__all__'): Promise<void> {
     return this.replication.requestSync(spaceId)
   }

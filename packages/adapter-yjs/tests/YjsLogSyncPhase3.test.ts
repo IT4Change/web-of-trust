@@ -248,6 +248,51 @@ describe('YjsReplicationAdapter — Slice A Phase 3 (VE-5/6/7/10 + write-reject 
     bobHandle.close()
   })
 
+  it('retries a capability-blocked catch-up after PersonalDoc reload imports key plus seed, without reconnecting', async () => {
+    const spaceId = await createSharedSpace()
+    const bobKeys = (bobAdapter as unknown as { keyManagement: InMemoryKeyManagementAdapter }).keyManagement
+    await bobKeys.deleteSpaceKeys(spaceId)
+
+    // The first catch-up cannot mint a capability. This records the blocked state.
+    await bobAdapter.requestSync(spaceId)
+    expect((bobAdapter as unknown as { capabilityCatchUpBlocked: Set<string> }).capabilityCatchUpBlocked.has(spaceId)).toBe(true)
+    const coordinator = (bobAdapter as unknown as {
+      coordinators: Map<string, { catchUp: () => Promise<unknown> }>
+    }).coordinators.get(spaceId)!
+    const catchUp = coordinator.catchUp.bind(coordinator)
+    let retries = 0
+    coordinator.catchUp = async () => {
+      retries += 1
+      return catchUp()
+    }
+
+    // Deliver the PersonalDoc's key + capability seed only now (the recovery
+    // ordering that previously stranded the coordinator).
+    const aliceKeys = (aliceAdapter as unknown as { keyManagement: InMemoryKeyManagementAdapter }).keyManagement
+    const bobMeta = (bobAdapter as unknown as { metadataStorage: InMemorySpaceMetadataStorage }).metadataStorage
+    const generation = await aliceKeys.getCurrentGeneration(spaceId)
+    const key = await aliceKeys.getKeyByGeneration(spaceId, generation)
+    const seed = await aliceKeys.getCapabilitySigningSeed(spaceId, generation)
+    expect(key).not.toBeNull()
+    expect(seed).not.toBeNull()
+    await bobMeta.saveGroupKey({ spaceId, generation, key: key! })
+    await bobMeta.saveCapabilitySigningSeed({ spaceId, generation, seed: seed! })
+
+    const aliceHandle = await aliceAdapter.openSpace<TestDoc>(spaceId)
+    aliceHandle.transact((doc) => { doc.items['after-reseed'] = { title: 'from broker log' } })
+    await wait(80)
+
+    // __all reloads the simulated PersonalDoc metadata. The retry goes through
+    // coordinator.catchUp(), which presents a capability before its sync request.
+    await bobAdapter.requestSync('__all__')
+    await wait(180)
+    expect(retries).toBe(1)
+    const bobHandle = await bobAdapter.openSpace<TestDoc>(spaceId)
+    expect(bobHandle.getDoc().items['after-reseed']?.title).toBe('from broker log')
+    aliceHandle.close()
+    bobHandle.close()
+  })
+
   // ── Group 2: VE-5/VE-11 write-reject — a write-path SEQ_COLLISION is a HARD error ──
   it('VE-11 write-reject HARD — a SEQ_COLLISION on a WRITE we sent is a hard error (SeqCollisionError): NO restore-clone, deviceId UNCHANGED, no device-revoke; no loop', async () => {
     // VE-11 Trigger-2: a write-path reject of a log-entry WE sent means our seq is

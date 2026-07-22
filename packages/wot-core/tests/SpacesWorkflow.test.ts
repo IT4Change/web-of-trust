@@ -11,6 +11,7 @@ class MemorySpaces implements SpaceReplicationPort {
   removeMemberCalls: Array<{ spaceId: string; memberDid: string }> = []
   promoteToAdminCalls: Array<{ spaceId: string; memberDid: string }> = []
   leaveCalls: string[] = []
+  forgetCalls: string[] = []
   syncCalls: string[] = []
 
   async createSpace<T>(type: SpaceInfo['type'], initialDoc: T, meta?: { name?: string; description?: string; appTag?: string }): Promise<SpaceInfo> {
@@ -61,6 +62,10 @@ class MemorySpaces implements SpaceReplicationPort {
 
   async leaveSpace(spaceId: string): Promise<void> {
     this.leaveCalls.push(spaceId)
+  }
+
+  async forgetSpaceLocally(spaceId: string): Promise<void> {
+    this.forgetCalls.push(spaceId)
   }
 
   async requestSync(spaceId: string): Promise<void> {

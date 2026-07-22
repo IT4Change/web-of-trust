@@ -20,6 +20,8 @@ export interface SpaceReplicationPort extends Partial<MembershipActivityCapable>
    * {@link ReplicationAdapter.promoteToAdmin}.
    */
   promoteToAdmin(spaceId: string, memberDid: string): Promise<void>
+  /** Remove local space state only; does not mutate membership or contact the broker. */
+  forgetSpaceLocally(spaceId: string): Promise<void>
   leaveSpace(spaceId: string): Promise<void>
   requestSync(spaceId: string): Promise<void>
 }

@@ -647,4 +647,21 @@ describe('YjsReplicationAdapter — Slice SR secure removal (VE-C1 wiring)', () 
       try { await carol.deleteStoredIdentity() } catch {}
     }
   })
+
+  it('forgetSpaceLocally aborts only this space\'s staged removal intent', async () => {
+    const spaceId = await createSharedSpace()
+    const keyPort = (aliceAdapter as unknown as { keyManagement: InMemoryKeyManagementAdapter }).keyManagement
+    const crypto = (aliceAdapter as unknown as { crypto: any }).crypto
+    const store = (aliceAdapter as unknown as { docLogStore: InMemoryDocLogStore }).docLogStore
+    const staged = await stageRotateSpaceKey({ crypto, keyPort, spaceId, ownerDid: alice.getDid() })
+    await store.putPendingRemoval({
+      spaceId, removedDid: bob.getDid(), homeBrokerSet: BROKER_URLS, confirmedBrokerUrls: [],
+      newGeneration: staged.newGeneration,
+      stagedKeyMaterial: { contentKey: staged.contentKey, capSigningSeed: staged.capabilitySigningSeed, capVerificationKey: staged.capabilityVerificationKey },
+      createdAt: Date.now(),
+    })
+
+    await aliceAdapter.forgetSpaceLocally(spaceId)
+    expect(await store.getPendingRemoval(spaceId, bob.getDid())).toBeNull()
+  })
 })

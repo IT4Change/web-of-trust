@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import type { PublicIdentitySession } from '../../wot-core/src/application/identity'
 import { createTestIdentity } from '../../wot-core/tests/helpers/identity-session'
 import { InMemoryMessagingAdapter, InMemorySpaceMetadataStorage, InMemoryKeyManagementAdapter } from '@web_of_trust/core/adapters'
@@ -65,6 +65,38 @@ describe('#234 recovery capability signing seed', () => {
     expect(seeds[0].seed.length).toBeGreaterThan(0)
     // sanity: device 1 can of course sign (it created the space).
     expect(await km1.getCapabilitySigningSeed(space.id, 0)).not.toBeNull()
+  })
+
+  it('defers a reseed ghost capability instead of passing generation -1 to key management', async () => {
+    const space = await device1.createSpace('shared', TestDoc(), { name: 'S', members: [alice.getDid()] })
+    const source = (device1 as unknown as { spaceCapabilitySource: (spaceId: string) => { getCapabilityJws: () => Promise<string> } })
+      .spaceCapabilitySource(space.id)
+    await km1.deleteSpaceKeys(space.id)
+
+    await expect(source.getCapabilityJws()).rejects.toMatchObject({ name: 'CapabilityKeysUnavailableError' })
+  })
+
+  it('uses local-only cleanup for a keyless leave and for forgetSpaceLocally', async () => {
+    const keyless = await device1.createSpace('shared', TestDoc(), { name: 'keyless', members: [alice.getDid()] })
+    const send = vi.spyOn(msg1, 'send')
+    const control = vi.spyOn(msg1, 'sendControlFrame')
+    await km1.deleteSpaceKeys(keyless.id)
+
+    await expect(device1.leaveSpace(keyless.id)).resolves.toBeUndefined()
+    expect(await device1.getSpace(keyless.id)).toBeNull()
+    expect(await sharedMeta.loadSpaceMetadata(keyless.id)).toBeNull()
+    expect(send).not.toHaveBeenCalled()
+    expect(control).not.toHaveBeenCalled()
+
+    const forgotten = await device1.createSpace('shared', TestDoc(), { name: 'forgotten', members: [alice.getDid()] })
+    send.mockClear()
+    control.mockClear()
+    await device1.forgetSpaceLocally(forgotten.id)
+    await device1.forgetSpaceLocally(forgotten.id)
+    expect(await device1.getSpace(forgotten.id)).toBeNull()
+    expect(await sharedMeta.loadSpaceMetadata(forgotten.id)).toBeNull()
+    expect(send).not.toHaveBeenCalled()
+    expect(control).not.toHaveBeenCalled()
   })
 
   // Proves the WRITE PREREQUISITE: the write path (spaceCapabilitySource) throws

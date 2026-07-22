@@ -8,7 +8,7 @@ import {
   InMemoryKeyManagementAdapter,
   InMemoryDocLogStore,
 } from '@web_of_trust/core/adapters'
-import { KEY_ROTATION_MESSAGE_TYPE } from '@web_of_trust/core/protocol'
+import { KEY_ROTATION_MESSAGE_TYPE, CapabilityKeysUnavailableError } from '@web_of_trust/core/protocol'
 import type { WireMessage, PendingRemoval } from '@web_of_trust/core/ports'
 import { stageRotateSpaceKey, createSpaceKey, rotateSpaceKey, buildKeyRotationBody, deliverInboxMessage } from '@web_of_trust/core/application'
 import { WebCryptoProtocolCryptoAdapter } from '@web_of_trust/core/protocol-adapters'
@@ -147,6 +147,14 @@ describe('AutomergeReplicationAdapter — Slice SR secure removal (VE-C1 wiring)
     await expect(aliceAdapter.removeMember(spaceId, alice.getDid()))
       .rejects.toThrow('secure self-leave is not supported by the Automerge adapter: durable admin-remove capability is unavailable')
     expect(await pendingRemoval(aliceAdapter, spaceId, alice.getDid())).toBeNull()
+  })
+
+  it('defers a keyless ghost capability source as blocked-by-key instead of validating generation -1', async () => {
+    const source = (aliceAdapter as unknown as {
+      spaceCapabilitySource: (spaceId: string) => { getCapabilityJws: () => Promise<string> }
+    }).spaceCapabilitySource('keyless-reseed-ghost')
+
+    await expect(source.getCapabilityJws()).rejects.toBeInstanceOf(CapabilityKeysUnavailableError)
   })
 
   it('WIRING (I-READ): a DUPLICATE key-rotation drives the coordinator blocked-by-key replay (ignore-stale-or-duplicate call-site)', async () => {
@@ -444,5 +452,47 @@ describe('AutomergeReplicationAdapter — Slice SR secure removal (VE-C1 wiring)
       await carolAdapter.stop()
       try { await carol.deleteStoredIdentity() } catch {}
     }
+  })
+
+  it('forgetSpaceLocally deletes key material and aborts this space\'s staged removal intent', async () => {
+    const spaceId = await createSharedSpace()
+    const keyPort = (aliceAdapter as unknown as { keyManagement: InMemoryKeyManagementAdapter }).keyManagement
+    const crypto = (aliceAdapter as unknown as { crypto: any }).crypto
+    const store = (aliceAdapter as unknown as { docLogStore: InMemoryDocLogStore }).docLogStore
+    const staged = await stageRotateSpaceKey({ crypto, keyPort, spaceId, ownerDid: alice.getDid() })
+    await store.putPendingRemoval({
+      spaceId, removedDid: bob.getDid(), homeBrokerSet: BROKER_URLS, confirmedBrokerUrls: [],
+      newGeneration: staged.newGeneration,
+      stagedKeyMaterial: { contentKey: staged.contentKey, capSigningSeed: staged.capabilitySigningSeed, capVerificationKey: staged.capabilityVerificationKey },
+      createdAt: Date.now(),
+    })
+
+    await aliceAdapter.forgetSpaceLocally(spaceId)
+    expect(await keyPort.getCurrentGeneration(spaceId)).toBe(-1)
+    expect(await store.getPendingRemoval(spaceId, bob.getDid())).toBeNull()
+  })
+
+  it('keyless self-abandon paths delete staged removal intents', async () => {
+    const removeMemberSpace = await createSharedSpace()
+    const leaveSpace = await createSharedSpace()
+    const keyPort = (aliceAdapter as unknown as { keyManagement: InMemoryKeyManagementAdapter }).keyManagement
+    const crypto = (aliceAdapter as unknown as { crypto: any }).crypto
+    const store = (aliceAdapter as unknown as { docLogStore: InMemoryDocLogStore }).docLogStore
+    for (const spaceId of [removeMemberSpace, leaveSpace]) {
+      const staged = await stageRotateSpaceKey({ crypto, keyPort, spaceId, ownerDid: alice.getDid() })
+      await store.putPendingRemoval({
+        spaceId, removedDid: bob.getDid(), homeBrokerSet: BROKER_URLS, confirmedBrokerUrls: [],
+        newGeneration: staged.newGeneration,
+        stagedKeyMaterial: { contentKey: staged.contentKey, capSigningSeed: staged.capabilitySigningSeed, capVerificationKey: staged.capabilityVerificationKey },
+        createdAt: Date.now(),
+      })
+      await keyPort.deleteSpaceKeys(spaceId)
+    }
+
+    await aliceAdapter.removeMember(removeMemberSpace, alice.getDid())
+    await aliceAdapter.leaveSpace(leaveSpace)
+
+    expect(await store.getPendingRemoval(removeMemberSpace, bob.getDid())).toBeNull()
+    expect(await store.getPendingRemoval(leaveSpace, bob.getDid())).toBeNull()
   })
 })

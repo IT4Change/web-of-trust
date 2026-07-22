@@ -49,7 +49,7 @@ import {
   encryptionKeyMultibaseFromDidDocument, x25519MultibaseToPublicKeyBytes,
   formatMembershipEventKey, parseMembershipEventKey, resolveActiveMembers, resolveMembershipWinner, assertMembershipEvent,
   resolveActiveAdmins, assertAdminEntry,
-  LogSyncCoordinator, AuthorMismatchError, LocalAppendFailedError, createSpaceCapabilityJws,
+  LogSyncCoordinator, AuthorMismatchError, LocalAppendFailedError, CapabilityKeysUnavailableError, createSpaceCapabilityJws,
   createSpaceRegisterMessageWithSigner, createSpaceRotateMessageWithSigner, createAdminRemoveMessageWithSigner,
   LOG_ENTRY_MESSAGE_TYPE, SYNC_RESPONSE_MESSAGE_TYPE,
 } from '@web_of_trust/core/protocol'
@@ -157,6 +157,12 @@ interface YjsSpaceState {
   info: SpaceInfo
   doc: Y.Doc
   handles: Set<YjsSpaceHandle<any>>
+  /**
+   * Remote log updates applied while no SpaceHandle was observing this doc.
+   * The initial catch-up can run before the connector opens its handle, so its
+   * normal onRemoteUpdate path has nobody to wake up.
+   */
+  unobservedRemoteUpdateRevision?: number
   memberEncryptionKeys: Map<string, Uint8Array>
   unsubUpdate: (() => void) | null
   // Pending member-update UX-Flags (Sync 005 Z.183-184). KEIN kanonischer State.
@@ -445,6 +451,17 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
   /** Slice B v3 (CodeRabbit): pending reconnect debounce, cleared in stop() so a queued tick
    * cannot resetForReconnect()/requestSync() against a tearing-down adapter. */
   private reconnectDebounceTimer: ReturnType<typeof setTimeout> | null = null
+  /** Overlapping initial/reconnect catch-ups share one final space-list wake-up. */
+  private pendingSpaceCatchUpBatches = 0
+  private catchUpAppliedWithoutHandle = false
+  /** Avoid duplicate relay catch-ups when restore and a connected event overlap. */
+  private spaceCatchUpsInFlight = new Set<string>()
+  /** Invalidates relay catch-up batches that belong to a stopped session. */
+  private catchUpEpoch = 0
+  // `started` becomes true before start() establishes the state subscription.
+  // Keep restore-triggered catch-up behind this separate readiness boundary so
+  // an already-connected transport cannot consume responses before that setup.
+  private catchUpReady = false
   private started = false
   private sentMessageIds = new Set<string>()
 
@@ -474,6 +491,10 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
    */
   private replayBlockedInFlight = new Set<string>()
   private replayBlockedDirty = new Set<string>()
+  /** Spaces whose capability-gated catch-up could not run until PersonalDoc key material arrives. */
+  private capabilityCatchUpBlocked = new Set<string>()
+  private capabilityCatchUpInFlight = new Set<string>()
+  private capabilityCatchUpDirty = new Set<string>()
 
   constructor(config: YjsReplicationConfig) {
     this.identity = config.identity
@@ -605,8 +626,20 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
     // only trigger one sync, not one per state change.
     if ('onStateChange' in this.messaging && typeof (this.messaging as any).onStateChange === 'function') {
       let reconnectSyncing = false
+      // `start()` can subscribe after the transport is already connected. Track the
+      // initial catch-up separately so a redundant connected notification directly
+      // after the state re-check does not start a second per-space catch-up storm.
+      let initialCatchUpStarted = false
+      let disconnectedSinceSubscription = false
       this.unsubStateChange = (this.messaging as any).onStateChange((state: string) => {
+        if (state === 'disconnected') {
+          disconnectedSinceSubscription = true
+          return
+        }
         if (state === 'connected' && this.started) {
+          // A state re-check below already covers the first connection. Only a
+          // real disconnected → connected transition is a reconnect.
+          if (initialCatchUpStarted && !disconnectedSinceSubscription) return
           if (this.reconnectDebounceTimer) clearTimeout(this.reconnectDebounceTimer)
           this.reconnectDebounceTimer = setTimeout(() => {
             this.reconnectDebounceTimer = null
@@ -625,9 +658,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
             // logSync, so without this the bumped epoch is NEVER recorded against a gap (no
             // catch-up runs) and the 3-distinct-epoch soft-skip gate is unreachable for Yjs
             // Spaces. requestSync(spaceId) → coordinator.catchUp() under logSync.
-            for (const spaceId of this.spaces.keys()) {
-              void this.requestSync(spaceId).catch(() => {})
-            }
+            this.requestCatchUpForAllSpaces()
             Promise.all([
               this._sendFullStateAllSpaces().catch(() => {}),
               this._pullAllFromVault().catch(() => {}),
@@ -641,10 +672,32 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
           }, 2000)
         }
       })
+
+      // State subscription is established; the initial connected re-check can
+      // now safely launch the restored spaces' catch-up.
+      this.catchUpReady = true
+
+      // Same readiness re-check as the PersonalDoc path: no connected event is
+      // guaranteed after subscription when the transport was already connected.
+      if (this.messaging.getState() === 'connected') {
+        initialCatchUpStarted = true
+        this.requestCatchUpForAllSpaces()
+      }
     }
+
+    // Adapters without a state subscription reach readiness only after the
+    // whole start sequence as well.
+    this.catchUpReady = true
   }
 
   async stop(): Promise<void> {
+    // A catch-up Promise can outlive the transport session.  Invalidate it before
+    // clearing its bookkeeping so its finally() cannot corrupt the next session.
+    this.catchUpReady = false
+    this.catchUpEpoch += 1
+    this.spaceCatchUpsInFlight.clear()
+    this.pendingSpaceCatchUpBatches = 0
+    this.catchUpAppliedWithoutHandle = false
     // Session-Grace neu armieren: nach stop()/start() derselben Instanz darf
     // ein alter First-Seen-Stempel keinen Sofort-Ghost erzeugen.
     this.metadataFirstSeenAt.clear()
@@ -689,6 +742,45 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
       // reconnect. Pull once more shortly after the initial reconnect sync.
       this._pullAllFromVault().catch(() => {})
     }, 10_000)
+  }
+
+  /** Start the log catch-up for every restored space without changing connection epochs. */
+  private requestCatchUpForAllSpaces(): void {
+    this.requestCatchUpForSpaces(this.spaces.keys())
+  }
+
+  /**
+   * Start relay-log catch-up for loaded spaces and coalesce the one post-catch-up
+   * listener wake-up. A space can be selected by both metadata restore and the
+   * connected handler; its in-flight catch-up is deliberately shared.
+   */
+  private requestCatchUpForSpaces(spaceIds: Iterable<string>): void {
+    const revisionsBefore = new Map(
+      Array.from(spaceIds)
+        .filter((spaceId) => this.spaces.has(spaceId) && !this.spaceCatchUpsInFlight.has(spaceId))
+        .map((spaceId) => [spaceId, this.spaces.get(spaceId)!.unobservedRemoteUpdateRevision ?? 0]),
+    )
+    if (revisionsBefore.size === 0) return
+    const catchUpEpoch = this.catchUpEpoch
+    for (const spaceId of revisionsBefore.keys()) this.spaceCatchUpsInFlight.add(spaceId)
+    this.pendingSpaceCatchUpBatches += 1
+    void Promise.all(
+      Array.from(revisionsBefore.keys(), (spaceId) => this.requestSync(spaceId).catch(() => {})),
+    ).then(() => {
+      if (catchUpEpoch !== this.catchUpEpoch) return
+      // A remote update has no handle-level observer until the connector opens
+      // the SpaceHandle. Remember it for the one coalesced post-catch-up wake-up.
+      this.catchUpAppliedWithoutHandle ||= Array.from(revisionsBefore.entries()).some(([spaceId, before]) =>
+        (this.spaces.get(spaceId)?.unobservedRemoteUpdateRevision ?? 0) > before,
+      )
+    }).finally(() => {
+      if (catchUpEpoch !== this.catchUpEpoch) return
+      for (const spaceId of revisionsBefore.keys()) this.spaceCatchUpsInFlight.delete(spaceId)
+      this.pendingSpaceCatchUpBatches -= 1
+      if (this.pendingSpaceCatchUpBatches !== 0 || !this.catchUpAppliedWithoutHandle) return
+      this.catchUpAppliedWithoutHandle = false
+      if (this.started) this.notifySpaceListeners()
+    })
   }
 
   getState(): ReplicationState {
@@ -1025,6 +1117,13 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
     const state = this.spaces.get(spaceId)
     if (!state) return false
 
+    // Member removal always reaches capability-gated rotation/commit machinery.
+    // A recovery ghost cannot safely perform that distributed operation before
+    // its PersonalDoc group keys arrive.
+    if (await this.keyManagement.getCurrentGeneration(spaceId) < 0) {
+      throw new CapabilityKeysUnavailableError(spaceId)
+    }
+
     const myDid = this.identity.getDid()
 
     // Admin-Guard (Sync 005 Z.229-234 "ein Admin", VE-3): nur ein Admin darf
@@ -1099,7 +1198,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
   ): Promise<void> {
     const spaceId = state.info.id
     const myDid = this.identity.getDid()
-    const notifyDids = [...state.info.members, memberDid]
+    const notifyDids = [...(state.info.members ?? []), memberDid]
     const clearBody = {
       spaceId,
       memberDid,
@@ -1400,7 +1499,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
 
     // (1) Ziel MUSS aktiver Member sein.
     const activeMembers = resolveActiveMembers(this.readMembershipEvents(state.doc))
-    const activeSet = new Set(activeMembers.length > 0 ? activeMembers : state.info.members)
+    const activeSet = new Set(activeMembers.length > 0 ? activeMembers : (state.info.members ?? []))
     if (!activeSet.has(memberDid)) {
       throw new Error('promoteToAdmin target must be an active member (Sync 005 Z.130)')
     }
@@ -1555,8 +1654,12 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
     return {
       getCapabilityJws: async () => {
         const generation = await this.keyManagement.getCurrentGeneration(spaceId)
+        // During recovery metadata can be restored before the PersonalDoc group
+        // keys. Map that expected state to the coordinator's retryable defer path;
+        // never pass -1 into the validated key-management API.
+        if (generation < 0) throw new CapabilityKeysUnavailableError(spaceId)
         const signingSeed = await this.keyManagement.getCapabilitySigningSeed(spaceId, generation)
-        if (!signingSeed) throw new Error(`No capability signing seed for space ${spaceId} @ gen ${generation}`)
+        if (!signingSeed) throw new CapabilityKeysUnavailableError(spaceId)
         const now = Date.now()
         const validityMs = this.capabilityValidityMs ?? 6 * 30 * 24 * 60 * 60 * 1000
         return createSpaceCapabilityJws({
@@ -1584,6 +1687,12 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
         // LOOP-GUARD: origin='remote' suppresses the local update observer, so this
         // apply never re-enters the write path / re-broadcasts.
         Y.applyUpdate(state.doc, plaintext, 'remote')
+        // At cold start the connector has not opened a handle yet. Preserve that
+        // missed handle notification for requestCatchUpForAllSpaces(), which wakes
+        // the space-list observers once after all restored spaces have converged.
+        if (state.handles.size === 0) {
+          state.unobservedRemoteUpdateRevision = (state.unobservedRemoteUpdateRevision ?? 0) + 1
+        }
         this._scheduleCompactDebounced(state)
       },
       // Slice B v2: the isForeignPayload sniff was removed with the (a)-model — out-of-
@@ -1669,7 +1778,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
       // VE-2: log entries are broadcast to all active space members (the relay
       // delivers to each member's sockets). state.info.members is the projection
       // of the canonical _members event set.
-      getRecipients: () => state.info.members,
+      getRecipients: () => state.info.members ?? [],
       getContentKey: async () => {
         const generation = await this.keyManagement.getCurrentGeneration(spaceId)
         const key = await this.keyManagement.getKeyByGeneration(spaceId, generation)
@@ -1760,12 +1869,13 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
     const active = resolveActiveAdmins(this.readAdminEntries(state.doc), activeMembers)
     if (active.length > 0) return active
     // Alt-Space-Fallback: SPEC-APPROX createdBy ?? members[0], aber nur wenn aktiv.
-    const activeSet = new Set(activeMembers.length > 0 ? activeMembers : state.info.members)
-    const candidate = state.info.createdBy ?? state.info.members[0]
+    const infoMembers = state.info.members ?? []
+    const activeSet = new Set(activeMembers.length > 0 ? activeMembers : infoMembers)
+    const candidate = state.info.createdBy ?? infoMembers[0]
     if (candidate !== undefined && activeSet.has(candidate)) return [candidate]
     // Letzter Fallback: irgendein aktives Mitglied (deterministisch), damit die
     // Liste fuer einen lebenden Space nie leer ist (Risk 7).
-    const fallbackList = activeMembers.length > 0 ? activeMembers : state.info.members
+    const fallbackList = activeMembers.length > 0 ? activeMembers : infoMembers
     return fallbackList.length > 0 ? [[...fallbackList].sort()[0]] : []
   }
 
@@ -1947,6 +2057,9 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
    * commit; Sync-002 seq/engine-dedup makes any earlier in-flight write harmless).
    */
   private async commitMembershipEventDurable(state: YjsSpaceState, event: MembershipEvent, activityEntry?: Record<string, unknown>): Promise<void> {
+    if (await this.keyManagement.getCurrentGeneration(state.info.id) < 0) {
+      throw new CapabilityKeysUnavailableError(state.info.id)
+    }
     const key = formatMembershipEventKey(event)
     const map = this.membersEventMap(state.doc)
     // B3 retry-hole (loop-review): `map.has(key)` proves the event is LOCALLY applied,
@@ -2024,16 +2137,27 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
     const state = this.spaces.get(spaceId)
     if (!state) return
 
+    // Inspect a terminal removal intent BEFORE treating a keyless ghost as an
+    // abandonable space. Its staged material is still needed by finalizeSelfLeave.
     const selfDid = this.identity.getDid()
+    const pendingStore = this.logSyncEnabled ? await this.ensureDocLogStore() : null
+    const securePending = pendingStore && await pendingStore.getPendingRemoval(spaceId, selfDid)
+
+    // A reseed ghost has metadata/doc state but no local group keys yet. It cannot
+    // create a valid membership event or capability, so disposal is strictly local.
+    if (await this.keyManagement.getCurrentGeneration(spaceId) < 0) {
+      if (!securePending) await this.abortPendingRemovalsForAbandonedSpace(spaceId)
+      await this.cleanupSpaceLocally(spaceId)
+      return
+    }
+
     const activeMembers = resolveActiveMembers(this.readMembershipEvents(state.doc))
-    const members = activeMembers.length > 0 ? activeMembers : state.info.members
+    const members = activeMembers.length > 0 ? activeMembers : (state.info.members ?? [])
     const existingSelf = resolveMembershipWinner(this.readMembershipEvents(state.doc), selfDid)
 
     // A broker-enforced admin self-removal can have its durable membership append
     // fail after rotation. Complete that exact staged transaction before the generic
     // "already removed" retry path decides authority from active members.
-    const pendingStore = this.logSyncEnabled ? await this.ensureDocLogStore() : null
-    const securePending = pendingStore && await pendingStore.getPendingRemoval(spaceId, selfDid)
     if (securePending) {
       const selfEncryptionKey = await this.identity.getEncryptionPublicKeyBytes()
       await runTwoPhaseRemoval(
@@ -2139,6 +2263,23 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
     await this.cleanupSpaceLocally(spaceId)
   }
 
+  /** Public local-only disposal for reseed ghosts and callers that intentionally abandon a space. */
+  async forgetSpaceLocally(spaceId: string): Promise<void> {
+    await this.abortPendingRemovalsForAbandonedSpace(spaceId)
+    await this.cleanupSpaceLocally(spaceId)
+  }
+
+  /** Abort only explicitly abandoned/keyless removal intents; terminal removal cleanup keeps its record. */
+  private async abortPendingRemovalsForAbandonedSpace(spaceId: string): Promise<void> {
+    if (!this.logSyncEnabled) return
+    const store = await this.ensureDocLogStore()
+    if (!store) return
+    const removals = await store.listPendingRemovals()
+    await Promise.all(removals
+      .filter((removal) => removal.spaceId === spaceId)
+      .map((removal) => store.deletePendingRemoval(removal.spaceId, removal.removedDid)))
+  }
+
   /**
    * Gemeinsame Cleanup-Mechanik fuer den User-Flow (leaveSpace) und den
    * Resolution-Pfad (kanonisch bestaetigte eigene Entfernung, Sync 005 Z.253
@@ -2170,6 +2311,9 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
     this.coordinators.delete(spaceId)
     this.replayBlockedInFlight.delete(spaceId)
     this.replayBlockedDirty.delete(spaceId)
+    this.capabilityCatchUpBlocked.delete(spaceId)
+    this.capabilityCatchUpInFlight.delete(spaceId)
+    this.capabilityCatchUpDirty.delete(spaceId)
 
     // Clean up schedulers
     this.vaultSchedulers.get(spaceId)?.destroy()
@@ -2415,7 +2559,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
         if (this.logSyncEnabled) {
           const coordinator = await this.getOrCreateCoordinator(state)
           if (coordinator) {
-            await coordinator.catchUp().catch((e) => {
+            await this.catchUpTrackingCapabilityBlock(spaceId, coordinator).catch((e) => {
               // E1: surface a non-transient append failure (e.g. a restore-clone
               // re-write triggered by catch-up) loudly — never a silent defer.
               if (e instanceof LocalAppendFailedError) {
@@ -2541,6 +2685,62 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
       await importKey(this.keyManagement, k.spaceId, k.generation, k.key)
     }
     await this._reloadCapabilitySeeds(spaceId)
+    await this.retryCapabilityBlockedCatchUp(spaceId)
+  }
+
+  /**
+   * A blocked initial catch-up has not presented a capability or sent a sync-request.
+   * Once PersonalDoc supplies both ingredients, retry exactly once per import cycle.
+   */
+  private async retryCapabilityBlockedCatchUp(spaceId: string): Promise<void> {
+    if (!this.logSyncEnabled || !this.capabilityCatchUpBlocked.has(spaceId) || !this.spaces.has(spaceId)) return
+    const catchUpEpoch = this.catchUpEpoch
+    const wasCatchUpReady = this.catchUpReady
+    if (this.messaging.getState() !== 'connected') return
+    const generation = await this.keyManagement.getCurrentGeneration(spaceId)
+    const seed = generation >= 0 ? await this.keyManagement.getCapabilitySigningSeed(spaceId, generation) : null
+    if (generation < 0 || !seed) {
+      console.error(`[YjsReplication] capability catch-up for ${spaceId} remains blocked: PersonalDoc imported a content key without a usable capability seed`)
+      return
+    }
+    if (this.capabilityCatchUpInFlight.has(spaceId)) {
+      this.capabilityCatchUpDirty.add(spaceId)
+      return
+    }
+    const coordinator = this.coordinators.get(spaceId)
+    if (!coordinator) return
+    this.capabilityCatchUpInFlight.add(spaceId)
+    try {
+      const result = await coordinator.catchUp()
+      // The marker means "dirty until an actual successful catch-up proved
+      // otherwise". A coalesced/gap-pending result did not make that proof.
+      if (result.complete) this.capabilityCatchUpBlocked.delete(spaceId)
+      else if (result.incomplete === 'blocked-by-key') this.capabilityCatchUpBlocked.add(spaceId)
+      else if (result.incomplete === 'gap-pending' && this.capabilityCatchUpBlocked.has(spaceId)) {
+        // catchUp() returns gap-pending immediately when a real flight owns this
+        // coordinator. Wait for that flight, then retry once through this same
+        // chained path. There is no timer/poll loop: a further coalescence can only
+        // chain behind another actually existing flight.
+        await coordinator.waitForCatchUpSettlement()
+        if (catchUpEpoch !== this.catchUpEpoch || (wasCatchUpReady && !this.catchUpReady)) return
+        if (!this.capabilityCatchUpBlocked.has(spaceId) || !this.spaces.has(spaceId)) return
+        await this.retryCapabilityBlockedCatchUp(spaceId)
+      }
+    } catch (err) {
+      console.warn(`[YjsReplication] capability catch-up retry failed for ${spaceId}:`, err)
+    } finally {
+      this.capabilityCatchUpInFlight.delete(spaceId)
+    }
+    if (catchUpEpoch === this.catchUpEpoch && (!wasCatchUpReady || this.catchUpReady) && this.capabilityCatchUpDirty.delete(spaceId)) {
+      await this.retryCapabilityBlockedCatchUp(spaceId)
+    }
+  }
+
+  private async catchUpTrackingCapabilityBlock(spaceId: string, coordinator: LogSyncCoordinator) {
+    const result = await coordinator.catchUp()
+    if (result.complete) this.capabilityCatchUpBlocked.delete(spaceId)
+    else if (result.incomplete === 'blocked-by-key') this.capabilityCatchUpBlocked.add(spaceId)
+    return result
   }
 
   /**
@@ -2626,7 +2826,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
       }
 
       // Send to ALL members (not just self) so offline changes propagate on reconnect
-      await Promise.all(state.info.members.map(async (memberDid) => {
+      await Promise.all((state.info.members ?? []).map(async (memberDid) => {
         const envelope: MessageEnvelope = {
           v: 1, id: crypto.randomUUID(), type: 'content',
           fromDid: myDid, toDid: memberDid,
@@ -2668,8 +2868,14 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
     if (!this.metadataStorage) return
 
     const allMeta = await this.metadataStorage.loadAllSpaceMetadata()
+    const newlyLoadedSpaceIds: string[] = []
     console.debug(`[YjsReplication] restoreSpacesFromMetadata: ${allMeta.length} spaces from metadata, ${this.spaces.size} already loaded`)
     for (const meta of allMeta) {
+      // Resilienz: ein einzelner malformter Metadata-Record (Teilzustand aus
+      // Reseed-/Rotations-Churn — z. B. fehlende Felder) darf NIE den gesamten
+      // Restore und damit den Unlock blockieren. Ein Space, dessen Restore
+      // wirft, wird uebersprungen und laut geloggt; die uebrigen Spaces laden.
+      try {
       console.debug(`[YjsReplication]   space: ${meta.info.id} name=${meta.info.name} type=${meta.info.type}`)
 
       if (this.spaces.has(meta.info.id)) {
@@ -2678,9 +2884,22 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
         // real ghost and gets cleaned up like an unloaded one.
         // The key may ALREADY be in the (synced) PersonalDoc while the local
         // keyManagement has not imported it yet — reload before judging.
+        const wasKeyless = (await this.keyManagement.getCurrentKey(meta.info.id)) === null
+        // If this was already recorded as capability-blocked, _reloadGroupKeys()
+        // owns the retry below.  The transition catch-up is for the handoff gap
+        // where that recording has not happened yet.
+        const wasCapabilityCatchUpBlocked = this.capabilityCatchUpBlocked.has(meta.info.id)
         await this._reloadGroupKeys(meta.info.id)
         const stillKeyless = (await this.keyManagement.getCurrentKey(meta.info.id)) === null
-        if (!stillKeyless) { this.metadataFirstSeenAt.delete(meta.info.id); continue }
+        if (!stillKeyless) {
+          this.metadataFirstSeenAt.delete(meta.info.id)
+          // A loaded Space can receive its content key in a later PersonalDoc
+          // restore.  Schedule the same relay catch-up as a newly discovered
+          // Space, independent of whether a prior attempt has reached its
+          // capability-block bookkeeping yet.
+          if (wasKeyless && !wasCapabilityCatchUpBlocked) newlyLoadedSpaceIds.push(meta.info.id)
+          continue
+        }
         // Keep asking the other devices for the key while the grace runs —
         // the initial request may have timed out (device offline).
         void this.sendSpaceSyncRequest(meta.info.id).catch(() => {})
@@ -2778,6 +2997,14 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
       if (adminEntriesRestore.length > 0) {
         meta.info.admins = resolveActiveAdmins(adminEntriesRestore, resolveActiveMembers(membershipEvents))
       }
+      // Robustheit: persistierte Metadata eines malformten/keylosen Space kann
+      // members/admins als undefined tragen (Teilzustand aus Reseed-/Rotations-
+      // Churn). Jede spaeter iterierende Stelle (spaceAdminDids, getRecipients,
+      // sendMemberUpdate ...) wuerde sonst "info.members is not iterable" werfen
+      // und den Restore/Unlock hart abbrechen. Ein Space ohne Member-Liste ist
+      // leer, nicht kaputt.
+      if (!Array.isArray(meta.info.members)) meta.info.members = []
+      if (!Array.isArray(meta.info.admins)) meta.info.admins = []
 
       const state: YjsSpaceState = {
         info: meta.info,
@@ -2808,8 +3035,11 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
       // Pendings bleiben offen und triggern unten den Catch-up.
       await this.resolveCanonicallyAnsweredMemberUpdates(state)
       if (!this.spaces.has(meta.info.id)) continue // Restore-Resolution hat den Space aufgeraeumt
+      newlyLoadedSpaceIds.push(meta.info.id)
       if (state.pendingRemoval || state.pendingAddition) {
-        void this.requestSync(meta.info.id).catch(() => {})
+        // Connected restores go through the coalesced batch below.  Offline,
+        // retain the existing best-effort pending-resolution request.
+        if (this.messaging.getState() !== 'connected') void this.requestSync(meta.info.id).catch(() => {})
       }
 
       await this.processPendingForSpace(meta.info.id)
@@ -2822,9 +3052,21 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
       void this.sendSpaceSyncRequest(meta.info.id).catch(() => {})
 
       // Vault pull happens later in _pullAllFromVault() with concurrency limit
+      } catch (err) {
+        console.error(`[YjsReplication] restore skipped malformed space ${meta?.info?.id}:`, err)
+        continue
+      }
     }
 
     this.notifySpaceListeners()
+    // A PersonalDoc update can reveal a space only after the transport has
+    // connected. Its content may still exist solely in the relay log, so catch
+    // it up now rather than waiting for a reload. start() normally restores
+    // before connect; the strict state gate keeps that path with the connected
+    // handler, while the in-flight set prevents overlap with that handler.
+    if (this.catchUpReady && this.messaging.getState() === 'connected') {
+      this.requestCatchUpForSpaces(newlyLoadedSpaceIds)
+    }
   }
 
   // --- Internal: Encrypted Space Sync ---
@@ -3075,7 +3317,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
     if (!state) return
 
 
-    await Promise.all(state.info.members.map(async (memberDid) => {
+    await Promise.all((state.info.members ?? []).map(async (memberDid) => {
       const envelope: MessageEnvelope = {
         v: 1, id: crypto.randomUUID(), type: 'content',
         fromDid: myDid, toDid: memberDid,
@@ -3471,7 +3713,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
         localKeyGeneration: await this.keyManagement.getCurrentGeneration(body.spaceId),
         // VE-2: Authority aus der echten aktiven Admin-Liste (war [createdBy]).
         knownAdminDids: this.spaceAdminDids(state),
-        knownMemberDids: state.info.members,
+        knownMemberDids: state.info.members ?? [],
         seenUpdates: await this.memberUpdateStore.listSeenForSpace(body.spaceId),
       },
       store: this.memberUpdateStore,
@@ -3561,7 +3803,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
           localKeyGeneration: await this.keyManagement.getCurrentGeneration(spaceId),
           // VE-2: Authority aus der echten aktiven Admin-Liste (war [createdBy]).
           knownAdminDids: this.spaceAdminDids(state),
-          knownMemberDids: state.info.members,
+          knownMemberDids: state.info.members ?? [],
           seenUpdates: await this.memberUpdateStore.listSeenForSpace(spaceId),
         },
         store: this.memberUpdateStore,
@@ -4130,7 +4372,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
     // (Sync 003 Z.500 MUSS) — der Group-Key-OneShot-Pfad ist tot.
     const clearBody = { spaceId, memberDid, action, effectiveKeyGeneration: generation }
 
-    for (const did of state.info.members) {
+    for (const did of (state.info.members ?? [])) {
       if (did === myDid || did === memberDid) continue
 
       const encPub = state.memberEncryptionKeys.get(did)
