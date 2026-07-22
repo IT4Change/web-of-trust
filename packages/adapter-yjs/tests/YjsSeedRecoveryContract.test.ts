@@ -394,7 +394,7 @@ describe('Seed-recovery contract — seed + relay log + PersonalDoc keys', () =>
     expect(internals.pendingSpaceCatchUpBatches).toBe(0)
   })
 
-  it('keeps a capability-block marker dirty when a concurrent retry only coalesces as gap-pending', async () => {
+  it('automatically retries a capability-block marker after a concurrent gap-pending flight settles', async () => {
     const created = await createTestIdentity('capability-retry-gap-pending')
     const identity = created.identity
     cleanup.push(async () => { await identity.deleteStoredIdentity() })
@@ -409,26 +409,75 @@ describe('Seed-recovery contract — seed + relay log + PersonalDoc keys', () =>
     await keyManagement.saveKey(spaceId, 0, new Uint8Array(32))
     await keyManagement.saveCapabilityKeyPair(spaceId, 0, new Uint8Array(32), new Uint8Array(32))
     let calls = 0
+    let settleConcurrentFlight!: () => void
+    const concurrentFlightSettled = new Promise<void>((resolve) => { settleConcurrentFlight = resolve })
     const internals = adapter as unknown as {
       spaces: Map<string, unknown>
-      coordinators: Map<string, { catchUp: () => Promise<{ complete: boolean, incomplete?: string }> }>
+      coordinators: Map<string, {
+        catchUp: () => Promise<{ complete: boolean, incomplete?: string }>
+        waitForCatchUpSettlement: () => Promise<void>
+      }>
       capabilityCatchUpBlocked: Set<string>
       retryCapabilityBlockedCatchUp: (spaceId: string) => Promise<void>
     }
-    internals.spaces.set(spaceId, {})
+    internals.spaces.set(spaceId, { handles: [], doc: new Y.Doc() })
     internals.capabilityCatchUpBlocked.add(spaceId)
     internals.coordinators.set(spaceId, {
       catchUp: async () => {
         calls += 1
         return calls === 1 ? { complete: false, incomplete: 'gap-pending' } : { complete: true }
       },
+      waitForCatchUpSettlement: async () => concurrentFlightSettled,
     })
 
-    await internals.retryCapabilityBlockedCatchUp(spaceId)
+    const retry = internals.retryCapabilityBlockedCatchUp(spaceId)
+    await waitUntil(() => calls === 1, 'the coalesced retry')
     expect(internals.capabilityCatchUpBlocked.has(spaceId)).toBe(true)
-    await internals.retryCapabilityBlockedCatchUp(spaceId)
+    settleConcurrentFlight()
+    await retry
     expect(calls).toBe(2)
     expect(internals.capabilityCatchUpBlocked.has(spaceId)).toBe(false)
+  })
+
+  it('does not let a chained capability catch-up retry cross stop into a new session', async () => {
+    const created = await createTestIdentity('capability-retry-stop-epoch')
+    const identity = created.identity
+    cleanup.push(async () => { await identity.deleteStoredIdentity() })
+    const broker = new InProcessLogBroker()
+    const messaging = new InMemoryMessagingAdapter({ broker, socketId: 'capability-retry-stop-epoch' })
+    await messaging.connect(identity.getDid())
+    const keyManagement = new InMemoryKeyManagementAdapter()
+    const adapter = await makeSpaceAdapter(identity, messaging, metadataInPersonalDoc(new Y.Doc()), keyManagement, new InMemoryCompactStore(), A1_DEVICE)
+    cleanup.push(async () => { await adapter.stop(); await messaging.disconnect() })
+
+    const spaceId = 'capability-retry-stop-epoch'
+    await keyManagement.saveKey(spaceId, 0, new Uint8Array(32))
+    await keyManagement.saveCapabilityKeyPair(spaceId, 0, new Uint8Array(32), new Uint8Array(32))
+    let calls = 0
+    let settleConcurrentFlight!: () => void
+    const concurrentFlightSettled = new Promise<void>((resolve) => { settleConcurrentFlight = resolve })
+    const internals = adapter as unknown as {
+      spaces: Map<string, unknown>
+      coordinators: Map<string, {
+        catchUp: () => Promise<{ complete: boolean, incomplete?: string }>
+        waitForCatchUpSettlement: () => Promise<void>
+      }>
+      capabilityCatchUpBlocked: Set<string>
+      retryCapabilityBlockedCatchUp: (spaceId: string) => Promise<void>
+    }
+    internals.spaces.set(spaceId, { handles: [], doc: new Y.Doc() })
+    internals.capabilityCatchUpBlocked.add(spaceId)
+    internals.coordinators.set(spaceId, {
+      catchUp: async () => ({ complete: ++calls > 1 }),
+      waitForCatchUpSettlement: async () => concurrentFlightSettled,
+    })
+
+    const retry = internals.retryCapabilityBlockedCatchUp(spaceId)
+    await waitUntil(() => calls === 1, 'the coalesced retry')
+    await adapter.stop()
+    settleConcurrentFlight()
+    await retry
+    expect(calls).toBe(1)
   })
 })
 

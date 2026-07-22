@@ -471,4 +471,28 @@ describe('AutomergeReplicationAdapter — Slice SR secure removal (VE-C1 wiring)
     expect(await keyPort.getCurrentGeneration(spaceId)).toBe(-1)
     expect(await store.getPendingRemoval(spaceId, bob.getDid())).toBeNull()
   })
+
+  it('keyless self-abandon paths delete staged removal intents', async () => {
+    const removeMemberSpace = await createSharedSpace()
+    const leaveSpace = await createSharedSpace()
+    const keyPort = (aliceAdapter as unknown as { keyManagement: InMemoryKeyManagementAdapter }).keyManagement
+    const crypto = (aliceAdapter as unknown as { crypto: any }).crypto
+    const store = (aliceAdapter as unknown as { docLogStore: InMemoryDocLogStore }).docLogStore
+    for (const spaceId of [removeMemberSpace, leaveSpace]) {
+      const staged = await stageRotateSpaceKey({ crypto, keyPort, spaceId, ownerDid: alice.getDid() })
+      await store.putPendingRemoval({
+        spaceId, removedDid: bob.getDid(), homeBrokerSet: BROKER_URLS, confirmedBrokerUrls: [],
+        newGeneration: staged.newGeneration,
+        stagedKeyMaterial: { contentKey: staged.contentKey, capSigningSeed: staged.capabilitySigningSeed, capVerificationKey: staged.capabilityVerificationKey },
+        createdAt: Date.now(),
+      })
+      await keyPort.deleteSpaceKeys(spaceId)
+    }
+
+    await aliceAdapter.removeMember(removeMemberSpace, alice.getDid())
+    await aliceAdapter.leaveSpace(leaveSpace)
+
+    expect(await store.getPendingRemoval(removeMemberSpace, bob.getDid())).toBeNull()
+    expect(await store.getPendingRemoval(leaveSpace, bob.getDid())).toBeNull()
+  })
 })
