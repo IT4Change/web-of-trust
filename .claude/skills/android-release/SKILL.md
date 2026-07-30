@@ -24,7 +24,9 @@ export PATH="$HOME/Android/Sdk/build-tools/36.0.0:$PATH"
 
 ```bash
 node -v && pnpm -v                          # Schritt 4
-java -version && command -v apksigner       # Schritt 5a/5b
+# keytool gehoert mitgeprueft: es kommt aus dem JDK, eine reine JRE bringt java
+# mit, aber kein keytool. Sonst faellt das erst nach dem Gradle-Build auf.
+java -version && command -v keytool && command -v apksigner   # Schritt 5a/5b
 ```
 
 Schritt 4 braucht nur Node. Schritt 5a und 5b brauchen ein **JDK**: `./gradlew`, `keytool` und `apksigner` sind allesamt Java-Programme. Fehlt Java (z.B. in einer Agent-Sandbox), lässt sich der Ablauf sauber teilen — Web-Build und Verifikation bis Schritt 4 hier erledigen, die nativen Schritte auf einer Umgebung mit JDK. Nicht versuchen, das zu umgehen.
@@ -48,18 +50,26 @@ cd "$REPO_ROOT"
 # (core-v0.4.1, adapter-yjs-v0.1.8, ota-<sha>) und der Changelog wird still leer
 # oder falsch, ohne dass irgendetwas fehlschlaegt.
 LAST_TAG=$(git describe --tags --abbrev=0 --match "v[0-9]*" 2>/dev/null || echo "")
-if [ -n "$LAST_TAG" ]; then
-  echo "--- apps/demo ---"
-  git log --oneline "$LAST_TAG"..HEAD -- apps/demo/
-  # packages/ NICHT weglassen: wot-core & Co landen ueber das Web-Bundle im APK,
-  # tauchen aber in einem auf apps/demo gefilterten Log nicht auf.
-  # Nur die drei Pakete, die apps/demo tatsaechlich als Dependency zieht und die
-  # damit im Web-Bundle landen. Ein Filter auf ganz packages/ waere zu breit und
-  # zoege Relay-, CLI-, Vault- und Test-Aenderungen in den App-Changelog.
-  echo "--- im APK gebuendelte Pakete ---"
-  git log --oneline "$LAST_TAG"..HEAD -- \
-    packages/wot-core/ packages/adapter-yjs/ packages/adapter-automerge/
+
+# Leeres LAST_TAG NICHT stillschweigend durchlassen: "$LAST_TAG"..HEAD wuerde zu
+# "..HEAD" und das liest Git als HEAD..HEAD, also als leere Range. Der Changelog
+# waere dann leer und der Lauf trotzdem gruen — dieselbe stille Falle wie der
+# fehlende --match-Filter.
+if [ -z "$LAST_TAG" ]; then
+  echo "ABBRUCH: kein v*-Tag gefunden." >&2
+  echo "Fuer ein Erstrelease eine Basis explizit setzen, z.B.:" >&2
+  echo "  LAST_TAG=\$(git rev-list --max-parents=0 HEAD | head -1)" >&2
+  exit 1
 fi
+
+echo "--- apps/demo ---"
+git log --oneline "$LAST_TAG"..HEAD -- apps/demo/
+# Nur die drei Pakete, die apps/demo tatsaechlich als Dependency zieht und die
+# damit ueber das Web-Bundle im APK landen. Ein Filter auf ganz packages/ waere
+# zu breit und zoege Relay-, CLI-, Vault- und Test-Aenderungen in den Changelog.
+echo "--- im APK gebuendelte Pakete ---"
+git log --oneline "$LAST_TAG"..HEAD -- \
+  packages/wot-core/ packages/adapter-yjs/ packages/adapter-automerge/
 ```
 
 Prüfe ob native Änderungen dabei sind:
@@ -215,11 +225,25 @@ VERSION_NAME=$(grep VERSION_NAME "$DEMO_DIR/android/version.properties" | cut -d
 # BEIDE Aenderungen aus Schritt 3 committen. Nur version.properties zu stagen
 # laesst den F-Droid-Metadaten-Bump uncommitted liegen — der Tag behauptet dann
 # eine Version, die das Repo-Metadatenfile nicht kennt.
-git add apps/demo/android/version.properties packages/wot-fdroid/fdroid/metadata/
+# Gezielt die eine YAML stagen, nicht das ganze metadata/-Verzeichnis: sonst
+# rutscht ein fremder Metadaten-Bump (z.B. der RLS-App) mit in den WoT-Release.
+git add apps/demo/android/version.properties \
+  packages/wot-fdroid/fdroid/metadata/org.reallife.weboftrust.yml
 
-# Kontrolle vor dem Commit: hier MUESSEN version.properties und mindestens ein
-# metadata/*.yml stehen.
-git status --short --cached
+# Den Stage-Inhalt VERGLEICHEN, nicht nur anzeigen. Ein blosses Ausgeben belegt
+# weder, dass beide erwarteten Dateien drin sind, noch dass nichts Fremdes
+# mitgestaged wurde. (`git status --cached` gibt es uebrigens nicht, das bricht
+# mit Exit 128 ab — `git diff --cached` ist die richtige Abfrage.)
+EXPECTED=$(printf '%s\n' \
+  apps/demo/android/version.properties \
+  packages/wot-fdroid/fdroid/metadata/org.reallife.weboftrust.yml | sort)
+STAGED=$(git diff --cached --name-only | sort)
+if [ "$STAGED" != "$EXPECTED" ]; then
+  echo "ABBRUCH: unerwarteter Stage-Inhalt." >&2
+  echo "--- erwartet ---" >&2; printf '%s\n' "$EXPECTED" >&2
+  echo "--- gestaged ---" >&2; printf '%s\n' "$STAGED" >&2
+  exit 1
+fi
 
 git commit -m "release: v${VERSION_NAME}"
 git tag "v${VERSION_NAME}"
