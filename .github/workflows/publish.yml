@@ -12,12 +12,18 @@ on:
 jobs:
   publish:
     runs-on: ubuntu-latest
-    # Kein npm-Publish mehr: 2FA/Trusted-Publisher-Setup auf npmjs.com ist
-    # blockiert (Passkey wird nicht akzeptiert). Die Pakete werden stattdessen
-    # als tgz-Assets ans GitHub-Release gehängt — RLS konsumiert genau diese
-    # Tarball-URLs als Dependencies.
+    # Zwei Ziele, bewusst parallel:
+    #   1. tgz-Assets am GitHub-Release — RLS konsumiert aktuell genau diese
+    #      Tarball-URLs als Dependencies. Bleibt, bis RLS auf npm umgehaengt ist.
+    #   2. npm via Trusted Publishing (OIDC). Der frühere Blocker (2FA/Passkey
+    #      wurde nicht akzeptiert) ist weg, seit auf npmjs.com ein Trusted
+    #      Publisher fuer real-life-org/web-of-trust + publish.yml hinterlegt ist.
+    # Die Reihenfolge ist Absicht: erst die Assets, dann npm. Scheitert npm,
+    # bleibt der Tarball-Pfad fuer RLS intakt und der Lauf trotzdem rot.
     permissions:
       contents: write
+      # Ohne id-token kein OIDC-Token und damit kein Trusted Publishing.
+      id-token: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -26,7 +32,9 @@ jobs:
           # Assets eines aelteren Releases ueberschreiben.
           ref: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.tag }}
 
-      - uses: pnpm/action-setup@v2
+      # v2 ist zu alt fuer Trusted Publishing — genau daran scheiterte
+      # pnpm/pnpm#11513, geloest durch ein Update der Action.
+      - uses: pnpm/action-setup@v4
         with:
           version: 9
 
@@ -60,3 +68,50 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.tag }}
         run: gh release upload "$TAG" /tmp/tgz/*.tgz --clobber
+
+      # Trusted Publishing verlangt npm >= 11.5.1. Node 24 bringt das normalerweise
+      # mit, aber die Runner-Version driftet. Explizit sicherstellen statt hoffen:
+      # ein zu altes npm kennt den OIDC-Austausch nicht, faellt auf "kein Token"
+      # zurueck und scheitert mit einem irrefuehrenden 404.
+      - name: npm-Version für Trusted Publishing sicherstellen
+        run: |
+          npm install -g npm@latest
+          npm --version
+
+      # pnpm publish, nicht npm publish: adapter-yjs und adapter-automerge haben
+      # "@web_of_trust/core": "workspace:*". pnpm schreibt das beim Packen auf die
+      # konkrete Version um, npm nicht — ein npm-Publish lieferte ein package.json
+      # aus, das sich beim Installieren nicht aufloesen laesst.
+      - name: Publish to npm (Trusted Publishing via OIDC)
+        run: |
+          set -euo pipefail
+          for dir in packages/wot-core packages/adapter-yjs packages/adapter-automerge; do
+            name=$(node -p "require('./$dir/package.json').name")
+            version=$(node -p "require('./$dir/package.json').version")
+            # npm view sauber auswerten statt nur den Exit-Code zu pruefen. Ein
+            # `if npm view ... >/dev/null 2>&1` ist hier gefaehrlich: npm liefert
+            # fuer eine nicht existierende Version je nach Fall rc 0 mit LEERER
+            # Ausgabe — der Publish waere dann lautlos uebersprungen worden, also
+            # genau die stille Maskierung, vor der der Kommentar oben warnt.
+            # Drei Faelle, drei Ausgaenge:
+            #   rc 0 und Ausgabe == version      -> liegt bereits dort, skip
+            #   E404 oder rc 0 mit leerer Ausgabe -> Version fehlt, publizieren
+            #   jeder andere Fehler               -> ABBRUCH (Netz, Auth, Registry)
+            set +e
+            view_out=$(npm view "$name@$version" version 2>&1)
+            view_rc=$?
+            set -e
+
+            if [ "$view_rc" -eq 0 ] && [ "$view_out" = "$version" ]; then
+              echo "übersprungen: $name@$version liegt bereits auf npm"
+              continue
+            fi
+            if [ "$view_rc" -ne 0 ] && ! printf '%s' "$view_out" | grep -q 'E404'; then
+              echo "ABBRUCH: npm view für $name@$version fehlgeschlagen:" >&2
+              printf '%s\n' "$view_out" >&2
+              exit 1
+            fi
+
+            echo "publiziere $name@$version"
+            pnpm -C "$dir" publish --access public --no-git-checks
+          done
