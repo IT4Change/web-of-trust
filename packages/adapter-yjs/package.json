@@ -37,7 +37,7 @@
     "y-protocols": "^1.0.7"
   },
   "peerDependencies": {
-    "@web_of_trust/core": "workspace:*"
+    "@web_of_trust/core": "workspace:^"
   },
   "devDependencies": {
     "@web_of_trust/core": "workspace:*",
