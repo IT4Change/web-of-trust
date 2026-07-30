@@ -19,11 +19,11 @@ Und drei Modi:
 ## Voraussetzungen prüfen, bevor du anfängst
 
 ```bash
-node -v && pnpm -v                                            # Schritt 4
-java -version && command -v keytool && command -v apksigner   # Schritt 5a/5b
+node -v && pnpm -v                                            # Schritt 5
+java -version && command -v keytool && command -v apksigner   # Schritt 6a/6b
 ```
 
-Schritt 4 braucht nur Node. Schritt 5a und 5b brauchen ein **JDK**: `./gradlew`, `keytool` und `apksigner` sind allesamt Java-Programme. Fehlt Java (z.B. in einer Agent-Sandbox), lässt sich der Ablauf sauber teilen — Web-Build und Verifikation bis Schritt 4 hier erledigen, die nativen Schritte auf einer Umgebung mit JDK. Nicht versuchen, das zu umgehen.
+Schritt 5 braucht nur Node. Schritt 6a und 6b brauchen ein **JDK**: `./gradlew`, `keytool` und `apksigner` sind allesamt Java-Programme. Fehlt Java (z.B. in einer Agent-Sandbox), lässt sich der Ablauf sauber teilen — Web-Build und Verifikation bis Schritt 5 hier erledigen, die nativen Schritte auf einer Umgebung mit JDK. Nicht versuchen, das zu umgehen.
 
 ## Ablauf
 
@@ -61,7 +61,10 @@ case "$APP" in
     HAS_VAULT=yes
     ;;
   rls)
-    APP_REPO=~/workspace/workspace/rls-p3a
+    # Kanonischer Checkout, NICHT ein persoenlicher Worktree. Wer aus einem
+    # Worktree released, setzt APP_REPO bewusst um und prueft vorher, dass der
+    # auf dem Release-Branch steht und mit origin synchron ist.
+    APP_REPO=~/workspace/workspace/real-life-stack
     APP_DIR="$APP_REPO/apps/reference"
     APP_ID=org.reallife.reallifestack
     BUILD_SCRIPT=build:android
@@ -75,16 +78,20 @@ esac
 
 METADATA="$FDROID_DIR/fdroid/metadata/${APP_ID}.yml"
 VERSION_FILE="$APP_DIR/android/version.properties"
+
+# Der Checkout MUSS den Release-Stand tragen. Sonst baut man aus einem
+# Feature-Branch und taggt hinterher etwas anderes.
+git -C "$APP_REPO" status --short --branch | head -1
 ```
 
 **Die wichtigste Asymmetrie:** Bei `rls` liegt `version.properties` im
 **real-life-stack**-Repo, die F-Droid-Metadaten aber im **web-of-trust**-Repo. Ein
-RLS-Release braucht deshalb **zwei Commits in zwei Repos**. Genau weil das leicht zu
-vergessen ist, wurde am 23.07.2026 ein APK mit VersionCode 3 gebaut und die Metadaten
-gebumpt, während die Quelle auf 0.2.0 stehen blieb. Schritt 6 erzwingt jetzt beide
-Hälften.
+RLS-Release braucht deshalb **zwei Commits in zwei Repos** und **zwei Pushes**. Genau
+weil das leicht zu vergessen ist, wurde am 23.07.2026 ein APK mit VersionCode 3 gebaut
+und die Metadaten gebumpt, während die Quelle auf 0.2.0 stehen blieb. Schritt 7
+erzwingt jetzt beide Hälften.
 
-Bei `wot` liegen beide im selben Repo, dort ist es ein Commit.
+Bei `wot` liegen beide im selben Repo, dort ist es ein Commit und ein Push.
 
 ### Schritt 3: Prüfe was sich geändert hat
 
@@ -128,6 +135,9 @@ Wenn native Änderungen vorhanden aber Modus `ota` gewählt:
 
 ### Schritt 4: Version bumpen (nur bei `apk` oder `full`)
 
+Im Modus `ota` wird **nicht** gebumpt — und dann ist auch in Schritt 7 nichts zu
+committen. Beide Schritte hängen am selben Modus-Gate.
+
 ```bash
 cat "$VERSION_FILE"
 ```
@@ -146,30 +156,58 @@ Zeige dem User die neue Version und frage ob sie passt.
 **Wichtig:** Backend-URLs UND OTA-Channel explizit als Env-Variablen mitgeben — nicht auf die Defaults im Code verlassen (Belt-and-Suspenders: falls die je driftet, backt dieser Befehl trotzdem den richtigen Produktions-Server). Ein falsch gebackenes Relay wandert sonst still in ein signiertes Release.
 
 ```bash
+# Als Array bauen und mit env aufrufen. Eine per $( … ) eingesetzte Zuweisung waere
+# KEINE Zuweisung: die Shell erkennt Zuweisungen vor der Expansion, das expandierte
+# Wort wird zum KOMMANDONAMEN. Der Build scheitert dann mit
+# "VITE_VAULT_URL=…: Datei oder Verzeichnis nicht gefunden".
+BUILD_ENV=(
+  VITE_BASE_PATH=/                     # Pflicht fuer Capacitor; die WoT-Demo
+                                       # defaultet sonst auf /demo/ (GitHub Pages)
+                                       # und zeigt ein Weissbild.
+  VITE_RELAY_URL=wss://relay.web-of-trust.de
+  VITE_PROFILE_SERVICE_URL=https://profiles.web-of-trust.de
+  VITE_UPDATE_SERVER_URL="$UPDATE_SERVER"
+  VITE_UPDATE_CHANNEL=android-foss
+)
+[ "$HAS_VAULT" = yes ] && BUILD_ENV+=(VITE_VAULT_URL=https://vault.web-of-trust.de)
+
 cd "$APP_DIR"
-# VITE_BASE_PATH=/ ist Pflicht fuer Capacitor. Die WoT-Demo defaultet auf /demo/
-# (GitHub Pages) und zeigt sonst ein Weissbild; build:mobile setzt es bereits, hier
-# steht es trotzdem explizit, damit beide Apps denselben Aufruf haben.
-VITE_BASE_PATH=/ \
-VITE_RELAY_URL=wss://relay.web-of-trust.de \
-VITE_PROFILE_SERVICE_URL=https://profiles.web-of-trust.de \
-$( [ "$HAS_VAULT" = yes ] && echo "VITE_VAULT_URL=https://vault.web-of-trust.de" ) \
-VITE_UPDATE_SERVER_URL="$UPDATE_SERVER" \
-VITE_UPDATE_CHANNEL=android-foss \
-pnpm "$BUILD_SCRIPT"
+env "${BUILD_ENV[@]}" pnpm "$BUILD_SCRIPT"
 ```
 
-**Verifizieren, BEVOR signiert wird.** Das gebaute Bundle darf nur die Produktions-URLs enthalten:
+**Verifizieren, BEVOR signiert wird.**
 
 ```bash
+set -euo pipefail
 d="$APP_DIR/dist/assets"
-grep -rl "utopia-lab" $d/*.js | wc -l    # MUSS 0 sein (alte, tote Relay)
-grep -rl "relay.box"  $d/*.js | wc -l    # MUSS 0 sein (Festival-Box)
-grep -rlE "wss://relay\.web-of-trust\.de" $d/*.js | wc -l  # MUSS >=1 sein
 
-# Zusaetzlich einmal ALLE Backend-URLs ansehen, statt nur auf Bekanntes zu pruefen.
-# Eine neue, falsche URL faellt sonst durch jedes gezielte grep.
-grep -rhoE "(wss?|https?)://[a-z0-9.-]*(web-of-trust|real-life-stack|utopia-lab|relay\.box)[a-z0-9./-]*" $d/*.js | sort -u
+# 1) Bekannte Altlasten duerfen NIE vorkommen.
+for bad in utopia-lab relay.box; do
+  if grep -rlq "$bad" $d/*.js; then
+    echo "ABBRUCH: '$bad' im Bundle gefunden." >&2; exit 1
+  fi
+done
+
+# 2) Das Produktions-Relay MUSS drin sein.
+grep -rlqE "wss://relay\.web-of-trust\.de" $d/*.js || {
+  echo "ABBRUCH: Produktions-Relay fehlt im Bundle." >&2; exit 1; }
+
+# 3) JEDE ws/wss-URL gegen eine Allowlist, hart abbrechen. Hier ist die Liste kurz
+#    und der Schaden bei einer falschen URL am groessten. Ein grep nur auf BEKANNTE
+#    Hosts wuerde einen neuen, falschen Host gar nicht sehen — es prueft dann bloss,
+#    was man ohnehin schon befuerchtet.
+UNEXPECTED_WS=$(grep -rhoE "wss?://[^\"'\`[:space:]]+" $d/*.js | sort -u \
+  | grep -vE '^wss://relay\.web-of-trust\.de' || true)
+if [ -n "$UNEXPECTED_WS" ]; then
+  echo "ABBRUCH: unerwartete WebSocket-URLs im Bundle:" >&2
+  printf '  %s\n' $UNEXPECTED_WS >&2
+  exit 1
+fi
+
+# 4) Alle HTTPS-Hosts auflisten. Hier bewusst KEIN harter Abbruch: Bundles enthalten
+#    legitime Fremd-URLs (JSON-LD-Kontexte, Spec-Links). Aber ansehen ist Pflicht.
+echo "--- HTTPS-Hosts im Bundle, bitte durchsehen ---"
+grep -rhoE "https://[a-zA-Z0-9.-]+" $d/*.js | sed 's|https://||' | sort -u
 ```
 
 ### Schritt 6a: APK bauen (bei `apk` oder `full`)
@@ -177,7 +215,7 @@ grep -rhoE "(wss?|https?)://[a-z0-9.-]*(web-of-trust|real-life-stack|utopia-lab|
 **Signatur-Kette, je App unterschiedlich:**
 
 - **wot**: Der fdroid-Flavor nutzt `signingConfig signingConfigs.debug`, Gradle baut also ein **debug-signiertes** `app-fdroid-release.apk` (NICHT `-unsigned`).
-- **rls**: Kein Flavor, kein signingConfig, Gradle baut ein **unsigniertes** APK.
+- **rls**: Kein Flavor, kein signingConfig, Gradle baut ein **unsigniertes** `app-release-unsigned.apk`.
 
 In beiden Fällen wird danach mit dem F-Droid-Key nachsigniert (`apksigner` ersetzt eine vorhandene Debug-Signatur). Ohne das bricht die Signatur-Kontinuität und ein Update über die vorige Version schlägt bei allen Nutzern fehl.
 
@@ -205,11 +243,23 @@ PASS=$(sed -n 's/^keystorepass:[[:space:]]*//p' config.yml)
 ALIAS=$(keytool -list -keystore "$KEYSTORE" -storetype PKCS12 -storepass "$PASS" 2>/dev/null | grep PrivateKeyEntry | cut -d, -f1)
 VERSION_CODE=$(grep VERSION_CODE "$VERSION_FILE" | cut -d= -f2)
 
-# Gebautes APK robust finden. -unsigned ausschliessen deckt beide Apps ab:
-# wot liefert app-fdroid-release.apk, rls ein unsigniertes app-release-unsigned.apk
-# — bei rls gibt es nur dieses eine, deshalb erst filtern, dann Fallback.
-BUILT=$(ls "$APK_OUT"/*.apk | grep -v -- '-unsigned' | head -1)
-[ -n "$BUILT" ] || BUILT=$(ls "$APK_OUT"/*.apk | head -1)
+# Gebautes APK waehlen — bewusst OHNE Pipe. Mit `set -o pipefail` ist jede Pipe
+# hier eine Falle: bei rls heisst das EINZIGE APK "-unsigned", ein `grep -v` findet
+# dann nichts und liefert Exit 1; und bei leerem Verzeichnis scheitert schon `ls`
+# mit Exit 2. Beides braeche die Zuweisung ab, BEVOR der Fallback oder die
+# Fehlermeldung greift — also genau in den Faellen, fuer die sie da sind.
+shopt -s nullglob
+APKS=("$APK_OUT"/*.apk)
+shopt -u nullglob
+[ ${#APKS[@]} -gt 0 ] || { echo "ABBRUCH: kein APK in $APK_OUT" >&2; exit 1; }
+
+BUILT=""
+for a in "${APKS[@]}"; do
+  case "$a" in *-unsigned.apk) continue ;; esac
+  BUILT="$a"; break
+done
+# rls: dort existiert NUR das unsignierte, dann ist es das richtige.
+[ -n "$BUILT" ] || BUILT="${APKS[0]}"
 echo "signiere: $BUILT"
 
 export PATH="$HOME/Android/Sdk/build-tools/36.0.0:$PATH"
@@ -245,6 +295,8 @@ fdroid update
 
 Falls `fdroid` nicht installiert: `pip install fdroidserver`
 
+**Vor dem Deploy:** Enthält das lokale `repo/` alle APKs, die auf dem Server liegen? Fehlt lokal eines, verschwindet diese Version beim Sync still aus dem Index. Fehlende erst herunterladen, dann `fdroid update` erneut laufen lassen.
+
 ### Schritt 6b: Play Store AAB bauen (optional, nur `wot`)
 
 ```bash
@@ -260,7 +312,11 @@ Sage dem User den Pfad — Upload manuell über <https://play.google.com/console
 
 Passiert automatisch bei Push auf den Default-Branch — GitHub Actions baut die Channel-Bundles.
 
-### Schritt 7: Commit + Tag + Push
+### Schritt 7: Commit + Tag + Push (nur bei `apk` oder `full`)
+
+**Im Modus `ota` diesen Schritt überspringen.** Dort wurde in Schritt 4 nichts
+gebumpt, es gibt also nichts zu committen — die Stage-Prüfung unten würde
+zwangsläufig fehlschlagen.
 
 **Bei `wot` — ein Commit, beide Dateien liegen im selben Repo:**
 
@@ -274,8 +330,8 @@ git add "$VERSION_FILE" "$METADATA"
 
 # Den Stage-Inhalt VERGLEICHEN, nicht nur anzeigen. Ein blosses Ausgeben belegt
 # weder, dass beide erwarteten Dateien drin sind, noch dass nichts Fremdes
-# mitgestaged wurde. (`git status --cached` gibt es uebrigens nicht, das bricht
-# mit Exit 128 ab — `git diff --cached` ist die richtige Abfrage.)
+# mitgestaged wurde — git add laesst vorher gestagte Fremdaenderungen stehen.
+# (`git status --cached` gibt es uebrigens nicht, das bricht mit Exit 128 ab.)
 EXPECTED=$(printf '%s\n' \
   "${VERSION_FILE#$APP_REPO/}" \
   "${METADATA#$APP_REPO/}" | sort)
@@ -289,33 +345,48 @@ fi
 
 git commit -m "release: v${VERSION_NAME}"
 git tag "v${VERSION_NAME}"
+git push && git push --tags
 ```
 
-**Bei `rls` — ZWEI Commits in ZWEI Repos.** Beide Hälften gehören zusammen; wird die zweite vergessen, behaupten die F-Droid-Metadaten eine Version, die im Quell-Repo nicht existiert:
+**Bei `rls` — ZWEI Commits in ZWEI Repos, und ZWEI Pushes.** Beide Hälften gehören
+zusammen; wird die zweite vergessen, behaupten die F-Droid-Metadaten eine Version, die
+im Quell-Repo nicht existiert. Jede Hälfte bekommt dieselbe Stage-Prüfung wie oben:
 
 ```bash
 # 1. Quelle im real-life-stack-Repo
 cd "$APP_REPO"
 VERSION_NAME=$(grep VERSION_NAME "$VERSION_FILE" | cut -d= -f2)
 git add "$VERSION_FILE"
-git diff --cached --name-only   # MUSS genau version.properties zeigen
+EXPECTED="${VERSION_FILE#$APP_REPO/}"
+STAGED=$(git diff --cached --name-only)
+if [ "$STAGED" != "$EXPECTED" ]; then
+  echo "ABBRUCH: unerwarteter Stage-Inhalt in $APP_REPO." >&2
+  echo "  erwartet: $EXPECTED" >&2
+  echo "  gestaged: $STAGED" >&2
+  exit 1
+fi
 git commit -m "release: Android App v${VERSION_NAME} (${VERSION_CODE})"
 git tag "v${VERSION_NAME}"
+git push && git push --tags          # Tag gehoert NUR ins Quell-Repo
 
-# 2. Metadaten im web-of-trust-Repo
+# 2. Metadaten im web-of-trust-Repo — eigener Push, sonst bleibt Schritt 1 lokal
 cd "$WOT_REPO"
 git add "$METADATA"
-git diff --cached --name-only   # MUSS genau die eine YAML zeigen
+EXPECTED="${METADATA#$WOT_REPO/}"
+STAGED=$(git diff --cached --name-only)
+if [ "$STAGED" != "$EXPECTED" ]; then
+  echo "ABBRUCH: unerwarteter Stage-Inhalt in $WOT_REPO." >&2
+  echo "  erwartet: $EXPECTED" >&2
+  echo "  gestaged: $STAGED" >&2
+  exit 1
+fi
 git commit -m "fdroid: ${APP_ID} ${VERSION_NAME} (${VERSION_CODE})"
+git push
 ```
 
-Frage den User ob gepusht werden soll. Wenn ja, in **beiden** Repos:
+Frage den User vor den Pushes, ob gepusht werden soll.
 
-```bash
-git push && git push --tags
-```
-
-Hinweis: schlägt der Push mit `sign_and_send_pubkey: agent refused operation` fehl, klemmt der Hardware-Key. Dann über HTTPS pushen statt das SSH-Remote zu ändern.
+Hinweis: schlägt ein Push mit `sign_and_send_pubkey: agent refused operation` fehl, klemmt der Hardware-Key. Dann über HTTPS pushen statt das SSH-Remote zu ändern.
 
 ### Schritt 8: F-Droid Repo deployen
 
@@ -324,16 +395,34 @@ Sage dem User: "Lade den Ordner `packages/wot-fdroid/fdroid/` per FileZilla auf 
 Alternativ:
 
 ```bash
-rsync -av "$FDROID_DIR/fdroid/" user@server:/path/to/wot-fdroid/fdroid/
+rsync -av "$FDROID_DIR/fdroid/" anton@85.215.34.19:/home/anton/docker-container/wot-fdroid/fdroid/
 ```
 
-Ohne diesen Schritt sehen die Nutzer weiterhin die Vorversion — Live-Repo ist
-<https://fdroid.utopia-lab.org/fdroid/repo>. Zum Gegenprüfen:
+Ohne diesen Schritt sehen die Nutzer weiterhin die Vorversion. Das ist schon passiert:
+am 30.07.2026 stand das Live-Repo noch auf dem Stand vom 12. Juli, weil ein Upload nie
+angekommen war.
+
+**Deshalb hart gegenprüfen, statt nur zu schauen.** Der Check muss fehlschlagen, wenn
+die neue Version nicht live ist:
 
 ```bash
 curl -s https://fdroid.utopia-lab.org/fdroid/repo/index-v1.json \
-  | python3 -c "import json,sys; d=json.load(sys.stdin); print({p: sorted({v['versionName'] for v in vs}, reverse=True)[:3] for p,vs in d['packages'].items()})"
+  | APP_ID="$APP_ID" WANT_N="$VERSION_NAME" WANT_C="$VERSION_CODE" python3 -c "
+import json, os, sys
+d = json.load(sys.stdin)
+app, want_n, want_c = os.environ['APP_ID'], os.environ['WANT_N'], int(os.environ['WANT_C'])
+pkgs = d.get('packages', {})
+if app not in pkgs:
+    sys.exit(f'ABBRUCH: {app} fehlt im Live-Index')
+if not [v for v in pkgs[app] if v['versionCode'] == want_c and v['versionName'] == want_n]:
+    have = sorted({(v['versionCode'], v['versionName']) for v in pkgs[app]}, reverse=True)
+    sys.exit(f'ABBRUCH: {app} {want_n} ({want_c}) ist NICHT live. Vorhanden: {have}')
+print(f'ok: {app} {want_n} ({want_c}) ist live')
+"
 ```
+
+Optional zusätzlich: das lokale APK gegen den Hash im Live-Index prüfen. Dann ist
+belegt, dass die Nutzer exakt das signierte Artefakt bekommen.
 
 ### Schritt 9: Zusammenfassung
 
@@ -342,8 +431,9 @@ Zeige dem User:
 - Welche App und welcher Modus
 - Neue Version (wenn gebumpt)
 - Was gebaut wurde (APK-Pfad, OTA-Tag)
-- Bei `rls`: ausdrücklich, dass **zwei** Repos committet wurden
-- Nächste Schritte (F-Droid Repo hochladen, ggf. Play Console)
+- Bei `rls`: ausdrücklich, dass **zwei** Repos committet und gepusht wurden
+- Ergebnis der Live-Index-Prüfung
+- Nächste Schritte (ggf. Play Console)
 
 ## Changelog generieren
 
