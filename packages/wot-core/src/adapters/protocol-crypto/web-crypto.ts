@@ -1,6 +1,6 @@
 import * as ed25519 from '@noble/ed25519'
 import type { ProtocolCryptoAdapter, ProtocolIdentityVaultCryptoHandle } from '../../protocol/crypto/ports'
-import { decodeBase64Url, encodeBase64Url } from '../../protocol/crypto/encoding'
+import { encodeBase64Url } from '../../protocol/crypto/encoding'
 
 const IDENTITY_INFO = 'wot/identity/ed25519/v1'
 const ENCRYPTION_INFO = 'wot/encryption/x25519/v1'
@@ -8,6 +8,8 @@ const ECIES_INFO = 'wot/ecies/v1'
 const BIP39_SEED_LENGTH = 64
 const NONCE_LENGTH = 12
 const X25519_KEY_LENGTH = 32
+// X25519 basepoint (u = 9), little-endian.
+const X25519_BASEPOINT = Uint8Array.of(9, ...new Array(31).fill(0))
 const AES_256_KEY_LENGTH = 32
 const AES_GCM_TAG_LENGTH = 16
 
@@ -69,10 +71,16 @@ export class WebCryptoProtocolCryptoAdapter implements ProtocolCryptoAdapter {
   }
 
   async x25519PublicFromSeed(seed: Uint8Array): Promise<Uint8Array> {
-    const privateKey = await crypto.subtle.importKey('pkcs8', toBuffer(wrapX25519PrivateKey(seed)), { name: 'X25519' }, true, ['deriveBits'])
-    const jwk = await crypto.subtle.exportKey('jwk', privateKey)
-    if (!jwk.x) throw new Error('X25519 public key export failed')
-    return decodeBase64Url(jwk.x)
+    // X25519(scalar, basepoint) is by definition the public key. Reading it out of
+    // exportKey('jwk') instead needs the private key to be extractable and relies on
+    // the engine computing the public component during PKCS#8 import. Node (OpenSSL),
+    // Chrome (BoringSSL) and current Firefox do; the Gecko build shipped in Tor
+    // Browser does not and rejects that export with OperationError. Deriving against
+    // the basepoint uses only primitives all of them support.
+    const privateKey = await crypto.subtle.importKey('pkcs8', toBuffer(wrapX25519PrivateKey(seed)), { name: 'X25519' }, false, ['deriveBits'])
+    const basepoint = await crypto.subtle.importKey('raw', toBuffer(X25519_BASEPOINT), { name: 'X25519' }, false, [])
+    const publicKey = await crypto.subtle.deriveBits({ name: 'X25519', public: basepoint }, privateKey, X25519_KEY_LENGTH * 8)
+    return new Uint8Array(publicKey)
   }
 
   async x25519SharedSecret(privateSeed: Uint8Array, publicKey: Uint8Array): Promise<Uint8Array> {
