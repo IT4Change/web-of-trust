@@ -410,6 +410,12 @@ describe('Pflicht-Test 11 — admins-Roundtrip (VE-6)', () => {
       metadataStorage: new InMemorySpaceMetadataStorage(), compactStore: new InMemoryCompactStore(),
     })
     await bobAdapter.start()
+    // Stop SOFORT nach start() registrieren, nicht erst am Ende des Test-Bodys.
+    // Schlaegt dazwischen eine Assertion oder ein waitUntil fehl, laeuft der
+    // Adapter sonst in die folgenden Tests weiter, und seine nachlaufenden Sends
+    // schlagen nach InMemoryMessagingAdapter.resetAll() als Unhandled Rejection
+    // auf. Aus einem Fehlschlag wird dann eine Kaskade in voellig anderen Tests.
+    cleanups.push(async () => { try { await bobAdapter.stop() } catch {} })
 
     const adapter1 = new AutomergeReplicationAdapter({
       identity: aliceId, messaging, brokerUrls: ['wss://b'],
@@ -417,6 +423,7 @@ describe('Pflicht-Test 11 — admins-Roundtrip (VE-6)', () => {
       metadataStorage: metadata, compactStore,
     })
     await adapter1.start()
+    cleanups.push(async () => { try { await adapter1.stop() } catch {} })
     const space = await adapter1.createSpace<TestDoc>('shared', { items: {} }, { name: 'S' })
     await adapter1.addMember(space.id, bobId.getDid(), await bobId.getEncryptionPublicKeyBytes())
     await waitUntil(async () => (await bobAdapter.getSpace(space.id)) !== null)
@@ -435,8 +442,7 @@ describe('Pflicht-Test 11 — admins-Roundtrip (VE-6)', () => {
     })
     await adapter2.start()
     cleanups.push(async () => {
-      await adapter2.stop()
-      await bobAdapter.stop()
+      try { await adapter2.stop() } catch {}
       try { await aliceId.deleteStoredIdentity() } catch {}
       try { await bobId.deleteStoredIdentity() } catch {}
     })
@@ -464,6 +470,9 @@ describe('Pflicht-Test 11 — admins-Roundtrip (VE-6)', () => {
       metadataStorage: new InMemorySpaceMetadataStorage(), compactStore: new InMemoryCompactStore(),
     })
     await bobAdapter.start()
+    // Siehe oben: Stop sofort registrieren, sonst leakt ein mittendrin
+    // gescheiterter Test den laufenden Adapter in die Folgetests.
+    cleanups.push(async () => { try { await bobAdapter.stop() } catch {} })
 
     const adapter1 = new AutomergeReplicationAdapter({
       identity: aliceId, messaging, brokerUrls: ['wss://b'],
@@ -471,6 +480,7 @@ describe('Pflicht-Test 11 — admins-Roundtrip (VE-6)', () => {
       metadataStorage: metadata, compactStore,
     })
     await adapter1.start()
+    cleanups.push(async () => { try { await adapter1.stop() } catch {} })
     const space = await adapter1.createSpace<TestDoc>('shared', { items: {} }, { name: 'S' })
     await adapter1.addMember(space.id, bobId.getDid(), await bobId.getEncryptionPublicKeyBytes())
     await waitUntil(async () => (await bobAdapter.getSpace(space.id)) !== null)
@@ -487,8 +497,7 @@ describe('Pflicht-Test 11 — admins-Roundtrip (VE-6)', () => {
     })
     await adapter2.start()
     cleanups.push(async () => {
-      await adapter2.stop()
-      await bobAdapter.stop()
+      try { await adapter2.stop() } catch {}
       try { await aliceId.deleteStoredIdentity() } catch {}
       try { await bobId.deleteStoredIdentity() } catch {}
     })

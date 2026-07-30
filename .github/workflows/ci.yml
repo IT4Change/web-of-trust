@@ -30,5 +30,21 @@ jobs:
       - name: Typecheck
         run: pnpm typecheck
 
+      # Ausgabe mitschreiben und als Artefakt sichern. Ein Rerun ueberschreibt die
+      # Run-Logs auf GitHub — ohne Artefakt ist die Evidenz eines Flakes danach weg
+      # und er bleibt undiagnostizierbar. set -o pipefail, damit tee den Exit-Code
+      # von vitest nicht verschluckt.
       - name: Test
-        run: pnpm test
+        run: set -o pipefail && pnpm test 2>&1 | tee /tmp/test-output.log
+
+      # run_attempt im Namen: sonst ueberschreibt der Rerun das Artefakt des
+      # fehlgeschlagenen Versuchs und wir stehen wieder ohne Spur da. Auch bei
+      # Erfolg hochladen — gerade der Vergleich rot/gruen auf demselben Commit
+      # ist bei einem Flake die aussagekraeftigste Information.
+      - name: Testausgabe sichern
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-output-attempt-${{ github.run_attempt }}
+          path: /tmp/test-output.log
+          retention-days: 14
