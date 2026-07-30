@@ -548,7 +548,12 @@ Sage dem User: "Lade den Ordner `packages/wot-fdroid/fdroid/` per FileZilla auf 
 Alternativ:
 
 ```bash
-rsync -av "$FDROID_DIR/fdroid/" anton@85.215.34.19:/home/anton/docker-container/wot-fdroid/fdroid/
+# NUR repo/ deployen. Der Server ist reines statisches Hosting — Keystore,
+# config.yml (Passwort!), metadata/, tmp/ und srclibs/ haben dort nichts verloren.
+# Bis zum 31.07.2026 wurde die ganze fdroid/-Mappe gesynct und lag im Web-Root,
+# nur durch eine Caddy-Blocklist geschuetzt. Der Mount ist seitdem auf repo/
+# verengt; dieser Pfad hier stellt sicher, dass es auch so bleibt.
+rsync -av "$FDROID_DIR/fdroid/repo/" anton@85.215.34.19:/home/anton/docker-container/wot-fdroid/fdroid/repo/
 ```
 
 Ohne diesen Schritt sehen die Nutzer weiterhin die Vorversion. Das ist schon passiert:
