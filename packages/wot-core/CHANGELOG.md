@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.5.0](https://github.com/real-life-org/web-of-trust/compare/core-v0.4.1...core-v0.5.0) (2026-07-30)
+
+
+### ⚠ BREAKING CHANGES
+
+* **crypto:** CryptoAdapter.exportKeyPair wurde entfernt. Private Schluessel werden non-extractable gehalten, es gibt daher keinen unterstuetzten Weg mehr, rohes privates Schluesselmaterial aus dem Adapter herauszureichen. Es gibt keinen direkten Ersatz. Wer ein Schluesselpaar wiederherstellen muss, leitet es mit deriveKeyPairFromSeed deterministisch aus dem Seed ab, statt es zu exportieren und wieder einzuspielen. importKeyPair bleibt fuer den Import vorhandenen Materials erhalten.
+
+### Bug Fixes
+
+* **crypto:** X25519-Public-Key ohne Private-Key-Export ableiten ([d21cbe8](https://github.com/real-life-org/web-of-trust/commit/d21cbe8592e486533a8b0648b8806dd87b024963))
+* **crypto:** X25519-Public-Key ohne Private-Key-Export ableiten ([36de563](https://github.com/real-life-org/web-of-trust/commit/36de5637cbb80d78179d473b70bc84893112ef03))
+* **publish:** Repository-URL auf real-life-org, npm-view-Auswertung korrigieren ([cdb2bcc](https://github.com/real-life-org/web-of-trust/commit/cdb2bcca0c72dc729a520e9e05d91565843c8e7b))
+
+
+### Code Refactoring
+
+* **crypto:** private Schluessel non-extractable, exportKeyPair entfernt ([cfcd47b](https://github.com/real-life-org/web-of-trust/commit/cfcd47b5024901c21159a32d3c84f2fe9dc519e2))
+
 ## [0.4.1](https://github.com/real-life-org/web-of-trust/compare/core-v0.4.0...core-v0.4.1) (2026-07-22)
 
 

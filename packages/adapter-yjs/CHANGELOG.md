@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.2.0](https://github.com/real-life-org/web-of-trust/compare/adapter-yjs-v0.1.8...adapter-yjs-v0.2.0) (2026-07-30)
+
+
+### ⚠ BREAKING CHANGES
+
+* **adapters:** Die peerDependency auf @web_of_trust/core ist jetzt eine Caret-Range statt eines exakten Pins, und sie zieht mit core 0.5.0 eine breaking Version nach. Konsumenten auf core 0.4.x muessen mit-upgraden.
+
+### Bug Fixes
+
+* **adapters:** peerDependency auf core als Range statt exaktem Pin ([dd9a477](https://github.com/real-life-org/web-of-trust/commit/dd9a47795e775ca4bdee5b926d72c522670549ba))
+* **publish:** Repository-URL auf real-life-org, npm-view-Auswertung korrigieren ([cdb2bcc](https://github.com/real-life-org/web-of-trust/commit/cdb2bcca0c72dc729a520e9e05d91565843c8e7b))
+
 ## [0.1.8](https://github.com/real-life-org/web-of-trust/compare/adapter-yjs-v0.1.7...adapter-yjs-v0.1.8) (2026-07-22)
 
 
