@@ -12,12 +12,18 @@ on:
 jobs:
   publish:
     runs-on: ubuntu-latest
-    # Kein npm-Publish mehr: 2FA/Trusted-Publisher-Setup auf npmjs.com ist
-    # blockiert (Passkey wird nicht akzeptiert). Die Pakete werden stattdessen
-    # als tgz-Assets ans GitHub-Release gehängt — RLS konsumiert genau diese
-    # Tarball-URLs als Dependencies.
+    # Zwei Ziele, bewusst parallel:
+    #   1. tgz-Assets am GitHub-Release — RLS konsumiert aktuell genau diese
+    #      Tarball-URLs als Dependencies. Bleibt, bis RLS auf npm umgehaengt ist.
+    #   2. npm via Trusted Publishing (OIDC). Der frühere Blocker (2FA/Passkey
+    #      wurde nicht akzeptiert) ist weg, seit auf npmjs.com ein Trusted
+    #      Publisher fuer real-life-org/web-of-trust + publish.yml hinterlegt ist.
+    # Die Reihenfolge ist Absicht: erst die Assets, dann npm. Scheitert npm,
+    # bleibt der Tarball-Pfad fuer RLS intakt und der Lauf trotzdem rot.
     permissions:
       contents: write
+      # Ohne id-token kein OIDC-Token und damit kein Trusted Publishing.
+      id-token: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -26,7 +32,9 @@ jobs:
           # Assets eines aelteren Releases ueberschreiben.
           ref: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.tag }}
 
-      - uses: pnpm/action-setup@v2
+      # v2 ist zu alt fuer Trusted Publishing — genau daran scheiterte
+      # pnpm/pnpm#11513, geloest durch ein Update der Action.
+      - uses: pnpm/action-setup@v4
         with:
           version: 9
 
@@ -60,3 +68,34 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.tag }}
         run: gh release upload "$TAG" /tmp/tgz/*.tgz --clobber
+
+      # Trusted Publishing verlangt npm >= 11.5.1. Node 24 bringt das normalerweise
+      # mit, aber die Runner-Version driftet. Explizit sicherstellen statt hoffen:
+      # ein zu altes npm kennt den OIDC-Austausch nicht, faellt auf "kein Token"
+      # zurueck und scheitert mit einem irrefuehrenden 404.
+      - name: npm-Version für Trusted Publishing sicherstellen
+        run: |
+          npm install -g npm@latest
+          npm --version
+
+      # pnpm publish, nicht npm publish: adapter-yjs und adapter-automerge haben
+      # "@web_of_trust/core": "workspace:*". pnpm schreibt das beim Packen auf die
+      # konkrete Version um, npm nicht — ein npm-Publish lieferte ein package.json
+      # aus, das sich beim Installieren nicht aufloesen laesst.
+      - name: Publish to npm (Trusted Publishing via OIDC)
+        run: |
+          set -euo pipefail
+          for dir in packages/wot-core packages/adapter-yjs packages/adapter-automerge; do
+            name=$(node -p "require('./$dir/package.json').name")
+            version=$(node -p "require('./$dir/package.json').version")
+            # Gezielt nur den Fall "diese Version liegt schon dort" ueberspringen,
+            # damit ein Re-Run des Workflows durchlaeuft. Bewusst KEIN pauschales
+            # `|| true` — das frühere `|| echo` hat hier monatelang stille
+            # Auth-404s maskiert, jeder andere Fehler muss den Lauf rot machen.
+            if npm view "$name@$version" version >/dev/null 2>&1; then
+              echo "übersprungen: $name@$version liegt bereits auf npm"
+              continue
+            fi
+            echo "publiziere $name@$version"
+            pnpm -C "$dir" publish --access public --no-git-checks
+          done
