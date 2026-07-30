@@ -31,3 +31,4 @@ docs/nlnet-application-2026.md
 
 # TypeScript incremental build info (build artifact)
 *.tsbuildinfo
+/out/
