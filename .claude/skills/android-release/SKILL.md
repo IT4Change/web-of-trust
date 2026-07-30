@@ -61,7 +61,9 @@ case "$APP" in
     HAS_VAULT=yes
     RELEASE_BRANCH=main
     GH_REPO=real-life-org/web-of-trust
-    TAG_PREFIX=v                     # WoT taggt v0.2.7
+    TAG_PREFIX=app-v                 # einheitlich mit RLS (seit 31.07.2026);
+                                     # Alt-Tags v0.2.1..v0.2.7 sind Historie,
+                                     # app-v0.2.7 ist Uebergangs-Zweit-Tag
     ;;
   rls)
     # Kanonischer Checkout, NICHT ein persoenlicher Worktree. Wer aus einem
@@ -78,7 +80,7 @@ case "$APP" in
     HAS_VAULT=no
     RELEASE_BRANCH=master
     GH_REPO=real-life-org/real-life-stack
-    TAG_PREFIX=app-v                 # RLS taggt app-v0.2.1, NICHT v0.2.1
+    TAG_PREFIX=app-v                 # RLS taggt app-v0.2.1
     ;;
 esac
 
@@ -145,9 +147,9 @@ Bei `wot` liegen beide im selben Repo, dort ist es ein Commit und ein Push.
 cd "$APP_REPO"
 # --match ist Pflicht: ohne greift describe den naechstgelegenen Tag BELIEBIGER Art
 # (core-v0.4.1, adapter-yjs-v0.1.8, ota-<sha>) und der Changelog wird still leer
-# oder falsch, ohne dass irgendetwas fehlschlaegt. Das Praefix ist je Repo anders:
-# WoT taggt v0.2.7, RLS app-v0.2.1 — ein hart verdrahtetes "v[0-9]*" findet in RLS
-# gar nichts.
+# oder falsch, ohne dass irgendetwas fehlschlaegt. Beide Repos taggen ihre App
+# einheitlich app-v* (WoT seit 31.07.2026; Alt-Tags v0.2.1..v0.2.7 bleiben als
+# Historie stehen und werden von --match bewusst NICHT mehr gefunden).
 LAST_TAG=$(git describe --tags --abbrev=0 --match "${TAG_PREFIX}[0-9]*" 2>/dev/null || echo "")
 
 # Leeres LAST_TAG NICHT stillschweigend durchlassen: "$LAST_TAG"..HEAD wuerde zu
