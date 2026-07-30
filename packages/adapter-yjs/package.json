@@ -4,7 +4,7 @@
   "description": "Yjs CRDT adapter for Web of Trust — pure JavaScript replication and personal document management",
   "repository": {
     "type": "git",
-    "url": "https://github.com/antontranelis/web-of-trust.git",
+    "url": "https://github.com/real-life-org/web-of-trust.git",
     "directory": "packages/adapter-yjs"
   },
   "publishConfig": {
