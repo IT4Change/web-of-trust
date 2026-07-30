@@ -34,9 +34,11 @@ jobs:
 
       # v2 ist zu alt fuer Trusted Publishing — genau daran scheiterte
       # pnpm/pnpm#11513, geloest durch ein Update der Action.
+      # KEIN version:-Input. v4 bricht mit "Multiple versions of pnpm specified"
+      # ab, wenn Workflow und packageManager (pnpm@9.15.4) unterschiedliche
+      # Versionen nennen. ci.yml, deploy.yml und deploy-vnext.yml machen es
+      # genauso und ueberlassen die Version der package.json.
       - uses: pnpm/action-setup@v4
-        with:
-          version: 9
 
       - uses: actions/setup-node@v4
         with:
