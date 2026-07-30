@@ -60,6 +60,8 @@ case "$APP" in
     UPDATE_SERVER=https://web-of-trust.de
     HAS_VAULT=yes
     RELEASE_BRANCH=main
+    GH_REPO=real-life-org/web-of-trust
+    TAG_PREFIX=v                     # WoT taggt v0.2.7
     ;;
   rls)
     # Kanonischer Checkout, NICHT ein persoenlicher Worktree. Wer aus einem
@@ -75,6 +77,8 @@ case "$APP" in
     UPDATE_SERVER=https://real-life-stack.de
     HAS_VAULT=no
     RELEASE_BRANCH=master
+    GH_REPO=real-life-org/real-life-stack
+    TAG_PREFIX=app-v                 # RLS taggt app-v0.2.1, NICHT v0.2.1
     ;;
 esac
 
@@ -84,39 +88,45 @@ VERSION_FILE="$APP_DIR/android/version.properties"
 # Den Checkout VALIDIEREN, nicht nur anzeigen. Ein `git status`, dessen Ausgabe
 # niemand auswertet, ist keine Pruefung — und der Normalfall ist hier der
 # unbrauchbare: am 30.07.2026 stand real-life-stack auf einem Feature-Branch mit
-# 20 uncommitteten Dateien, 31 Commits hinterher. Daraus zu bauen und hinterher zu
-# taggen haette ein Binary erzeugt, das zu keinem veroeffentlichten Stand passt.
-cd "$APP_REPO"
-git fetch --quiet origin "$RELEASE_BRANCH"
+# 20 uncommitteten Dateien, 31 Commits hinterher.
+#
+# Fail-closed: JEDER Teilschritt bricht ab, auch ein fehlgeschlagenes fetch. Ohne
+# frischen origin-Stand vergleicht man gegen eine veraltete Referenz und die
+# Pruefung geht faelschlich durch.
+set -euo pipefail
 
-DIRTY=$(git status --porcelain)
-if [ -n "$DIRTY" ]; then
-  echo "ABBRUCH: $APP_REPO ist nicht sauber:" >&2
-  printf '%s\n' "$DIRTY" >&2
-  exit 1
-fi
-
-BRANCH=$(git rev-parse --abbrev-ref HEAD)
-COUNTS=$(git rev-list --left-right --count "origin/$RELEASE_BRANCH...HEAD")
-BEHIND=$(echo "$COUNTS" | cut -f1)
-AHEAD=$(echo "$COUNTS" | cut -f2)
-if [ "$BRANCH" != "$RELEASE_BRANCH" ] || [ "$BEHIND" -ne 0 ] || [ "$AHEAD" -ne 0 ]; then
-  echo "ABBRUCH: $APP_REPO steht nicht exakt auf origin/$RELEASE_BRANCH." >&2
-  echo "  Branch: $BRANCH (erwartet: $RELEASE_BRANCH)" >&2
-  echo "  $BEHIND Commits hinterher, $AHEAD voraus" >&2
-  exit 1
-fi
-echo "Checkout ok: $BRANCH == origin/$RELEASE_BRANCH, sauber"
-
-# Bei rls zusaetzlich das WoT-Repo pruefen — dort landen die Metadaten, und ein
-# dirty Checkout wuerde beim Stagen Fremdaenderungen mitnehmen.
-if [ "$APP" = rls ]; then
-  WOT_DIRTY=$(git -C "$WOT_REPO" status --porcelain)
-  if [ -n "$WOT_DIRTY" ]; then
-    echo "ABBRUCH: $WOT_REPO ist nicht sauber (dort landen die Metadaten):" >&2
-    printf '%s\n' "$WOT_DIRTY" >&2
-    exit 1
+assert_clean_at_origin() {
+  repo=$1; branch=$2; label=$3
+  git -C "$repo" fetch --quiet origin "$branch" || {
+    echo "ABBRUCH: konnte origin/$branch in $label nicht holen." >&2
+    echo "Ohne frischen Stand ist der Vergleich wertlos." >&2
+    return 1; }
+  dirty=$(git -C "$repo" status --porcelain)
+  if [ -n "$dirty" ]; then
+    echo "ABBRUCH: $label ist nicht sauber:" >&2
+    printf '%s\n' "$dirty" >&2
+    return 1
   fi
+  br=$(git -C "$repo" rev-parse --abbrev-ref HEAD)
+  counts=$(git -C "$repo" rev-list --left-right --count "origin/$branch...HEAD") || {
+    echo "ABBRUCH: origin/$branch existiert nicht in $label." >&2
+    return 1; }
+  behind=$(echo "$counts" | cut -f1); ahead=$(echo "$counts" | cut -f2)
+  if [ "$br" != "$branch" ] || [ "$behind" -ne 0 ] || [ "$ahead" -ne 0 ]; then
+    echo "ABBRUCH: $label steht nicht exakt auf origin/$branch." >&2
+    echo "  Branch: $br (erwartet: $branch), $behind hinterher, $ahead voraus" >&2
+    return 1
+  fi
+  echo "ok: $label == origin/$branch, sauber"
+}
+
+assert_clean_at_origin "$APP_REPO" "$RELEASE_BRANCH" "$APP_REPO"
+
+# Bei rls MUSS auch das WoT-Repo vollstaendig geprueft werden — dort landen die
+# Metadaten. Bewusst if/fi statt `[ … ] && …`: mit set -e wuerde ein falscher
+# Test-Ausdruck den ganzen Schritt abbrechen.
+if [ "$APP" = rls ]; then
+  assert_clean_at_origin "$WOT_REPO" main "$WOT_REPO (Metadaten)"
 fi
 ```
 
@@ -135,15 +145,17 @@ Bei `wot` liegen beide im selben Repo, dort ist es ein Commit und ein Push.
 cd "$APP_REPO"
 # --match ist Pflicht: ohne greift describe den naechstgelegenen Tag BELIEBIGER Art
 # (core-v0.4.1, adapter-yjs-v0.1.8, ota-<sha>) und der Changelog wird still leer
-# oder falsch, ohne dass irgendetwas fehlschlaegt.
-LAST_TAG=$(git describe --tags --abbrev=0 --match "v[0-9]*" 2>/dev/null || echo "")
+# oder falsch, ohne dass irgendetwas fehlschlaegt. Das Praefix ist je Repo anders:
+# WoT taggt v0.2.7, RLS app-v0.2.1 — ein hart verdrahtetes "v[0-9]*" findet in RLS
+# gar nichts.
+LAST_TAG=$(git describe --tags --abbrev=0 --match "${TAG_PREFIX}[0-9]*" 2>/dev/null || echo "")
 
 # Leeres LAST_TAG NICHT stillschweigend durchlassen: "$LAST_TAG"..HEAD wuerde zu
 # "..HEAD" und das liest Git als HEAD..HEAD, also als leere Range. Der Changelog
 # waere dann leer und der Lauf trotzdem gruen — dieselbe stille Falle wie der
 # fehlende --match-Filter.
 if [ -z "$LAST_TAG" ]; then
-  echo "ABBRUCH: kein v*-Tag gefunden." >&2
+  echo "ABBRUCH: kein ${TAG_PREFIX}*-Tag gefunden." >&2
   echo "Fuer ein Erstrelease eine Basis explizit setzen, z.B.:" >&2
   echo "  LAST_TAG=\$(git rev-list --max-parents=0 HEAD | head -1)" >&2
   exit 1
@@ -375,7 +387,9 @@ Danach belegen, dass der Workflow auch wirklich ein Bundle erzeugt hat. Die
 OTA-Releases heissen `ota-<sha>`:
 
 ```bash
-gh release view "ota-${HEAD_SHA}" --repo real-life-org/web-of-trust \
+# $GH_REPO, nicht hart web-of-trust: die RLS-OTA-Releases liegen im
+# real-life-stack-Repo (erzeugt von deploy-prototypes.yml).
+gh release view "ota-${HEAD_SHA}" --repo "$GH_REPO" \
   --json tagName,createdAt --jq '"ok: \(.tagName) vom \(.createdAt[0:16])"' \
   || { echo "ABBRUCH: kein OTA-Release fuer $HEAD_SHA gefunden." >&2
        echo "Laeuft der Workflow noch, oder ist er fehlgeschlagen?" >&2; exit 1; }
@@ -434,11 +448,11 @@ fi
 
 ```bash
 if [ "$APP" = wot ]; then
-  git -C "$APP_REPO" commit -m "release: v${VERSION_NAME}"
-  git -C "$APP_REPO" tag "v${VERSION_NAME}"
+  git -C "$APP_REPO" commit -m "release: ${TAG_PREFIX}${VERSION_NAME}"
+  git -C "$APP_REPO" tag "${TAG_PREFIX}${VERSION_NAME}"
 else
   git -C "$APP_REPO" commit -m "release: Android App v${VERSION_NAME} (${VERSION_CODE})"
-  git -C "$APP_REPO" tag "v${VERSION_NAME}"          # Tag gehoert NUR ins Quell-Repo
+  git -C "$APP_REPO" tag "${TAG_PREFIX}${VERSION_NAME}"   # Tag gehoert NUR ins Quell-Repo
   git -C "$WOT_REPO" commit -m "fdroid: ${APP_ID} ${VERSION_NAME} (${VERSION_CODE})"
 fi
 
@@ -462,12 +476,52 @@ else
 fi
 ```
 
-Bricht ein Push ab, sind Commits und Tag noch lokal und lassen sich korrigieren.
-Deshalb committen wir vorher und pushen erst am Ende.
+**Nach den Pushes verifizieren, dass beide Hälften draußen sind.** Bei `rls` kann
+der erste Push gelingen und der zweite scheitern — dann ist der Split
+veröffentlicht, und ohne Prüfung merkt es niemand:
+
+```bash
+verify_pushed() {
+  repo=$1; branch=$2; label=$3
+  git -C "$repo" fetch --quiet origin "$branch" || return 1
+  [ -z "$(git -C "$repo" rev-list "origin/$branch..HEAD")" ] || {
+    echo "NICHT GEPUSHT: $label" >&2; return 1; }
+  echo "ok: $label ist auf origin/$branch"
+}
+
+verify_pushed "$APP_REPO" "$RELEASE_BRANCH" "Quelle"
+if [ "$APP" = rls ]; then
+  verify_pushed "$WOT_REPO" main "Metadaten" || {
+    cat >&2 <<'"'"'RECOVERY'"'"'
+ABBRUCH: Die Quelle ist veroeffentlicht, die Metadaten nicht.
+
+Das ist der Zwei-Repo-Split. NICHT die Quelle zurueckrollen — Tag und Commit sind
+bereits oeffentlich, ein force-push darauf ist schlimmer als der Split.
+
+Richtig ist, die zweite Haelfte nachzuziehen:
+  cd $WOT_REPO && git push
+Der Metadaten-Commit liegt dort lokal bereit und ist idempotent.
+
+Scheitert der Push dauerhaft (z.B. Hardware-Key), den Zustand ausdruecklich
+benennen: die App-Version ist getaggt, aber im F-Droid-Index noch nicht sichtbar.
+Bis zum Nachziehen KEIN fdroid update und KEIN Deploy — sonst behauptet der Index
+eine Version, die kein Repo dokumentiert.
+RECOVERY
+    exit 1; }
+fi
+```
+
+Bricht ein Push ab, bevor er stattgefunden hat, sind Commits und Tag noch lokal und
+lassen sich korrigieren. Deshalb committen wir vorher und pushen erst am Ende.
 
 Hinweis: schlägt ein Push mit `sign_and_send_pubkey: agent refused operation` fehl, klemmt der Hardware-Key. Dann über HTTPS pushen statt das SSH-Remote zu ändern.
 
-### Schritt 8: F-Droid Repo deployen
+### Schritt 8: F-Droid Repo deployen (nur bei `apk` oder `full`)
+
+**Im Modus `ota` diesen Schritt überspringen.** Dort wurde kein APK gebaut und der
+F-Droid-Index nicht angefasst — ein Deploy würde nur den unveränderten Stand erneut
+hochladen und die Live-Prüfung unten liefe gegen eine Version, die dieser Lauf gar
+nicht erzeugt hat.
 
 Sage dem User: "Lade den Ordner `packages/wot-fdroid/fdroid/` per FileZilla auf den Server hoch."
 
@@ -520,4 +574,4 @@ Zeige dem User:
 git log --oneline "$LAST_TAG"..HEAD -- "$APP_REL/" $BUNDLED | sed 's/^[a-f0-9]* /- /'
 ```
 
-`$LAST_TAG` muss aus Schritt 3 stammen, also mit `--match "v[0-9]*"` ermittelt und auf Leere geprüft sein.
+`$LAST_TAG` muss aus Schritt 3 stammen, also mit `--match "${TAG_PREFIX}[0-9]*"` ermittelt und auf Leere geprüft sein.
