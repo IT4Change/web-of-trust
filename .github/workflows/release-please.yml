@@ -16,9 +16,87 @@ jobs:
       core_released: ${{ steps.release.outputs['packages/wot-core--release_created'] }}
       adapter-yjs_released: ${{ steps.release.outputs['packages/adapter-yjs--release_created'] }}
       adapter-automerge_released: ${{ steps.release.outputs['packages/adapter-automerge--release_created'] }}
+      # Tag-Namen fuer den Publish-Anstoss unten. Nur Unterstriche im Namen, aus
+      # Lesbarkeit — nicht weil Bindestriche nicht gingen. GitHub-Expressions
+      # erlauben sie in der Punkt-Notation durchaus, `needs.release-please.…`
+      # ist der Beweis. Die vorhandenen `*-released`-Outputs werden unten
+      # trotzdem in Klammer-Notation gelesen, damit gar nicht erst die Frage
+      # aufkommt.
+      core_tag: ${{ steps.release.outputs['packages/wot-core--tag_name'] }}
+      adapter_yjs_tag: ${{ steps.release.outputs['packages/adapter-yjs--tag_name'] }}
+      adapter_automerge_tag: ${{ steps.release.outputs['packages/adapter-automerge--tag_name'] }}
     steps:
       - uses: googleapis/release-please-action@v4
         id: release
         with:
           manifest-file: .release-please-manifest.json
           config-file: release-please-config.json
+
+  # Release-Please erzeugt die Releases als github-actions[bot] mit dem
+  # GITHUB_TOKEN. GitHub loest aus solchen Events KEINE Workflows aus, um
+  # Rekursion zu verhindern — der `on: release`-Trigger in publish.yml hat
+  # deshalb nie gefeuert, und jedes Paket-Release brauchte einen manuellen
+  # Anstoss, den niemand gemacht hat. Ergebnis: npm lag monatelang zurueck.
+  #
+  # workflow_dispatch ist von dieser Sperre ausdruecklich ausgenommen und
+  # erzeugt auch mit dem GITHUB_TOKEN einen Lauf.
+  #
+  # Bewusst per Dispatch statt workflow_call: so laeuft publish.yml als
+  # Top-Level-Workflow und das OIDC-Token nennt publish.yml. Genau darauf ist
+  # der Trusted Publisher auf npmjs.com konfiguriert. Als aufgerufener Workflow
+  # koennte der Anspruch stattdessen auf release-please.yml zeigen und npm den
+  # Publish ablehnen.
+  trigger-publish:
+    needs: release-please
+    if: needs.release-please.outputs.releases_created == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Publish je erzeugtem Release anstossen
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CORE_RELEASED: ${{ needs.release-please.outputs.core_released }}
+          CORE_TAG: ${{ needs.release-please.outputs.core_tag }}
+          YJS_RELEASED: ${{ needs.release-please.outputs['adapter-yjs_released'] }}
+          YJS_TAG: ${{ needs.release-please.outputs.adapter_yjs_tag }}
+          AUTOMERGE_RELEASED: ${{ needs.release-please.outputs['adapter-automerge_released'] }}
+          AUTOMERGE_TAG: ${{ needs.release-please.outputs.adapter_automerge_tag }}
+        run: |
+          set -euo pipefail
+          started=0
+          missing=0
+
+          dispatch() {
+            released=$1; tag=$2; label=$3
+            # Der Guard muss PRO PAKET greifen. Nur zu pruefen, ob am Ende
+            # ueberhaupt ein Tag dabei war, uebersieht den Fall "core wurde
+            # released, aber sein Tag-Output fehlt" — dann wuerde core still
+            # nicht publiziert, waehrend die anderen beiden durchlaufen und der
+            # Job gruen bleibt.
+            if [ "$released" = "true" ] && [ -z "$tag" ]; then
+              echo "ABBRUCH-Kandidat: $label als released gemeldet, aber kein Tag-Output." >&2
+              missing=1
+              return
+            fi
+            [ -n "$tag" ] || return
+            echo "starte publish.yml für $tag"
+            gh workflow run publish.yml --repo "$GITHUB_REPOSITORY" -f tag="$tag"
+            started=$((started + 1))
+          }
+
+          dispatch "$CORE_RELEASED"      "$CORE_TAG"      "wot-core"
+          dispatch "$YJS_RELEASED"       "$YJS_TAG"       "adapter-yjs"
+          dispatch "$AUTOMERGE_RELEASED" "$AUTOMERGE_TAG" "adapter-automerge"
+
+          if [ "$missing" -eq 1 ]; then
+            echo "ABBRUCH: mindestens ein released-Paket ohne Tag-Output." >&2
+            echo "Vermutlich hat sich das Output-Schema von release-please geaendert." >&2
+            exit 1
+          fi
+          # releases_created war true, also MUSS mindestens ein Tag dabei sein.
+          if [ "$started" -eq 0 ]; then
+            echo "ABBRUCH: releases_created=true, aber kein Tag-Output gefunden." >&2
+            exit 1
+          fi
+          echo "$started Publish-Lauf/Laeufe angestossen"

@@ -1,6 +1,11 @@
 name: Publish Packages
 
 on:
+  # ACHTUNG: dieser Trigger feuert NICHT fuer Releases, die release-please als
+  # github-actions[bot] anlegt — GitHub loest aus GITHUB_TOKEN-Events keine
+  # Workflows aus. Er greift nur, wenn ein Mensch ein Release von Hand anlegt.
+  # Der automatische Weg laeuft ueber den trigger-publish-Job in
+  # release-please.yml, der hier per workflow_dispatch reinkommt.
   release:
     types: [published]
   workflow_dispatch:
@@ -54,13 +59,44 @@ jobs:
           pnpm --filter @web_of_trust/adapter-yjs build
           pnpm --filter @web_of_trust/adapter-automerge build
 
-      - name: Pack tarballs
+      # Der Lauf gehoert GENAU EINEM Paket, abgeleitet aus dem Tag. Frueher hat
+      # jeder Lauf alle drei Pakete publiziert; bei drei gleichzeitig erzeugten
+      # Releases starten drei Laeufe, und zwischen `npm view` und `pnpm publish`
+      # liegt ein Fenster, in dem sich zwei davon gegenseitig ueberholen. Zwei
+      # Laeufe endeten dann rot, obwohl alles publiziert war.
+      # Serialisieren per concurrency waere hier falsch: GitHub CANCELT wartende
+      # Laeufe, sobald ein neuer dazukommt — einer der drei haette seinen
+      # Tarball-Upload verloren.
+      - name: Paket aus dem Tag ableiten
+        id: pkg
+        env:
+          TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.tag }}
         run: |
+          set -euo pipefail
+          case "$TAG" in
+            core-v*)              dir=packages/wot-core ;;
+            adapter-yjs-v*)       dir=packages/adapter-yjs ;;
+            adapter-automerge-v*) dir=packages/adapter-automerge ;;
+            *)
+              echo "ABBRUCH: Tag '$TAG' gehoert zu keinem publizierbaren Paket." >&2
+              echo "Erwartet: core-v*, adapter-yjs-v* oder adapter-automerge-v*." >&2
+              exit 1 ;;
+          esac
+          echo "dir=$dir" >> "$GITHUB_OUTPUT"
+          echo "Paket dieses Laufs: $dir"
+
+      # pnpm pack loest dabei "workspace:*" auf die konkrete Version auf. Genau
+      # dieser Tarball wird spaeter unveraendert publiziert, npm-Paket und
+      # Release-Asset sind damit byte-identisch.
+      - name: Tarball packen
+        id: pack
+        run: |
+          set -euo pipefail
           mkdir -p /tmp/tgz
-          for dir in packages/wot-core packages/adapter-yjs packages/adapter-automerge; do
-            pnpm -C "$dir" pack --pack-destination /tmp/tgz
-          done
-          ls -l /tmp/tgz
+          pnpm -C "${{ steps.pkg.outputs.dir }}" pack --pack-destination /tmp/tgz
+          tarball=$(ls /tmp/tgz/*.tgz)
+          echo "tarball=$tarball" >> "$GITHUB_OUTPUT"
+          ls -l "$tarball"
 
       # Fehler dürfen den Lauf NICHT grün lassen (das frühere `|| echo` hat
       # monatelang stille Auth-404s maskiert). --clobber macht den Upload
@@ -84,36 +120,42 @@ jobs:
       # "@web_of_trust/core": "workspace:*". pnpm schreibt das beim Packen auf die
       # konkrete Version um, npm nicht — ein npm-Publish lieferte ein package.json
       # aus, das sich beim Installieren nicht aufloesen laesst.
+      # npm publish auf den fertigen Tarball, NICHT pnpm publish. Zwei Gruende:
+      #  1. pnpm publish reicht sein eigenes --no-git-checks an npm durch, das
+      #     den Flag nicht kennt und mit EUNKNOWNCONFIG abbricht. Ohne den Flag
+      #     fragt pnpms Branch-Check interaktiv nach und haengt in CI.
+      #  2. Der Tarball hat die workspace:*-Rewrites schon drin, das Argument
+      #     fuer pnpm publish entfaellt damit.
       - name: Publish to npm (Trusted Publishing via OIDC)
+        env:
+          DIR: ${{ steps.pkg.outputs.dir }}
+          TARBALL: ${{ steps.pack.outputs.tarball }}
         run: |
           set -euo pipefail
-          for dir in packages/wot-core packages/adapter-yjs packages/adapter-automerge; do
-            name=$(node -p "require('./$dir/package.json').name")
-            version=$(node -p "require('./$dir/package.json').version")
-            # npm view sauber auswerten statt nur den Exit-Code zu pruefen. Ein
-            # `if npm view ... >/dev/null 2>&1` ist hier gefaehrlich: npm liefert
-            # fuer eine nicht existierende Version je nach Fall rc 0 mit LEERER
-            # Ausgabe — der Publish waere dann lautlos uebersprungen worden, also
-            # genau die stille Maskierung, vor der der Kommentar oben warnt.
-            # Drei Faelle, drei Ausgaenge:
-            #   rc 0 und Ausgabe == version      -> liegt bereits dort, skip
-            #   E404 oder rc 0 mit leerer Ausgabe -> Version fehlt, publizieren
-            #   jeder andere Fehler               -> ABBRUCH (Netz, Auth, Registry)
-            set +e
-            view_out=$(npm view "$name@$version" version 2>&1)
-            view_rc=$?
-            set -e
+          name=$(node -p "require('./$DIR/package.json').name")
+          version=$(node -p "require('./$DIR/package.json').version")
 
-            if [ "$view_rc" -eq 0 ] && [ "$view_out" = "$version" ]; then
-              echo "übersprungen: $name@$version liegt bereits auf npm"
-              continue
-            fi
-            if [ "$view_rc" -ne 0 ] && ! printf '%s' "$view_out" | grep -q 'E404'; then
-              echo "ABBRUCH: npm view für $name@$version fehlgeschlagen:" >&2
-              printf '%s\n' "$view_out" >&2
-              exit 1
-            fi
+          # npm view sauber auswerten statt nur den Exit-Code zu pruefen. npm
+          # liefert fuer eine fehlende Version je nach Fall rc 0 mit LEERER
+          # Ausgabe — ein `if npm view ... >/dev/null` haette den Publish dann
+          # lautlos uebersprungen. Drei Faelle, drei Ausgaenge:
+          #   rc 0 und Ausgabe == version       -> liegt bereits dort, skip
+          #   E404 oder rc 0 mit leerer Ausgabe -> Version fehlt, publizieren
+          #   jeder andere Fehler               -> ABBRUCH (Netz, Auth, Registry)
+          set +e
+          view_out=$(npm view "$name@$version" version 2>&1)
+          view_rc=$?
+          set -e
 
-            echo "publiziere $name@$version"
-            pnpm -C "$dir" publish --access public --no-git-checks
-          done
+          if [ "$view_rc" -eq 0 ] && [ "$view_out" = "$version" ]; then
+            echo "übersprungen: $name@$version liegt bereits auf npm"
+            exit 0
+          fi
+          if [ "$view_rc" -ne 0 ] && ! printf '%s' "$view_out" | grep -q 'E404'; then
+            echo "ABBRUCH: npm view für $name@$version fehlgeschlagen:" >&2
+            printf '%s\n' "$view_out" >&2
+            exit 1
+          fi
+
+          echo "publiziere $name@$version aus $TARBALL"
+          npm publish "$TARBALL" --access public
