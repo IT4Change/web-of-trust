@@ -59,6 +59,7 @@ case "$APP" in
     BUNDLED="packages/wot-core/ packages/adapter-yjs/ packages/adapter-automerge/"
     UPDATE_SERVER=https://web-of-trust.de
     HAS_VAULT=yes
+    RELEASE_BRANCH=main
     ;;
   rls)
     # Kanonischer Checkout, NICHT ein persoenlicher Worktree. Wer aus einem
@@ -73,15 +74,50 @@ case "$APP" in
     BUNDLED="packages/wot-connector/"
     UPDATE_SERVER=https://real-life-stack.de
     HAS_VAULT=no
+    RELEASE_BRANCH=master
     ;;
 esac
 
 METADATA="$FDROID_DIR/fdroid/metadata/${APP_ID}.yml"
 VERSION_FILE="$APP_DIR/android/version.properties"
 
-# Der Checkout MUSS den Release-Stand tragen. Sonst baut man aus einem
-# Feature-Branch und taggt hinterher etwas anderes.
-git -C "$APP_REPO" status --short --branch | head -1
+# Den Checkout VALIDIEREN, nicht nur anzeigen. Ein `git status`, dessen Ausgabe
+# niemand auswertet, ist keine Pruefung — und der Normalfall ist hier der
+# unbrauchbare: am 30.07.2026 stand real-life-stack auf einem Feature-Branch mit
+# 20 uncommitteten Dateien, 31 Commits hinterher. Daraus zu bauen und hinterher zu
+# taggen haette ein Binary erzeugt, das zu keinem veroeffentlichten Stand passt.
+cd "$APP_REPO"
+git fetch --quiet origin "$RELEASE_BRANCH"
+
+DIRTY=$(git status --porcelain)
+if [ -n "$DIRTY" ]; then
+  echo "ABBRUCH: $APP_REPO ist nicht sauber:" >&2
+  printf '%s\n' "$DIRTY" >&2
+  exit 1
+fi
+
+BRANCH=$(git rev-parse --abbrev-ref HEAD)
+COUNTS=$(git rev-list --left-right --count "origin/$RELEASE_BRANCH...HEAD")
+BEHIND=$(echo "$COUNTS" | cut -f1)
+AHEAD=$(echo "$COUNTS" | cut -f2)
+if [ "$BRANCH" != "$RELEASE_BRANCH" ] || [ "$BEHIND" -ne 0 ] || [ "$AHEAD" -ne 0 ]; then
+  echo "ABBRUCH: $APP_REPO steht nicht exakt auf origin/$RELEASE_BRANCH." >&2
+  echo "  Branch: $BRANCH (erwartet: $RELEASE_BRANCH)" >&2
+  echo "  $BEHIND Commits hinterher, $AHEAD voraus" >&2
+  exit 1
+fi
+echo "Checkout ok: $BRANCH == origin/$RELEASE_BRANCH, sauber"
+
+# Bei rls zusaetzlich das WoT-Repo pruefen — dort landen die Metadaten, und ein
+# dirty Checkout wuerde beim Stagen Fremdaenderungen mitnehmen.
+if [ "$APP" = rls ]; then
+  WOT_DIRTY=$(git -C "$WOT_REPO" status --porcelain)
+  if [ -n "$WOT_DIRTY" ]; then
+    echo "ABBRUCH: $WOT_REPO ist nicht sauber (dort landen die Metadaten):" >&2
+    printf '%s\n' "$WOT_DIRTY" >&2
+    exit 1
+  fi
+fi
 ```
 
 **Die wichtigste Asymmetrie:** Bei `rls` liegt `version.properties` im
@@ -310,81 +346,124 @@ Sage dem User den Pfad — Upload manuell über <https://play.google.com/console
 
 ### Schritt 6c: OTA-Bundle (bei `ota` oder `full`)
 
-Passiert automatisch bei Push auf den Default-Branch — GitHub Actions baut die Channel-Bundles.
+GitHub Actions baut die Channel-Bundles bei **Push auf den Default-Branch**. Daraus
+folgt etwas, das leicht untergeht: der `ota`-Modus loest von sich aus **nichts** aus.
+Er bumpt keine Version (Schritt 4) und committet nichts (Schritt 7) — ohne einen Push
+passiert also gar nichts, und der Lauf endet trotzdem zufrieden.
+
+Deshalb im Modus `ota` ausdruecklich pruefen, ob die Aenderungen ueberhaupt draussen
+sind, und den Bundle-Bau belegen statt anzunehmen:
+
+```bash
+set -euo pipefail
+cd "$APP_REPO"
+git fetch --quiet origin "$RELEASE_BRANCH"
+
+# Liegt der lokale Stand schon auf origin? Wenn nicht, gibt es nichts, was einen
+# OTA-Build ausgeloest haette.
+if [ -n "$(git rev-list "origin/$RELEASE_BRANCH..HEAD")" ]; then
+  echo "ABBRUCH: HEAD ist nicht auf origin/$RELEASE_BRANCH gepusht." >&2
+  echo "Ohne Push baut der Workflow kein OTA-Bundle. Erst mergen/pushen." >&2
+  exit 1
+fi
+
+HEAD_SHA=$(git rev-parse --short=7 HEAD)
+echo "erwarte ein OTA-Release fuer $HEAD_SHA"
+```
+
+Danach belegen, dass der Workflow auch wirklich ein Bundle erzeugt hat. Die
+OTA-Releases heissen `ota-<sha>`:
+
+```bash
+gh release view "ota-${HEAD_SHA}" --repo real-life-org/web-of-trust \
+  --json tagName,createdAt --jq '"ok: \(.tagName) vom \(.createdAt[0:16])"' \
+  || { echo "ABBRUCH: kein OTA-Release fuer $HEAD_SHA gefunden." >&2
+       echo "Laeuft der Workflow noch, oder ist er fehlgeschlagen?" >&2; exit 1; }
+```
 
 ### Schritt 7: Commit + Tag + Push (nur bei `apk` oder `full`)
 
 **Im Modus `ota` diesen Schritt überspringen.** Dort wurde in Schritt 4 nichts
 gebumpt, es gibt also nichts zu committen — die Stage-Prüfung unten würde
-zwangsläufig fehlschlagen.
+zwangsläufig fehlschlagen. Für `ota` gilt stattdessen Schritt 6c.
 
-**Bei `wot` — ein Commit, beide Dateien liegen im selben Repo:**
+Der Ablauf ist bewusst in drei Phasen getrennt: **erst alles stagen und
+validieren, dann committen, dann fragen, dann pushen.** Ein Push, der vor der
+Freigabe passiert, ist keine Freigabe. Und bei `rls` darf die erste Hälfte erst
+raus, wenn die zweite validiert ist — sonst veröffentlicht man genau den
+Zwei-Repo-Split, den dieser Schritt verhindern soll.
+
+**Phase 1 — stagen und validieren.**
 
 ```bash
-cd "$APP_REPO"
+set -euo pipefail
 VERSION_NAME=$(grep VERSION_NAME "$VERSION_FILE" | cut -d= -f2)
+VERSION_CODE=$(grep VERSION_CODE "$VERSION_FILE" | cut -d= -f2)
 
-# Gezielt die eine YAML stagen, nicht das ganze metadata/-Verzeichnis: sonst
-# rutscht ein fremder Metadaten-Bump (z.B. der anderen App) mit in den Release.
-git add "$VERSION_FILE" "$METADATA"
-
-# Den Stage-Inhalt VERGLEICHEN, nicht nur anzeigen. Ein blosses Ausgeben belegt
-# weder, dass beide erwarteten Dateien drin sind, noch dass nichts Fremdes
-# mitgestaged wurde — git add laesst vorher gestagte Fremdaenderungen stehen.
+# Vergleicht den Stage-Inhalt eines Repos gegen die exakt erwartete Pfadliste.
+# Nur anzeigen genuegt nicht: es belegt weder Vollstaendigkeit noch, dass nichts
+# Fremdes mitgestaged wurde — git add laesst vorher gestagte Fremdaenderungen stehen.
 # (`git status --cached` gibt es uebrigens nicht, das bricht mit Exit 128 ab.)
-EXPECTED=$(printf '%s\n' \
-  "${VERSION_FILE#$APP_REPO/}" \
-  "${METADATA#$APP_REPO/}" | sort)
-STAGED=$(git diff --cached --name-only | sort)
-if [ "$STAGED" != "$EXPECTED" ]; then
-  echo "ABBRUCH: unerwarteter Stage-Inhalt." >&2
-  echo "--- erwartet ---" >&2; printf '%s\n' "$EXPECTED" >&2
-  echo "--- gestaged ---" >&2; printf '%s\n' "$STAGED" >&2
-  exit 1
-fi
+assert_staged() {
+  repo=$1; shift
+  expected=$(printf '%s\n' "$@" | sort)
+  staged=$(git -C "$repo" diff --cached --name-only | sort)
+  if [ "$staged" != "$expected" ]; then
+    echo "ABBRUCH: unerwarteter Stage-Inhalt in $repo." >&2
+    echo "--- erwartet ---" >&2; printf '%s\n' "$expected" >&2
+    echo "--- gestaged ---" >&2; printf '%s\n' "$staged" >&2
+    exit 1
+  fi
+}
 
-git commit -m "release: v${VERSION_NAME}"
-git tag "v${VERSION_NAME}"
-git push && git push --tags
+if [ "$APP" = wot ]; then
+  # Gezielt die eine YAML stagen, nicht das ganze metadata/-Verzeichnis: sonst
+  # rutscht ein fremder Metadaten-Bump (z.B. der anderen App) mit in den Release.
+  git -C "$APP_REPO" add "$VERSION_FILE" "$METADATA"
+  assert_staged "$APP_REPO" "${VERSION_FILE#$APP_REPO/}" "${METADATA#$APP_REPO/}"
+else
+  # BEIDE Repos stagen und BEIDE validieren, bevor irgendetwas committet wird.
+  git -C "$APP_REPO" add "$VERSION_FILE"
+  assert_staged "$APP_REPO" "${VERSION_FILE#$APP_REPO/}"
+  git -C "$WOT_REPO" add "$METADATA"
+  assert_staged "$WOT_REPO" "${METADATA#$WOT_REPO/}"
+fi
 ```
 
-**Bei `rls` — ZWEI Commits in ZWEI Repos, und ZWEI Pushes.** Beide Hälften gehören
-zusammen; wird die zweite vergessen, behaupten die F-Droid-Metadaten eine Version, die
-im Quell-Repo nicht existiert. Jede Hälfte bekommt dieselbe Stage-Prüfung wie oben:
+**Phase 2 — committen und taggen, noch nichts pushen.**
 
 ```bash
-# 1. Quelle im real-life-stack-Repo
-cd "$APP_REPO"
-VERSION_NAME=$(grep VERSION_NAME "$VERSION_FILE" | cut -d= -f2)
-git add "$VERSION_FILE"
-EXPECTED="${VERSION_FILE#$APP_REPO/}"
-STAGED=$(git diff --cached --name-only)
-if [ "$STAGED" != "$EXPECTED" ]; then
-  echo "ABBRUCH: unerwarteter Stage-Inhalt in $APP_REPO." >&2
-  echo "  erwartet: $EXPECTED" >&2
-  echo "  gestaged: $STAGED" >&2
-  exit 1
+if [ "$APP" = wot ]; then
+  git -C "$APP_REPO" commit -m "release: v${VERSION_NAME}"
+  git -C "$APP_REPO" tag "v${VERSION_NAME}"
+else
+  git -C "$APP_REPO" commit -m "release: Android App v${VERSION_NAME} (${VERSION_CODE})"
+  git -C "$APP_REPO" tag "v${VERSION_NAME}"          # Tag gehoert NUR ins Quell-Repo
+  git -C "$WOT_REPO" commit -m "fdroid: ${APP_ID} ${VERSION_NAME} (${VERSION_CODE})"
 fi
-git commit -m "release: Android App v${VERSION_NAME} (${VERSION_CODE})"
-git tag "v${VERSION_NAME}"
-git push && git push --tags          # Tag gehoert NUR ins Quell-Repo
 
-# 2. Metadaten im web-of-trust-Repo — eigener Push, sonst bleibt Schritt 1 lokal
-cd "$WOT_REPO"
-git add "$METADATA"
-EXPECTED="${METADATA#$WOT_REPO/}"
-STAGED=$(git diff --cached --name-only)
-if [ "$STAGED" != "$EXPECTED" ]; then
-  echo "ABBRUCH: unerwarteter Stage-Inhalt in $WOT_REPO." >&2
-  echo "  erwartet: $EXPECTED" >&2
-  echo "  gestaged: $STAGED" >&2
-  exit 1
-fi
-git commit -m "fdroid: ${APP_ID} ${VERSION_NAME} (${VERSION_CODE})"
-git push
+# Zeigen, was gleich rausgehen wuerde.
+git -C "$APP_REPO" --no-pager log --oneline -1
+[ "$APP" = rls ] && git -C "$WOT_REPO" --no-pager log --oneline -1
 ```
 
-Frage den User vor den Pushes, ob gepusht werden soll.
+**Phase 3 — Freigabe einholen, dann pushen.**
+
+Frage den User jetzt, ob gepusht werden soll. Erst nach seinem Ja:
+
+```bash
+if [ "$APP" = wot ]; then
+  git -C "$APP_REPO" push && git -C "$APP_REPO" push --tags
+else
+  # Beide Repos explizit. Ein `git push` im falschen Verzeichnis schiebt nur eine
+  # Haelfte raus und laesst die andere lokal — genau der Split, den wir vermeiden.
+  git -C "$APP_REPO" push && git -C "$APP_REPO" push --tags
+  git -C "$WOT_REPO" push
+fi
+```
+
+Bricht ein Push ab, sind Commits und Tag noch lokal und lassen sich korrigieren.
+Deshalb committen wir vorher und pushen erst am Ende.
 
 Hinweis: schlägt ein Push mit `sign_and_send_pubkey: agent refused operation` fehl, klemmt der Hardware-Key. Dann über HTTPS pushen statt das SSH-Remote zu ändern.
 
