@@ -16,6 +16,9 @@ class WebCryptoEncryptionKeyPair {
   constructor(public readonly keyPair: CryptoKeyPair) {}
 }
 
+/** X25519 basepoint (u = 9), little-endian. */
+const X25519_BASEPOINT = Uint8Array.of(9, ...new Array(31).fill(0))
+
 /** OID for X25519: 1.3.101.110 — wraps raw 32-byte key in PKCS8 DER */
 function wrapX25519PrivateKey(rawKey: Uint8Array): Uint8Array {
   const prefix = new Uint8Array([
@@ -271,22 +274,14 @@ export class WebCryptoAdapter implements CryptoAdapter {
       ['deriveBits'],
     )
 
-    // Derive public key: import extractable, export JWK, re-import public only
-    const extractablePriv = await crypto.subtle.importKey(
-      'pkcs8',
-      pkcs8,
-      { name: 'X25519' },
-      true,
-      ['deriveBits'],
-    )
-    const jwk = await crypto.subtle.exportKey('jwk', extractablePriv)
-    const publicKey = await crypto.subtle.importKey(
-      'jwk',
-      { kty: jwk.kty, crv: jwk.crv, x: jwk.x },
-      { name: 'X25519' },
-      true,
-      [],
-    )
+    // X25519(scalar, basepoint) is by definition the public key. Exporting it out of
+    // the private key instead relies on the engine computing the public component
+    // during PKCS#8 import. Node (OpenSSL), Chrome (BoringSSL) and current Firefox
+    // do; the Gecko build shipped in Tor Browser does not and rejects that export
+    // with OperationError.
+    const basepoint = await crypto.subtle.importKey('raw', toBuffer(X25519_BASEPOINT), { name: 'X25519' }, false, [])
+    const publicKeyBytes = await crypto.subtle.deriveBits({ name: 'X25519', public: basepoint }, privateKey, 256)
+    const publicKey = await crypto.subtle.importKey('raw', publicKeyBytes, { name: 'X25519' }, true, [])
 
     return new WebCryptoEncryptionKeyPair({ privateKey, publicKey })
   }
