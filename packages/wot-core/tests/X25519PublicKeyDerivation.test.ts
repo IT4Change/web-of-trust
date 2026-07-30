@@ -1,6 +1,8 @@
 import { describe, it, expect, afterEach } from 'vitest'
+import * as ed25519 from '@noble/ed25519'
 import { WebCryptoProtocolCryptoAdapter } from '../src/adapters/protocol-crypto'
 import { WebCryptoAdapter } from '../src/adapters/crypto/WebCryptoAdapter'
+import { encodeBase64Url } from '../src/protocol/crypto/encoding'
 
 // RFC 7748 section 6.1 — Alice's private scalar and the matching X25519 public key.
 const RFC7748_PRIVATE_KEY = '77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a'
@@ -12,6 +14,16 @@ function fromHex(hex: string): Uint8Array {
 
 function toHex(bytes: Uint8Array): string {
   return [...bytes].map((byte) => byte.toString(16).padStart(2, '0')).join('')
+}
+
+// PKCS#8 wrapper for a raw Ed25519 seed (OID 1.3.101.112), so importKeyPair can be
+// exercised now that exportKeyPair no longer exists to produce the input.
+function wrapEd25519PrivateKey(seed: Uint8Array): Uint8Array {
+  const prefix = fromHex('302e020100300506032b657004220420')
+  const pkcs8 = new Uint8Array(prefix.length + seed.length)
+  pkcs8.set(prefix)
+  pkcs8.set(seed, prefix.length)
+  return pkcs8
 }
 
 // Node (OpenSSL), Chrome (BoringSSL) and current Firefox all compute the public key
@@ -83,6 +95,72 @@ describe('X25519 public key derivation', () => {
     const publicKey = new Uint8Array(await crypto.subtle.exportKey('raw', keyPair.keyPair.publicKey))
 
     expect(toHex(publicKey)).toBe(RFC7748_PUBLIC_KEY)
+  })
+
+  it('generates Ed25519 key pairs whose private half cannot be exported', async () => {
+    const adapter = new WebCryptoAdapter()
+
+    const keyPair = await adapter.generateKeyPair()
+
+    expect(keyPair.privateKey.extractable).toBe(false)
+    expect(keyPair.publicKey.extractable).toBe(true)
+    await expect(crypto.subtle.exportKey('pkcs8', keyPair.privateKey)).rejects.toThrow()
+  })
+
+  it('imports Ed25519 key pairs whose private half cannot be exported', async () => {
+    const adapter = new WebCryptoAdapter()
+    const seed = crypto.getRandomValues(new Uint8Array(32))
+    const publicKeyBytes = await ed25519.getPublicKeyAsync(seed)
+
+    const keyPair = await adapter.importKeyPair({
+      publicKey: encodeBase64Url(new Uint8Array(publicKeyBytes)),
+      privateKey: encodeBase64Url(wrapEd25519PrivateKey(seed)),
+    })
+
+    expect(keyPair.privateKey.extractable).toBe(false)
+    await expect(crypto.subtle.exportKey('pkcs8', keyPair.privateKey)).rejects.toThrow()
+  })
+
+  it('encrypts asymmetrically without exporting private key material', async () => {
+    restoreExportKey = simulateEngineWithoutPrivateKeyExport()
+    const adapter = new WebCryptoAdapter()
+    const recipient = await adapter.deriveEncryptionKeyPair(crypto.getRandomValues(new Uint8Array(32)))
+    const recipientPublicKey = new Uint8Array(await crypto.subtle.exportKey('raw', recipient.keyPair.publicKey))
+    const plaintext = new TextEncoder().encode('the ephemeral private key must stay unreadable')
+
+    const payload = await adapter.encryptAsymmetric(plaintext, recipientPublicKey)
+    const decrypted = await adapter.decryptAsymmetric(payload, recipient)
+
+    expect(decrypted).toEqual(plaintext)
+  })
+
+  // The round-trip above would pass with an extractable ephemeral key too, so assert the
+  // flag directly. There is no black-box way to observe it: the ephemeral pair never
+  // leaves encryptAsymmetric, so the generateKey call itself is the only witness.
+  it('generates the ECIES ephemeral key pair as non-extractable', async () => {
+    const adapter = new WebCryptoAdapter()
+    const recipient = await adapter.deriveEncryptionKeyPair(crypto.getRandomValues(new Uint8Array(32)))
+    const recipientPublicKey = new Uint8Array(await crypto.subtle.exportKey('raw', recipient.keyPair.publicKey))
+
+    const previous = Object.getOwnPropertyDescriptor(crypto.subtle, 'generateKey')
+    const original = crypto.subtle.generateKey.bind(crypto.subtle)
+    const extractableFlags: boolean[] = []
+    Object.defineProperty(crypto.subtle, 'generateKey', {
+      value: async (algorithm: AlgorithmIdentifier, extractable: boolean, usages: KeyUsage[]) => {
+        extractableFlags.push(extractable)
+        return original(algorithm as 'Ed25519', extractable, usages)
+      },
+      configurable: true,
+      writable: true,
+    })
+    try {
+      await adapter.encryptAsymmetric(new TextEncoder().encode('secret'), recipientPublicKey)
+    } finally {
+      if (previous) Object.defineProperty(crypto.subtle, 'generateKey', previous)
+      else Reflect.deleteProperty(crypto.subtle, 'generateKey')
+    }
+
+    expect(extractableFlags).toEqual([false])
   })
 
   it('produces the same public key that ECDH agrees on', async () => {

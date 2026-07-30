@@ -36,26 +36,19 @@ function wrapX25519PrivateKey(rawKey: Uint8Array): Uint8Array {
 }
 
 export class WebCryptoAdapter implements CryptoAdapter {
+  // Private keys are created and imported non-extractable: once WebCrypto holds them
+  // there is no path back to the raw bytes. That is only possible because no operation
+  // needs the private key in the clear — the public key comes from a basepoint
+  // derivation rather than from exporting the private half.
   async generateKeyPair(): Promise<KeyPair> {
     const keyPair = await crypto.subtle.generateKey(
       { name: 'Ed25519' },
-      true,
+      false,
       ['sign', 'verify']
     ) as CryptoKeyPair
     return {
       publicKey: keyPair.publicKey,
       privateKey: keyPair.privateKey,
-    }
-  }
-
-  async exportKeyPair(keyPair: KeyPair): Promise<{ publicKey: string; privateKey: string }> {
-    const [publicKeyRaw, privateKeyRaw] = await Promise.all([
-      crypto.subtle.exportKey('raw', keyPair.publicKey),
-      crypto.subtle.exportKey('pkcs8', keyPair.privateKey),
-    ])
-    return {
-      publicKey: encodeBase64Url(new Uint8Array(publicKeyRaw)),
-      privateKey: encodeBase64Url(new Uint8Array(privateKeyRaw)),
     }
   }
 
@@ -74,7 +67,7 @@ export class WebCryptoAdapter implements CryptoAdapter {
         'pkcs8',
         toBuffer(privBytes),
         { name: 'Ed25519' },
-        true,
+        false,
         ['sign']
       ),
     ])
@@ -318,10 +311,12 @@ export class WebCryptoAdapter implements CryptoAdapter {
     plaintext: Uint8Array,
     recipientPublicKeyBytes: Uint8Array,
   ): Promise<EncryptedPayload> {
-    // 1. Generate ephemeral X25519 key pair
+    // 1. Generate ephemeral X25519 key pair. Non-extractable: only the public half is
+    // put on the wire, and WebCrypto keeps public keys exportable regardless of the
+    // flag, so step 6 still works while the ephemeral private key stays unreadable.
     const ephemeral = await crypto.subtle.generateKey(
       { name: 'X25519' },
-      true,
+      false,
       ['deriveBits'],
     ) as CryptoKeyPair
 

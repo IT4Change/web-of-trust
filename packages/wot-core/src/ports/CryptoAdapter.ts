@@ -33,8 +33,9 @@ export interface EncryptionKeyPair {
  */
 export interface CryptoAdapter {
   // Key Management (Ed25519)
+  // Deliberately no exportKeyPair: private keys are held non-extractable, so there is
+  // no supported path that hands raw private key material back to calling code.
   generateKeyPair(): Promise<KeyPair>
-  exportKeyPair(keyPair: KeyPair): Promise<{ publicKey: string; privateKey: string }>
   importKeyPair(exported: { publicKey: string; privateKey: string }): Promise<KeyPair>
   exportPublicKey(publicKey: CryptoKey): Promise<string>
   importPublicKey(exported: string): Promise<CryptoKey>
