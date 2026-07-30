@@ -15,7 +15,42 @@ on:
         required: true
 
 jobs:
+  # Tag-Klassifikation als EIGENER Job. Ein exit 0 im Step wuerde nur den Step
+  # beenden — die Folge-Steps liefen mit leerem dir weiter (pack im Repo-Root,
+  # Upload von nichts). Genau das tat der fruehere "Skip": wirkungslos. Ein
+  # Job-level if ueberspringt dagegen den ganzen Publish-Job sauber und sichtbar.
+  classify:
+    runs-on: ubuntu-latest
+    outputs:
+      kind: ${{ steps.c.outputs.kind }}
+      dir: ${{ steps.c.outputs.dir }}
+    steps:
+      - id: c
+        env:
+          TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.tag }}
+        run: |
+          set -euo pipefail
+          case "$TAG" in
+            core-v*)              kind=package; dir=packages/wot-core ;;
+            adapter-yjs-v*)       kind=package; dir=packages/adapter-yjs ;;
+            adapter-automerge-v*) kind=package; dir=packages/adapter-automerge ;;
+            app-v*|v[0-9]*)
+              # App-Releases sind eine ERWARTETE Tag-Klasse, aber kein npm-Paket.
+              # (v[0-9]* deckt die Alt-Tags bis v0.2.7 ab. Das Release von v0.2.7
+              # am 30.07. brach hier frueher rot ab.)
+              echo "App-Release-Tag '$TAG' — kein npm-Publish noetig."
+              kind=app; dir= ;;
+            *)
+              echo "ABBRUCH: Tag '$TAG' gehoert zu keinem publizierbaren Paket." >&2
+              echo "Erwartet: core-v*, adapter-yjs-v*, adapter-automerge-v* (oder app-v*/v* als Skip)." >&2
+              exit 1 ;;
+          esac
+          echo "kind=$kind" >> "$GITHUB_OUTPUT"
+          echo "dir=$dir"   >> "$GITHUB_OUTPUT"
+
   publish:
+    needs: classify
+    if: needs.classify.outputs.kind == 'package'
     runs-on: ubuntu-latest
     # Zwei Ziele, bewusst parallel:
     #   1. tgz-Assets am GitHub-Release — RLS konsumiert aktuell genau diese
@@ -59,39 +94,6 @@ jobs:
           pnpm --filter @web_of_trust/adapter-yjs build
           pnpm --filter @web_of_trust/adapter-automerge build
 
-      # Der Lauf gehoert GENAU EINEM Paket, abgeleitet aus dem Tag. Frueher hat
-      # jeder Lauf alle drei Pakete publiziert; bei drei gleichzeitig erzeugten
-      # Releases starten drei Laeufe, und zwischen `npm view` und `pnpm publish`
-      # liegt ein Fenster, in dem sich zwei davon gegenseitig ueberholen. Zwei
-      # Laeufe endeten dann rot, obwohl alles publiziert war.
-      # Serialisieren per concurrency waere hier falsch: GitHub CANCELT wartende
-      # Laeufe, sobald ein neuer dazukommt — einer der drei haette seinen
-      # Tarball-Upload verloren.
-      - name: Paket aus dem Tag ableiten
-        id: pkg
-        env:
-          TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.tag }}
-        run: |
-          set -euo pipefail
-          case "$TAG" in
-            core-v*)              dir=packages/wot-core ;;
-            adapter-yjs-v*)       dir=packages/adapter-yjs ;;
-            adapter-automerge-v*) dir=packages/adapter-automerge ;;
-            app-v*|v[0-9]*)
-              # App-Releases sind eine ERWARTETE Tag-Klasse, aber kein
-              # npm-Paket — sauber ueberspringen statt rot abzubrechen.
-              # Das Release von v0.2.7 am 30.07. hat genau so einen roten
-              # Lauf erzeugt. (v[0-9]* deckt die Alt-Tags bis 0.2.7 ab.)
-              echo "App-Release-Tag '$TAG' — kein npm-Publish noetig."
-              exit 0 ;;
-            *)
-              echo "ABBRUCH: Tag '$TAG' gehoert zu keinem publizierbaren Paket." >&2
-              echo "Erwartet: core-v*, adapter-yjs-v* oder adapter-automerge-v*." >&2
-              exit 1 ;;
-          esac
-          echo "dir=$dir" >> "$GITHUB_OUTPUT"
-          echo "Paket dieses Laufs: $dir"
-
       # pnpm pack loest dabei "workspace:*" auf die konkrete Version auf. Genau
       # dieser Tarball wird spaeter unveraendert publiziert, npm-Paket und
       # Release-Asset sind damit byte-identisch.
@@ -100,7 +102,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p /tmp/tgz
-          pnpm -C "${{ steps.pkg.outputs.dir }}" pack --pack-destination /tmp/tgz
+          pnpm -C "${{ needs.classify.outputs.dir }}" pack --pack-destination /tmp/tgz
           tarball=$(ls /tmp/tgz/*.tgz)
           echo "tarball=$tarball" >> "$GITHUB_OUTPUT"
           ls -l "$tarball"
@@ -135,7 +137,7 @@ jobs:
       #     fuer pnpm publish entfaellt damit.
       - name: Publish to npm (Trusted Publishing via OIDC)
         env:
-          DIR: ${{ steps.pkg.outputs.dir }}
+          DIR: ${{ needs.classify.outputs.dir }}
           TARBALL: ${{ steps.pack.outputs.tarball }}
         run: |
           set -euo pipefail
