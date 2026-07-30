@@ -1,6 +1,11 @@
 name: Publish Packages
 
 on:
+  # ACHTUNG: dieser Trigger feuert NICHT fuer Releases, die release-please als
+  # github-actions[bot] anlegt — GitHub loest aus GITHUB_TOKEN-Events keine
+  # Workflows aus. Er greift nur, wenn ein Mensch ein Release von Hand anlegt.
+  # Der automatische Weg laeuft ueber den trigger-publish-Job in
+  # release-please.yml, der hier per workflow_dispatch reinkommt.
   release:
     types: [published]
   workflow_dispatch:

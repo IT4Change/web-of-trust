@@ -16,9 +16,62 @@ jobs:
       core_released: ${{ steps.release.outputs['packages/wot-core--release_created'] }}
       adapter-yjs_released: ${{ steps.release.outputs['packages/adapter-yjs--release_created'] }}
       adapter-automerge_released: ${{ steps.release.outputs['packages/adapter-automerge--release_created'] }}
+      # Tag-Namen fuer den Publish-Anstoss unten. Bewusst nur Unterstriche im
+      # Output-Namen: in GitHub-Expressions wuerde `outputs.adapter-yjs_tag` als
+      # Subtraktion geparst werden.
+      core_tag: ${{ steps.release.outputs['packages/wot-core--tag_name'] }}
+      adapter_yjs_tag: ${{ steps.release.outputs['packages/adapter-yjs--tag_name'] }}
+      adapter_automerge_tag: ${{ steps.release.outputs['packages/adapter-automerge--tag_name'] }}
     steps:
       - uses: googleapis/release-please-action@v4
         id: release
         with:
           manifest-file: .release-please-manifest.json
           config-file: release-please-config.json
+
+  # Release-Please erzeugt die Releases als github-actions[bot] mit dem
+  # GITHUB_TOKEN. GitHub loest aus solchen Events KEINE Workflows aus, um
+  # Rekursion zu verhindern — der `on: release`-Trigger in publish.yml hat
+  # deshalb nie gefeuert, und jedes Paket-Release brauchte einen manuellen
+  # Anstoss, den niemand gemacht hat. Ergebnis: npm lag monatelang zurueck.
+  #
+  # workflow_dispatch ist von dieser Sperre ausdruecklich ausgenommen und
+  # erzeugt auch mit dem GITHUB_TOKEN einen Lauf.
+  #
+  # Bewusst per Dispatch statt workflow_call: so laeuft publish.yml als
+  # Top-Level-Workflow und das OIDC-Token nennt publish.yml. Genau darauf ist
+  # der Trusted Publisher auf npmjs.com konfiguriert. Als aufgerufener Workflow
+  # koennte der Anspruch stattdessen auf release-please.yml zeigen und npm den
+  # Publish ablehnen.
+  trigger-publish:
+    needs: release-please
+    if: needs.release-please.outputs.releases_created == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Publish je erzeugtem Release anstossen
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CORE_TAG: ${{ needs.release-please.outputs.core_tag }}
+          YJS_TAG: ${{ needs.release-please.outputs.adapter_yjs_tag }}
+          AUTOMERGE_TAG: ${{ needs.release-please.outputs.adapter_automerge_tag }}
+        run: |
+          set -euo pipefail
+          started=0
+          for tag in "$CORE_TAG" "$YJS_TAG" "$AUTOMERGE_TAG"; do
+            # Leere Tags ueberspringen: nicht jedes Paket wird in jedem Lauf
+            # released.
+            [ -n "$tag" ] || continue
+            echo "starte publish.yml für $tag"
+            gh workflow run publish.yml --repo "$GITHUB_REPOSITORY" -f tag="$tag"
+            started=$((started + 1))
+          done
+          # releases_created war true, also MUSS mindestens ein Tag dabei sein.
+          # Sonst hat sich das Output-Schema von release-please geaendert und wir
+          # wuerden still gar nichts publizieren.
+          if [ "$started" -eq 0 ]; then
+            echo "ABBRUCH: releases_created=true, aber kein Tag-Output gefunden." >&2
+            exit 1
+          fi
+          echo "$started Publish-Lauf/Laeufe angestossen"
