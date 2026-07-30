@@ -371,11 +371,25 @@ set -euo pipefail
 cd "$APP_REPO"
 git fetch --quiet origin "$RELEASE_BRANCH"
 
-# Liegt der lokale Stand schon auf origin? Wenn nicht, gibt es nichts, was einen
-# OTA-Build ausgeloest haette.
-if [ -n "$(git rev-list "origin/$RELEASE_BRANCH..HEAD")" ]; then
-  echo "ABBRUCH: HEAD ist nicht auf origin/$RELEASE_BRANCH gepusht." >&2
-  echo "Ohne Push baut der Workflow kein OTA-Bundle. Erst mergen/pushen." >&2
+# BEIDE Richtungen pruefen. Nur auf Unpubliziertes zu schauen reicht nicht: ein
+# VERALTETER Checkout hat nichts Unpubliziertes und kaeme durch — man wuerde dann
+# das OTA-Release eines ALTEN Commits bestaetigt bekommen, waehrend die
+# tatsaechlich neuen Aenderungen gar kein Bundle haben.
+# Bewusst hier ausgeschrieben statt assert_clean_at_origin aus Schritt 2
+# aufzurufen: die Snippets laufen in getrennten Shells, eine dort definierte
+# Funktion existiert hier nicht.
+git fetch --quiet origin "$RELEASE_BRANCH" || {
+  echo "ABBRUCH: konnte origin/$RELEASE_BRANCH nicht holen." >&2
+  echo "Ohne frischen Stand ist der Vergleich wertlos." >&2
+  exit 1; }
+
+COUNTS=$(git rev-list --left-right --count "origin/$RELEASE_BRANCH...HEAD")
+BEHIND=$(echo "$COUNTS" | cut -f1); AHEAD=$(echo "$COUNTS" | cut -f2)
+if [ "$BEHIND" -ne 0 ] || [ "$AHEAD" -ne 0 ]; then
+  echo "ABBRUCH: HEAD ist nicht identisch mit origin/$RELEASE_BRANCH." >&2
+  echo "  $BEHIND Commits hinterher, $AHEAD voraus" >&2
+  echo "Voraus  → erst mergen/pushen, sonst baut der Workflow kein Bundle." >&2
+  echo "Hinterher → erst pullen, sonst prueft man ein Bundle von gestern." >&2
   exit 1
 fi
 
@@ -466,13 +480,19 @@ git -C "$APP_REPO" --no-pager log --oneline -1
 Frage den User jetzt, ob gepusht werden soll. Erst nach seinem Ja:
 
 ```bash
-if [ "$APP" = wot ]; then
-  git -C "$APP_REPO" push && git -C "$APP_REPO" push --tags
-else
-  # Beide Repos explizit. Ein `git push` im falschen Verzeichnis schiebt nur eine
-  # Haelfte raus und laesst die andere lokal — genau der Split, den wir vermeiden.
-  git -C "$APP_REPO" push && git -C "$APP_REPO" push --tags
-  git -C "$WOT_REPO" push
+# Branch UND Tag in EINEM atomaren Push. `git push && git push --tags` sind zwei
+# Operationen: gelingt die erste und scheitert die zweite, ist der Commit
+# veroeffentlicht und der Tag fehlt — ein halber Release, den niemand als solchen
+# erkennt. --atomic aktualisiert entweder alle Refs oder keinen.
+TAG="${TAG_PREFIX}${VERSION_NAME}"
+
+git -C "$APP_REPO" push --atomic origin \
+  "HEAD:refs/heads/$RELEASE_BRANCH" "refs/tags/$TAG"
+
+if [ "$APP" = rls ]; then
+  # Zweites Repo, eigener Push. Ein `git push` im falschen Verzeichnis schiebt nur
+  # eine Haelfte raus und laesst die andere lokal — genau der Split von oben.
+  git -C "$WOT_REPO" push origin "HEAD:refs/heads/main"
 fi
 ```
 
@@ -539,7 +559,11 @@ angekommen war.
 die neue Version nicht live ist:
 
 ```bash
-curl -s https://fdroid.utopia-lab.org/fdroid/repo/index-v1.json \
+# -f: HTTP-Fehler werden zu Exit != 0, statt eine Fehlerseite in python zu pipen
+#     (das gaebe eine kryptische JSON-Meldung statt "Server antwortet 404").
+# -S: Fehler trotzdem anzeigen. --max-time und --max-filesize begrenzen den Abruf.
+curl -fsS --max-time 30 --max-filesize 20000000 \
+  https://fdroid.utopia-lab.org/fdroid/repo/index-v1.json \
   | APP_ID="$APP_ID" WANT_N="$VERSION_NAME" WANT_C="$VERSION_CODE" python3 -c "
 import json, os, sys
 d = json.load(sys.stdin)
