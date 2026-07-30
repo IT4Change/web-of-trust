@@ -37,7 +37,7 @@
     "@automerge/automerge-repo-storage-indexeddb": "^2.5.3"
   },
   "peerDependencies": {
-    "@web_of_trust/core": "workspace:*"
+    "@web_of_trust/core": "workspace:^"
   },
   "devDependencies": {
     "@web_of_trust/core": "workspace:*",
