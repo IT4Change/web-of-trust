@@ -85,12 +85,18 @@ jobs:
           echo "dir=$dir" >> "$GITHUB_OUTPUT"
           echo "Paket dieses Laufs: $dir"
 
+      # pnpm pack loest dabei "workspace:*" auf die konkrete Version auf. Genau
+      # dieser Tarball wird spaeter unveraendert publiziert, npm-Paket und
+      # Release-Asset sind damit byte-identisch.
       - name: Tarball packen
+        id: pack
         run: |
           set -euo pipefail
           mkdir -p /tmp/tgz
           pnpm -C "${{ steps.pkg.outputs.dir }}" pack --pack-destination /tmp/tgz
-          ls -l /tmp/tgz
+          tarball=$(ls /tmp/tgz/*.tgz)
+          echo "tarball=$tarball" >> "$GITHUB_OUTPUT"
+          ls -l "$tarball"
 
       # Fehler dürfen den Lauf NICHT grün lassen (das frühere `|| echo` hat
       # monatelang stille Auth-404s maskiert). --clobber macht den Upload
@@ -114,9 +120,16 @@ jobs:
       # "@web_of_trust/core": "workspace:*". pnpm schreibt das beim Packen auf die
       # konkrete Version um, npm nicht — ein npm-Publish lieferte ein package.json
       # aus, das sich beim Installieren nicht aufloesen laesst.
+      # npm publish auf den fertigen Tarball, NICHT pnpm publish. Zwei Gruende:
+      #  1. pnpm publish reicht sein eigenes --no-git-checks an npm durch, das
+      #     den Flag nicht kennt und mit EUNKNOWNCONFIG abbricht. Ohne den Flag
+      #     fragt pnpms Branch-Check interaktiv nach und haengt in CI.
+      #  2. Der Tarball hat die workspace:*-Rewrites schon drin, das Argument
+      #     fuer pnpm publish entfaellt damit.
       - name: Publish to npm (Trusted Publishing via OIDC)
         env:
           DIR: ${{ steps.pkg.outputs.dir }}
+          TARBALL: ${{ steps.pack.outputs.tarball }}
         run: |
           set -euo pipefail
           name=$(node -p "require('./$DIR/package.json').name")
@@ -144,5 +157,5 @@ jobs:
             exit 1
           fi
 
-          echo "publiziere $name@$version"
-          pnpm -C "$DIR" publish --access public --no-git-checks
+          echo "publiziere $name@$version aus $TARBALL"
+          npm publish "$TARBALL" --access public
