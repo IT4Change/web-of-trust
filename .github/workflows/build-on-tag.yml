@@ -10,11 +10,11 @@ name: Build on Tag
 
 on:
   push:
-    tags: ['v[0-9]*']          # nur App-Tags; core-v*, adapter-*, ota-* nicht
+    tags: ['app-v[0-9]*']      # nur App-Tags; core-v*, adapter-*, ota-* und Alt-Tags v* nicht
   workflow_dispatch:
     inputs:
       tag:
-        description: 'App-Tag, der gebaut werden soll (z.B. v0.2.7)'
+        description: 'App-Tag, der gebaut werden soll (z.B. app-v0.2.7)'
         required: true
 
 permissions:

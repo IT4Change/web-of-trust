@@ -77,6 +77,13 @@ jobs:
             core-v*)              dir=packages/wot-core ;;
             adapter-yjs-v*)       dir=packages/adapter-yjs ;;
             adapter-automerge-v*) dir=packages/adapter-automerge ;;
+            app-v*|v[0-9]*)
+              # App-Releases sind eine ERWARTETE Tag-Klasse, aber kein
+              # npm-Paket — sauber ueberspringen statt rot abzubrechen.
+              # Das Release von v0.2.7 am 30.07. hat genau so einen roten
+              # Lauf erzeugt. (v[0-9]* deckt die Alt-Tags bis 0.2.7 ab.)
+              echo "App-Release-Tag '$TAG' — kein npm-Publish noetig."
+              exit 0 ;;
             *)
               echo "ABBRUCH: Tag '$TAG' gehoert zu keinem publizierbaren Paket." >&2
               echo "Erwartet: core-v*, adapter-yjs-v* oder adapter-automerge-v*." >&2

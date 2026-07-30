@@ -19,7 +19,15 @@ set -euo pipefail
 # ---------------------------------------------------------------- App-Profil
 APP_DIR=apps/demo
 APP_ID=org.reallife.weboftrust
-TAG_PREFIX=v                                   # WoT taggt v0.2.7
+TAG_PREFIX=app-v                               # einheitlich mit RLS; die App
+                                               # teilt sich das Repo mit den
+                                               # npm-Paketen (core-v*, adapter-*)
+                                               # — ein nacktes v* war der einzige
+                                               # unpraefigierte Namensraum.
+                                               # Alt-Tags v0.2.1..v0.2.7 bleiben
+                                               # als Historie; app-v0.2.7 ist als
+                                               # Uebergangs-Tag auf demselben
+                                               # Commit gesetzt.
 BUILD_SCRIPT=build:mobile
 GRADLE_TASK=assembleFdroidRelease              # fdroid-Flavor, debug-signiert
 APK_OUT="$APP_DIR/android/app/build/outputs/apk/fdroid/release"
@@ -43,7 +51,7 @@ build_workspace_deps() {
 
 TAG="${1:-}"
 if [ -z "$TAG" ]; then
-  echo "Aufruf: $0 <tag>   (z.B. ${TAG_PREFIX}0.2.7)" >&2
+  echo "Aufruf: $0 <tag>   (z.B. ${TAG_PREFIX}0.2.8)" >&2
   exit 1
 fi
 
