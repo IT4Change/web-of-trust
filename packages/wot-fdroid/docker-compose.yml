@@ -6,7 +6,10 @@ services:
     restart: unless-stopped
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - ./fdroid:/srv/fdroid:ro
+      # Nur repo/ mounten: der Container braucht weder Keystore noch config.yml
+      # noch metadata/ — er serviert statisch. Secrets liegen auf dem Server
+      # unter ~/secrets/wot-fdroid/, ausserhalb jedes Mounts.
+      - ./fdroid/repo:/srv/fdroid/repo:ro
     networks:
       - "net"
 

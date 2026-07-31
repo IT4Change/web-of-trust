@@ -1,188 +1,270 @@
 ---
-description: Erstellt ein neues Release der WoT App — Version bumpen, APK bauen, F-Droid Repo aktualisieren, OTA-Bundle erstellen. Nutze diesen Skill wenn ein neues Release veröffentlicht werden soll.
+description: Signiert und veröffentlicht ein Android-Release einer der beiden Apps (WoT Demo / RLS Reference). Bumpt die Version, taggt, laesst CI bauen, signiert das CI-Artefakt mit dem F-Droid-Key und deployt. Nutze diesen Skill fuer ein neues App-Release.
 allowed-tools: [Bash, Read, Edit, Write, Glob, Grep]
 ---
 
-# Android Release
+# Android Release (Sign & Deploy)
 
-Erstellt ein neues Release der WoT Demo App. Unterstützt drei Modi:
+**Rolle dieses Skills:** die menschliche Brücke zwischen dem automatischen
+Build und der Auslieferung. Gebaut wird nicht mehr hier — der `build-on-tag`-
+Workflow in beiden App-Repos baut das APK reproduzierbar vom Tag
+(`scripts/release/build-android.sh`). Dieser Skill **bumpt und taggt vorne**,
+**zieht das CI-Artefakt**, **signiert es mit dem F-Droid-Schlüssel** (der bewusst
+nur lokal liegt) und **deployt**. Die Build-Logik lebt an genau einer getesteten
+Stelle; sie hier zu duplizieren wäre garantierte Drift.
 
-- **`ota`** — Nur Web-Änderungen, OTA-Bundle über GitHub Pages (kein APK nötig)
-- **`apk`** — Neues APK mit Version-Bump, signiert, ins F-Droid Repo
-- **`full`** — Beides: APK + OTA
+> Übergangszustand. Version-Bump/Tag wandern mit Phase 2 zu release-please,
+> Signierung und Deploy zum `wot-release`-Runner. Dann schrumpft dieser Skill auf
+> „Release-PR mergen, fertig". Bis dahin ist das hier der Weg.
 
-## Umgebung
+**Zwei Apps:** `wot` (Web of Trust Demo) · `rls` (Real Life Stack Reference).
+**Modus** dieses Skills ist immer APK/Release. Reine Web-Änderungen (OTA) laufen
+über den Push auf den Default-Branch, nicht hier.
+
+## Voraussetzungen
 
 ```bash
-REPO_ROOT=$(git rev-parse --show-toplevel)
-DEMO_DIR="$REPO_ROOT/apps/demo"
-FDROID_DIR="$REPO_ROOT/packages/wot-fdroid"
-export PATH="$HOME/Android/Sdk/build-tools/36.0.0:$PATH"
+command -v keytool && command -v apksigner   # JDK-Tools zum Signieren/Verifizieren
+command -v fdroid                            # Index-Bau (pip install fdroidserver)
+command -v gh                                # CI-Artefakt ziehen
 ```
 
-**Voraussetzungen prüfen, bevor du anfängst:**
-
-```bash
-node -v && pnpm -v                          # Schritt 4
-# keytool gehoert mitgeprueft: es kommt aus dem JDK, eine reine JRE bringt java
-# mit, aber kein keytool. Sonst faellt das erst nach dem Gradle-Build auf.
-java -version && command -v keytool && command -v apksigner   # Schritt 5a/5b
-```
-
-Schritt 4 braucht nur Node. Schritt 5a und 5b brauchen ein **JDK**: `./gradlew`, `keytool` und `apksigner` sind allesamt Java-Programme. Fehlt Java (z.B. in einer Agent-Sandbox), lässt sich der Ablauf sauber teilen — Web-Build und Verifikation bis Schritt 4 hier erledigen, die nativen Schritte auf einer Umgebung mit JDK. Nicht versuchen, das zu umgehen.
+Node/pnpm/Gradle braucht dieser Skill **nicht** — das ist CI-Sache. Fehlt ein
+JDK-Tool, lässt sich der Ablauf nicht sinnvoll teilen: ohne Signierung kein
+Release. Dann auf einer Umgebung mit JDK fortsetzen.
 
 ## Ablauf
 
-### Schritt 1: Modus bestimmen
+### Schritt 1: App bestimmen
 
-Interpretiere $ARGUMENTS:
+- `wot`, `demo`, `web-of-trust` → **wot** · `rls`, `stack`, `reference` → **rls**
+- Optional eine Versionsnummer wie `0.2.2`, sonst Auto-Increment.
 
-- `ota`, `web`, `hotfix` → Modus `ota`
-- `apk`, `native`, `fdroid` → Modus `apk`
-- `full`, `release`, ohne Argument → Modus `full`
-- Optional: Versionsnummer z.B. `0.2.0` → nutze diese, sonst auto-increment
+**Ohne erkennbare App: nachfragen, nicht raten.** Das falsche Profil signiert ein
+falsches Binary unter fremdem Paketnamen.
 
-### Schritt 2: Prüfe was sich geändert hat
+### Schritt 2: App-Profil setzen
+
+Alle Unterschiede stehen ausschließlich hier.
 
 ```bash
-cd "$REPO_ROOT"
-# --match ist Pflicht: ohne greift describe den naechstgelegenen Tag BELIEBIGER Art
-# (core-v0.4.1, adapter-yjs-v0.1.8, ota-<sha>) und der Changelog wird still leer
-# oder falsch, ohne dass irgendetwas fehlschlaegt.
-LAST_TAG=$(git describe --tags --abbrev=0 --match "v[0-9]*" 2>/dev/null || echo "")
+# Das F-Droid-Repo liegt IMMER im web-of-trust-Repo — auch fuer die RLS-App.
+WOT_REPO=~/workspace/workspace/web-of-trust
+FDROID_DIR="$WOT_REPO/packages/wot-fdroid"
 
-# Leeres LAST_TAG NICHT stillschweigend durchlassen: "$LAST_TAG"..HEAD wuerde zu
-# "..HEAD" und das liest Git als HEAD..HEAD, also als leere Range. Der Changelog
-# waere dann leer und der Lauf trotzdem gruen — dieselbe stille Falle wie der
-# fehlende --match-Filter.
-if [ -z "$LAST_TAG" ]; then
-  echo "ABBRUCH: kein v*-Tag gefunden." >&2
-  echo "Fuer ein Erstrelease eine Basis explizit setzen, z.B.:" >&2
-  echo "  LAST_TAG=\$(git rev-list --max-parents=0 HEAD | head -1)" >&2
-  exit 1
+case "$APP" in
+  wot)
+    APP_REPO="$WOT_REPO"
+    APP_DIR="$APP_REPO/apps/demo"
+    APP_ID=org.reallife.weboftrust
+    RELEASE_BRANCH=main
+    GH_REPO=real-life-org/web-of-trust
+    ;;
+  rls)
+    # Kanonischer Checkout, NICHT ein persoenlicher Worktree. Wer aus einem
+    # Worktree released, setzt APP_REPO bewusst um.
+    APP_REPO=~/workspace/workspace/real-life-stack
+    APP_DIR="$APP_REPO/apps/reference"
+    APP_ID=org.reallife.reallifestack
+    RELEASE_BRANCH=master
+    GH_REPO=real-life-org/real-life-stack
+    ;;
+esac
+
+TAG_PREFIX=app-v                 # beide Apps taggen einheitlich app-v* (seit
+                                 # 31.07.2026). Alt-Tags v0.2.1..v0.2.7 sind
+                                 # Historie.
+METADATA="$FDROID_DIR/fdroid/metadata/${APP_ID}.yml"
+VERSION_FILE="$APP_DIR/android/version.properties"
+
+# Den Checkout VALIDIEREN, nicht nur anzeigen. Fail-closed: JEDER Teilschritt
+# bricht ab, auch ein fehlgeschlagenes fetch — ohne frischen origin-Stand
+# vergleicht man gegen eine veraltete Referenz und die Pruefung geht faelschlich
+# durch. Am 30.07.2026 stand real-life-stack auf einem Feature-Branch mit 20
+# uncommitteten Dateien; ein `git status`, dessen Ausgabe niemand auswertet,
+# haette daraus gebaut.
+set -euo pipefail
+assert_clean_at_origin() {
+  repo=$1; branch=$2; label=$3
+  git -C "$repo" fetch --quiet origin "$branch" || {
+    echo "ABBRUCH: konnte origin/$branch in $label nicht holen." >&2; return 1; }
+  dirty=$(git -C "$repo" status --porcelain)
+  if [ -n "$dirty" ]; then
+    echo "ABBRUCH: $label ist nicht sauber:" >&2; printf '%s\n' "$dirty" >&2; return 1
+  fi
+  br=$(git -C "$repo" rev-parse --abbrev-ref HEAD)
+  counts=$(git -C "$repo" rev-list --left-right --count "origin/$branch...HEAD") || {
+    echo "ABBRUCH: origin/$branch existiert nicht in $label." >&2; return 1; }
+  behind=$(echo "$counts" | cut -f1); ahead=$(echo "$counts" | cut -f2)
+  if [ "$br" != "$branch" ] || [ "$behind" -ne 0 ] || [ "$ahead" -ne 0 ]; then
+    echo "ABBRUCH: $label steht nicht exakt auf origin/$branch." >&2
+    echo "  Branch: $br (erwartet: $branch), $behind hinterher, $ahead voraus" >&2
+    return 1
+  fi
+  echo "ok: $label == origin/$branch, sauber"
+}
+
+assert_clean_at_origin "$APP_REPO" "$RELEASE_BRANCH" "$APP_REPO"
+# Bei rls MUSS auch das WoT-Repo geprueft werden — dort landen die Metadaten.
+if [ "$APP" = rls ]; then
+  assert_clean_at_origin "$WOT_REPO" main "$WOT_REPO (Metadaten)"
+fi
+```
+
+**Die wichtigste Asymmetrie:** Bei `rls` liegt `version.properties` im
+**real-life-stack**-Repo, die F-Droid-Metadaten aber im **web-of-trust**-Repo. Ein
+RLS-Release braucht deshalb **zwei Commits in zwei Repos**. Bei `wot` liegen beide
+im selben Repo, dort ist es ein Commit.
+
+### Schritt 3: Version bumpen
+
+Bump-Logik (wenn keine Version angegeben): Patch `0.1.0` → `0.1.1`, VERSION_CODE +1.
+
+```bash
+cat "$VERSION_FILE"
+```
+
+Aktualisiere **beide** Stellen:
+
+1. `$VERSION_FILE` — VERSION_CODE und VERSION_NAME
+2. `$METADATA` — CurrentVersion und CurrentVersionCode
+
+Zeige dem User die neue Version und frage, ob sie passt. Danach:
+
+```bash
+VERSION_NAME=$(grep VERSION_NAME "$VERSION_FILE" | cut -d= -f2)
+VERSION_CODE=$(grep VERSION_CODE "$VERSION_FILE" | cut -d= -f2)
+TAG="${TAG_PREFIX}${VERSION_NAME}"
+```
+
+### Schritt 4: Commit, Tag, Push (löst den CI-Build aus)
+
+Drei Phasen: **stagen und validieren → committen und taggen → Freigabe → pushen.**
+Ein Push vor der Freigabe ist keine Freigabe. Bei `rls` darf die erste Repo-Hälfte
+erst raus, wenn die zweite validiert ist — sonst veröffentlicht man den
+Zwei-Repo-Split.
+
+```bash
+# Vergleicht den Stage-Inhalt gegen die exakt erwartete Pfadliste. Nur anzeigen
+# genuegt nicht: git add laesst vorher gestagte Fremdaenderungen stehen.
+# (`git status --cached` gibt es nicht, das bricht mit Exit 128 ab.)
+assert_staged() {
+  repo=$1; shift
+  expected=$(printf '%s\n' "$@" | sort)
+  staged=$(git -C "$repo" diff --cached --name-only | sort)
+  if [ "$staged" != "$expected" ]; then
+    echo "ABBRUCH: unerwarteter Stage-Inhalt in $repo." >&2
+    echo "--- erwartet ---" >&2; printf '%s\n' "$expected" >&2
+    echo "--- gestaged ---" >&2; printf '%s\n' "$staged" >&2
+    return 1
+  fi
+}
+
+if [ "$APP" = wot ]; then
+  git -C "$APP_REPO" add "$VERSION_FILE" "$METADATA"
+  assert_staged "$APP_REPO" "${VERSION_FILE#$APP_REPO/}" "${METADATA#$APP_REPO/}"
+  git -C "$APP_REPO" commit -m "release: $TAG"
+  git -C "$APP_REPO" tag "$TAG"
+else
+  git -C "$APP_REPO" add "$VERSION_FILE"
+  assert_staged "$APP_REPO" "${VERSION_FILE#$APP_REPO/}"
+  git -C "$WOT_REPO" add "$METADATA"
+  assert_staged "$WOT_REPO" "${METADATA#$WOT_REPO/}"
+  git -C "$APP_REPO" commit -m "release: Android App v${VERSION_NAME} (${VERSION_CODE})"
+  git -C "$APP_REPO" tag "$TAG"
+  git -C "$WOT_REPO" commit -m "fdroid: ${APP_ID} ${VERSION_NAME} (${VERSION_CODE})"
 fi
 
-echo "--- apps/demo ---"
-git log --oneline "$LAST_TAG"..HEAD -- apps/demo/
-# Nur die drei Pakete, die apps/demo tatsaechlich als Dependency zieht und die
-# damit ueber das Web-Bundle im APK landen. Ein Filter auf ganz packages/ waere
-# zu breit und zoege Relay-, CLI-, Vault- und Test-Aenderungen in den Changelog.
-echo "--- im APK gebuendelte Pakete ---"
-git log --oneline "$LAST_TAG"..HEAD -- \
-  packages/wot-core/ packages/adapter-yjs/ packages/adapter-automerge/
+git -C "$APP_REPO" --no-pager log --oneline -1
+[ "$APP" = rls ] && git -C "$WOT_REPO" --no-pager log --oneline -1 || true
 ```
 
-Prüfe ob native Änderungen dabei sind:
+**Frage den User jetzt, ob gepusht werden soll.** Erst nach seinem Ja:
 
 ```bash
-git diff --name-only "$LAST_TAG"..HEAD -- \
-  apps/demo/android/ \
-  apps/demo/ios/ \
-  apps/demo/capacitor.config.ts
+# Branch UND Tag in EINEM atomaren Push: `git push && git push --tags` sind zwei
+# Operationen; gelingt die erste und scheitert die zweite, ist der Commit
+# veroeffentlicht und der Tag fehlt — ein halber Release.
+git -C "$APP_REPO" push --atomic origin "HEAD:refs/heads/$RELEASE_BRANCH" "refs/tags/$TAG"
+if [ "$APP" = rls ]; then
+  git -C "$WOT_REPO" push origin "HEAD:refs/heads/main"
+  # Beide Haelften draussen? Sonst ist der Split veroeffentlicht.
+  git -C "$WOT_REPO" fetch --quiet origin main
+  [ -z "$(git -C "$WOT_REPO" rev-list origin/main..HEAD)" ] || {
+    echo "ABBRUCH: Quelle ist gepusht, Metadaten NICHT." >&2
+    echo "Zweite Haelfte nachziehen (cd $WOT_REPO && git push) — NICHT die Quelle" >&2
+    echo "zurueckrollen (Tag ist oeffentlich). Bis dahin KEIN fdroid update/Deploy." >&2
+    exit 1; }
+fi
 ```
 
-Wenn native Änderungen vorhanden aber Modus `ota` gewählt:
-- **Warne den User:** "Es gibt native Änderungen die per OTA nicht deployed werden. Sicher dass du nur OTA willst?"
+Hinweis: schlägt ein Push mit `sign_and_send_pubkey: agent refused operation`
+fehl, klemmt der Hardware-Key. Dann über HTTPS pushen statt das SSH-Remote zu
+ändern.
 
-### Schritt 3: Version bumpen (nur bei `apk` oder `full`)
+### Schritt 5: CI bauen lassen und Artefakt ziehen
 
-Lies aktuelle Version:
+Der Tag-Push triggert `build-on-tag`. **Nicht lokal bauen** — das Artefakt, das
+die Nutzer bekommen, soll exakt das sein, was CI reproduzierbar gebaut hat.
 
 ```bash
-cat "$DEMO_DIR/android/version.properties"
+# Auf den Lauf warten und das Artefakt herunterladen.
+gh run watch --repo "$GH_REPO" \
+  "$(gh run list --repo "$GH_REPO" --workflow build-on-tag.yml \
+       --branch "$TAG" --limit 1 --json databaseId --jq '.[0].databaseId')" \
+  --exit-status
+
+DL=$(mktemp -d)
+gh run download --repo "$GH_REPO" \
+  "$(gh run list --repo "$GH_REPO" --workflow build-on-tag.yml \
+       --branch "$TAG" --limit 1 --json databaseId --jq '.[0].databaseId')" \
+  --name "android-$TAG" --dir "$DL"
+
+# Provenienz pruefen, BEVOR signiert wird: (a) die SHA256SUMS aus CI stimmen mit
+# den Dateien, (b) build-info.json beschreibt genau diesen Tag und VersionCode.
+( cd "$DL" && sha256sum -c SHA256SUMS )
+node -e '
+const fs=require("fs"), p=process.argv[1];
+const bi=JSON.parse(fs.readFileSync(p+"/build-info.json","utf8"));
+const [,,tag,code]=process.argv;
+if (bi.tag!==tag)         throw new Error(`build-info.tag ${bi.tag} != ${tag}`);
+if (String(bi.versionCode)!==code) throw new Error(`versionCode ${bi.versionCode} != ${code}`);
+if (bi.signed)            throw new Error("Artefakt behauptet, signiert zu sein");
+console.log(`Artefakt ok: ${bi.tag} (Code ${bi.versionCode}), unsigniert`);
+' "$DL" "$TAG" "$VERSION_CODE"
+
+CI_APK=$(ls "$DL"/*.apk | head -1)
+echo "CI-APK: $CI_APK"
 ```
 
-Bump-Logik (wenn keine Version angegeben):
-- Patch-Bump: `0.1.0` → `0.1.1`, VERSION_CODE +1
+### Schritt 6: Signieren mit dem F-Droid-Key
 
-Aktualisiere:
+`apksigner` ersetzt die vorhandene (Debug-)Signatur des CI-Artefakts durch die
+F-Droid-Signatur. Der Fingerprint MUSS exakt dem Repo-Schlüssel entsprechen —
+sonst schlägt das Update über die vorige Version bei allen Nutzern fehl.
 
-1. `apps/demo/android/version.properties` — VERSION_CODE und VERSION_NAME
-2. `packages/wot-fdroid/fdroid/metadata/org.reallife.weboftrust.yml` — CurrentVersion und CurrentVersionCode
-
-Zeige dem User die neue Version und frage ob sie passt.
-
-### Schritt 4: Web-Assets bauen
-
-**Wichtig:** Backend-URLs UND OTA-Channel explizit als Env-Variablen mitgeben — nicht auf die `.env`-Defaults verlassen (Belt-and-Suspenders: falls die `.env` je driftet, backt dieser Befehl trotzdem den richtigen Produktions-Server). Ein falsch gebackenes Relay wandert sonst still in ein signiertes Release.
-
-```bash
-cd "$DEMO_DIR"
-VITE_RELAY_URL=wss://relay.web-of-trust.de \
-VITE_PROFILE_SERVICE_URL=https://profiles.web-of-trust.de \
-VITE_VAULT_URL=https://vault.web-of-trust.de \
-VITE_UPDATE_SERVER_URL=https://web-of-trust.de \
-VITE_UPDATE_CHANNEL=android-foss \
-pnpm build:mobile
-```
-
-`build:mobile` setzt bereits `VITE_BASE_PATH=/`, baut und synct.
-
-**Verifizieren (bevor signiert wird):** das gebaute Bundle darf NUR die Server-URLs enthalten:
-```bash
-d="$DEMO_DIR/dist/assets"
-grep -rl "utopia-lab" $d/*.js | wc -l    # MUSS 0 sein (alte, tote Relay)
-grep -rl "relay.box"  $d/*.js | wc -l    # MUSS 0 sein (Festival-Box)
-grep -rlE "wss://relay\.web-of-trust\.de" $d/*.js | wc -l  # MUSS >=1 sein
-```
-
-### Schritt 5a: F-Droid APK bauen (bei `apk` oder `full`)
-
-**Achtung:** Der fdroid-Flavor nutzt `signingConfig signingConfigs.debug` (siehe
-`app/build.gradle`), d.h. Gradle baut ein **Debug-signiertes** APK namens
-`app-fdroid-release.apk` (NICHT `-unsigned`). Es MUSS danach mit dem F-Droid-Key
-nachsigniert werden (apksigner ersetzt die Debug-Signatur), sonst bricht die
-Signatur-Kontinuität und ein Update über die vorige Version schlägt fehl.
-
-**Zweite Falle:** Schlaegt Gradle fehl und die Folgeschritte laufen trotzdem
-(z.B. weil die Kommandos nicht mit `&&` verkettet sind), signiert `apksigner` das
-APK aus einem *frueheren* Build. Der Fingerprint-Check ist dann gruen, weil der
-Schluessel stimmt, aber der Inhalt ist veraltet. Genau so wurde am 30.07.2026
-ein eine Woche alter Build signiert. Deshalb: Output vorher loeschen und die
-Kette abbrechen lassen.
-
-```bash
-set -euo pipefail          # ← ohne das rutscht ein gescheiterter Build durch
-OUT="$DEMO_DIR/android/app/build/outputs/apk/fdroid/release"
-rm -rf "$OUT"              # ← verhindert das Signieren eines Alt-APKs
-
-cd "$DEMO_DIR/android"
-./gradlew assembleFdroidRelease
-```
-
-Voraussetzung: `$DEMO_DIR/android/local.properties` mit `sdk.dir=...` muss
-existieren. Die Datei ist gitignored und fehlt deshalb in frisch angelegten
-Worktrees — Gradle bricht dann mit "SDK location not found" ab.
-
-APK signieren und ins F-Droid Repo kopieren:
+Der Keystore liegt **nicht** mehr im F-Droid-Ordner (seit 31.07.2026 unter
+`~/secrets/wot-fdroid/`, ausserhalb jedes Mounts).
 
 ```bash
 cd "$FDROID_DIR/fdroid"
-KEYSTORE="$HOME/.android/fdroid-keystore.p12"
-# Bewusst ohne awk '{print $2}': wird dieser Skill mit Argumenten aufgerufen,
-# ersetzt der Harness $1/$2/... im Snippet durch Woerter aus den Argumenten.
-# Das Passwort waere dann still Muell. sed kommt ohne Positionsparameter aus.
-PASS=$(sed -n 's/^keystorepass:[[:space:]]*//p' config.yml)
+SECRETS=~/secrets/wot-fdroid
+KEYSTORE="$SECRETS/keystore.p12"
+# Passwort per sed, NICHT awk '{print $2}': wird dieser Skill mit Argumenten
+# aufgerufen, ersetzt der Harness $1/$2/... im Snippet — das Passwort waere Muell.
+PASS=$(sed -n 's/^keystorepass:[[:space:]]*//p' "$SECRETS/config.yml")
 ALIAS=$(keytool -list -keystore "$KEYSTORE" -storetype PKCS12 -storepass "$PASS" 2>/dev/null | grep PrivateKeyEntry | cut -d, -f1)
-VERSION_CODE=$(grep VERSION_CODE "$DEMO_DIR/android/version.properties" | cut -d= -f2)
 
 export PATH="$HOME/Android/Sdk/build-tools/36.0.0:$PATH"
-# Gebautes APK robust finden (Debug-signiert, Name = app-fdroid-release.apk).
-UNSIGNED=$(ls "$DEMO_DIR/android/app/build/outputs/apk/fdroid/release/"*.apk | grep -v -- '-unsigned' | head -1)
 apksigner sign \
-  --ks "$KEYSTORE" \
-  --ks-key-alias "$ALIAS" \
-  --ks-pass "pass:$PASS" \
-  --key-pass "pass:$PASS" \
-  --out "repo/org.reallife.weboftrust_${VERSION_CODE}.apk" \
-  "$UNSIGNED"
+  --ks "$KEYSTORE" --ks-key-alias "$ALIAS" \
+  --ks-pass "pass:$PASS" --key-pass "pass:$PASS" \
+  --out "repo/${APP_ID}_${VERSION_CODE}.apk" "$CI_APK"
 
-# Signatur-Kontinuität verifizieren. Der Fingerprint MUSS exakt dem Schlüssel des
-# F-Droid-Repos entsprechen, sonst schlägt das Update über die Vorversion bei
-# allen Nutzern fehl. Deshalb VERGLEICHEN und abbrechen — ein blosses
-# `| grep SHA-256` zeigt den Wert nur an und akzeptiert jeden Fingerprint.
+# Fingerprint VERGLEICHEN und abbrechen — ein blosses `| grep SHA-256` zeigt nur
+# an und akzeptiert jeden Schluessel.
 EXPECTED_FP=8371f8dea9c3f7c104460ab7d8c7d2432445ab28fd83beafe0db5c835b020a87
-ACTUAL_FP=$(apksigner verify --print-certs "repo/org.reallife.weboftrust_${VERSION_CODE}.apk" \
+ACTUAL_FP=$(apksigner verify --print-certs "repo/${APP_ID}_${VERSION_CODE}.apk" \
   | sed -n 's/.*SHA-256 digest: *//p' | head -1)
 if [ "$ACTUAL_FP" != "$EXPECTED_FP" ]; then
   echo "ABBRUCH: Fingerprint stimmt nicht." >&2
@@ -193,93 +275,80 @@ fi
 echo "Signatur-Kontinuität ok: $ACTUAL_FP"
 ```
 
-F-Droid Index aktualisieren:
+### Schritt 7: F-Droid-Index bauen
 
 ```bash
+cd "$FDROID_DIR/fdroid"
+```
+
+**Vor `fdroid update`: enthält das lokale `repo/` alle APKs, die auf dem Server
+liegen?** Fehlt lokal eines, verschwindet diese Version beim Sync still aus dem
+Index. Das ist real passiert (0.2.0 wäre am 30.07. fast rausgefallen).
+
+```bash
+SERVER=anton@85.215.34.19
+SERVER_REPO=/home/anton/docker-container/wot-fdroid/fdroid/repo
+missing=$(comm -23 \
+  <(ssh "$SERVER" "ls $SERVER_REPO/*.apk 2>/dev/null | xargs -n1 basename | sort") \
+  <(ls repo/*.apk | xargs -n1 basename | sort))
+if [ -n "$missing" ]; then
+  echo "Diese APKs liegen auf dem Server, aber nicht lokal — erst holen:" >&2
+  printf '  %s\n' $missing >&2
+  for f in $missing; do scp "$SERVER:$SERVER_REPO/$f" repo/; done
+fi
+
 fdroid update
 ```
 
-Falls `fdroid` nicht installiert: `pip install fdroidserver`
+### Schritt 8: Deployen und live gegenprüfen
 
-### Schritt 5b: Play Store AAB bauen (optional)
-
-```bash
-cd "$DEMO_DIR/android"
-./gradlew bundlePlaystoreRelease
-```
-
-AAB: `app/build/outputs/bundle/playstoreRelease/app-playstore-release.aab`
-
-Sage dem User den Pfad — Upload manuell über https://play.google.com/console
-
-### Schritt 5c: OTA-Bundle (bei `ota` oder `full`)
-
-Passiert automatisch bei Push auf `main` — GitHub Actions baut die 3 Channel-Bundles.
-
-### Schritt 6: Commit + Tag + Push
+**Nur `repo/` deployen.** Keystore, `config.yml`, `metadata/` liegen bewusst
+außerhalb des Web-Mounts; die ganze Mappe zu syncen würde sie wieder ins Web-Root
+tragen (bis 31.07.2026 genau so gewesen).
 
 ```bash
-cd "$REPO_ROOT"
-VERSION_NAME=$(grep VERSION_NAME "$DEMO_DIR/android/version.properties" | cut -d= -f2)
-
-# BEIDE Aenderungen aus Schritt 3 committen. Nur version.properties zu stagen
-# laesst den F-Droid-Metadaten-Bump uncommitted liegen — der Tag behauptet dann
-# eine Version, die das Repo-Metadatenfile nicht kennt.
-# Gezielt die eine YAML stagen, nicht das ganze metadata/-Verzeichnis: sonst
-# rutscht ein fremder Metadaten-Bump (z.B. der RLS-App) mit in den WoT-Release.
-git add apps/demo/android/version.properties \
-  packages/wot-fdroid/fdroid/metadata/org.reallife.weboftrust.yml
-
-# Den Stage-Inhalt VERGLEICHEN, nicht nur anzeigen. Ein blosses Ausgeben belegt
-# weder, dass beide erwarteten Dateien drin sind, noch dass nichts Fremdes
-# mitgestaged wurde. (`git status --cached` gibt es uebrigens nicht, das bricht
-# mit Exit 128 ab — `git diff --cached` ist die richtige Abfrage.)
-EXPECTED=$(printf '%s\n' \
-  apps/demo/android/version.properties \
-  packages/wot-fdroid/fdroid/metadata/org.reallife.weboftrust.yml | sort)
-STAGED=$(git diff --cached --name-only | sort)
-if [ "$STAGED" != "$EXPECTED" ]; then
-  echo "ABBRUCH: unerwarteter Stage-Inhalt." >&2
-  echo "--- erwartet ---" >&2; printf '%s\n' "$EXPECTED" >&2
-  echo "--- gestaged ---" >&2; printf '%s\n' "$STAGED" >&2
-  exit 1
-fi
-
-git commit -m "release: v${VERSION_NAME}"
-git tag "v${VERSION_NAME}"
+rsync -av "$FDROID_DIR/fdroid/repo/" \
+  anton@85.215.34.19:/home/anton/docker-container/wot-fdroid/fdroid/repo/
 ```
 
-Frage den User ob gepusht werden soll. Wenn ja:
+**Hart gegenprüfen**, dass die neue Version wirklich live ist — der Check MUSS
+fehlschlagen, wenn nicht (am 30.07. stand das Live-Repo unbemerkt auf dem Stand
+vom 12. Juli):
 
 ```bash
-git push && git push --tags
+curl -fsS --max-time 30 --max-filesize 20000000 \
+  https://fdroid.utopia-lab.org/fdroid/repo/index-v1.json \
+  | APP_ID="$APP_ID" WANT_N="$VERSION_NAME" WANT_C="$VERSION_CODE" python3 -c '
+import json, os, sys
+d = json.load(sys.stdin)
+app, wn, wc = os.environ["APP_ID"], os.environ["WANT_N"], int(os.environ["WANT_C"])
+pkgs = d.get("packages", {})
+if app not in pkgs: sys.exit(f"ABBRUCH: {app} fehlt im Live-Index")
+if not [v for v in pkgs[app] if v["versionCode"]==wc and v["versionName"]==wn]:
+    have = sorted({(v["versionCode"], v["versionName"]) for v in pkgs[app]}, reverse=True)
+    sys.exit(f"ABBRUCH: {app} {wn} ({wc}) ist NICHT live. Vorhanden: {have}")
+print(f"live: {app} {wn} ({wc})")
+'
 ```
 
-### Schritt 7: F-Droid Repo deployen
+### Schritt 9: GitHub-Release-Asset
 
-Sage dem User: "Lade den Ordner `packages/wot-fdroid/fdroid/` per FileZilla auf den Server hoch."
-
-Alternativ:
+Ans GitHub-Release des App-Tags gehört **das signierte APK** (für Obtainium) —
+NICHT das unsignierte CI-Artefakt, sonst installieren Nutzer eine Signatur, von
+der sie nie wieder updaten können.
 
 ```bash
-rsync -av "$FDROID_DIR/fdroid/" user@server:/path/to/wot-fdroid/fdroid/
+gh release create "$TAG" --repo "$GH_REPO" --title "$TAG" --generate-notes \
+  "$FDROID_DIR/fdroid/repo/${APP_ID}_${VERSION_CODE}.apk" \
+  || gh release upload "$TAG" --repo "$GH_REPO" --clobber \
+       "$FDROID_DIR/fdroid/repo/${APP_ID}_${VERSION_CODE}.apk"
 ```
 
-### Schritt 8: Zusammenfassung
+### Schritt 10: Zusammenfassung
 
-Zeige dem User:
-
-- Welcher Modus (ota/apk/full)
-- Neue Version (wenn gebumpt)
-- Was gebaut wurde (APK-Pfad, OTA-Tag)
-- Nächste Schritte (F-Droid Repo hochladen, Play Console)
-
-## Changelog generieren
-
-```bash
-git log --oneline "$LAST_TAG"..HEAD -- \
-  apps/demo/ packages/wot-core/ packages/adapter-yjs/ packages/adapter-automerge/ \
-  | sed 's/^[a-f0-9]* /- /'
-```
-
-`$LAST_TAG` muss aus Schritt 2 stammen, also mit `--match "v[0-9]*"` ermittelt sein. Die drei Pakete gehoeren dazu, sonst fehlen im Changelog die Aenderungen, die ueber das Web-Bundle im APK landen. Ganz `packages/` waere dagegen zu breit — Relay, CLI, Vault und e2e-log-sync haben mit der App nichts zu tun.
+- Welche App, welche Version
+- Bei `rls`: ausdrücklich, dass **zwei** Repos committet und gepusht wurden
+- Ergebnis der Live-Index-Prüfung
+- Play-AAB (noch nicht in CI): bis Phase 3 lokal via `./gradlew bundlePlaystoreRelease`
+  im `$APP_DIR/android`, dann manuell in die Play Console. Bewusst getrennt vom
+  reproduzierbaren F-Droid-Pfad.
