@@ -284,9 +284,17 @@ export class EncryptedMessagingNetworkAdapter extends NetworkAdapter {
         }
 
         await signEnvelope(envelope, (data) => this.identity.sign(data))
+        // The adapter may have been disconnected while this fire-and-forget send
+        // was mid-flight (e.g. a test's afterEach stop()). Skip the send instead of
+        // hitting the disconnected messaging adapter — otherwise the failure below
+        // logs after the environment has torn down and races vitest's worker RPC
+        // (EnvironmentTeardownError: Closing rpc while "onUserConsoleLog" pending).
+        if (!this.ready) return
         await this.messaging.send(envelope)
       } catch (err) {
-        console.debug('[EncryptedSync] Failed to send sync message:', err)
+        // A send failing after disconnect is expected, not an error — don't emit a
+        // late log that could outlive the adapter (see the guard above).
+        if (this.ready) console.debug('[EncryptedSync] Failed to send sync message:', err)
       }
     })()
   }

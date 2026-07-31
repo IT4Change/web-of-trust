@@ -227,6 +227,36 @@ describe('EncryptedMessagingNetworkAdapter', () => {
       expect(sendSpy).not.toHaveBeenCalled()
     })
 
+    it('does not reach messaging.send or log after a mid-flight disconnect', async () => {
+      // Reproduces the teardown race: a fire-and-forget encrypted send is started
+      // while ready, then the adapter (and its messaging) are torn down before the
+      // IIFE reaches messaging.send — exactly a test's afterEach stop(). The send
+      // must be skipped and no late console.debug may fire (which would otherwise
+      // race vitest's worker RPC → EnvironmentTeardownError).
+      aliceAdapter.registerDocument(DOC_ID, SPACE_ID)
+      aliceAdapter.connect(ALICE_DID as PeerId)
+      await aliceMessaging.connect(ALICE_DID)
+
+      const sendSpy = vi.spyOn(aliceMessaging, 'send')
+      const debugSpy = vi.spyOn(console, 'debug').mockImplementation(() => {})
+
+      aliceAdapter.send({
+        type: 'sync',
+        senderId: ALICE_DID as PeerId,
+        targetId: BOB_DID as PeerId,
+        documentId: DOC_ID,
+        data: new Uint8Array([1, 2, 3]),
+      })
+      // Tear down synchronously, before the in-flight IIFE resumes past its first await.
+      aliceAdapter.disconnect()
+      await aliceMessaging.disconnect()
+
+      await new Promise(r => setTimeout(r, 50))
+      expect(sendSpy).not.toHaveBeenCalled()
+      expect(debugSpy).not.toHaveBeenCalled()
+      debugSpy.mockRestore()
+    })
+
     it('should not send without registered document', async () => {
       await aliceMessaging.connect(ALICE_DID)
       aliceAdapter.connect(ALICE_DID as PeerId)
