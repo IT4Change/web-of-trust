@@ -16,8 +16,8 @@
     "cap:run:android": "cap run android",
     "cap:run:ios": "cap run ios",
     "build:mobile": "VITE_BASE_PATH=/ vite build && cap sync",
-    "build:fdroid": "VITE_BASE_PATH=/ vite build && cap sync android && cd android && ./gradlew assembleFdroidRelease",
-    "build:playstore": "VITE_BASE_PATH=/ vite build && cap sync android && cd android && ./gradlew assemblePlaystoreRelease"
+    "build:fdroid": "VITE_BASE_PATH=/ VITE_UPDATE_CHANNEL=android-foss vite build && cap sync android && cd android && ./gradlew assembleRelease",
+    "build:playstore": "VITE_BASE_PATH=/ VITE_DISABLE_LIVE_UPDATE=true vite build && cap sync android && cd android && ./gradlew bundleRelease"
   },
   "dependencies": {
     "@capacitor/android": "^8.1.0",
