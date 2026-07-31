@@ -127,6 +127,39 @@ function metadataGateThenFail(): { storage: InMemorySpaceMetadataStorage; saveCa
   return { storage, saveCalls: () => calls, release: () => release() }
 }
 
+/**
+ * Gates the FIRST space-register control frame — the await boundary INSIDE
+ * ensurePublished(), i.e. after this flight already persisted its metadata. Later
+ * frames pass through so the rest of the session is unaffected.
+ */
+function spaceRegisterGatedOnFirst(messaging: InMemoryMessagingAdapter): { registerCalls: () => number; release: () => void } {
+  const base = messaging.sendControlFrame!.bind(messaging)
+  let calls = 0
+  let release: () => void = () => {}
+  const gate = new Promise<void>((r) => { release = r })
+  ;(messaging as unknown as { sendControlFrame: typeof messaging.sendControlFrame }).sendControlFrame = async (frame) => {
+    if ((frame as { type?: string }).type === SPACE_REGISTER_MESSAGE_TYPE) {
+      calls += 1
+      if (calls === 1) await gate
+    }
+    return base(frame)
+  }
+  return { registerCalls: () => calls, release: () => release() }
+}
+
+/** Fault injection for the late-publish repro: the SECOND saveSpaceMetadata throws. */
+function metadataFailingOnSecondSave(): { storage: InMemorySpaceMetadataStorage; saveCalls: () => number } {
+  const storage = new InMemorySpaceMetadataStorage()
+  const realSave = storage.saveSpaceMetadata.bind(storage)
+  let calls = 0
+  storage.saveSpaceMetadata = async (meta) => {
+    calls += 1
+    if (calls === 2) throw new Error('injected durability failure: second flight')
+    return realSave(meta)
+  }
+  return { storage, saveCalls: () => calls }
+}
+
 /** Fault injection at a durability boundary: the first saveSpaceMetadata throws. */
 function metadataFailingOnce(): { storage: InMemorySpaceMetadataStorage; saveCalls: () => number } {
   const storage = new InMemorySpaceMetadataStorage()
@@ -248,6 +281,37 @@ describe('Deterministic private space (Sync 001) — Automerge adapter contract'
 
     await adapter.openOrCreateDeterministicPrivateSpace({ items: {} }, PRIVATE_META)
     expect(saveCalls()).toBeGreaterThan(2)
+  }, 60_000)
+
+  it('a flight parked in ensurePublished() must not seed the genesis log afterwards', async () => {
+    // Parity with Yjs: the publication tail is a chain of awaits, and a flight parked
+    // inside ensurePublished() across stop()/start() must not write the genesis log
+    // from its own state — the next fresh retry would then skip its OWN correct seed.
+    const broker = new InProcessLogBroker()
+    const { identity } = await createTestIdentity('detps-am-publish')
+    cleanup.push(async () => { await identity.deleteStoredIdentity() })
+    const DEVICE = 'c7777777-7777-4777-8777-777777777777'
+    const { storage } = metadataFailingOnSecondSave()
+    const stores = await makeStores(DEVICE, storage)
+    const { adapter, messaging } = await makeAdapter(identity, broker, 'detps-am-publish', DEVICE, stores)
+    await adapter.start()
+    cleanup.push(async () => { await adapter.stop() })
+
+    const genesis = await derivePrivateSpaceGenesis((info, length) => identity.deriveFrameworkKey(info, length))
+    const gated = spaceRegisterGatedOnFirst(messaging)
+
+    const flightA = adapter.openOrCreateDeterministicPrivateSpace({ items: { m: { title: 'stale' } } }, PRIVATE_META).catch(() => null)
+    await waitUntil(() => gated.registerCalls() >= 1, 'flight A to reach the gated space-register')
+
+    await adapter.stop()
+    await adapter.start()
+
+    await expect(adapter.openOrCreateDeterministicPrivateSpace({ items: {} }, PRIVATE_META)).rejects.toThrow(/second flight/)
+
+    gated.release()
+    await flightA
+
+    expect(Object.keys(await stores.docLogStore.getKnownHeads(genesis.spaceId))).toHaveLength(0)
   }, 60_000)
 
   it('a stale flight must not touch network registration of the fresh session', async () => {

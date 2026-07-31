@@ -143,6 +143,39 @@ function metadataGateThenFail(doc: Y.Doc): { storage: PersonalDocSpaceMetadataSt
   return { storage, saveCalls: () => calls, release: () => release() }
 }
 
+/**
+ * Gates the FIRST space-register control frame — the await boundary INSIDE
+ * ensurePublished(), i.e. after this flight already persisted its metadata. Later
+ * frames pass through so the rest of the session is unaffected.
+ */
+function spaceRegisterGatedOnFirst(messaging: InMemoryMessagingAdapter): { registerCalls: () => number; release: () => void } {
+  const base = messaging.sendControlFrame!.bind(messaging)
+  let calls = 0
+  let release: () => void = () => {}
+  const gate = new Promise<void>((r) => { release = r })
+  ;(messaging as unknown as { sendControlFrame: typeof messaging.sendControlFrame }).sendControlFrame = async (frame) => {
+    if ((frame as { type?: string }).type === SPACE_REGISTER_MESSAGE_TYPE) {
+      calls += 1
+      if (calls === 1) await gate
+    }
+    return base(frame)
+  }
+  return { registerCalls: () => calls, release: () => release() }
+}
+
+/** Fault injection for the late-publish repro: the SECOND saveSpaceMetadata throws. */
+function metadataFailingOnSecondSave(doc: Y.Doc): { storage: PersonalDocSpaceMetadataStorage; saveCalls: () => number } {
+  const storage = metadataInPersonalDoc(doc)
+  const realSave = storage.saveSpaceMetadata.bind(storage)
+  let calls = 0
+  storage.saveSpaceMetadata = async (meta) => {
+    calls += 1
+    if (calls === 2) throw new Error('injected durability failure: second flight')
+    return realSave(meta)
+  }
+  return { storage, saveCalls: () => calls }
+}
+
 /** Fault injection at a durability boundary: the first saveSpaceMetadata throws. */
 function metadataFailingOnce(doc: Y.Doc): { storage: PersonalDocSpaceMetadataStorage; saveCalls: () => number } {
   const storage = metadataInPersonalDoc(doc)
@@ -276,6 +309,42 @@ describe('Deterministic private space (Sync 001) — Yjs adapter contract', () =
     // The next call must RESUME B's failed state (a third metadata write).
     await adapter.openOrCreateDeterministicPrivateSpace({ items: {} }, PRIVATE_META)
     expect(saveCalls()).toBeGreaterThan(2)
+  }, 60_000)
+
+  it('a flight parked in ensurePublished() must not seed the genesis log afterwards', async () => {
+    // The publication tail is a chain of awaits — ensurePublished(), spaceLogIsEmpty(),
+    // the seed write, the vault push — and every one of them is a lifecycle boundary.
+    // A flight parked inside ensurePublished() across stop()/start() must not write the
+    // genesis log from its own state: the next fresh retry would no longer see empty
+    // heads and would skip its OWN correct seed, making the stale content durable.
+    const broker = new InProcessLogBroker()
+    const { identity } = await createTestIdentity('detps-publish')
+    cleanup.push(async () => { await identity.deleteStoredIdentity() })
+    const DEVICE = 'c7777777-7777-4777-8777-777777777777'
+    const { storage } = metadataFailingOnSecondSave(new Y.Doc())
+    const stores = await makeStores(DEVICE, storage)
+    const { adapter, messaging } = await makeAdapter(identity, broker, 'detps-publish', DEVICE, stores)
+    await adapter.start()
+    cleanup.push(async () => { await adapter.stop() })
+
+    const genesis = await derivePrivateSpaceGenesis((info, length) => identity.deriveFrameworkKey(info, length))
+    const gated = spaceRegisterGatedOnFirst(messaging)
+
+    // Flight A parks INSIDE ensurePublished() — its metadata write already happened.
+    const flightA = adapter.openOrCreateDeterministicPrivateSpace({ items: { m: { title: 'stale' } } }, PRIVATE_META).catch(() => null)
+    await waitUntil(() => gated.registerCalls() >= 1, 'flight A to reach the gated space-register')
+
+    await adapter.stop()
+    await adapter.start()
+
+    // The new session's flight fails at its metadata write, so there is NO fresh
+    // genesis seed yet — the log heads are the uncontested proof of who wrote.
+    await expect(adapter.openOrCreateDeterministicPrivateSpace({ items: {} }, PRIVATE_META)).rejects.toThrow(/second flight/)
+
+    gated.release()
+    await flightA // the stale flight runs out
+
+    expect(Object.keys(await stores.docLogStore.getKnownHeads(genesis.spaceId))).toHaveLength(0)
   }, 60_000)
 
   it('a stale flight must not overwrite the fresh session at the encryption-key await', async () => {
