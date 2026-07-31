@@ -117,6 +117,7 @@ describe('Seed-recovery contract — seed + relay log + PersonalDoc keys', () =>
     cleanup.push(async () => { await a1Adapter.stop(); await a1Messaging.disconnect() })
     const space = await a1Adapter.createSpace<TestDoc>('shared', { items: {} }, { name: 'Never rotated recovery' })
     const a1Handle = await a1Adapter.openSpace<TestDoc>(space.id)
+    cleanup.push(async () => { a1Handle.close() })
     a1Handle.transact((doc) => { doc.items['visible-after-recovery'] = { title: 'visible' } })
     await waitUntil(async () => (await metaA1.loadGroupKeys(space.id)).length === 1, 'A1 PersonalDoc group key')
     await waitUntil(async () => (await metaA1.loadCapabilitySigningSeeds(space.id)).length === 1, 'A1 PersonalDoc capability seed')
@@ -141,10 +142,13 @@ describe('Seed-recovery contract — seed + relay log + PersonalDoc keys', () =>
     personalA2.start()
     cleanup.push(async () => { personalA2.destroy(); personalA2Doc.destroy(); await personalA2Messaging.disconnect() })
 
+    // Content key and capability seed sync as separate PersonalDoc log entries and
+    // may arrive independently; wait for BOTH before the restore instead of assuming
+    // the seed rides along with the content key.
     await waitUntil(async () => (await metaA2.loadGroupKeys(space.id)).length === 1, 'A2 PersonalDoc content key')
-    // This proves the PersonalDoc has the seed before the connector restore; the
-    // fresh KeyManagementPort still has neither key material imported locally.
-    expect((await metaA2.loadCapabilitySigningSeeds(space.id)).length).toBe(1)
+    await waitUntil(async () => (await metaA2.loadCapabilitySigningSeeds(space.id)).length === 1, 'A2 PersonalDoc capability seed')
+    // The PersonalDoc now holds the seed, but the fresh KeyManagementPort has not
+    // imported any key material yet.
     expect(await kmA2.getCapabilitySigningSeed(space.id, 0)).toBeNull()
 
     await a2Adapter.restoreSpacesFromMetadata()
@@ -152,7 +156,6 @@ describe('Seed-recovery contract — seed + relay log + PersonalDoc keys', () =>
     expect(await kmA2.getCapabilitySigningSeed(space.id, 0)).not.toBeNull()
     const internals = a2Adapter as unknown as { capabilityCatchUpBlocked: Set<string> }
     expect(internals.capabilityCatchUpBlocked.has(space.id)).toBe(false)
-    a1Handle.close()
   })
 
   // Antons Relogin-Fall: der Content-Key trifft im recoverten PersonalDoc VOR dem
@@ -188,6 +191,7 @@ describe('Seed-recovery contract — seed + relay log + PersonalDoc keys', () =>
     cleanup.push(async () => { await a1Adapter.stop(); await a1Messaging.disconnect() })
     const space = await a1Adapter.createSpace<TestDoc>('shared', { items: {} }, { name: 'Late seed arrival' })
     const a1Handle = await a1Adapter.openSpace<TestDoc>(space.id)
+    cleanup.push(async () => { a1Handle.close() })
     a1Handle.transact((doc) => { doc.items['x'] = { title: 'x' } })
     await waitUntil(async () => (await metaA1.loadGroupKeys(space.id)).length === 1, 'A1 PersonalDoc group key')
     await waitUntil(async () => (await metaA1.loadCapabilitySigningSeeds(space.id)).length === 1, 'A1 PersonalDoc capability seed')
@@ -208,20 +212,24 @@ describe('Seed-recovery contract — seed + relay log + PersonalDoc keys', () =>
     const internals = a2Adapter as unknown as { capabilityCatchUpBlocked: Set<string> }
 
     // Phase 1: only the space metadata + content key are visible (seed still in flight).
+    // The space loads and reads, but with no capability seed the fire-and-forget
+    // catch-up must mark it capability-blocked. Wait for that transition
+    // deterministically — otherwise Phase 2 could import the seed before the block
+    // was ever recorded, making the final assertion pass vacuously.
     await metaA2.saveSpaceMetadata(spaceMeta)
     await metaA2.saveGroupKey(groupKey)
     await a2Adapter.restoreSpacesFromMetadata()
     expect((await a2Adapter.getSpaces()).map((s) => s.id)).toContain(space.id)
     expect(await kmA2.getCapabilitySigningSeed(space.id, 0)).toBeNull()
+    await waitUntil(() => internals.capabilityCatchUpBlocked.has(space.id), 'Phase 1 capability block', 10_000)
 
     // Phase 2: the capability seed's PersonalDoc entry arrives; the connector restores
-    // again. The seed MUST now be imported so the founder can present a capability.
+    // again. The seed MUST now be imported and the block MUST clear.
     await metaA2.saveCapabilitySigningSeed(seed)
     await a2Adapter.restoreSpacesFromMetadata()
 
-    expect(await kmA2.getCapabilitySigningSeed(space.id, 0), 'late capability seed not imported on re-restore').not.toBeNull()
-    expect(internals.capabilityCatchUpBlocked.has(space.id)).toBe(false)
-    a1Handle.close()
+    await waitUntil(async () => (await kmA2.getCapabilitySigningSeed(space.id, 0)) !== null, 'late capability seed imported on re-restore', 10_000)
+    await waitUntil(() => !internals.capabilityCatchUpBlocked.has(space.id), 'capability block cleared after seed import', 10_000)
   })
 
   it('recovers every pre- and post-rotation item from the relay log without reconnecting', async () => {
