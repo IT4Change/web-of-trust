@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.5.1](https://github.com/real-life-org/web-of-trust/compare/core-v0.5.0...core-v0.5.1) (2026-07-31)
+
+
+### Features
+
+* **sync:** deterministic-genesis private space (core + adapters) ([7d4d97d](https://github.com/real-life-org/web-of-trust/commit/7d4d97dd731f7f693099d9e1e44176f6270e6a80))
+* **sync:** deterministic-genesis private space (core + adapters) — PR 1/2 ([9d2da66](https://github.com/real-life-org/web-of-trust/commit/9d2da665e1ccacb1483f47ac57702500ccb96006))
+
+
+### Bug Fixes
+
+* **adapters:** put the creation flight under a lifecycle lease ([de5a45a](https://github.com/real-life-org/web-of-trust/commit/de5a45a670a31681c3be0026b8657b82c19ce383))
+
 ## [0.5.0](https://github.com/real-life-org/web-of-trust/compare/core-v0.4.1...core-v0.5.0) (2026-07-30)
 
 

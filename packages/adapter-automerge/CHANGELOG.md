@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.2.1](https://github.com/real-life-org/web-of-trust/compare/adapter-automerge-v0.2.0...adapter-automerge-v0.2.1) (2026-07-31)
+
+
+### Features
+
+* **sync:** deterministic-genesis private space (core + adapters) ([7d4d97d](https://github.com/real-life-org/web-of-trust/commit/7d4d97dd731f7f693099d9e1e44176f6270e6a80))
+* **sync:** deterministic-genesis private space (core + adapters) — PR 1/2 ([9d2da66](https://github.com/real-life-org/web-of-trust/commit/9d2da665e1ccacb1483f47ac57702500ccb96006))
+
+
+### Bug Fixes
+
+* **adapter-automerge:** cancel mid-flight sends across a reconnect via lifecycle epoch ([#321](https://github.com/real-life-org/web-of-trust/issues/321)) ([93909cf](https://github.com/real-life-org/web-of-trust/commit/93909cf197f19fb2c18be3d6d74f01187113e14c))
+* **adapter-automerge:** stop mid-flight sync-send from logging after disconnect ([cec4691](https://github.com/real-life-org/web-of-trust/commit/cec469126a55cb740682d97c89c90177319c2c06))
+* **adapter-automerge:** stop mid-flight sync-send from logging after disconnect (CI teardown flake) ([0676e0f](https://github.com/real-life-org/web-of-trust/commit/0676e0f41f7b609c0eab9e146f1b68eb2ff75d51))
+* **adapters:** a creation flight must not certify a lifecycle it no longer belongs to ([36a089d](https://github.com/real-life-org/web-of-trust/commit/36a089d788364ea4f4cfd75b550b28e11ca39434))
+* **adapters:** extend the lifecycle epoch over the late coordinator tail ([5fc4105](https://github.com/real-life-org/web-of-trust/commit/5fc410539b51ecf70f8f29500be3ca9abafcb401))
+* **adapters:** guard the earlier await boundaries of a creation flight too ([b3d302b](https://github.com/real-life-org/web-of-trust/commit/b3d302b409e8d87736e3a29d7cf93f9d2a897ec2))
+* **adapters:** issue the lifecycle lease synchronously at the entry point ([2461e5c](https://github.com/real-life-org/web-of-trust/commit/2461e5cbcf472d9d8c4a01c2634dbd28ca1ba513))
+* **adapters:** make private-space completion survive a process restart ([ad39cc0](https://github.com/real-life-org/web-of-trust/commit/ad39cc04c2c39549bf173804dfe32bc596f6369f))
+* **adapters:** put the creation flight under a lifecycle lease ([de5a45a](https://github.com/real-life-org/web-of-trust/commit/de5a45a670a31681c3be0026b8657b82c19ce383))
+* **adapters:** resume a failed private-space create instead of reporting success ([e3482c7](https://github.com/real-life-org/web-of-trust/commit/e3482c744334a7b35c0d5e8aed69de87f68518a4))
+
 ## [0.2.0](https://github.com/real-life-org/web-of-trust/compare/adapter-automerge-v0.1.5...adapter-automerge-v0.2.0) (2026-07-30)
 
 
