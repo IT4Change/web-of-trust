@@ -155,6 +155,75 @@ describe('Seed-recovery contract — seed + relay log + PersonalDoc keys', () =>
     a1Handle.close()
   })
 
+  // Antons Relogin-Fall: der Content-Key trifft im recoverten PersonalDoc VOR dem
+  // Capability-Seed ein (getrennte Log-Eintraege, unterschiedliches Sync-Timing —
+  // #300-Klasse). Der erste restore sieht nur den Content-Key -> capability-blocked.
+  // Trifft der Seed spaeter ein, MUSS ein erneuter restore ihn nachimportieren.
+  it('imports the capability seed on a later restore when the content key arrived first', async () => {
+    InMemoryMessagingAdapter.resetAll()
+    const broker = new InProcessLogBroker()
+    const created = await createTestIdentity('late-capability-seed-arrival')
+    const a1 = created.identity
+    const a2 = await recoverTestIdentity(created.mnemonic, 'late-capability-seed-arrival')
+    cleanup.push(async () => { await a1.deleteStoredIdentity() })
+    cleanup.push(async () => { await a2.deleteStoredIdentity() })
+
+    const a1Messaging = new InMemoryMessagingAdapter({ broker, socketId: 'late-seed-a1' })
+    const personalA1Messaging = new InMemoryMessagingAdapter({ broker, socketId: 'late-seed-personal-a1' })
+    await a1Messaging.connect(a1.getDid())
+    await personalA1Messaging.connect(a1.getDid())
+    const personalA1Doc = new Y.Doc()
+    const metaA1 = metadataInPersonalDoc(personalA1Doc)
+    const personalKey = await a1.deriveFrameworkKey('personal-doc-v1')
+    const personalDocId = personalDocIdFromKey(personalKey)
+    const personalA1 = new YjsPersonalLogSyncAdapter({
+      doc: personalA1Doc, messaging: personalA1Messaging, identity: a1, personalKey, docId: personalDocId,
+      docLogStore: await makeDocLogStore(PERSONAL_A1_DEVICE), deviceId: PERSONAL_A1_DEVICE,
+    })
+    personalA1.start()
+    cleanup.push(async () => { personalA1.destroy(); personalA1Doc.destroy(); await personalA1Messaging.disconnect() })
+
+    const a1Adapter = await makeSpaceAdapter(a1, a1Messaging, metaA1, new InMemoryKeyManagementAdapter(), new InMemoryCompactStore(), A1_DEVICE)
+    await a1Adapter.start()
+    cleanup.push(async () => { await a1Adapter.stop(); await a1Messaging.disconnect() })
+    const space = await a1Adapter.createSpace<TestDoc>('shared', { items: {} }, { name: 'Late seed arrival' })
+    const a1Handle = await a1Adapter.openSpace<TestDoc>(space.id)
+    a1Handle.transact((doc) => { doc.items['x'] = { title: 'x' } })
+    await waitUntil(async () => (await metaA1.loadGroupKeys(space.id)).length === 1, 'A1 PersonalDoc group key')
+    await waitUntil(async () => (await metaA1.loadCapabilitySigningSeeds(space.id)).length === 1, 'A1 PersonalDoc capability seed')
+
+    // The recovered material as A1 wrote it — reused verbatim on the recovery device.
+    const [groupKey] = await metaA1.loadGroupKeys(space.id)
+    const [seed] = await metaA1.loadCapabilitySigningSeeds(space.id)
+    const spaceMeta = (await metaA1.loadAllSpaceMetadata()).find((m) => m.info.id === space.id)!
+
+    const a2Messaging = new InMemoryMessagingAdapter({ broker, socketId: 'late-seed-a2' })
+    await a2Messaging.connect(a2.getDid())
+    const personalA2Doc = new Y.Doc()
+    const metaA2 = metadataInPersonalDoc(personalA2Doc)
+    const kmA2 = new InMemoryKeyManagementAdapter()
+    const a2Adapter = await makeSpaceAdapter(a2, a2Messaging, metaA2, kmA2, new InMemoryCompactStore(), A2_DEVICE)
+    await a2Adapter.start()
+    cleanup.push(async () => { await a2Adapter.stop(); await a2Messaging.disconnect() })
+    const internals = a2Adapter as unknown as { capabilityCatchUpBlocked: Set<string> }
+
+    // Phase 1: only the space metadata + content key are visible (seed still in flight).
+    await metaA2.saveSpaceMetadata(spaceMeta)
+    await metaA2.saveGroupKey(groupKey)
+    await a2Adapter.restoreSpacesFromMetadata()
+    expect((await a2Adapter.getSpaces()).map((s) => s.id)).toContain(space.id)
+    expect(await kmA2.getCapabilitySigningSeed(space.id, 0)).toBeNull()
+
+    // Phase 2: the capability seed's PersonalDoc entry arrives; the connector restores
+    // again. The seed MUST now be imported so the founder can present a capability.
+    await metaA2.saveCapabilitySigningSeed(seed)
+    await a2Adapter.restoreSpacesFromMetadata()
+
+    expect(await kmA2.getCapabilitySigningSeed(space.id, 0), 'late capability seed not imported on re-restore').not.toBeNull()
+    expect(internals.capabilityCatchUpBlocked.has(space.id)).toBe(false)
+    a1Handle.close()
+  })
+
   it('recovers every pre- and post-rotation item from the relay log without reconnecting', async () => {
     InMemoryMessagingAdapter.resetAll()
     const broker = new InProcessLogBroker()
