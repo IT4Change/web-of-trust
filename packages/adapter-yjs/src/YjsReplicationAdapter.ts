@@ -28,7 +28,7 @@ import type {
 import type { IdentitySession, MessageEnvelope, SpaceInfo, SpaceDocMeta, SpaceMemberChange, IncomingSpaceInvite, ReplicationState } from '@web_of_trust/core/types'
 import { SPACE_SYNC_REQUEST_MESSAGE_TYPE } from '@web_of_trust/core/types'
 import {
-  createSpaceKey, rotateSpaceKey, importKey, processMemberUpdate,
+  createSpaceKey, createDeterministicSpaceKey, rotateSpaceKey, importKey, processMemberUpdate,
   resolveMemberUpdatesAgainstCanonical, canonicalEventSetAnswersPending,
   buildSpaceInviteBody, applySpaceInviteBody, buildKeyRotationBody, applyKeyRotationBody,
   deliverInboxMessage, receiveInboxMessage,
@@ -52,6 +52,7 @@ import {
   LogSyncCoordinator, AuthorMismatchError, LocalAppendFailedError, CapabilityKeysUnavailableError, createSpaceCapabilityJws,
   createSpaceRegisterMessageWithSigner, createSpaceRotateMessageWithSigner, createAdminRemoveMessageWithSigner,
   LOG_ENTRY_MESSAGE_TYPE, SYNC_RESPONSE_MESSAGE_TYPE,
+  derivePrivateSpaceGenesis,
 } from '@web_of_trust/core/protocol'
 import type { LogSyncEngineHooks, CapabilitySource, ControlFrameReceipt, WriteRejectHandler } from '@web_of_trust/core/protocol'
 import type { MembershipEvent, AdminEntry } from '@web_of_trust/core/protocol'
@@ -788,7 +789,29 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
   }
 
   async createSpace<T>(type: SpaceInfo['type'], initialDoc: T, meta?: { name?: string; description?: string; appTag?: string; modules?: string[] }): Promise<SpaceInfo> {
-    const spaceId = crypto.randomUUID()
+    return this.createSpaceWithId(crypto.randomUUID(), type, initialDoc, meta)
+  }
+
+  /**
+   * Sync 001 §"Privater Space": open (if already loaded) or deterministically
+   * create the private space whose genesis (id + generation-0 keys) is derived
+   * from the identity. Idempotent across devices / recovery / restart — every
+   * device derives byte-identical material, so space-register is first-writer-wins
+   * idempotent and the local key provisioning is idempotent (see
+   * createDeterministicSpaceKey). Callers MUST restore persisted spaces first; an
+   * already-loaded private space is returned as-is rather than re-created.
+   */
+  async openOrCreateDeterministicPrivateSpace<T>(initialDoc: T, meta?: { name?: string; description?: string; appTag?: string; modules?: string[] }): Promise<SpaceInfo> {
+    const genesis = await derivePrivateSpaceGenesis((info, length) => this.identity.deriveFrameworkKey(info, length))
+    const existing = this.spaces.get(genesis.spaceId)
+    if (existing) return existing.info
+    return this.createSpaceWithId(genesis.spaceId, 'shared', initialDoc, meta, {
+      contentKey: genesis.contentKey,
+      capabilitySigningSeed: genesis.capabilitySigningSeed,
+    })
+  }
+
+  private async createSpaceWithId<T>(spaceId: string, type: SpaceInfo['type'], initialDoc: T, meta?: { name?: string; description?: string; appTag?: string; modules?: string[] }, genesisMaterial?: { contentKey: Uint8Array; capabilitySigningSeed: Uint8Array }): Promise<SpaceInfo> {
     const now = new Date().toISOString()
     const myDid = this.identity.getDid()
 
@@ -832,8 +855,14 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
       doc.getMap<AdminEntry>('_admins').set(myDid, selfAdmin)
     }, 'local')
 
-    // Create group key + capability key pair + owner self-capability
-    await createSpaceKey({ crypto: this.crypto, keyPort: this.keyManagement, spaceId, ownerDid: this.identity.getDid(), validityDurationMs: this.capabilityValidityMs })
+    // Create group key + capability key pair + owner self-capability. The
+    // deterministic path (private space) uses the derived genesis material and is
+    // idempotent at generation 0 (multi-device / recovery / crash-safe).
+    if (genesisMaterial) {
+      await createDeterministicSpaceKey({ crypto: this.crypto, keyPort: this.keyManagement, spaceId, ownerDid: this.identity.getDid(), validityDurationMs: this.capabilityValidityMs, genesisMaterial })
+    } else {
+      await createSpaceKey({ crypto: this.crypto, keyPort: this.keyManagement, spaceId, ownerDid: this.identity.getDid(), validityDurationMs: this.capabilityValidityMs })
+    }
 
     // Store state (include own encryption key for multi-device key rotation)
     const ownEncKey = await this.identity.getEncryptionPublicKeyBytes()

@@ -20,7 +20,7 @@ export interface IdentitySession {
   // Ed25519 signature. Operation-shaped; the vault never returns raw seed
   // material through this surface.
   signEd25519(data: Uint8Array): Promise<Uint8Array>
-  deriveFrameworkKey(info: string): Promise<Uint8Array>
+  deriveFrameworkKey(info: string, length?: number): Promise<Uint8Array>
   getPublicKeyMultibase(): Promise<string>
   getEncryptionPublicKeyBytes(): Promise<Uint8Array>
   encryptForRecipient(plaintext: Uint8Array, recipientPublicKeyBytes: Uint8Array): Promise<IdentityEncryptedPayload>

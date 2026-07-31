@@ -114,6 +114,80 @@ export async function createSpaceKey(options: CreateSpaceKeyOptions): Promise<Cr
   )
 }
 
+export interface CreateDeterministicSpaceKeyOptions extends CreateSpaceKeyOptions {
+  /** Sync 001 deterministic private-space genesis material (generation 0). */
+  genesisMaterial: { contentKey: Uint8Array; capabilitySigningSeed: Uint8Array }
+}
+
+/**
+ * Sync 001 §"Privater Space": provision the genesis (generation 0) content key +
+ * capability from DETERMINISTIC material (not random), IDEMPOTENTLY. Unlike
+ * {@link createSpaceKey}, this MUST tolerate re-derivation on another device, a
+ * recovery, or a crash-restart. The generation-0 contract mirrors
+ * {@link commitStagedRotation}'s same-generation branch, pinned to the supplied
+ * genesis bytes:
+ *  - `current < 0` → NORMAL create: persist genesis content key + capability.
+ *  - `current === 0`:
+ *      · stored content key absent or ≠ genesis → HARD genesis conflict.
+ *      · stored capability VK present and ≠ genesis VK → HARD genesis conflict.
+ *      · content + VK + own-capability all present + identical → return the STORED
+ *        material (incl. stored ownCapabilityJws), NO re-write.
+ *      · otherwise (capability chain incomplete after a crash between the separate
+ *        writes) → complete it from the SAME genesis bytes, no content re-write.
+ *  - `current > 0` → the space already rotated past genesis; genesis MUST NEVER be
+ *    reactivated/overwritten — current keys arrive via PersonalDoc/catch-up.
+ */
+export async function createDeterministicSpaceKey(
+  options: CreateDeterministicSpaceKeyOptions,
+): Promise<CreateSpaceKeyResult> {
+  const validityMs = resolveCapabilityValidityMs(options.validityDurationMs) // fail fast, see createSpaceKey
+  const { spaceId, keyPort, crypto, genesisMaterial } = options
+  const { contentKey, capabilitySigningSeed } = genesisMaterial
+  const capabilityVerificationKey = await crypto.ed25519PublicKeyFromSeed(capabilitySigningSeed)
+  const material: StagedRotationMaterial = { newGeneration: 0, contentKey, capabilitySigningSeed, capabilityVerificationKey }
+  const provisionOptions = { crypto, keyPort, spaceId, ownerDid: options.ownerDid, now: options.now }
+
+  const current = await keyPort.getCurrentGeneration(spaceId)
+
+  // NORMAL create.
+  if (current < 0) {
+    await keyPort.saveKey(spaceId, 0, contentKey)
+    return provisionCapabilityForGeneration(provisionOptions, material, validityMs)
+  }
+
+  // Genesis already present: idempotent / partial-crash repair / hard conflict.
+  if (current === 0) {
+    const storedKey = await keyPort.getKeyByGeneration(spaceId, 0)
+    if (!storedKey || !bytesEqual(storedKey, contentKey)) {
+      throw new Error(
+        `deterministic genesis conflict: space ${spaceId} generation 0 is present with a ` +
+          'DIVERGENT content key; refusing to overwrite genesis material.',
+      )
+    }
+    const storedCapVk = await keyPort.getCapabilityVerificationKey(spaceId, 0)
+    if (storedCapVk && !bytesEqual(storedCapVk, capabilityVerificationKey)) {
+      throw new Error(
+        `deterministic genesis conflict: space ${spaceId} generation 0 is present with ` +
+          'DIVERGENT capability material; refusing to overwrite genesis material.',
+      )
+    }
+    const ownCapabilityJws = await keyPort.getOwnCapability(spaceId, 0)
+    if (storedCapVk && ownCapabilityJws) {
+      // Fully idempotent: content + capability + own-capability present + identical.
+      return { contentKey, capabilitySigningSeed, capabilityVerificationKey, ownCapabilityJws }
+    }
+    // Partial-crash repair: complete the capability chain from the SAME genesis
+    // bytes without re-writing the (identical) content key.
+    return provisionCapabilityForGeneration(provisionOptions, material, validityMs)
+  }
+
+  // current > 0 — already rotated past genesis.
+  throw new Error(
+    `deterministic genesis refused: space ${spaceId} has already rotated to generation ${current}; ` +
+      'genesis (generation 0) must never be reactivated — current keys arrive via PersonalDoc/catch-up.',
+  )
+}
+
 /** Sync 005 Z.285: rotate to generation+1, keeping older keys retrievable; fresh capability key pair + self-capability. */
 export async function rotateSpaceKey(options: RotateSpaceKeyOptions): Promise<CreateSpaceKeyResult> {
   const validityMs = resolveCapabilityValidityMs(options.validityDurationMs) // fail fast, see createSpaceKey

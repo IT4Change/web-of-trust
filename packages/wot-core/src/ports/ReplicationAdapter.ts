@@ -104,3 +104,16 @@ export interface SecureSelfLeaveCapable {
 export function hasSecureSelfLeave(value: unknown): value is SecureSelfLeaveCapable {
   return typeof (value as SecureSelfLeaveCapable | null)?.supportsSecureSelfLeave === 'function'
 }
+
+/**
+ * Optional capability: open-or-create the private space whose genesis (id +
+ * generation-0 keys) is deterministically derived from the identity (Sync 001).
+ * Idempotent across devices / recovery / restart — no random-id discovery race.
+ */
+export interface DeterministicPrivateSpaceCapable {
+  openOrCreateDeterministicPrivateSpace<T>(initialDoc: T, meta?: { name?: string; description?: string; appTag?: string; modules?: string[] }): Promise<SpaceInfo>
+}
+
+export function hasDeterministicPrivateSpace(value: unknown): value is DeterministicPrivateSpaceCapable {
+  return typeof (value as DeterministicPrivateSpaceCapable | null)?.openOrCreateDeterministicPrivateSpace === 'function'
+}

@@ -5,7 +5,7 @@ import * as Automerge from '@automerge/automerge'
 import type { ReplicationAdapter, SpaceHandle, TransactOptions, Subscribable, MessagingAdapter, MessageIdHistoryPort, SpaceMetadataStorage, KeyManagementPort, MemberUpdatePendingStore, WireMessage, DocLogStore } from '@web_of_trust/core/ports'
 import type { IdentitySession, SpaceInfo, SpaceMemberChange, IncomingSpaceInvite, ReplicationState, MessageEnvelope } from '@web_of_trust/core/types'
 import {
-  createSpaceKey, rotateSpaceKey, importKey, processMemberUpdate,
+  createSpaceKey, createDeterministicSpaceKey, rotateSpaceKey, importKey, processMemberUpdate,
   resolveMemberUpdatesAgainstCanonical, canonicalEventSetAnswersPending,
   buildSpaceInviteBody, applySpaceInviteBody, buildKeyRotationBody, applyKeyRotationBody,
   deliverInboxMessage, receiveInboxMessage,
@@ -28,6 +28,7 @@ import {
   LogSyncCoordinator, AuthorMismatchError, LocalAppendFailedError, CapabilityKeysUnavailableError, createSpaceCapabilityJws,
   createSpaceRegisterMessageWithSigner, createSpaceRotateMessageWithSigner,
   LOG_ENTRY_MESSAGE_TYPE, SYNC_RESPONSE_MESSAGE_TYPE,
+  derivePrivateSpaceGenesis,
 } from '@web_of_trust/core/protocol'
 import type { LogSyncEngineHooks, CapabilitySource, ControlFrameReceipt, WriteRejectHandler } from '@web_of_trust/core/protocol'
 import { WebCryptoProtocolCryptoAdapter } from '@web_of_trust/core/protocol-adapters'
@@ -955,7 +956,28 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
   }
 
   async createSpace<T>(type: 'personal' | 'shared', initialDoc: T, meta?: { name?: string; description?: string; appTag?: string; modules?: string[] }): Promise<SpaceInfo> {
-    const spaceId = crypto.randomUUID()
+    return this.createSpaceWithId(crypto.randomUUID(), type, initialDoc, meta)
+  }
+
+  /**
+   * Sync 001 §"Privater Space": open (if already loaded) or deterministically
+   * create the private space whose genesis (id + generation-0 keys) is derived
+   * from the identity. Idempotent across devices / recovery / restart — every
+   * device derives byte-identical material, so space-register is first-writer-wins
+   * idempotent and the local key provisioning is idempotent. Callers MUST restore
+   * persisted spaces first; an already-loaded private space is returned as-is.
+   */
+  async openOrCreateDeterministicPrivateSpace<T>(initialDoc: T, meta?: { name?: string; description?: string; appTag?: string; modules?: string[] }): Promise<SpaceInfo> {
+    const genesis = await derivePrivateSpaceGenesis((info, length) => this.identity.deriveFrameworkKey(info, length))
+    const existing = this.spaces.get(genesis.spaceId)
+    if (existing) return existing.info
+    return this.createSpaceWithId(genesis.spaceId, 'shared', initialDoc, meta, {
+      contentKey: genesis.contentKey,
+      capabilitySigningSeed: genesis.capabilitySigningSeed,
+    })
+  }
+
+  private async createSpaceWithId<T>(spaceId: string, type: 'personal' | 'shared', initialDoc: T, meta?: { name?: string; description?: string; appTag?: string; modules?: string[] }, genesisMaterial?: { contentKey: Uint8Array; capabilitySigningSeed: Uint8Array }): Promise<SpaceInfo> {
     const myDid = this.identity.getDid()
 
     // M2 (Review): das Creator-Doc startet auf demselben deterministischen
@@ -1015,8 +1037,14 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
       d._admins[myDid] = { did: myDid }
     })
 
-    // Create group key + capability key pair + owner self-capability
-    await createSpaceKey({ crypto: this.crypto, keyPort: this.keyManagement, spaceId, ownerDid: this.identity.getDid(), validityDurationMs: this.capabilityValidityMs })
+    // Create group key + capability key pair + owner self-capability. The
+    // deterministic path (private space) uses derived genesis material and is
+    // idempotent at generation 0 (multi-device / recovery / crash-safe).
+    if (genesisMaterial) {
+      await createDeterministicSpaceKey({ crypto: this.crypto, keyPort: this.keyManagement, spaceId, ownerDid: this.identity.getDid(), validityDurationMs: this.capabilityValidityMs, genesisMaterial })
+    } else {
+      await createSpaceKey({ crypto: this.crypto, keyPort: this.keyManagement, spaceId, ownerDid: this.identity.getDid(), validityDurationMs: this.capabilityValidityMs })
+    }
 
     // Register document -> space mapping
     this.networkAdapter.registerDocument(docHandle.documentId, spaceId)
