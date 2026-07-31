@@ -59,6 +59,26 @@ async function makeAdapter(identity: PublicIdentitySession, broker: InProcessLog
   return { adapter, messaging }
 }
 
+/** The adapter's live coordinator map — session-wide state a stale flight must not touch. */
+function coordinatorsOf(adapter: AutomergeReplicationAdapter): Map<string, unknown> {
+  return (adapter as unknown as { coordinators: Map<string, unknown> }).coordinators
+}
+
+/**
+ * How many log-change observers currently sit on the doc handle of `spaceId` in the
+ * adapter's CURRENT repo. A stale flight re-attaching its observer (closing over the
+ * shut-down session's SpaceState) shows up here as an extra listener.
+ */
+function logChangeListeners(adapter: AutomergeReplicationAdapter, spaceId: string): number {
+  const internals = adapter as unknown as {
+    spaces: Map<string, { documentId: string }>
+    repo: { handles: Record<string, { listenerCount: (event: string) => number }> }
+  }
+  const documentId = internals.spaces.get(spaceId)?.documentId
+  if (!documentId) return 0
+  return internals.repo.handles[documentId]?.listenerCount('change') ?? 0
+}
+
 /** Counts space-register control frames a given messaging adapter sends. */
 function countSpaceRegisters(messaging: InMemoryMessagingAdapter): () => number {
   let count = 0
@@ -221,6 +241,11 @@ describe('Deterministic private space (Sync 001) — Automerge adapter contract'
     release()
     await flightA
 
+    // ...and it must not have installed a coordinator built over its OWN space state
+    // (from the shut-down repo) into the new session, nor flipped the fresh network
+    // adapter to log-sync-managed on its behalf.
+    expect(coordinatorsOf(adapter).size).toBe(0)
+
     await adapter.openOrCreateDeterministicPrivateSpace({ items: {} }, PRIVATE_META)
     expect(saveCalls()).toBeGreaterThan(2)
   }, 60_000)
@@ -252,15 +277,23 @@ describe('Deterministic private space (Sync 001) — Automerge adapter contract'
     let registerCalls = 0
     net.registerDocument = (docId, spaceId) => { registerCalls += 1; return realRegister(docId, spaceId) }
 
-    await adapter.openOrCreateDeterministicPrivateSpace({ items: {} }, PRIVATE_META)
+    const fresh = await adapter.openOrCreateDeterministicPrivateSpace({ items: {} }, PRIVATE_META)
     const afterFreshSession = registerCalls
     expect(afterFreshSession).toBeGreaterThan(0) // the fresh session did register
+    const freshCoordinator = coordinatorsOf(adapter).get(fresh.id)
+    expect(freshCoordinator).toBeDefined() // the fresh session owns the coordinator
+    const freshListeners = logChangeListeners(adapter, fresh.id)
 
     gated.release()
     await flightA // the stale flight runs out
 
     // It must NOT have registered anything into the new session.
     expect(registerCalls).toBe(afterFreshSession)
+    // ...nor replaced/added a coordinator built over its own shut-down state,
+    // nor re-attached its log observer to the fresh session's doc handle.
+    expect(coordinatorsOf(adapter).get(fresh.id)).toBe(freshCoordinator)
+    expect(coordinatorsOf(adapter).size).toBe(1)
+    expect(logChangeListeners(adapter, fresh.id)).toBe(freshListeners)
   }, 60_000)
 
   it('concurrent open-or-create calls share one flight and yield one space', async () => {

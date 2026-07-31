@@ -1158,9 +1158,15 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
     // edit, so the first local write appends seq=0. The initial doc seed (above)
     // rode in the encrypted invite snapshot, NOT as a log entry (the observer is
     // attached only now, mirroring the Yjs setupSpaceSync ordering).
+    // Re-check AFTER the metadata + repo-flush awaits: the observer attach and the
+    // coordinator install below are session-wide again. stop() unsubscribed this
+    // flight's observer already — re-attaching it here would revive a hook closing
+    // over the shut-down session's state.
+    this.ensureSameLifecycle(lifecycleEpoch)
+
     if (this.logSyncEnabled) {
       this.attachLogChangeObserver(spaceState)
-      const coordinator = await this.getOrCreateCoordinator(spaceState)
+      const coordinator = await this.getOrCreateCoordinator(spaceState, lifecycleEpoch)
       if (coordinator) {
         await coordinator.ensurePublished().catch((err) => {
           if (err instanceof AuthorMismatchError) {
@@ -2958,8 +2964,14 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
    * null when the log path is disabled or there is no durable store. The
    * coordinator's docId is the canonical UUID spaceId (VE-9) — NOT the base58
    * documentId — so all three wire surfaces carry the UUID.
+   *
+   * `lifecycleEpoch` binds the install to a session: the coordinator's engine hooks
+   * close over `space`, and the install additionally flips the CURRENT network adapter
+   * to log-sync-managed. A caller whose flight outlived its session would otherwise
+   * hand the new session both. Callers that own a lifecycle (the creation flight) pass
+   * their epoch; the check sits after the awaits below, before either mutation.
    */
-  private async getOrCreateCoordinator(space: SpaceState): Promise<LogSyncCoordinator | null> {
+  private async getOrCreateCoordinator(space: SpaceState, lifecycleEpoch?: number): Promise<LogSyncCoordinator | null> {
     if (!this.logSyncEnabled) return null
     const spaceId = space.info.id
     const existing = this.coordinators.get(spaceId)
@@ -3005,6 +3017,9 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
       },
       onSecurityError: this.onSecurityError,
     })
+    // Last boundary before the two session-wide mutations: ensureDocLogStore()/
+    // ensureDeviceId() awaited, so a stop() may have landed since the caller's check.
+    if (lifecycleEpoch !== undefined) this.ensureSameLifecycle(lifecycleEpoch)
     this.coordinators.set(spaceId, coordinator)
     // VE-7: the log path now owns this space's steady-state sync — disable the
     // native automerge-repo content/full-state channel for it.

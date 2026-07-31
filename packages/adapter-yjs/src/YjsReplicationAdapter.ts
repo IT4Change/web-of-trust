@@ -963,6 +963,12 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
       }
     }
 
+    // Re-check AFTER the CompactStore / metadata / group-key awaits: everything
+    // below — listener notification, the coordinator install, the first publication —
+    // is session-wide state again. Guarding only the final provisioned marker would
+    // let a stale flight hand the new session a coordinator over its dead doc.
+    this.ensureSameLifecycle(lifecycleEpoch)
+
     this.notifySpaceListeners()
 
     // VE-8/VE-2 (Sync 002 §207): the creator runs the closed first-publication
@@ -971,7 +977,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
     // appends seq=0. When log-sync is on we do NOT use the legacy multi-device
     // content send as the log-path source (VE-7 disables it fully in Phase 3).
     if (this.logSyncEnabled) {
-      const coordinator = await this.getOrCreateCoordinator(state)
+      const coordinator = await this.getOrCreateCoordinator(state, lifecycleEpoch)
       if (coordinator) {
         await coordinator.ensurePublished().catch((err) => {
           if (err instanceof AuthorMismatchError) {
@@ -1884,8 +1890,15 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
   /**
    * Get (or lazily create) the LogSyncCoordinator for a space (VE-2..9). Returns
    * null when the log path is disabled or there is no durable store.
+   *
+   * `lifecycleEpoch` binds the install to a session: the coordinator's engine hooks
+   * close over `state`, so a caller whose flight outlived its session would otherwise
+   * publish a coordinator over a destroyed doc into `this.coordinators` — where the
+   * next open-or-create finds it by spaceId and never re-binds it. Callers that own a
+   * lifecycle (the creation flight) pass their epoch; the check sits after the awaits
+   * below, immediately before the map mutation.
    */
-  private async getOrCreateCoordinator(state: YjsSpaceState): Promise<LogSyncCoordinator | null> {
+  private async getOrCreateCoordinator(state: YjsSpaceState, lifecycleEpoch?: number): Promise<LogSyncCoordinator | null> {
     if (!this.logSyncEnabled) return null
     const spaceId = state.info.id
     const existing = this.coordinators.get(spaceId)
@@ -1939,6 +1952,9 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
       },
       onSecurityError: this.onSecurityError,
     })
+    // Last boundary before the install: ensureDocLogStore()/ensureDeviceId() awaited,
+    // so a stop() may have landed since the caller's own check.
+    if (lifecycleEpoch !== undefined) this.ensureSameLifecycle(lifecycleEpoch)
     this.coordinators.set(spaceId, coordinator)
     return coordinator
   }

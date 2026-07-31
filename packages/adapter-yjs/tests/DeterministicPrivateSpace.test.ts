@@ -93,6 +93,11 @@ function countSpaceRegisters(messaging: InMemoryMessagingAdapter): () => number 
   return () => count
 }
 
+/** The adapter's live coordinator map — session-wide state a stale flight must not touch. */
+function coordinatorsOf(adapter: YjsReplicationAdapter): Map<string, unknown> {
+  return (adapter as unknown as { coordinators: Map<string, unknown> }).coordinators
+}
+
 /**
  * Gates the FIRST getEncryptionPublicKeyBytes() call — the await boundary that sits
  * between the epoch check and the `spaces.set()` mutation. Later calls pass through
@@ -263,6 +268,11 @@ describe('Deterministic private space (Sync 001) — Yjs adapter contract', () =
     release()
     await flightA // the stale flight runs out; it must not certify anything
 
+    // ...and it must not have installed a coordinator built over its OWN (destroyed)
+    // doc into the new session: the next open-or-create would find it by spaceId and
+    // never re-bind it, leaving the log hooks writing against the dead state.
+    expect(coordinatorsOf(adapter).size).toBe(0)
+
     // The next call must RESUME B's failed state (a third metadata write).
     await adapter.openOrCreateDeterministicPrivateSpace({ items: {} }, PRIVATE_META)
     expect(saveCalls()).toBeGreaterThan(2)
@@ -292,9 +302,16 @@ describe('Deterministic private space (Sync 001) — Yjs adapter contract', () =
 
     // The NEW session creates the space with fresh content (gate is open for call 2+).
     await adapter.openOrCreateDeterministicPrivateSpace({ items: { m: { title: 'fresh' } } }, PRIVATE_META)
+    const freshCoordinator = coordinatorsOf(adapter).get(genesis.spaceId)
+    expect(freshCoordinator).toBeDefined() // the fresh session owns the coordinator
 
     gated.release()
     await flightA // stale flight runs out — it must not install anything
+
+    // Neither a replacement nor an addition: the coordinator stays the fresh session's,
+    // so the log hooks keep pointing at the live doc.
+    expect(coordinatorsOf(adapter).get(genesis.spaceId)).toBe(freshCoordinator)
+    expect(coordinatorsOf(adapter).size).toBe(1)
 
     const handle = await adapter.openSpace<{ items: Record<string, { title: string }> }>(genesis.spaceId)
     cleanup.push(async () => { handle.close() })
