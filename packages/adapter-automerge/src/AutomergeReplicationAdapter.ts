@@ -323,6 +323,15 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
   private compactStore: CompactStore | null = null
   private vault: VaultClient | null = null
   private spaces = new Map<string, SpaceState>()
+  /**
+   * Spaces whose creation entered `this.spaces` but did NOT finish all durability
+   * and publication phases (a throw at metadata / repo flush / first publication).
+   * A retry must RESUME those phases; such an entry must never take an
+   * open-or-create early return.
+   */
+  private incompleteSpaces = new Set<string>()
+  /** Single-flight guard so concurrent open-or-create calls share one creation. */
+  private deterministicPrivateSpaceFlight: Promise<SpaceInfo> | null = null
   private state: ReplicationState = 'idle'
   private memberChangeCallbacks = new Set<(change: SpaceMemberChange) => void>()
   private spaceInviteListeners = new Set<(invite: IncomingSpaceInvite) => void>()
@@ -965,12 +974,26 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
    * from the identity. Idempotent across devices / recovery / restart — every
    * device derives byte-identical material, so space-register is first-writer-wins
    * idempotent and the local key provisioning is idempotent. Callers MUST restore
-   * persisted spaces first; an already-loaded private space is returned as-is.
+   * persisted spaces first; a fully-provisioned private space is returned as-is.
+   *
+   * Retry-safe: only a COMPLETE entry takes the early return. If an earlier
+   * attempt failed at a durability/publication boundary, the space sits in
+   * `incompleteSpaces` and the create is resumed so the missing phases run —
+   * reporting success on a half-created space would leave it unrestorable or
+   * never published. Concurrent calls share one flight.
    */
-  async openOrCreateDeterministicPrivateSpace<T>(initialDoc: T, meta?: { name?: string; description?: string; appTag?: string; modules?: string[] }): Promise<SpaceInfo> {
+  openOrCreateDeterministicPrivateSpace<T>(initialDoc: T, meta?: { name?: string; description?: string; appTag?: string; modules?: string[] }): Promise<SpaceInfo> {
+    if (this.deterministicPrivateSpaceFlight) return this.deterministicPrivateSpaceFlight
+    const flight = this.runOpenOrCreateDeterministicPrivateSpace(initialDoc, meta)
+      .finally(() => { if (this.deterministicPrivateSpaceFlight === flight) this.deterministicPrivateSpaceFlight = null })
+    this.deterministicPrivateSpaceFlight = flight
+    return flight
+  }
+
+  private async runOpenOrCreateDeterministicPrivateSpace<T>(initialDoc: T, meta?: { name?: string; description?: string; appTag?: string; modules?: string[] }): Promise<SpaceInfo> {
     const genesis = await derivePrivateSpaceGenesis((info, length) => this.identity.deriveFrameworkKey(info, length))
     const existing = this.spaces.get(genesis.spaceId)
-    if (existing) return existing.info
+    if (existing && !this.incompleteSpaces.has(genesis.spaceId)) return existing.info
     return this.createSpaceWithId(genesis.spaceId, 'shared', initialDoc, meta, {
       contentKey: genesis.contentKey,
       capabilitySigningSeed: genesis.capabilitySigningSeed,
@@ -996,17 +1019,25 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
     // docId (UUID) stays in sync with the repo's docId. Outside log-sync the
     // legacy random documentId is kept (the invite snapshot carries the
     // documentUrl) — no behaviour change for the 146 baseline tests.
-    const docHandle = this.logSyncEnabled
-      ? this.repo.import<T>(this.inviteBootstrapBinary(spaceId), { docId: spaceIdToDocumentId(spaceId) })
-      : this.repo.import<T>(this.inviteBootstrapBinary(spaceId))
-    if (!docHandle.isReady()) {
+    // RESUME: a previous attempt may have thrown at a durability/publication
+    // boundary AFTER the space entered `this.spaces` (then marked incomplete).
+    // Reuse that doc + state and re-run the remaining, idempotent phases —
+    // re-importing would discard the seeded doc, and skipping them would report
+    // success on a half-created space.
+    const resumed = this.spaces.get(spaceId)
+    const docHandle = resumed
+      ? null
+      : this.logSyncEnabled
+        ? this.repo.import<T>(this.inviteBootstrapBinary(spaceId), { docId: spaceIdToDocumentId(spaceId) })
+        : this.repo.import<T>(this.inviteBootstrapBinary(spaceId))
+    if (docHandle && !docHandle.isReady()) {
       docHandle.doneLoading()
     }
 
     // Set initial app doc + shared metadata in the doc's _meta object. appTag
     // included: invited members must inherit cross-app isolation (the invite
     // carries no plaintext spaceInfo).
-    docHandle.change((d: any) => {
+    docHandle?.change((d: any) => {
       Object.assign(d, initialDoc)
       d._meta = d._meta ?? {}
       if (meta?.name) d._meta.name = meta.name
@@ -1046,14 +1077,16 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
       await createSpaceKey({ crypto: this.crypto, keyPort: this.keyManagement, spaceId, ownerDid: this.identity.getDid(), validityDurationMs: this.capabilityValidityMs })
     }
 
+    const documentId = resumed?.documentId ?? docHandle!.documentId
+
     // Register document -> space mapping
-    this.networkAdapter.registerDocument(docHandle.documentId, spaceId)
+    this.networkAdapter.registerDocument(documentId, spaceId)
 
     // Register self-as-other-device as peer for multi-device sync
     // Use a different peerId suffix so automerge-repo doesn't think it's talking to itself
     this.networkAdapter.registerSelfPeer(spaceId)
 
-    const info: SpaceInfo = {
+    const info: SpaceInfo = resumed?.info ?? {
       id: spaceId,
       type,
       name: meta?.name,
@@ -1066,20 +1099,29 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
       createdAt: new Date().toISOString(),
     }
 
-    const spaceState: SpaceState = {
-      info,
-      documentId: docHandle.documentId,
-      documentUrl: docHandle.url,
-      handles: new Set(),
-      memberEncryptionKeys: new Map(),
+    let spaceState: SpaceState
+    if (resumed) {
+      spaceState = resumed
+    } else {
+      spaceState = {
+        info,
+        documentId: docHandle!.documentId,
+        documentUrl: docHandle!.url,
+        handles: new Set(),
+        memberEncryptionKeys: new Map(),
+      }
+      this.spaces.set(spaceId, spaceState)
     }
-    this.spaces.set(spaceId, spaceState)
-    this.attachMembershipObserver(spaceState)
+    // From here on a failure leaves a half-provisioned space in `this.spaces`
+    // (metadata / repo flush / first publication may be missing). Mark it so a
+    // retry RESUMES the missing phases instead of reporting success.
+    this.incompleteSpaces.add(spaceId)
+    this.attachMembershipObserver(spaceState) // self-guarded: no double attach
     this._notifySpacesSubscribers()
 
     await this._persistSpaceMetadata(spaceState)
     // Flush repo so the doc is persisted to IndexedDB
-    await this.repo.flush([docHandle.documentId])
+    await this.repo.flush([documentId])
 
     // VE-8/VE-2 (Sync 002 §207): under log-sync the creator runs the closed
     // first-publication sequence — space-register → present-capability →
@@ -1117,6 +1159,7 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
     // Push initial snapshot to vault (fire-and-forget)
     this._pushSnapshotToVault(spaceState).catch(() => {})
 
+    this.incompleteSpaces.delete(spaceId) // fully provisioned + published
     return { ...info }
   }
 

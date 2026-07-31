@@ -437,6 +437,15 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
   private spaceFilter?: (info: SpaceInfo) => boolean
 
   private spaces = new Map<string, YjsSpaceState>()
+  /**
+   * Spaces whose creation entered `this.spaces` but did NOT finish all durability
+   * and publication phases (a throw at CompactStore / metadata / group-key /
+   * first-publication). A retry must RESUME those phases; such an entry must
+   * never take an open-or-create early return.
+   */
+  private incompleteSpaces = new Set<string>()
+  /** Single-flight guard so concurrent open-or-create calls share one creation. */
+  private deterministicPrivateSpaceFlight: Promise<SpaceInfo> | null = null
   private spaceListeners = new Set<(spaces: SpaceInfo[]) => void>()
   private memberChangeListeners = new Set<(change: SpaceMemberChange) => void>()
   private spaceInviteListeners = new Set<(invite: IncomingSpaceInvite) => void>()
@@ -798,13 +807,27 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
    * from the identity. Idempotent across devices / recovery / restart — every
    * device derives byte-identical material, so space-register is first-writer-wins
    * idempotent and the local key provisioning is idempotent (see
-   * createDeterministicSpaceKey). Callers MUST restore persisted spaces first; an
-   * already-loaded private space is returned as-is rather than re-created.
+   * createDeterministicSpaceKey). Callers MUST restore persisted spaces first; a
+   * fully-provisioned private space is returned as-is rather than re-created.
+   *
+   * Retry-safe: only a COMPLETE entry takes the early return. If an earlier
+   * attempt failed at a durability/publication boundary, the space sits in
+   * `incompleteSpaces` and the create is resumed so the missing phases run —
+   * reporting success on a half-created space would leave it unrestorable or
+   * never published. Concurrent calls share one flight.
    */
-  async openOrCreateDeterministicPrivateSpace<T>(initialDoc: T, meta?: { name?: string; description?: string; appTag?: string; modules?: string[] }): Promise<SpaceInfo> {
+  openOrCreateDeterministicPrivateSpace<T>(initialDoc: T, meta?: { name?: string; description?: string; appTag?: string; modules?: string[] }): Promise<SpaceInfo> {
+    if (this.deterministicPrivateSpaceFlight) return this.deterministicPrivateSpaceFlight
+    const flight = this.runOpenOrCreateDeterministicPrivateSpace(initialDoc, meta)
+      .finally(() => { if (this.deterministicPrivateSpaceFlight === flight) this.deterministicPrivateSpaceFlight = null })
+    this.deterministicPrivateSpaceFlight = flight
+    return flight
+  }
+
+  private async runOpenOrCreateDeterministicPrivateSpace<T>(initialDoc: T, meta?: { name?: string; description?: string; appTag?: string; modules?: string[] }): Promise<SpaceInfo> {
     const genesis = await derivePrivateSpaceGenesis((info, length) => this.identity.deriveFrameworkKey(info, length))
     const existing = this.spaces.get(genesis.spaceId)
-    if (existing) return existing.info
+    if (existing && !this.incompleteSpaces.has(genesis.spaceId)) return existing.info
     return this.createSpaceWithId(genesis.spaceId, 'shared', initialDoc, meta, {
       contentKey: genesis.contentKey,
       capabilitySigningSeed: genesis.capabilitySigningSeed,
@@ -815,7 +838,14 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
     const now = new Date().toISOString()
     const myDid = this.identity.getDid()
 
-    const info: SpaceInfo = {
+    // RESUME: a previous attempt may have thrown at a durability/publication
+    // boundary AFTER the space entered `this.spaces` (then marked incomplete).
+    // Reuse that doc + state and re-run the remaining, idempotent phases —
+    // replacing them would drop the seeded content and leak the attached update
+    // observer, and skipping them would report success on a half-created space.
+    const resumed = this.spaces.get(spaceId)
+
+    const info: SpaceInfo = resumed?.info ?? {
       id: spaceId,
       type,
       name: meta?.name,
@@ -830,9 +860,9 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
       createdAt: now,
     }
 
-    // Create Y.Doc
-    const doc = new Y.Doc()
-    doc.transact(() => {
+    // Create Y.Doc (only on a fresh create; a resume keeps the seeded doc)
+    const doc = resumed?.doc ?? new Y.Doc()
+    if (!resumed) doc.transact(() => {
       applyInitialDoc(doc, initialDoc as Record<string, any>)
       // Set shared metadata in _meta map. appTag included: invited members must
       // inherit cross-app isolation (the invite carries no plaintext spaceInfo).
@@ -865,18 +895,28 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
     }
 
     // Store state (include own encryption key for multi-device key rotation)
-    const ownEncKey = await this.identity.getEncryptionPublicKeyBytes()
-    const state: YjsSpaceState = {
-      info,
-      doc,
-      handles: new Set(),
-      memberEncryptionKeys: new Map([[this.identity.getDid(), ownEncKey]]),
-      unsubUpdate: null,
+    let state: YjsSpaceState
+    if (resumed) {
+      state = resumed
+    } else {
+      const ownEncKey = await this.identity.getEncryptionPublicKeyBytes()
+      state = {
+        info,
+        doc,
+        handles: new Set(),
+        memberEncryptionKeys: new Map([[this.identity.getDid(), ownEncKey]]),
+        unsubUpdate: null,
+      }
+      this.spaces.set(spaceId, state)
     }
-    this.spaces.set(spaceId, state)
+    // From here on a failure leaves a half-provisioned space in `this.spaces`
+    // (metadata / group key / first publication may be missing). Mark it so a
+    // retry RESUMES the missing phases instead of reporting success; cleared
+    // only on the successful paths below.
+    this.incompleteSpaces.add(spaceId)
 
-    // Setup encrypted sync for this space
-    this.setupSpaceSync(state)
+    // Setup encrypted sync for this space (a resume keeps its existing observer)
+    if (!state.unsubUpdate) this.setupSpaceSync(state)
 
     // Save to CompactStore
     await this._saveToCompactStore(state)
@@ -939,6 +979,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
         })
       }
       this._scheduleVaultImmediate(state)
+      this.incompleteSpaces.delete(spaceId) // fully provisioned + published
       return info
     }
 
@@ -973,6 +1014,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
     // Push initial state to Vault so other devices can pull it
     this._scheduleVaultImmediate(state)
 
+    this.incompleteSpaces.delete(spaceId) // fully provisioned
     return info
   }
 

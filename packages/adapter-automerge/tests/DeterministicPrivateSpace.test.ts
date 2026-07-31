@@ -15,7 +15,7 @@ import { InMemoryRepoStorageAdapter } from '../src/InMemoryRepoStorageAdapter'
 const BROKER_URLS = ['wss://broker.example.com']
 const PRIVATE_META = { name: 'Privat', appTag: 'rls-private', modules: ['feed'] }
 
-async function makeAdapter(identity: PublicIdentitySession, broker: InProcessLogBroker, socketId: string, deviceId: string): Promise<AutomergeReplicationAdapter> {
+async function makeAdapter(identity: PublicIdentitySession, broker: InProcessLogBroker, socketId: string, deviceId: string, metadataStorage?: InMemorySpaceMetadataStorage): Promise<AutomergeReplicationAdapter> {
   const messaging = new InMemoryMessagingAdapter({ broker, socketId })
   await messaging.connect(identity.getDid())
   const docLogStore = new InMemoryDocLogStore()
@@ -24,10 +24,23 @@ async function makeAdapter(identity: PublicIdentitySession, broker: InProcessLog
   return new AutomergeReplicationAdapter({
     identity, messaging, brokerUrls: BROKER_URLS,
     keyManagement: new InMemoryKeyManagementAdapter(),
-    metadataStorage: new InMemorySpaceMetadataStorage(),
+    metadataStorage: metadataStorage ?? new InMemorySpaceMetadataStorage(),
     repoStorage: new InMemoryRepoStorageAdapter(),
     docLogStore, enableLogSync: true, deviceId,
   })
+}
+
+/** Fault injection at a durability boundary: the first saveSpaceMetadata throws. */
+function metadataFailingOnce(): { storage: InMemorySpaceMetadataStorage; saveCalls: () => number } {
+  const storage = new InMemorySpaceMetadataStorage()
+  const realSave = storage.saveSpaceMetadata.bind(storage)
+  let calls = 0
+  storage.saveSpaceMetadata = async (meta) => {
+    calls += 1
+    if (calls === 1) throw new Error('injected durability failure: saveSpaceMetadata')
+    return realSave(meta)
+  }
+  return { storage, saveCalls: () => calls }
 }
 
 // Parity with adapter-yjs/tests/DeterministicPrivateSpace.test.ts — the same
@@ -55,6 +68,44 @@ describe('Deterministic private space (Sync 001) — Automerge adapter contract'
 
     const second = await adapter.openOrCreateDeterministicPrivateSpace({ items: {} }, PRIVATE_META)
     expect(second.id).toBe(genesis.spaceId)
+    expect((await adapter.getSpaces()).filter((s) => s.appTag === 'rls-private')).toHaveLength(1)
+  })
+
+  it('resumes the missing phases after a failed create instead of reporting success', async () => {
+    const broker = new InProcessLogBroker()
+    const { identity } = await createTestIdentity('detps-am-fault')
+    cleanup.push(async () => { await identity.deleteStoredIdentity() })
+    const { storage, saveCalls } = metadataFailingOnce()
+    const adapter = await makeAdapter(identity, broker, 'detps-am-fault', 'f1111111-1111-4111-8111-111111111111', storage)
+    await adapter.start()
+    cleanup.push(async () => { await adapter.stop() })
+
+    const genesis = await derivePrivateSpaceGenesis((info, length) => identity.deriveFrameworkKey(info, length))
+
+    await expect(adapter.openOrCreateDeterministicPrivateSpace({ items: {} }, PRIVATE_META)).rejects.toThrow(/injected durability failure/)
+    expect(await storage.loadSpaceMetadata(genesis.spaceId)).toBeNull()
+
+    const space = await adapter.openOrCreateDeterministicPrivateSpace({ items: {} }, PRIVATE_META)
+    expect(space.id).toBe(genesis.spaceId)
+    expect(saveCalls()).toBeGreaterThan(1)
+    expect(await storage.loadSpaceMetadata(genesis.spaceId)).not.toBeNull()
+    expect((await adapter.getSpaces()).filter((s) => s.appTag === 'rls-private')).toHaveLength(1)
+  })
+
+  it('concurrent open-or-create calls share one flight and yield one space', async () => {
+    const broker = new InProcessLogBroker()
+    const { identity } = await createTestIdentity('detps-am-concurrent')
+    cleanup.push(async () => { await identity.deleteStoredIdentity() })
+    const adapter = await makeAdapter(identity, broker, 'detps-am-concurrent', 'c1111111-1111-4111-8111-111111111111')
+    await adapter.start()
+    cleanup.push(async () => { await adapter.stop() })
+
+    const results = await Promise.all([
+      adapter.openOrCreateDeterministicPrivateSpace({ items: {} }, PRIVATE_META),
+      adapter.openOrCreateDeterministicPrivateSpace({ items: {} }, PRIVATE_META),
+      adapter.openOrCreateDeterministicPrivateSpace({ items: {} }, PRIVATE_META),
+    ])
+    expect(new Set(results.map((r) => r.id)).size).toBe(1)
     expect((await adapter.getSpaces()).filter((s) => s.appTag === 'rls-private')).toHaveLength(1)
   })
 
