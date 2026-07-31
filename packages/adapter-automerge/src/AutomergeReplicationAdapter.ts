@@ -335,6 +335,13 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
   private fullyProvisionedSpaces = new Set<string>()
   /** Single-flight guard so concurrent open-or-create calls share one creation. */
   private deterministicPrivateSpaceFlight: Promise<SpaceInfo> | null = null
+  /**
+   * Adapter lifecycle generation, bumped on every stop(). A creation flight
+   * captures it and re-checks it after its await boundaries: a flight that
+   * outlived its session must neither mutate the new session's state nor
+   * certify a space as provisioned in it.
+   */
+  private lifecycleEpoch = 0
   private state: ReplicationState = 'idle'
   private memberChangeCallbacks = new Set<(change: SpaceMemberChange) => void>()
   private spaceInviteListeners = new Set<(invite: IncomingSpaceInvite) => void>()
@@ -915,6 +922,8 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
     // to re-verify (idempotently) instead of taking an early return.
     this.fullyProvisionedSpaces.clear()
     this.deterministicPrivateSpaceFlight = null
+    // Invalidate any in-flight creation from this session (see lifecycleEpoch).
+    this.lifecycleEpoch += 1
     this.started = false
     if (this.reconnectDebounceTimer) {
       clearTimeout(this.reconnectDebounceTimer)
@@ -1012,6 +1021,7 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
 
   private async createSpaceWithId<T>(spaceId: string, type: 'personal' | 'shared', initialDoc: T, meta?: { name?: string; description?: string; appTag?: string; modules?: string[] }, genesisMaterial?: { contentKey: Uint8Array; capabilitySigningSeed: Uint8Array }): Promise<SpaceInfo> {
     const myDid = this.identity.getDid()
+    const lifecycleEpoch = this.lifecycleEpoch
 
     // M2 (Review): das Creator-Doc startet auf demselben deterministischen
     // Bootstrap-Binary wie der Invite-Apply (inviteBootstrapBinary: fester
@@ -1109,6 +1119,10 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
       createdAt: new Date().toISOString(),
     }
 
+    // A stop() may have happened across the awaits above. From here on we mutate
+    // session-wide state, so a flight from a previous lifecycle MUST abort.
+    this.ensureSameLifecycle(lifecycleEpoch)
+
     let spaceState: SpaceState
     if (resumed) {
       spaceState = resumed
@@ -1173,6 +1187,7 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
     // Push initial snapshot to vault (fire-and-forget)
     this._pushSnapshotToVault(spaceState).catch(() => {})
 
+    this.ensureSameLifecycle(lifecycleEpoch)
     this.fullyProvisionedSpaces.add(spaceId) // every phase completed + published
     return { ...info }
   }
@@ -2803,6 +2818,18 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
    * exactly once across process restarts. Unknown (no log store) → treat as
    * seeded, so we never append a duplicate on a store-less setup.
    */
+  /**
+   * A creation flight that outlived its session (stop() bumped the epoch) must not
+   * touch the new lifecycle: it may neither install space state nor mark a space
+   * as fully provisioned — otherwise it would certify a DIFFERENT, possibly failed
+   * state of the new session as complete.
+   */
+  private ensureSameLifecycle(epoch: number): void {
+    if (this.lifecycleEpoch !== epoch) {
+      throw new Error('adapter lifecycle changed (stop) while the space creation was in flight')
+    }
+  }
+
   private async spaceLogIsEmpty(spaceId: string): Promise<boolean> {
     if (!this.docLogStore) return false
     try {

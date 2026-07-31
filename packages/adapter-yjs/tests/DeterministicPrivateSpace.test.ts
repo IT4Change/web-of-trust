@@ -83,6 +83,26 @@ function countSpaceRegisters(messaging: InMemoryMessagingAdapter): () => number 
   return () => count
 }
 
+/**
+ * Scripted durability boundary for the lifecycle repro: call 1 blocks on a gate
+ * (the flight that will outlive its session), call 2 throws (the new session's
+ * flight fails), call 3+ succeeds.
+ */
+function metadataGateThenFail(doc: Y.Doc): { storage: PersonalDocSpaceMetadataStorage; saveCalls: () => number; release: () => void } {
+  const storage = metadataInPersonalDoc(doc)
+  const realSave = storage.saveSpaceMetadata.bind(storage)
+  let calls = 0
+  let release: () => void = () => {}
+  const gate = new Promise<void>((r) => { release = r })
+  storage.saveSpaceMetadata = async (meta) => {
+    calls += 1
+    if (calls === 1) { await gate; return realSave(meta) }
+    if (calls === 2) throw new Error('injected durability failure: second flight')
+    return realSave(meta)
+  }
+  return { storage, saveCalls: () => calls, release: () => release() }
+}
+
 /** Fault injection at a durability boundary: the first saveSpaceMetadata throws. */
 function metadataFailingOnce(doc: Y.Doc): { storage: PersonalDocSpaceMetadataStorage; saveCalls: () => number } {
   const storage = metadataInPersonalDoc(doc)
@@ -180,6 +200,37 @@ describe('Deterministic private space (Sync 001) — Yjs adapter contract', () =
     expect(space.id).toBe(genesis.spaceId)
     // The contract: after open-or-create returns, the space IS registered.
     expect(registersB()).toBeGreaterThan(0)
+  })
+
+  it('a flight that outlived stop() must not certify the new session', async () => {
+    // Lifecycle contract: flight A hangs before its metadata write, the adapter is
+    // stopped and started, flight B fails at the same boundary, then A runs out.
+    // A must NOT mark the space provisioned — otherwise the next call early-returns
+    // and B's failed state is never resumed.
+    const broker = new InProcessLogBroker()
+    const { identity } = await createTestIdentity('detps-lifecycle')
+    cleanup.push(async () => { await identity.deleteStoredIdentity() })
+    const DEVICE = 'a9999999-9999-4999-8999-999999999999'
+    const { storage, saveCalls, release } = metadataGateThenFail(new Y.Doc())
+    const { adapter } = await makeAdapter(identity, broker, 'detps-lifecycle', DEVICE, await makeStores(DEVICE, storage))
+    await adapter.start()
+    cleanup.push(async () => { await adapter.stop() })
+
+    const flightA = adapter.openOrCreateDeterministicPrivateSpace({ items: {} }, PRIVATE_META).catch(() => null)
+    await new Promise((r) => setTimeout(r, 30)) // let A reach the gated metadata write
+
+    await adapter.stop()
+    await adapter.start()
+
+    // B fails at the same durability boundary in the NEW session.
+    await expect(adapter.openOrCreateDeterministicPrivateSpace({ items: {} }, PRIVATE_META)).rejects.toThrow(/second flight/)
+
+    release()
+    await flightA // the stale flight runs out; it must not certify anything
+
+    // The next call must RESUME B's failed state (a third metadata write).
+    await adapter.openOrCreateDeterministicPrivateSpace({ items: {} }, PRIVATE_META)
+    expect(saveCalls()).toBeGreaterThan(2)
   })
 
   it('concurrent open-or-create calls share one flight and yield one space', async () => {

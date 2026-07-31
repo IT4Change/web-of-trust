@@ -450,6 +450,13 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
   private fullyProvisionedSpaces = new Set<string>()
   /** Single-flight guard so concurrent open-or-create calls share one creation. */
   private deterministicPrivateSpaceFlight: Promise<SpaceInfo> | null = null
+  /**
+   * Adapter lifecycle generation, bumped on every stop(). A creation flight
+   * captures it and re-checks it after its await boundaries: a flight that
+   * outlived its session must neither mutate the new session's state nor
+   * certify a space as provisioned in it.
+   */
+  private lifecycleEpoch = 0
   private spaceListeners = new Set<(spaces: SpaceInfo[]) => void>()
   private memberChangeListeners = new Set<(change: SpaceMemberChange) => void>()
   private spaceInviteListeners = new Set<(invite: IncomingSpaceInvite) => void>()
@@ -710,6 +717,8 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
     // to re-verify (idempotently) instead of taking an early return.
     this.fullyProvisionedSpaces.clear()
     this.deterministicPrivateSpaceFlight = null
+    // Invalidate any in-flight creation from this session (see lifecycleEpoch).
+    this.lifecycleEpoch += 1
     // A catch-up Promise can outlive the transport session.  Invalidate it before
     // clearing its bookkeeping so its finally() cannot corrupt the next session.
     this.catchUpReady = false
@@ -848,6 +857,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
   private async createSpaceWithId<T>(spaceId: string, type: SpaceInfo['type'], initialDoc: T, meta?: { name?: string; description?: string; appTag?: string; modules?: string[] }, genesisMaterial?: { contentKey: Uint8Array; capabilitySigningSeed: Uint8Array }): Promise<SpaceInfo> {
     const now = new Date().toISOString()
     const myDid = this.identity.getDid()
+    const lifecycleEpoch = this.lifecycleEpoch
 
     // RESUME: a previous attempt may have thrown at a durability/publication
     // boundary AFTER the space entered `this.spaces` (then marked incomplete).
@@ -904,6 +914,10 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
     } else {
       await createSpaceKey({ crypto: this.crypto, keyPort: this.keyManagement, spaceId, ownerDid: this.identity.getDid(), validityDurationMs: this.capabilityValidityMs })
     }
+
+    // A stop() may have happened across the awaits above. From here on we mutate
+    // session-wide state, so a flight from a previous lifecycle MUST abort.
+    this.ensureSameLifecycle(lifecycleEpoch)
 
     // Store state (include own encryption key for multi-device key rotation)
     let state: YjsSpaceState
@@ -995,6 +1009,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
         })
       }
       this._scheduleVaultImmediate(state)
+      this.ensureSameLifecycle(lifecycleEpoch)
       this.fullyProvisionedSpaces.add(spaceId) // every phase completed + published
       return info
     }
@@ -1030,6 +1045,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
     // Push initial state to Vault so other devices can pull it
     this._scheduleVaultImmediate(state)
 
+    this.ensureSameLifecycle(lifecycleEpoch)
     this.fullyProvisionedSpaces.add(spaceId) // every phase completed
     return info
   }
@@ -1840,6 +1856,18 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
    * exactly once across process restarts. Unknown (no log store) → treat as
    * seeded, so we never append a duplicate on a store-less setup.
    */
+  /**
+   * A creation flight that outlived its session (stop() bumped the epoch) must not
+   * touch the new lifecycle: it may neither install space state nor mark a space
+   * as fully provisioned — otherwise it would certify a DIFFERENT, possibly failed
+   * state of the new session as complete.
+   */
+  private ensureSameLifecycle(epoch: number): void {
+    if (this.lifecycleEpoch !== epoch) {
+      throw new Error('adapter lifecycle changed (stop) while the space creation was in flight')
+    }
+  }
+
   private async spaceLogIsEmpty(spaceId: string): Promise<boolean> {
     if (!this.docLogStore) return false
     try {

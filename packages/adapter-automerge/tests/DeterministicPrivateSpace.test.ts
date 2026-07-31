@@ -60,6 +60,25 @@ function countSpaceRegisters(messaging: InMemoryMessagingAdapter): () => number 
   return () => count
 }
 
+/**
+ * Scripted durability boundary for the lifecycle repro: call 1 blocks on a gate,
+ * call 2 throws (new session's flight fails), call 3+ succeeds.
+ */
+function metadataGateThenFail(): { storage: InMemorySpaceMetadataStorage; saveCalls: () => number; release: () => void } {
+  const storage = new InMemorySpaceMetadataStorage()
+  const realSave = storage.saveSpaceMetadata.bind(storage)
+  let calls = 0
+  let release: () => void = () => {}
+  const gate = new Promise<void>((r) => { release = r })
+  storage.saveSpaceMetadata = async (meta) => {
+    calls += 1
+    if (calls === 1) { await gate; return realSave(meta) }
+    if (calls === 2) throw new Error('injected durability failure: second flight')
+    return realSave(meta)
+  }
+  return { storage, saveCalls: () => calls, release: () => release() }
+}
+
 /** Fault injection at a durability boundary: the first saveSpaceMetadata throws. */
 function metadataFailingOnce(): { storage: InMemorySpaceMetadataStorage; saveCalls: () => number } {
   const storage = new InMemorySpaceMetadataStorage()
@@ -150,6 +169,32 @@ describe('Deterministic private space (Sync 001) — Automerge adapter contract'
     const space = await adapterB.openOrCreateDeterministicPrivateSpace({ items: {} }, PRIVATE_META)
     expect(space.id).toBe(genesis.spaceId)
     expect(registersB()).toBeGreaterThan(0)
+  })
+
+  it('a flight that outlived stop() must not certify the new session', async () => {
+    // Lifecycle contract (parity with Yjs).
+    const broker = new InProcessLogBroker()
+    const { identity } = await createTestIdentity('detps-am-lifecycle')
+    cleanup.push(async () => { await identity.deleteStoredIdentity() })
+    const DEVICE = 'a9999999-9999-4999-8999-999999999999'
+    const { storage, saveCalls, release } = metadataGateThenFail()
+    const { adapter } = await makeAdapter(identity, broker, 'detps-am-lifecycle', DEVICE, await makeStores(DEVICE, storage))
+    await adapter.start()
+    cleanup.push(async () => { await adapter.stop() })
+
+    const flightA = adapter.openOrCreateDeterministicPrivateSpace({ items: {} }, PRIVATE_META).catch(() => null)
+    await new Promise((r) => setTimeout(r, 30))
+
+    await adapter.stop()
+    await adapter.start()
+
+    await expect(adapter.openOrCreateDeterministicPrivateSpace({ items: {} }, PRIVATE_META)).rejects.toThrow(/second flight/)
+
+    release()
+    await flightA
+
+    await adapter.openOrCreateDeterministicPrivateSpace({ items: {} }, PRIVATE_META)
+    expect(saveCalls()).toBeGreaterThan(2)
   })
 
   it('concurrent open-or-create calls share one flight and yield one space', async () => {
