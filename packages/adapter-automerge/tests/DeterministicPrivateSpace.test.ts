@@ -13,6 +13,16 @@ import { AutomergeReplicationAdapter } from '../src/AutomergeReplicationAdapter'
 import { InMemoryRepoStorageAdapter } from '../src/InMemoryRepoStorageAdapter'
 
 const BROKER_URLS = ['wss://broker.example.com']
+
+/** Deterministic wait — no fixed sleeps (CI runners are far slower than dev boxes). */
+async function waitUntil(cond: () => boolean, what: string, timeoutMs = 15_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (cond()) return
+    await new Promise((r) => setTimeout(r, 10))
+  }
+  throw new Error(`Timed out waiting for ${what}`)
+}
 const PRIVATE_META = { name: 'Privat', appTag: 'rls-private', modules: ['feed'] }
 
 /** The durable stores that survive a process restart (same device, same disk). */
@@ -169,7 +179,7 @@ describe('Deterministic private space (Sync 001) — Automerge adapter contract'
     const space = await adapterB.openOrCreateDeterministicPrivateSpace({ items: {} }, PRIVATE_META)
     expect(space.id).toBe(genesis.spaceId)
     expect(registersB()).toBeGreaterThan(0)
-  })
+  }, 60_000)
 
   it('a flight that outlived stop() must not certify the new session', async () => {
     // Lifecycle contract (parity with Yjs).
@@ -183,7 +193,7 @@ describe('Deterministic private space (Sync 001) — Automerge adapter contract'
     cleanup.push(async () => { await adapter.stop() })
 
     const flightA = adapter.openOrCreateDeterministicPrivateSpace({ items: {} }, PRIVATE_META).catch(() => null)
-    await new Promise((r) => setTimeout(r, 30))
+    await waitUntil(() => saveCalls() >= 1, 'flight A to reach the gated metadata write')
 
     await adapter.stop()
     await adapter.start()
@@ -195,7 +205,7 @@ describe('Deterministic private space (Sync 001) — Automerge adapter contract'
 
     await adapter.openOrCreateDeterministicPrivateSpace({ items: {} }, PRIVATE_META)
     expect(saveCalls()).toBeGreaterThan(2)
-  })
+  }, 60_000)
 
   it('concurrent open-or-create calls share one flight and yield one space', async () => {
     const broker = new InProcessLogBroker()

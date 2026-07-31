@@ -14,6 +14,16 @@ import { derivePrivateSpaceGenesis, SPACE_REGISTER_MESSAGE_TYPE } from '@web_of_
 import { YjsReplicationAdapter } from '../src/YjsReplicationAdapter'
 
 const BROKER_URLS = ['wss://broker.example.com']
+
+/** Deterministic wait — no fixed sleeps (CI runners are far slower than dev boxes). */
+async function waitUntil(cond: () => boolean, what: string, timeoutMs = 15_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (cond()) return
+    await new Promise((r) => setTimeout(r, 10))
+  }
+  throw new Error(`Timed out waiting for ${what}`)
+}
 const PRIVATE_META = { name: 'Privat', appTag: 'rls-private', modules: ['feed'] }
 
 function metadataInPersonalDoc(doc: Y.Doc): PersonalDocSpaceMetadataStorage {
@@ -200,7 +210,7 @@ describe('Deterministic private space (Sync 001) — Yjs adapter contract', () =
     expect(space.id).toBe(genesis.spaceId)
     // The contract: after open-or-create returns, the space IS registered.
     expect(registersB()).toBeGreaterThan(0)
-  })
+  }, 60_000)
 
   it('a flight that outlived stop() must not certify the new session', async () => {
     // Lifecycle contract: flight A hangs before its metadata write, the adapter is
@@ -217,7 +227,7 @@ describe('Deterministic private space (Sync 001) — Yjs adapter contract', () =
     cleanup.push(async () => { await adapter.stop() })
 
     const flightA = adapter.openOrCreateDeterministicPrivateSpace({ items: {} }, PRIVATE_META).catch(() => null)
-    await new Promise((r) => setTimeout(r, 30)) // let A reach the gated metadata write
+    await waitUntil(() => saveCalls() >= 1, 'flight A to reach the gated metadata write')
 
     await adapter.stop()
     await adapter.start()
@@ -231,7 +241,7 @@ describe('Deterministic private space (Sync 001) — Yjs adapter contract', () =
     // The next call must RESUME B's failed state (a third metadata write).
     await adapter.openOrCreateDeterministicPrivateSpace({ items: {} }, PRIVATE_META)
     expect(saveCalls()).toBeGreaterThan(2)
-  })
+  }, 60_000)
 
   it('concurrent open-or-create calls share one flight and yield one space', async () => {
     const broker = new InProcessLogBroker()
