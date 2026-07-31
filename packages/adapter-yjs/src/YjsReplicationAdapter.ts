@@ -89,6 +89,11 @@ import type { MembershipRemovalDoc } from './types'
  * skip exactly this mutation without affecting normal local edits or the remote path.
  */
 const MEMBERSHIP_COMMIT_ORIGIN = 'wot:membership-commit-durable'
+// Origin of a SpaceHandle.transactDurable mutation: the steady-state observer skips
+// it, and the produced delta is written through the awaitable coordinator path
+// instead (persist-before-send, error-propagating) — the durability ack is bound
+// to EXACTLY this transaction, never to unrelated head movement.
+const DURABLE_TRANSACT_ORIGIN = 'wot:durable-transact'
 /** A last-member self-leave is local state disposal, never a space-sync delta. */
 const LOCAL_ONLY_MEMBERSHIP_ORIGIN = 'wot:membership-local-only'
 
@@ -297,6 +302,25 @@ class YjsSpaceHandle<T> implements SpaceHandle<T> {
       this.adapter._scheduleCompactImmediate(this.spaceState)
       this.adapter._scheduleVaultImmediate(this.spaceState)
     }
+  }
+
+  /**
+   * Like {@link transact}, but resolves only after the log entry produced by
+   * EXACTLY this transaction is durably persisted (persist-before-send), and
+   * rejects when that append fails. Generalizes the secure-removal commit
+   * mechanics (dedicated origin + one-shot delta capture + awaitable
+   * coordinator write). A no-op transaction resolves immediately. Requires the
+   * log-sync configuration — without a durable log path this throws instead of
+   * pretending durability.
+   */
+  async transactDurable(fn: (doc: T) => void): Promise<void> {
+    if (this.closed) throw new Error('SpaceHandle is closed')
+    await this.adapter._transactDurable(this.spaceState, () => {
+      const proxy = createDataProxy<T>(this.spaceState.doc.getMap('data'))
+      fn(proxy)
+    })
+    this.adapter._scheduleCompactImmediate(this.spaceState)
+    this.adapter._scheduleVaultImmediate(this.spaceState)
   }
 
   onRemoteUpdate(callback: () => void): () => void {
@@ -2262,6 +2286,38 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
     await coordinator.writeLocalUpdate(update)
   }
 
+  /**
+   * Core of {@link YjsSpaceHandle#transactDurable}: run the mutation under
+   * {@link DURABLE_TRANSACT_ORIGIN}, capture the delta of exactly this
+   * transaction, and write it through the awaitable coordinator path. Throws
+   * when no durable log path exists (non-log-sync configuration or missing
+   * coordinator) — a caller relying on durability must not get a silent
+   * fire-and-forget fallback.
+   */
+  async _transactDurable(state: YjsSpaceState, apply: () => void): Promise<void> {
+    let captured: Uint8Array | null = null
+    const captureHandler = (update: Uint8Array, origin: unknown) => {
+      if (origin === DURABLE_TRANSACT_ORIGIN) captured = update
+    }
+    state.doc.on('update', captureHandler)
+    try {
+      state.doc.transact(apply, DURABLE_TRANSACT_ORIGIN)
+    } finally {
+      state.doc.off('update', captureHandler)
+    }
+    if (!captured) return // no-op transaction — nothing to prove durable
+    if (!this.logSyncEnabled) {
+      throw new Error('transactDurable requires the log-sync configuration (no durable log path)')
+    }
+    const coordinator = await this.getOrCreateCoordinator(state)
+    if (!coordinator) {
+      throw new Error('transactDurable requires a log-sync coordinator to durably record the update')
+    }
+    // Awaitable + error-propagating: appendLocalEntry persists the JWS BEFORE send,
+    // so a throw here means the durable record was NOT written.
+    await coordinator.writeLocalUpdate(captured)
+  }
+
   onMemberChange(callback: (change: SpaceMemberChange) => void): () => void {
     this.memberChangeListeners.add(callback)
     return () => { this.memberChangeListeners.delete(callback) }
@@ -3224,6 +3280,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
       // so the observer must NOT also fire a (fire-and-forget) write for it, which would
       // create a SECOND log entry / seq for the same membership op.
       if (origin === MEMBERSHIP_COMMIT_ORIGIN) return
+      if (origin === DURABLE_TRANSACT_ORIGIN) return
       if (origin === LOCAL_ONLY_MEMBERSHIP_ORIGIN) return
       // VE-2: when the log path is the primary steady-state path, local updates are
       // written as encrypted log entries (NOT content broadcasts). The legacy

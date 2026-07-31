@@ -228,7 +228,7 @@ class AutomergeSpaceHandle<T> implements SpaceHandle<T> {
   private localChanging = false
   private unsubChange?: () => void
 
-  constructor(spaceState: SpaceState, docHandle: DocHandle<T>, vaultScheduler: VaultPushScheduler | null, compactScheduler: VaultPushScheduler | null) {
+  constructor(spaceState: SpaceState, docHandle: DocHandle<T>, vaultScheduler: VaultPushScheduler | null, compactScheduler: VaultPushScheduler | null, private readonly durableWriter?: (apply: (doc: T) => void) => Promise<void>) {
     this.id = spaceState.info.id
     this.spaceState = spaceState
     this.docHandle = docHandle
@@ -255,6 +255,26 @@ class AutomergeSpaceHandle<T> implements SpaceHandle<T> {
 
   getMeta(): import('@web_of_trust/core').SpaceDocMeta {
     return {}
+  }
+
+  /**
+   * Like {@link transact}, but resolves only after the log entry produced by
+   * EXACTLY this transaction is durably persisted (persist-before-send), and
+   * rejects when that append fails. Mirrors the Yjs handle; mechanics follow the
+   * secure-removal commit (suppressed observer + explicit awaited coordinator
+   * write). A no-op transaction resolves immediately.
+   */
+  async transactDurable(fn: (doc: T) => void): Promise<void> {
+    if (this.closed) throw new Error('Handle is closed')
+    if (!this.durableWriter) throw new Error('transactDurable requires the log-sync configuration (no durable log path)')
+    this.localChanging = true
+    try {
+      await this.durableWriter(fn)
+    } finally {
+      this.localChanging = false
+    }
+    if (this.vaultScheduler) this.vaultScheduler.pushImmediate()
+    if (this.compactScheduler) this.compactScheduler.pushImmediate()
   }
 
   transact(fn: (doc: T) => void, options?: TransactOptions): void {
@@ -1291,7 +1311,8 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
       this.compactSchedulers.set(spaceId, compactSched)
     }
 
-    const handle = new AutomergeSpaceHandle<T>(space, docHandle, scheduler, compactSched)
+    const handle = new AutomergeSpaceHandle<T>(space, docHandle, scheduler, compactSched,
+      this.logSyncEnabled ? (apply) => this._transactDurable(space, docHandle as DocHandle<unknown>, apply as (doc: unknown) => void) : undefined)
     space.handles.add(handle)
 
     return handle
@@ -2020,6 +2041,32 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
    * Restore ist kein Space-Sync i.S.v. Sync 005 Z.194).
    * Analogon zum _members-Observer im Yjs-Adapter.
    */
+  /**
+   * Core of {@link AutomergeSpaceHandle#transactDurable}: run the change with the
+   * steady-state log observer suppressed, then write EXACTLY this change set
+   * through the awaitable coordinator path (persist-before-send,
+   * error-propagating). Throws when no durable log path exists.
+   */
+  async _transactDurable(space: SpaceState, docHandle: DocHandle<unknown>, apply: (doc: unknown) => void): Promise<void> {
+    const before = docHandle.doc() as Automerge.Doc<unknown>
+    space.suppressLogForLocalCommit = true
+    try {
+      docHandle.change(apply as any)
+    } finally {
+      space.suppressLogForLocalCommit = false
+    }
+    const changes = Automerge.getChanges(before, docHandle.doc() as Automerge.Doc<unknown>)
+    if (changes.length === 0) return // no-op transaction — nothing to prove durable
+    if (!this.logSyncEnabled) {
+      throw new Error('transactDurable requires the log-sync configuration (no durable log path)')
+    }
+    const coordinator = await this.getOrCreateCoordinator(space)
+    if (!coordinator) {
+      throw new Error('transactDurable requires a log-sync coordinator to durably record the update')
+    }
+    await coordinator.writeLocalUpdate(frameChanges(changes))
+  }
+
   private attachMembershipObserver(space: SpaceState): void {
     if (space.unsubDocChange) return
     const docHandle = this.repo.handles[space.documentId]
