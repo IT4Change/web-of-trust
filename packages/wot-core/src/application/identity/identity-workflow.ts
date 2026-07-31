@@ -81,8 +81,8 @@ class ProtocolIdentitySession implements PublicIdentitySession {
     )
   }
 
-  async deriveFrameworkKey(info: string): Promise<Uint8Array> {
-    return this.#handle.deriveFrameworkKey(info, 32)
+  async deriveFrameworkKey(info: string, length = 32): Promise<Uint8Array> {
+    return this.#handle.deriveFrameworkKey(info, length)
   }
 
   async getPublicKeyMultibase(): Promise<string> {

@@ -28,13 +28,14 @@ import type {
 import type { IdentitySession, MessageEnvelope, SpaceInfo, SpaceDocMeta, SpaceMemberChange, IncomingSpaceInvite, ReplicationState } from '@web_of_trust/core/types'
 import { SPACE_SYNC_REQUEST_MESSAGE_TYPE } from '@web_of_trust/core/types'
 import {
-  createSpaceKey, rotateSpaceKey, importKey, processMemberUpdate,
+  createSpaceKey, createDeterministicSpaceKey, rotateSpaceKey, importKey, processMemberUpdate,
   resolveMemberUpdatesAgainstCanonical, canonicalEventSetAnswersPending,
   buildSpaceInviteBody, applySpaceInviteBody, buildKeyRotationBody, applyKeyRotationBody,
   deliverInboxMessage, receiveInboxMessage,
   runTwoPhaseRemoval, recoverPendingRemovals,
+  openLifecycleLease,
 } from '@web_of_trust/core/application'
-import type { LocalImpact, SecureRemovalDeps } from '@web_of_trust/core/application'
+import type { LocalImpact, SecureRemovalDeps, LifecycleLease } from '@web_of_trust/core/application'
 import type { MembershipActivityCapable, SecureSelfLeaveCapable } from '@web_of_trust/core/ports'
 import type {
   ProtocolCryptoAdapter, MemberUpdateSignal, SeenMemberUpdateSignal, SpaceInviteBody, KeyRotationBody,
@@ -52,6 +53,7 @@ import {
   LogSyncCoordinator, AuthorMismatchError, LocalAppendFailedError, CapabilityKeysUnavailableError, createSpaceCapabilityJws,
   createSpaceRegisterMessageWithSigner, createSpaceRotateMessageWithSigner, createAdminRemoveMessageWithSigner,
   LOG_ENTRY_MESSAGE_TYPE, SYNC_RESPONSE_MESSAGE_TYPE,
+  derivePrivateSpaceGenesis,
 } from '@web_of_trust/core/protocol'
 import type { LogSyncEngineHooks, CapabilitySource, ControlFrameReceipt, WriteRejectHandler } from '@web_of_trust/core/protocol'
 import type { MembershipEvent, AdminEntry } from '@web_of_trust/core/protocol'
@@ -436,6 +438,26 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
   private spaceFilter?: (info: SpaceInfo) => boolean
 
   private spaces = new Map<string, YjsSpaceState>()
+  /**
+   * Spaces whose full provisioning THIS process ran to completion (key material,
+   * metadata, group key, publication). Purely an optimisation for the hot path —
+   * never a durable completion claim: it starts EMPTY on every process start and
+   * is cleared on stop(). So the first open-or-create after a restart always
+   * re-runs the idempotent provisioning tail, which is what closes the
+   * "metadata persisted, process died before space-register" hole. Completion is
+   * therefore re-derived from durable artefacts (key store, metadata store, log
+   * heads) rather than remembered in RAM.
+   */
+  private fullyProvisionedSpaces = new Set<string>()
+  /** Single-flight guard so concurrent open-or-create calls share one creation. */
+  private deterministicPrivateSpaceFlight: Promise<SpaceInfo> | null = null
+  /**
+   * Adapter lifecycle generation, bumped on every stop(). A creation flight
+   * captures it and re-checks it after its await boundaries: a flight that
+   * outlived its session must neither mutate the new session's state nor
+   * certify a space as provisioned in it.
+   */
+  private lifecycleEpoch = 0
   private spaceListeners = new Set<(spaces: SpaceInfo[]) => void>()
   private memberChangeListeners = new Set<(change: SpaceMemberChange) => void>()
   private spaceInviteListeners = new Set<(invite: IncomingSpaceInvite) => void>()
@@ -691,6 +713,13 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
   }
 
   async stop(): Promise<void> {
+    // Provisioning verification is per-session: a flight may still be running its
+    // continuation past this stop(), so the next session must NOT trust it and has
+    // to re-verify (idempotently) instead of taking an early return.
+    this.fullyProvisionedSpaces.clear()
+    this.deterministicPrivateSpaceFlight = null
+    // Invalidate any in-flight creation from this session (see lifecycleEpoch).
+    this.lifecycleEpoch += 1
     // A catch-up Promise can outlive the transport session.  Invalidate it before
     // clearing its bookkeeping so its finally() cannot corrupt the next session.
     this.catchUpReady = false
@@ -788,11 +817,73 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
   }
 
   async createSpace<T>(type: SpaceInfo['type'], initialDoc: T, meta?: { name?: string; description?: string; appTag?: string; modules?: string[] }): Promise<SpaceInfo> {
-    const spaceId = crypto.randomUUID()
+    // The lease MUST be opened synchronously at the public entry point — before
+    // any await — so a flight parked in an early await cannot re-issue itself a
+    // lease from a later session (see openOrCreateDeterministicPrivateSpace).
+    return this.createSpaceWithId(crypto.randomUUID(), type, initialDoc, meta, undefined,
+      openLifecycleLease(() => this.lifecycleEpoch, 'the space creation'))
+  }
+
+  /**
+   * Sync 001 §"Privater Space": open (if already loaded) or deterministically
+   * create the private space whose genesis (id + generation-0 keys) is derived
+   * from the identity. Idempotent across devices / recovery / restart — every
+   * device derives byte-identical material, so space-register is first-writer-wins
+   * idempotent and the local key provisioning is idempotent (see
+   * createDeterministicSpaceKey). Callers MUST restore persisted spaces first; a
+   * fully-provisioned private space is returned as-is rather than re-created.
+   *
+   * Retry- AND restart-safe: the early return is taken ONLY for a space this
+   * process already provisioned end-to-end. After a process restart (or a create
+   * that died at a durability boundary) nothing is marked, so the idempotent
+   * provisioning tail re-runs — re-persisting key material/metadata and, above
+   * all, re-running `ensurePublished()` so a space whose metadata was persisted
+   * but whose `space-register` never reached the broker gets published instead of
+   * being reported as complete. Concurrent calls share one flight.
+   */
+  openOrCreateDeterministicPrivateSpace<T>(initialDoc: T, meta?: { name?: string; description?: string; appTag?: string; modules?: string[] }): Promise<SpaceInfo> {
+    if (this.deterministicPrivateSpaceFlight) return this.deterministicPrivateSpaceFlight
+    // The lease is issued SYNCHRONOUSLY here, before the first await of the flight.
+    // Opening it any later (inside createSpaceWithId) let a flight parked in the
+    // genesis derivation survive stop()/start() and then issue itself a lease of
+    // the NEW session — legitimizing the stale creation.
+    const lease = openLifecycleLease(() => this.lifecycleEpoch, 'the space creation')
+    const flight = this.runOpenOrCreateDeterministicPrivateSpace(lease, initialDoc, meta)
+      .finally(() => { if (this.deterministicPrivateSpaceFlight === flight) this.deterministicPrivateSpaceFlight = null })
+    this.deterministicPrivateSpaceFlight = flight
+    return flight
+  }
+
+  private async runOpenOrCreateDeterministicPrivateSpace<T>(lease: LifecycleLease, initialDoc: T, meta?: { name?: string; description?: string; appTag?: string; modules?: string[] }): Promise<SpaceInfo> {
+    // The derivation itself is an await boundary and runs under the lease too.
+    const genesis = await lease.step(derivePrivateSpaceGenesis((info, length) => this.identity.deriveFrameworkKey(info, length)))
+    const existing = this.spaces.get(genesis.spaceId)
+    if (existing && this.fullyProvisionedSpaces.has(genesis.spaceId)) return existing.info
+    return this.createSpaceWithId(genesis.spaceId, 'shared', initialDoc, meta, {
+      contentKey: genesis.contentKey,
+      capabilitySigningSeed: genesis.capabilitySigningSeed,
+    }, lease)
+  }
+
+  private async createSpaceWithId<T>(spaceId: string, type: SpaceInfo['type'], initialDoc: T, meta: { name?: string; description?: string; appTag?: string; modules?: string[] } | undefined, genesisMaterial: { contentKey: Uint8Array; capabilitySigningSeed: Uint8Array } | undefined, lease: LifecycleLease): Promise<SpaceInfo> {
     const now = new Date().toISOString()
     const myDid = this.identity.getDid()
+    // Structured cancellation for the WHOLE flight: every await below runs through
+    // lease.step(), so the flight resumes only into the session that started it, and
+    // every synchronous effect is preceded by lease.check(). The lease is MANDATORY
+    // and issued synchronously at the public entry points (createSpace /
+    // openOrCreateDeterministicPrivateSpace) — opening it here was one await too
+    // late: the genesis derivation ran outside of it.
+    lease.check()
 
-    const info: SpaceInfo = {
+    // RESUME: a previous attempt may have thrown at a durability/publication
+    // boundary AFTER the space entered `this.spaces` (then marked incomplete).
+    // Reuse that doc + state and re-run the remaining, idempotent phases —
+    // replacing them would drop the seeded content and leak the attached update
+    // observer, and skipping them would report success on a half-created space.
+    const resumed = this.spaces.get(spaceId)
+
+    const info: SpaceInfo = resumed?.info ?? {
       id: spaceId,
       type,
       name: meta?.name,
@@ -807,9 +898,9 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
       createdAt: now,
     }
 
-    // Create Y.Doc
-    const doc = new Y.Doc()
-    doc.transact(() => {
+    // Create Y.Doc (only on a fresh create; a resume keeps the seeded doc)
+    const doc = resumed?.doc ?? new Y.Doc()
+    if (!resumed) doc.transact(() => {
       applyInitialDoc(doc, initialDoc as Record<string, any>)
       // Set shared metadata in _meta map. appTag included: invited members must
       // inherit cross-app isolation (the invite carries no plaintext spaceInfo).
@@ -832,41 +923,57 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
       doc.getMap<AdminEntry>('_admins').set(myDid, selfAdmin)
     }, 'local')
 
-    // Create group key + capability key pair + owner self-capability
-    await createSpaceKey({ crypto: this.crypto, keyPort: this.keyManagement, spaceId, ownerDid: this.identity.getDid(), validityDurationMs: this.capabilityValidityMs })
+    // Create group key + capability key pair + owner self-capability. The
+    // deterministic path (private space) uses the derived genesis material and is
+    // idempotent at generation 0 (multi-device / recovery / crash-safe).
+    if (genesisMaterial) {
+      await lease.step(createDeterministicSpaceKey({ crypto: this.crypto, keyPort: this.keyManagement, spaceId, ownerDid: this.identity.getDid(), validityDurationMs: this.capabilityValidityMs, genesisMaterial }))
+    } else {
+      await lease.step(createSpaceKey({ crypto: this.crypto, keyPort: this.keyManagement, spaceId, ownerDid: this.identity.getDid(), validityDurationMs: this.capabilityValidityMs }))
+    }
 
     // Store state (include own encryption key for multi-device key rotation)
-    const ownEncKey = await this.identity.getEncryptionPublicKeyBytes()
-    const state: YjsSpaceState = {
-      info,
-      doc,
-      handles: new Set(),
-      memberEncryptionKeys: new Map([[this.identity.getDid(), ownEncKey]]),
-      unsubUpdate: null,
+    let state: YjsSpaceState
+    if (resumed) {
+      state = resumed
+    } else {
+      const ownEncKey = await lease.step(this.identity.getEncryptionPublicKeyBytes())
+      state = {
+        info,
+        doc,
+        handles: new Set(),
+        memberEncryptionKeys: new Map([[this.identity.getDid(), ownEncKey]]),
+        unsubUpdate: null,
+      }
+      this.spaces.set(spaceId, state)
     }
-    this.spaces.set(spaceId, state)
+    // Until every phase below completed, this space must NOT be treated as
+    // provisioned: a failure (or a process death) leaves metadata / group key /
+    // first publication missing, and the next open-or-create has to resume them.
+    this.fullyProvisionedSpaces.delete(spaceId)
 
-    // Setup encrypted sync for this space
-    this.setupSpaceSync(state)
+    // Setup encrypted sync for this space (a resume keeps its existing observer)
+    if (!state.unsubUpdate) this.setupSpaceSync(state)
 
     // Save to CompactStore
-    await this._saveToCompactStore(state)
+    await lease.step(this._saveToCompactStore(state))
 
     // Save metadata + group key
     if (this.metadataStorage) {
-      await this.metadataStorage.saveSpaceMetadata({
+      await lease.step(this.metadataStorage.saveSpaceMetadata({
         info,
         documentId: spaceId,
         documentUrl: `yjs:${spaceId}`,
         memberEncryptionKeys: {},
-      })
-      const groupKey = await this.keyManagement.getCurrentKey(spaceId)
-      const generation = await this.keyManagement.getCurrentGeneration(spaceId)
+      }))
+      const groupKey = await lease.step(this.keyManagement.getCurrentKey(spaceId))
+      const generation = await lease.step(this.keyManagement.getCurrentGeneration(spaceId))
       if (groupKey) {
-        await this.persistGroupKeyWithSeed(spaceId, generation, groupKey)
+        await lease.step(this.persistGroupKeyWithSeed(spaceId, generation, groupKey))
       }
     }
 
+    lease.check()
     this.notifySpaceListeners()
 
     // VE-8/VE-2 (Sync 002 §207): the creator runs the closed first-publication
@@ -875,9 +982,9 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
     // appends seq=0. When log-sync is on we do NOT use the legacy multi-device
     // content send as the log-path source (VE-7 disables it fully in Phase 3).
     if (this.logSyncEnabled) {
-      const coordinator = await this.getOrCreateCoordinator(state)
+      const coordinator = await lease.step(this.getOrCreateCoordinator(state, lease))
       if (coordinator) {
-        await coordinator.ensurePublished().catch((err) => {
+        await lease.step(coordinator.ensurePublished().catch((err) => {
           if (err instanceof AuthorMismatchError) {
             console.error('[YjsReplication] AUTHOR_MISMATCH during createSpace publish:', err.message)
           } else if (err instanceof LocalAppendFailedError) {
@@ -888,7 +995,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
           } else {
             console.debug('[YjsReplication] first-publication deferred (will retry):', err)
           }
-        })
+        }))
         // VE-4 (self-contained log, mirrors the Automerge adapter): the creator's
         // INITIAL doc seed (_members/_admins/_meta + the initialDoc) was written to
         // the Y.Doc BEFORE setupSpaceSync attached the update observer, so it is NOT
@@ -896,7 +1003,13 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
         // (seq=0) so a cold-start device with NO invite snapshot reconstructs the doc
         // purely from `leere heads → kompletter Log` (sync-request catch-up).
         // Subsequent local edits append from seq=1.
-        await this.writeFullStateViaLog(state).catch((err) => {
+        //
+        // DURABLE guard (restart contract): a resume — e.g. the first open-or-create
+        // after a process died between metadata persistence and publication — must
+        // seed the log if and only if it was never seeded. Empty log heads are that
+        // durable proof; a non-empty log already reconstructs the doc, so re-seeding
+        // on every restart would append a redundant full-state entry.
+        if (await lease.step(this.spaceLogIsEmpty(spaceId))) await lease.step(this.writeFullStateViaLog(state).catch((err) => {
           if (err instanceof AuthorMismatchError) {
             console.error('[YjsReplication] AUTHOR_MISMATCH during createSpace seed:', err.message)
           } else if (err instanceof LocalAppendFailedError) {
@@ -907,9 +1020,11 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
           } else {
             console.debug('[YjsReplication] createSpace seed deferred (will retry):', err)
           }
-        })
+        }))
       }
+      lease.check()
       this._scheduleVaultImmediate(state)
+      this.fullyProvisionedSpaces.add(spaceId) // every phase completed + published
       return info
     }
 
@@ -917,12 +1032,12 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
     // Other devices that discover this space via PersonalDoc sync will receive
     // the full state and merge it into their (initially empty) Y.Doc.
     // We use 'content' type (not 'space-invite') to avoid triggering UI notifications.
-    const groupKey = await this.keyManagement.getCurrentKey(spaceId)
+    const groupKey = await lease.step(this.keyManagement.getCurrentKey(spaceId))
     if (groupKey) {
       const myDid = this.identity.getDid()
       const docBinary = Y.encodeStateAsUpdate(doc)
-      const generation = await this.keyManagement.getCurrentGeneration(spaceId)
-      const encrypted = await encryptOneShot({ crypto: this.crypto, spaceContentKey: groupKey, plaintext: docBinary })
+      const generation = await lease.step(this.keyManagement.getCurrentGeneration(spaceId))
+      const encrypted = await lease.step(encryptOneShot({ crypto: this.crypto, spaceContentKey: groupKey, plaintext: docBinary }))
       const payload = {
         spaceId,
         generation,
@@ -935,15 +1050,19 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
         createdAt: new Date().toISOString(), encoding: 'json',
         payload: JSON.stringify(payload), signature: '',
       }
-      const signed = await signEnvelope(envelope, (data) => this.identity.sign(data))
+      const signed = await lease.step(signEnvelope(envelope, (data) => this.identity.sign(data)))
       this.sentMessageIds.add(signed.id)
       setTimeout(() => this.sentMessageIds.delete(signed.id), 30_000)
+      // NOT lease.step(): the catch here swallows an offline send, and it must not
+      // also swallow a lifecycle abort. The check below covers this await.
       try { await this.messaging.send(signed) } catch { /* offline */ }
     }
 
     // Push initial state to Vault so other devices can pull it
+    lease.check()
     this._scheduleVaultImmediate(state)
 
+    this.fullyProvisionedSpaces.add(spaceId) // every phase completed
     return info
   }
 
@@ -1748,10 +1867,33 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
   }
 
   /**
+   * Durable proof of "this space was never seeded into the log": empty known
+   * heads. Used by the resume path so the genesis full-state entry is written
+   * exactly once across process restarts. Unknown (no log store) → treat as
+   * seeded, so we never append a duplicate on a store-less setup.
+   */
+  private async spaceLogIsEmpty(spaceId: string): Promise<boolean> {
+    if (!this.docLogStore) return false
+    try {
+      const heads = await this.docLogStore.getKnownHeads(spaceId)
+      return Object.keys(heads).length === 0
+    } catch {
+      return false
+    }
+  }
+
+  /**
    * Get (or lazily create) the LogSyncCoordinator for a space (VE-2..9). Returns
    * null when the log path is disabled or there is no durable store.
+   *
+   * `lease` binds the install to a session: the coordinator's engine hooks close over
+   * `state`, so a caller whose flight outlived its session would otherwise publish a
+   * coordinator over a destroyed doc into `this.coordinators` — where the next
+   * open-or-create finds it by spaceId and never re-binds it. Callers that own a
+   * lifecycle (the creation flight) pass their lease; the check sits after the awaits
+   * below, immediately before the map mutation.
    */
-  private async getOrCreateCoordinator(state: YjsSpaceState): Promise<LogSyncCoordinator | null> {
+  private async getOrCreateCoordinator(state: YjsSpaceState, lease?: LifecycleLease): Promise<LogSyncCoordinator | null> {
     if (!this.logSyncEnabled) return null
     const spaceId = state.info.id
     const existing = this.coordinators.get(spaceId)
@@ -1805,6 +1947,9 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
       },
       onSecurityError: this.onSecurityError,
     })
+    // Last boundary before the install: ensureDocLogStore()/ensureDeviceId() awaited,
+    // so a stop() may have landed since the caller's own check.
+    lease?.check()
     this.coordinators.set(spaceId, coordinator)
     return coordinator
   }

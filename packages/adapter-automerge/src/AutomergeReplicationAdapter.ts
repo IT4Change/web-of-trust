@@ -5,13 +5,14 @@ import * as Automerge from '@automerge/automerge'
 import type { ReplicationAdapter, SpaceHandle, TransactOptions, Subscribable, MessagingAdapter, MessageIdHistoryPort, SpaceMetadataStorage, KeyManagementPort, MemberUpdatePendingStore, WireMessage, DocLogStore } from '@web_of_trust/core/ports'
 import type { IdentitySession, SpaceInfo, SpaceMemberChange, IncomingSpaceInvite, ReplicationState, MessageEnvelope } from '@web_of_trust/core/types'
 import {
-  createSpaceKey, rotateSpaceKey, importKey, processMemberUpdate,
+  createSpaceKey, createDeterministicSpaceKey, rotateSpaceKey, importKey, processMemberUpdate,
   resolveMemberUpdatesAgainstCanonical, canonicalEventSetAnswersPending,
   buildSpaceInviteBody, applySpaceInviteBody, buildKeyRotationBody, applyKeyRotationBody,
   deliverInboxMessage, receiveInboxMessage,
   runTwoPhaseRemoval, recoverPendingRemovals,
+  openLifecycleLease,
 } from '@web_of_trust/core/application'
-import type { LocalImpact, SecureRemovalDeps } from '@web_of_trust/core/application'
+import type { LocalImpact, SecureRemovalDeps, LifecycleLease } from '@web_of_trust/core/application'
 import type {
   ProtocolCryptoAdapter, MemberUpdateSignal, SeenMemberUpdateSignal, SpaceInviteBody, KeyRotationBody,
   DidResolver, DidcommPlaintextMessage, InboxAckLocalOutcome, InboxMessageKind,
@@ -28,6 +29,7 @@ import {
   LogSyncCoordinator, AuthorMismatchError, LocalAppendFailedError, CapabilityKeysUnavailableError, createSpaceCapabilityJws,
   createSpaceRegisterMessageWithSigner, createSpaceRotateMessageWithSigner,
   LOG_ENTRY_MESSAGE_TYPE, SYNC_RESPONSE_MESSAGE_TYPE,
+  derivePrivateSpaceGenesis,
 } from '@web_of_trust/core/protocol'
 import type { LogSyncEngineHooks, CapabilitySource, ControlFrameReceipt, WriteRejectHandler } from '@web_of_trust/core/protocol'
 import { WebCryptoProtocolCryptoAdapter } from '@web_of_trust/core/protocol-adapters'
@@ -322,6 +324,25 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
   private compactStore: CompactStore | null = null
   private vault: VaultClient | null = null
   private spaces = new Map<string, SpaceState>()
+  /**
+   * Spaces whose full provisioning THIS process ran to completion (key material,
+   * metadata, repo flush, publication). Purely an optimisation for the hot path —
+   * never a durable completion claim: it starts EMPTY on every process start and
+   * is cleared on stop(). So the first open-or-create after a restart always
+   * re-runs the idempotent provisioning tail, which is what closes the
+   * "metadata persisted, process died before space-register" hole. Completion is
+   * re-derived from durable artefacts (key store, metadata store, log heads).
+   */
+  private fullyProvisionedSpaces = new Set<string>()
+  /** Single-flight guard so concurrent open-or-create calls share one creation. */
+  private deterministicPrivateSpaceFlight: Promise<SpaceInfo> | null = null
+  /**
+   * Adapter lifecycle generation, bumped on every stop(). A creation flight
+   * captures it and re-checks it after its await boundaries: a flight that
+   * outlived its session must neither mutate the new session's state nor
+   * certify a space as provisioned in it.
+   */
+  private lifecycleEpoch = 0
   private state: ReplicationState = 'idle'
   private memberChangeCallbacks = new Set<(change: SpaceMemberChange) => void>()
   private spaceInviteListeners = new Set<(invite: IncomingSpaceInvite) => void>()
@@ -897,6 +918,13 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
   }
 
   async stop(): Promise<void> {
+    // Provisioning verification is per-session: a flight may still be running its
+    // continuation past this stop(), so the next session must NOT trust it and has
+    // to re-verify (idempotently) instead of taking an early return.
+    this.fullyProvisionedSpaces.clear()
+    this.deterministicPrivateSpaceFlight = null
+    // Invalidate any in-flight creation from this session (see lifecycleEpoch).
+    this.lifecycleEpoch += 1
     this.started = false
     if (this.reconnectDebounceTimer) {
       clearTimeout(this.reconnectDebounceTimer)
@@ -955,8 +983,62 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
   }
 
   async createSpace<T>(type: 'personal' | 'shared', initialDoc: T, meta?: { name?: string; description?: string; appTag?: string; modules?: string[] }): Promise<SpaceInfo> {
-    const spaceId = crypto.randomUUID()
+    // The lease MUST be opened synchronously at the public entry point — before
+    // any await — so a flight parked in an early await cannot re-issue itself a
+    // lease from a later session (see openOrCreateDeterministicPrivateSpace).
+    return this.createSpaceWithId(crypto.randomUUID(), type, initialDoc, meta, undefined,
+      openLifecycleLease(() => this.lifecycleEpoch, 'the space creation'))
+  }
+
+  /**
+   * Sync 001 §"Privater Space": open (if already loaded) or deterministically
+   * create the private space whose genesis (id + generation-0 keys) is derived
+   * from the identity. Idempotent across devices / recovery / restart — every
+   * device derives byte-identical material, so space-register is first-writer-wins
+   * idempotent and the local key provisioning is idempotent. Callers MUST restore
+   * persisted spaces first; a fully-provisioned private space is returned as-is.
+   *
+   * Retry- AND restart-safe: the early return is taken ONLY for a space this
+   * process already provisioned end-to-end. After a process restart (or a create
+   * that died at a durability boundary) nothing is marked, so the idempotent
+   * provisioning tail re-runs — re-persisting key material/metadata and, above
+   * all, re-running `ensurePublished()` so a space whose metadata was persisted
+   * but whose `space-register` never reached the broker gets published instead of
+   * being reported as complete. Concurrent calls share one flight.
+   */
+  openOrCreateDeterministicPrivateSpace<T>(initialDoc: T, meta?: { name?: string; description?: string; appTag?: string; modules?: string[] }): Promise<SpaceInfo> {
+    if (this.deterministicPrivateSpaceFlight) return this.deterministicPrivateSpaceFlight
+    // The lease is issued SYNCHRONOUSLY here, before the first await of the flight.
+    // Opening it any later (inside createSpaceWithId) let a flight parked in the
+    // genesis derivation survive stop()/start() and then issue itself a lease of
+    // the NEW session — legitimizing the stale creation.
+    const lease = openLifecycleLease(() => this.lifecycleEpoch, 'the space creation')
+    const flight = this.runOpenOrCreateDeterministicPrivateSpace(lease, initialDoc, meta)
+      .finally(() => { if (this.deterministicPrivateSpaceFlight === flight) this.deterministicPrivateSpaceFlight = null })
+    this.deterministicPrivateSpaceFlight = flight
+    return flight
+  }
+
+  private async runOpenOrCreateDeterministicPrivateSpace<T>(lease: LifecycleLease, initialDoc: T, meta?: { name?: string; description?: string; appTag?: string; modules?: string[] }): Promise<SpaceInfo> {
+    // The derivation itself is an await boundary and runs under the lease too.
+    const genesis = await lease.step(derivePrivateSpaceGenesis((info, length) => this.identity.deriveFrameworkKey(info, length)))
+    const existing = this.spaces.get(genesis.spaceId)
+    if (existing && this.fullyProvisionedSpaces.has(genesis.spaceId)) return existing.info
+    return this.createSpaceWithId(genesis.spaceId, 'shared', initialDoc, meta, {
+      contentKey: genesis.contentKey,
+      capabilitySigningSeed: genesis.capabilitySigningSeed,
+    }, lease)
+  }
+
+  private async createSpaceWithId<T>(spaceId: string, type: 'personal' | 'shared', initialDoc: T, meta: { name?: string; description?: string; appTag?: string; modules?: string[] } | undefined, genesisMaterial: { contentKey: Uint8Array; capabilitySigningSeed: Uint8Array } | undefined, lease: LifecycleLease): Promise<SpaceInfo> {
     const myDid = this.identity.getDid()
+    // Structured cancellation for the WHOLE flight: every await below runs through
+    // lease.step(), so the flight resumes only into the session that started it, and
+    // every synchronous effect is preceded by lease.check(). The lease is MANDATORY
+    // and issued synchronously at the public entry points (createSpace /
+    // openOrCreateDeterministicPrivateSpace) — opening it here was one await too
+    // late: the genesis derivation ran outside of it.
+    lease.check()
 
     // M2 (Review): das Creator-Doc startet auf demselben deterministischen
     // Bootstrap-Binary wie der Invite-Apply (inviteBootstrapBinary: fester
@@ -974,17 +1056,25 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
     // docId (UUID) stays in sync with the repo's docId. Outside log-sync the
     // legacy random documentId is kept (the invite snapshot carries the
     // documentUrl) — no behaviour change for the 146 baseline tests.
-    const docHandle = this.logSyncEnabled
-      ? this.repo.import<T>(this.inviteBootstrapBinary(spaceId), { docId: spaceIdToDocumentId(spaceId) })
-      : this.repo.import<T>(this.inviteBootstrapBinary(spaceId))
-    if (!docHandle.isReady()) {
+    // RESUME: a previous attempt may have thrown at a durability/publication
+    // boundary AFTER the space entered `this.spaces` (then marked incomplete).
+    // Reuse that doc + state and re-run the remaining, idempotent phases —
+    // re-importing would discard the seeded doc, and skipping them would report
+    // success on a half-created space.
+    const resumed = this.spaces.get(spaceId)
+    const docHandle = resumed
+      ? null
+      : this.logSyncEnabled
+        ? this.repo.import<T>(this.inviteBootstrapBinary(spaceId), { docId: spaceIdToDocumentId(spaceId) })
+        : this.repo.import<T>(this.inviteBootstrapBinary(spaceId))
+    if (docHandle && !docHandle.isReady()) {
       docHandle.doneLoading()
     }
 
     // Set initial app doc + shared metadata in the doc's _meta object. appTag
     // included: invited members must inherit cross-app isolation (the invite
     // carries no plaintext spaceInfo).
-    docHandle.change((d: any) => {
+    docHandle?.change((d: any) => {
       Object.assign(d, initialDoc)
       d._meta = d._meta ?? {}
       if (meta?.name) d._meta.name = meta.name
@@ -1015,17 +1105,25 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
       d._admins[myDid] = { did: myDid }
     })
 
-    // Create group key + capability key pair + owner self-capability
-    await createSpaceKey({ crypto: this.crypto, keyPort: this.keyManagement, spaceId, ownerDid: this.identity.getDid(), validityDurationMs: this.capabilityValidityMs })
+    // Create group key + capability key pair + owner self-capability. The
+    // deterministic path (private space) uses derived genesis material and is
+    // idempotent at generation 0 (multi-device / recovery / crash-safe).
+    if (genesisMaterial) {
+      await lease.step(createDeterministicSpaceKey({ crypto: this.crypto, keyPort: this.keyManagement, spaceId, ownerDid: this.identity.getDid(), validityDurationMs: this.capabilityValidityMs, genesisMaterial }))
+    } else {
+      await lease.step(createSpaceKey({ crypto: this.crypto, keyPort: this.keyManagement, spaceId, ownerDid: this.identity.getDid(), validityDurationMs: this.capabilityValidityMs }))
+    }
+
+    const documentId = resumed?.documentId ?? docHandle!.documentId
 
     // Register document -> space mapping
-    this.networkAdapter.registerDocument(docHandle.documentId, spaceId)
+    this.networkAdapter.registerDocument(documentId, spaceId)
 
     // Register self-as-other-device as peer for multi-device sync
     // Use a different peerId suffix so automerge-repo doesn't think it's talking to itself
     this.networkAdapter.registerSelfPeer(spaceId)
 
-    const info: SpaceInfo = {
+    const info: SpaceInfo = resumed?.info ?? {
       id: spaceId,
       type,
       name: meta?.name,
@@ -1038,20 +1136,29 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
       createdAt: new Date().toISOString(),
     }
 
-    const spaceState: SpaceState = {
-      info,
-      documentId: docHandle.documentId,
-      documentUrl: docHandle.url,
-      handles: new Set(),
-      memberEncryptionKeys: new Map(),
+    let spaceState: SpaceState
+    if (resumed) {
+      spaceState = resumed
+    } else {
+      spaceState = {
+        info,
+        documentId: docHandle!.documentId,
+        documentUrl: docHandle!.url,
+        handles: new Set(),
+        memberEncryptionKeys: new Map(),
+      }
+      this.spaces.set(spaceId, spaceState)
     }
-    this.spaces.set(spaceId, spaceState)
-    this.attachMembershipObserver(spaceState)
+    // Until every phase below completed, this space must NOT be treated as
+    // provisioned: a failure (or a process death) leaves metadata / repo flush /
+    // first publication missing, and the next open-or-create has to resume them.
+    this.fullyProvisionedSpaces.delete(spaceId)
+    this.attachMembershipObserver(spaceState) // self-guarded: no double attach
     this._notifySpacesSubscribers()
 
-    await this._persistSpaceMetadata(spaceState)
+    await lease.step(this._persistSpaceMetadata(spaceState))
     // Flush repo so the doc is persisted to IndexedDB
-    await this.repo.flush([docHandle.documentId])
+    await lease.step(this.repo.flush([documentId]))
 
     // VE-8/VE-2 (Sync 002 §207): under log-sync the creator runs the closed
     // first-publication sequence — space-register → present-capability →
@@ -1059,11 +1166,15 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
     // edit, so the first local write appends seq=0. The initial doc seed (above)
     // rode in the encrypted invite snapshot, NOT as a log entry (the observer is
     // attached only now, mirroring the Yjs setupSpaceSync ordering).
+    // stop() unsubscribed this flight's observer already — re-attaching it below
+    // would revive a hook closing over the shut-down session's state.
+    lease.check()
+
     if (this.logSyncEnabled) {
       this.attachLogChangeObserver(spaceState)
-      const coordinator = await this.getOrCreateCoordinator(spaceState)
+      const coordinator = await lease.step(this.getOrCreateCoordinator(spaceState, lease))
       if (coordinator) {
-        await coordinator.ensurePublished().catch((err) => {
+        await lease.step(coordinator.ensurePublished().catch((err) => {
           if (err instanceof AuthorMismatchError) {
             console.error('[ReplicationAdapter] AUTHOR_MISMATCH during createSpace publish:', err.message)
           } else if (err instanceof LocalAppendFailedError) {
@@ -1073,15 +1184,23 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
           } else {
             console.debug('[ReplicationAdapter] first-publication deferred (will retry):', err)
           }
-        })
+        }))
         // VE-4 (self-contained log): the creator's INITIAL doc seed (members/admins/
         // meta) was written to the Automerge doc BEFORE the observer attached, so it
         // is NOT yet in the log. Publish it as the first log-entry (seq=0, full
         // state) so a cold-start device with NO snapshot reconstructs the doc purely
         // from `leere heads → kompletter Log`. Subsequent edits append from seq=1.
-        await this.writeFullStateViaLog(spaceState)
+        // DURABLE guard (restart contract): seed the log if and only if it was
+        // never seeded. Empty log heads are that proof; a non-empty log already
+        // reconstructs the doc, so re-seeding on every restart would append a
+        // redundant full-state entry.
+        if (await lease.step(this.spaceLogIsEmpty(spaceId))) await lease.step(this.writeFullStateViaLog(spaceState))
       }
     }
+
+    // The snapshot pushes are fire-and-forget, so nothing downstream would catch a
+    // stale flight: check BEFORE starting them, not after.
+    lease.check()
 
     // Save initial snapshot to CompactStore (fire-and-forget)
     this._saveToCompactStore(spaceState).catch(() => {})
@@ -1089,6 +1208,7 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
     // Push initial snapshot to vault (fire-and-forget)
     this._pushSnapshotToVault(spaceState).catch(() => {})
 
+    this.fullyProvisionedSpaces.add(spaceId) // every phase completed + published
     return { ...info }
   }
 
@@ -2713,6 +2833,22 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
   }
 
   /**
+   * Durable proof of "this space was never seeded into the log": empty known
+   * heads. Used by the resume path so the genesis full-state entry is written
+   * exactly once across process restarts. Unknown (no log store) → treat as
+   * seeded, so we never append a duplicate on a store-less setup.
+   */
+  private async spaceLogIsEmpty(spaceId: string): Promise<boolean> {
+    if (!this.docLogStore) return false
+    try {
+      const heads = await this.docLogStore.getKnownHeads(spaceId)
+      return Object.keys(heads).length === 0
+    } catch {
+      return false
+    }
+  }
+
+  /**
    * VE-9 capability source for a Space-doc: re-issue a Space-Capability JWS
    * (read+write) for the current generation, signed with the per-generation Space
    * Capability signing key (NEVER the Identity key; kid = wot:space:<spaceId>#cap-<gen>).
@@ -2825,8 +2961,14 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
    * null when the log path is disabled or there is no durable store. The
    * coordinator's docId is the canonical UUID spaceId (VE-9) — NOT the base58
    * documentId — so all three wire surfaces carry the UUID.
+   *
+   * `lease` binds the install to a session: the coordinator's engine hooks close over
+   * `space`, and the install additionally flips the CURRENT network adapter to
+   * log-sync-managed. A caller whose flight outlived its session would otherwise hand
+   * the new session both. Callers that own a lifecycle (the creation flight) pass
+   * their lease; the check sits after the awaits below, before either mutation.
    */
-  private async getOrCreateCoordinator(space: SpaceState): Promise<LogSyncCoordinator | null> {
+  private async getOrCreateCoordinator(space: SpaceState, lease?: LifecycleLease): Promise<LogSyncCoordinator | null> {
     if (!this.logSyncEnabled) return null
     const spaceId = space.info.id
     const existing = this.coordinators.get(spaceId)
@@ -2872,6 +3014,9 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
       },
       onSecurityError: this.onSecurityError,
     })
+    // Last boundary before the two session-wide mutations: ensureDocLogStore()/
+    // ensureDeviceId() awaited, so a stop() may have landed since the caller's check.
+    lease?.check()
     this.coordinators.set(spaceId, coordinator)
     // VE-7: the log path now owns this space's steady-state sync — disable the
     // native automerge-repo content/full-state channel for it.
