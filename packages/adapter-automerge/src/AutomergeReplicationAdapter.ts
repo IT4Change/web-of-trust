@@ -983,7 +983,11 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
   }
 
   async createSpace<T>(type: 'personal' | 'shared', initialDoc: T, meta?: { name?: string; description?: string; appTag?: string; modules?: string[] }): Promise<SpaceInfo> {
-    return this.createSpaceWithId(crypto.randomUUID(), type, initialDoc, meta)
+    // The lease MUST be opened synchronously at the public entry point — before
+    // any await — so a flight parked in an early await cannot re-issue itself a
+    // lease from a later session (see openOrCreateDeterministicPrivateSpace).
+    return this.createSpaceWithId(crypto.randomUUID(), type, initialDoc, meta, undefined,
+      openLifecycleLease(() => this.lifecycleEpoch, 'the space creation'))
   }
 
   /**
@@ -1004,29 +1008,37 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
    */
   openOrCreateDeterministicPrivateSpace<T>(initialDoc: T, meta?: { name?: string; description?: string; appTag?: string; modules?: string[] }): Promise<SpaceInfo> {
     if (this.deterministicPrivateSpaceFlight) return this.deterministicPrivateSpaceFlight
-    const flight = this.runOpenOrCreateDeterministicPrivateSpace(initialDoc, meta)
+    // The lease is issued SYNCHRONOUSLY here, before the first await of the flight.
+    // Opening it any later (inside createSpaceWithId) let a flight parked in the
+    // genesis derivation survive stop()/start() and then issue itself a lease of
+    // the NEW session — legitimizing the stale creation.
+    const lease = openLifecycleLease(() => this.lifecycleEpoch, 'the space creation')
+    const flight = this.runOpenOrCreateDeterministicPrivateSpace(lease, initialDoc, meta)
       .finally(() => { if (this.deterministicPrivateSpaceFlight === flight) this.deterministicPrivateSpaceFlight = null })
     this.deterministicPrivateSpaceFlight = flight
     return flight
   }
 
-  private async runOpenOrCreateDeterministicPrivateSpace<T>(initialDoc: T, meta?: { name?: string; description?: string; appTag?: string; modules?: string[] }): Promise<SpaceInfo> {
-    const genesis = await derivePrivateSpaceGenesis((info, length) => this.identity.deriveFrameworkKey(info, length))
+  private async runOpenOrCreateDeterministicPrivateSpace<T>(lease: LifecycleLease, initialDoc: T, meta?: { name?: string; description?: string; appTag?: string; modules?: string[] }): Promise<SpaceInfo> {
+    // The derivation itself is an await boundary and runs under the lease too.
+    const genesis = await lease.step(derivePrivateSpaceGenesis((info, length) => this.identity.deriveFrameworkKey(info, length)))
     const existing = this.spaces.get(genesis.spaceId)
     if (existing && this.fullyProvisionedSpaces.has(genesis.spaceId)) return existing.info
     return this.createSpaceWithId(genesis.spaceId, 'shared', initialDoc, meta, {
       contentKey: genesis.contentKey,
       capabilitySigningSeed: genesis.capabilitySigningSeed,
-    })
+    }, lease)
   }
 
-  private async createSpaceWithId<T>(spaceId: string, type: 'personal' | 'shared', initialDoc: T, meta?: { name?: string; description?: string; appTag?: string; modules?: string[] }, genesisMaterial?: { contentKey: Uint8Array; capabilitySigningSeed: Uint8Array }): Promise<SpaceInfo> {
+  private async createSpaceWithId<T>(spaceId: string, type: 'personal' | 'shared', initialDoc: T, meta: { name?: string; description?: string; appTag?: string; modules?: string[] } | undefined, genesisMaterial: { contentKey: Uint8Array; capabilitySigningSeed: Uint8Array } | undefined, lease: LifecycleLease): Promise<SpaceInfo> {
     const myDid = this.identity.getDid()
     // Structured cancellation for the WHOLE flight: every await below runs through
     // lease.step(), so the flight resumes only into the session that started it, and
-    // every synchronous effect is preceded by lease.check(). Placing the checks by
-    // hand kept leaving the next await boundary open one step further down.
-    const lease = openLifecycleLease(() => this.lifecycleEpoch, 'the space creation')
+    // every synchronous effect is preceded by lease.check(). The lease is MANDATORY
+    // and issued synchronously at the public entry points (createSpace /
+    // openOrCreateDeterministicPrivateSpace) — opening it here was one await too
+    // late: the genesis derivation ran outside of it.
+    lease.check()
 
     // M2 (Review): das Creator-Doc startet auf demselben deterministischen
     // Bootstrap-Binary wie der Invite-Apply (inviteBootstrapBinary: fester

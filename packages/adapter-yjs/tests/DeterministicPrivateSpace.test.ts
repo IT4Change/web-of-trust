@@ -103,6 +103,30 @@ function coordinatorsOf(adapter: YjsReplicationAdapter): Map<string, unknown> {
  * between the epoch check and the `spaces.set()` mutation. Later calls pass through
  * so the new session can create the space while flight A is still parked.
  */
+/**
+ * Gates the FIRST deriveFrameworkKey() call — the genesis DERIVATION itself, i.e.
+ * the very first await of the flight, before any lease used to exist there.
+ */
+function identityGatedOnFirstDerive(identity: PublicIdentitySession): { identity: PublicIdentitySession; deriveCalls: () => number; release: () => void } {
+  let calls = 0
+  let release: () => void = () => {}
+  const gate = new Promise<void>((r) => { release = r })
+  const proxied = new Proxy(identity as object, {
+    get(target, prop) {
+      if (prop === 'deriveFrameworkKey') {
+        return async (info: string, length?: number) => {
+          calls += 1
+          if (calls === 1) await gate
+          return (target as PublicIdentitySession).deriveFrameworkKey(info, length)
+        }
+      }
+      const value = Reflect.get(target, prop)
+      return typeof value === 'function' ? value.bind(target) : value
+    },
+  }) as PublicIdentitySession
+  return { identity: proxied, deriveCalls: () => calls, release: () => release() }
+}
+
 function identityGatedOnFirstEncKey(identity: PublicIdentitySession): { identity: PublicIdentitySession; encCalls: () => number; release: () => void } {
   let calls = 0
   let release: () => void = () => {}
@@ -345,6 +369,33 @@ describe('Deterministic private space (Sync 001) — Yjs adapter contract', () =
     await flightA // the stale flight runs out
 
     expect(Object.keys(await stores.docLogStore.getKnownHeads(genesis.spaceId))).toHaveLength(0)
+  }, 60_000)
+
+  it('a flight parked in the genesis derivation must not create in a later session', async () => {
+    // Review round 5: the lease used to be opened inside createSpaceWithId — one
+    // await too late. A flight parked in derivePrivateSpaceGenesis() survived
+    // stop()/start(), then issued itself a lease of the NEW session and actually
+    // created the stale private space there (1 space instead of 0).
+    const broker = new InProcessLogBroker()
+    const { identity } = await createTestIdentity('detps-derive')
+    cleanup.push(async () => { await identity.deleteStoredIdentity() })
+    const DEVICE = 'c7777777-7777-4777-8777-777777777777'
+    const gated = identityGatedOnFirstDerive(identity)
+    const { adapter } = await makeAdapter(gated.identity, broker, 'detps-derive', DEVICE, await makeStores(DEVICE))
+    await adapter.start()
+    cleanup.push(async () => { await adapter.stop() })
+
+    const flightA = adapter.openOrCreateDeterministicPrivateSpace({ items: {} }, PRIVATE_META).then(() => null, (e: Error) => e)
+    await waitUntil(() => gated.deriveCalls() >= 1, 'flight A to reach the genesis derivation')
+
+    await adapter.stop()
+    await adapter.start()
+
+    // The new session does nothing — the stale flight alone must not create.
+    gated.release()
+    const outcome = await flightA
+    expect(outcome).toBeInstanceOf(Error) // lifecycle changed while in flight
+    expect((await adapter.getSpaces()).filter((s) => s.appTag === 'rls-private')).toHaveLength(0)
   }, 60_000)
 
   it('a stale flight must not overwrite the fresh session at the encryption-key await', async () => {

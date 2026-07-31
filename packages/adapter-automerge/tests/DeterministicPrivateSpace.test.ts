@@ -91,6 +91,30 @@ function countSpaceRegisters(messaging: InMemoryMessagingAdapter): () => number 
 }
 
 /**
+ * Gates the FIRST deriveFrameworkKey() call — the genesis DERIVATION itself, i.e.
+ * the very first await of the flight, before any lease used to exist there.
+ */
+function identityGatedOnFirstDerive(identity: PublicIdentitySession): { identity: PublicIdentitySession; deriveCalls: () => number; release: () => void } {
+  let calls = 0
+  let release: () => void = () => {}
+  const gate = new Promise<void>((r) => { release = r })
+  const proxied = new Proxy(identity as object, {
+    get(target, prop) {
+      if (prop === 'deriveFrameworkKey') {
+        return async (info: string, length?: number) => {
+          calls += 1
+          if (calls === 1) await gate
+          return (target as PublicIdentitySession).deriveFrameworkKey(info, length)
+        }
+      }
+      const value = Reflect.get(target, prop)
+      return typeof value === 'function' ? value.bind(target) : value
+    },
+  }) as PublicIdentitySession
+  return { identity: proxied, deriveCalls: () => calls, release: () => release() }
+}
+
+/**
  * Gates the FIRST saveKey() call — an await inside the key provisioning that sits
  * BEFORE the network registrations. Later calls pass through so the new session can
  * finish while flight A is still parked.
@@ -312,6 +336,30 @@ describe('Deterministic private space (Sync 001) — Automerge adapter contract'
     await flightA
 
     expect(Object.keys(await stores.docLogStore.getKnownHeads(genesis.spaceId))).toHaveLength(0)
+  }, 60_000)
+
+  it('a flight parked in the genesis derivation must not create in a later session', async () => {
+    // Parity with Yjs (review round 5): the lease must be issued synchronously at
+    // the public entry point, and the derivation itself must run under it.
+    const broker = new InProcessLogBroker()
+    const { identity } = await createTestIdentity('detps-am-derive')
+    cleanup.push(async () => { await identity.deleteStoredIdentity() })
+    const DEVICE = 'c7777777-7777-4777-8777-777777777777'
+    const gated = identityGatedOnFirstDerive(identity)
+    const { adapter } = await makeAdapter(gated.identity, broker, 'detps-am-derive', DEVICE, await makeStores(DEVICE))
+    await adapter.start()
+    cleanup.push(async () => { await adapter.stop() })
+
+    const flightA = adapter.openOrCreateDeterministicPrivateSpace({ items: {} }, PRIVATE_META).then(() => null, (e: Error) => e)
+    await waitUntil(() => gated.deriveCalls() >= 1, 'flight A to reach the genesis derivation')
+
+    await adapter.stop()
+    await adapter.start()
+
+    gated.release()
+    const outcome = await flightA
+    expect(outcome).toBeInstanceOf(Error) // lifecycle changed while in flight
+    expect((await adapter.getSpaces()).filter((s) => s.appTag === 'rls-private')).toHaveLength(0)
   }, 60_000)
 
   it('a stale flight must not touch network registration of the fresh session', async () => {
