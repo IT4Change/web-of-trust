@@ -67,7 +67,7 @@ export type {
   ProfileSummary,
 } from './ports/DiscoveryAdapter'
 export type { ReplicationAdapter, SpaceHandle, TransactOptions, SecureSelfLeaveCapable } from './ports/ReplicationAdapter'
-export { hasSecureSelfLeave } from './ports/ReplicationAdapter'
+export { hasSecureSelfLeave } from './application/spaces/replication-capabilities'
 export type { PublishStateStore, PublishStateField } from './ports/PublishStateStore'
 export type { GraphCacheStore, GraphCacheSnapshot, CachedGraphEntry } from './ports/GraphCacheStore'
 export type { OutboxStore, OutboxEntry } from './ports/OutboxStore'

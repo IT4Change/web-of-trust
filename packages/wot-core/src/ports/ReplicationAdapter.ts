@@ -91,18 +91,9 @@ export interface MembershipActivityCapable {
   removeMemberWithActivity(spaceId: string, did: string, opts?: { activityEntry?: Record<string, unknown> }): Promise<{ changed: boolean }>
 }
 
-export function hasMembershipActivity(value: unknown): value is MembershipActivityCapable {
-  return typeof (value as MembershipActivityCapable | null)?.addMemberWithActivity === 'function'
-    && typeof (value as MembershipActivityCapable | null)?.removeMemberWithActivity === 'function'
-}
-
 /** Optional capability: secure self-leave is fully wired, including durable recovery. */
 export interface SecureSelfLeaveCapable {
   supportsSecureSelfLeave(): boolean
-}
-
-export function hasSecureSelfLeave(value: unknown): value is SecureSelfLeaveCapable {
-  return typeof (value as SecureSelfLeaveCapable | null)?.supportsSecureSelfLeave === 'function'
 }
 
 /**
@@ -114,6 +105,6 @@ export interface DeterministicPrivateSpaceCapable {
   openOrCreateDeterministicPrivateSpace<T>(initialDoc: T, meta?: { name?: string; description?: string; appTag?: string; modules?: string[] }): Promise<SpaceInfo>
 }
 
-export function hasDeterministicPrivateSpace(value: unknown): value is DeterministicPrivateSpaceCapable {
-  return typeof (value as DeterministicPrivateSpaceCapable | null)?.openOrCreateDeterministicPrivateSpace === 'function'
-}
+// The runtime guards for these capabilities (hasMembershipActivity,
+// hasSecureSelfLeave, hasDeterministicPrivateSpace) live in
+// application/spaces/replication-capabilities.ts — ports stay type-only.
