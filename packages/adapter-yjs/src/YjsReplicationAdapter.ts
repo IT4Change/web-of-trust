@@ -925,6 +925,9 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
       state = resumed
     } else {
       const ownEncKey = await this.identity.getEncryptionPublicKeyBytes()
+      // Re-check AFTER this await: a stop()/start() during the key read would
+      // otherwise let this stale flight overwrite the fresh session's doc+state.
+      this.ensureSameLifecycle(lifecycleEpoch)
       state = {
         info,
         doc,

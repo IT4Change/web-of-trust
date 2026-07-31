@@ -71,6 +71,24 @@ function countSpaceRegisters(messaging: InMemoryMessagingAdapter): () => number 
 }
 
 /**
+ * Gates the FIRST saveKey() call — an await inside the key provisioning that sits
+ * BEFORE the network registrations. Later calls pass through so the new session can
+ * finish while flight A is still parked.
+ */
+function keyManagementGatedOnFirstSave(km: InMemoryKeyManagementAdapter): { keyManagement: InMemoryKeyManagementAdapter; saveKeyCalls: () => number; release: () => void } {
+  const realSave = km.saveKey.bind(km)
+  let calls = 0
+  let release: () => void = () => {}
+  const gate = new Promise<void>((r) => { release = r })
+  km.saveKey = async (spaceId, generation, key) => {
+    calls += 1
+    if (calls === 1) await gate
+    return realSave(spaceId, generation, key)
+  }
+  return { keyManagement: km, saveKeyCalls: () => calls, release: () => release() }
+}
+
+/**
  * Scripted durability boundary for the lifecycle repro: call 1 blocks on a gate,
  * call 2 throws (new session's flight fails), call 3+ succeeds.
  */
@@ -205,6 +223,44 @@ describe('Deterministic private space (Sync 001) — Automerge adapter contract'
 
     await adapter.openOrCreateDeterministicPrivateSpace({ items: {} }, PRIVATE_META)
     expect(saveCalls()).toBeGreaterThan(2)
+  }, 60_000)
+
+  it('a stale flight must not touch network registration of the fresh session', async () => {
+    // Parity with the Yjs encryption-key repro: the await inside key provisioning
+    // sits BEFORE registerDocument/registerSelfPeer, which are session-wide state.
+    const broker = new InProcessLogBroker()
+    const { identity } = await createTestIdentity('detps-am-netreg')
+    cleanup.push(async () => { await identity.deleteStoredIdentity() })
+    const DEVICE = 'b8888888-8888-4888-8888-888888888888'
+    const stores = await makeStores(DEVICE)
+    const gated = keyManagementGatedOnFirstSave(stores.keyManagement)
+    const { adapter } = await makeAdapter(identity, broker, 'detps-am-netreg', DEVICE, stores)
+    await adapter.start()
+    cleanup.push(async () => { await adapter.stop() })
+
+    const flightA = adapter.openOrCreateDeterministicPrivateSpace({ items: {} }, PRIVATE_META).catch(() => null)
+    await waitUntil(() => gated.saveKeyCalls() >= 1, 'flight A to reach the gated key write')
+
+    await adapter.stop()
+    await adapter.start()
+
+    // Spy on the NEW session's network adapter — start() constructs a fresh
+    // EncryptedMessagingNetworkAdapter, so a spy installed before the restart would
+    // never see what the stale flight does to the new session.
+    const net = (adapter as unknown as { networkAdapter: { registerDocument: (d: unknown, s: string) => void } }).networkAdapter
+    const realRegister = net.registerDocument.bind(net)
+    let registerCalls = 0
+    net.registerDocument = (docId, spaceId) => { registerCalls += 1; return realRegister(docId, spaceId) }
+
+    await adapter.openOrCreateDeterministicPrivateSpace({ items: {} }, PRIVATE_META)
+    const afterFreshSession = registerCalls
+    expect(afterFreshSession).toBeGreaterThan(0) // the fresh session did register
+
+    gated.release()
+    await flightA // the stale flight runs out
+
+    // It must NOT have registered anything into the new session.
+    expect(registerCalls).toBe(afterFreshSession)
   }, 60_000)
 
   it('concurrent open-or-create calls share one flight and yield one space', async () => {

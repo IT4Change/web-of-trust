@@ -94,6 +94,31 @@ function countSpaceRegisters(messaging: InMemoryMessagingAdapter): () => number 
 }
 
 /**
+ * Gates the FIRST getEncryptionPublicKeyBytes() call — the await boundary that sits
+ * between the epoch check and the `spaces.set()` mutation. Later calls pass through
+ * so the new session can create the space while flight A is still parked.
+ */
+function identityGatedOnFirstEncKey(identity: PublicIdentitySession): { identity: PublicIdentitySession; encCalls: () => number; release: () => void } {
+  let calls = 0
+  let release: () => void = () => {}
+  const gate = new Promise<void>((r) => { release = r })
+  const proxied = new Proxy(identity as object, {
+    get(target, prop) {
+      if (prop === 'getEncryptionPublicKeyBytes') {
+        return async () => {
+          calls += 1
+          if (calls === 1) await gate
+          return (target as PublicIdentitySession).getEncryptionPublicKeyBytes()
+        }
+      }
+      const value = Reflect.get(target, prop)
+      return typeof value === 'function' ? value.bind(target) : value
+    },
+  }) as PublicIdentitySession
+  return { identity: proxied, encCalls: () => calls, release: () => release() }
+}
+
+/**
  * Scripted durability boundary for the lifecycle repro: call 1 blocks on a gate
  * (the flight that will outlive its session), call 2 throws (the new session's
  * flight fails), call 3+ succeeds.
@@ -241,6 +266,39 @@ describe('Deterministic private space (Sync 001) — Yjs adapter contract', () =
     // The next call must RESUME B's failed state (a third metadata write).
     await adapter.openOrCreateDeterministicPrivateSpace({ items: {} }, PRIVATE_META)
     expect(saveCalls()).toBeGreaterThan(2)
+  }, 60_000)
+
+  it('a stale flight must not overwrite the fresh session at the encryption-key await', async () => {
+    // The epoch check sits before `spaces.set()`, but `getEncryptionPublicKeyBytes()`
+    // awaits in between. A flight parked there across stop()/start() must NOT install
+    // its own doc over the one the new session just created.
+    const broker = new InProcessLogBroker()
+    const { identity } = await createTestIdentity('detps-enckey')
+    cleanup.push(async () => { await identity.deleteStoredIdentity() })
+    const DEVICE = 'b8888888-8888-4888-8888-888888888888'
+    const gated = identityGatedOnFirstEncKey(identity)
+    const { adapter } = await makeAdapter(gated.identity, broker, 'detps-enckey', DEVICE, await makeStores(DEVICE))
+    await adapter.start()
+    cleanup.push(async () => { await adapter.stop() })
+
+    const genesis = await derivePrivateSpaceGenesis((info, length) => identity.deriveFrameworkKey(info, length))
+
+    // Flight A parks at the encryption-key await with its OWN doc content.
+    const flightA = adapter.openOrCreateDeterministicPrivateSpace({ items: { m: { title: 'stale' } } }, PRIVATE_META).catch(() => null)
+    await waitUntil(() => gated.encCalls() >= 1, 'flight A to reach the encryption-key await')
+
+    await adapter.stop()
+    await adapter.start()
+
+    // The NEW session creates the space with fresh content (gate is open for call 2+).
+    await adapter.openOrCreateDeterministicPrivateSpace({ items: { m: { title: 'fresh' } } }, PRIVATE_META)
+
+    gated.release()
+    await flightA // stale flight runs out — it must not install anything
+
+    const handle = await adapter.openSpace<{ items: Record<string, { title: string }> }>(genesis.spaceId)
+    cleanup.push(async () => { handle.close() })
+    expect(handle.getDoc().items?.m?.title).toBe('fresh')
   }, 60_000)
 
   it('concurrent open-or-create calls share one flight and yield one space', async () => {

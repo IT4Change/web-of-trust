@@ -1099,6 +1099,11 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
 
     const documentId = resumed?.documentId ?? docHandle!.documentId
 
+    // Re-check AFTER the key-provisioning await: the network registrations below
+    // are session-wide state, so a stale flight must abort BEFORE them — not only
+    // before the spaces map is touched.
+    this.ensureSameLifecycle(lifecycleEpoch)
+
     // Register document -> space mapping
     this.networkAdapter.registerDocument(documentId, spaceId)
 
