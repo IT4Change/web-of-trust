@@ -41,6 +41,10 @@ export class EncryptedMessagingNetworkAdapter extends NetworkAdapter {
   private keyManagement: KeyManagementPort
   private crypto: ProtocolCryptoAdapter
   private ready = false
+  // Lifecycle generation, bumped on every disconnect(). A fire-and-forget send
+  // captures it at launch; if it changes before the send lands, the flight belongs
+  // to a torn-down session and must not send into a later reconnect's connection.
+  private sessionEpoch = 0
   private readyResolve?: () => void
   private readyPromise: Promise<void>
   private unsubMessage?: () => void
@@ -234,7 +238,10 @@ export class EncryptedMessagingNetworkAdapter extends NetworkAdapter {
 
     // Fire-and-forget async encryption + send. Key lookups are async now, so
     // they run inside the IIFE where await is legal — send() must stay sync and
-    // return void per the automerge-repo NetworkAdapter contract.
+    // return void per the automerge-repo NetworkAdapter contract. Capture the
+    // lifecycle generation so a disconnect (+reconnect) that happens mid-flight
+    // cancels this send instead of leaking it into a later session.
+    const sendEpoch = this.sessionEpoch
     void (async () => {
       try {
         // F4 (Review): Label und Key atomar zur SELBEN Generation lesen —
@@ -284,9 +291,22 @@ export class EncryptedMessagingNetworkAdapter extends NetworkAdapter {
         }
 
         await signEnvelope(envelope, (data) => this.identity.sign(data))
+        // The adapter may have been disconnected (and possibly reconnected) while
+        // this fire-and-forget send was mid-flight — a test's afterEach stop(), or a
+        // real disconnect→reconnect. Skip the send unless we are still in the same
+        // live session it was launched in: `ready` alone is true again after a
+        // reconnect, so it would leak this stale envelope into the new connection.
+        // Epoch mismatch also avoids the late console.debug that races vitest's
+        // worker RPC on teardown (EnvironmentTeardownError).
+        if (!this.ready || this.sessionEpoch !== sendEpoch) return
         await this.messaging.send(envelope)
       } catch (err) {
-        console.debug('[EncryptedSync] Failed to send sync message:', err)
+        // A send failing after disconnect/reconnect is expected, not an error — and
+        // logging past the session's lifetime races teardown. Only log while still
+        // in the launching session.
+        if (this.ready && this.sessionEpoch === sendEpoch) {
+          console.debug('[EncryptedSync] Failed to send sync message:', err)
+        }
       }
     })()
   }
@@ -296,6 +316,9 @@ export class EncryptedMessagingNetworkAdapter extends NetworkAdapter {
     this.unsubMessage = undefined
     this.sentMessageIds.clear()
     this.ready = false
+    // Invalidate any in-flight fire-and-forget sends from this session so a
+    // reconnect can't inherit them (see send()).
+    this.sessionEpoch++
   }
 
   // --- Space/Document registration ---
