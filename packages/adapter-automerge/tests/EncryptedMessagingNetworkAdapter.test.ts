@@ -257,6 +257,51 @@ describe('EncryptedMessagingNetworkAdapter', () => {
       debugSpy.mockRestore()
     })
 
+    it('does not leak a mid-flight send into a later session after disconnect→reconnect', async () => {
+      // Reviewer counter-repro (#321): a `ready` boolean is true again after a
+      // reconnect, so a send launched in an earlier session would resume and send
+      // into the NEW connection. Gate identity.sign() to pin the flight mid-encrypt,
+      // tear the session down and start a fresh one on the SAME adapter instance,
+      // then release: the lifecycle epoch must cancel the stale flight.
+      let releaseSign: () => void = () => {}
+      const signGate = new Promise<void>((r) => { releaseSign = r })
+      const gatedIdentity = {
+        getDid: () => ALICE_DID,
+        sign: async (_data: string) => { await signGate; return 'mock-signature' },
+      }
+      const adapter = new EncryptedMessagingNetworkAdapter(aliceMessaging, gatedIdentity, aliceGroupKeys)
+      adapter.registerDocument(DOC_ID, SPACE_ID)
+      adapter.connect(ALICE_DID as PeerId)
+      await aliceMessaging.connect(ALICE_DID)
+
+      adapter.send({
+        type: 'sync',
+        senderId: ALICE_DID as PeerId,
+        targetId: BOB_DID as PeerId,
+        documentId: DOC_ID,
+        data: new Uint8Array([1, 2, 3]),
+      })
+      // Let the flight reach the gated identity.sign().
+      await new Promise(r => setTimeout(r, 10))
+
+      // Tear the session down and start a fresh one on the same instance.
+      adapter.disconnect()
+      await aliceMessaging.disconnect()
+      await aliceMessaging.connect(ALICE_DID)
+      adapter.connect(ALICE_DID as PeerId)
+
+      // Watch only the resumed stale flight — it must not send into the new session.
+      const sendSpy = vi.spyOn(aliceMessaging, 'send')
+      const debugSpy = vi.spyOn(console, 'debug').mockImplementation(() => {})
+      releaseSign()
+      await new Promise(r => setTimeout(r, 50))
+
+      expect(sendSpy).not.toHaveBeenCalled()
+      expect(debugSpy).not.toHaveBeenCalled()
+      debugSpy.mockRestore()
+      adapter.disconnect()
+    })
+
     it('should not send without registered document', async () => {
       await aliceMessaging.connect(ALICE_DID)
       aliceAdapter.connect(ALICE_DID as PeerId)
