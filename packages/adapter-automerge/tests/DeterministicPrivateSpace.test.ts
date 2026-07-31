@@ -8,26 +8,56 @@ import {
   InMemoryKeyManagementAdapter,
   InMemoryDocLogStore,
 } from '@web_of_trust/core/adapters'
-import { derivePrivateSpaceGenesis } from '@web_of_trust/core/protocol'
+import { derivePrivateSpaceGenesis, SPACE_REGISTER_MESSAGE_TYPE } from '@web_of_trust/core/protocol'
 import { AutomergeReplicationAdapter } from '../src/AutomergeReplicationAdapter'
 import { InMemoryRepoStorageAdapter } from '../src/InMemoryRepoStorageAdapter'
 
 const BROKER_URLS = ['wss://broker.example.com']
 const PRIVATE_META = { name: 'Privat', appTag: 'rls-private', modules: ['feed'] }
 
-async function makeAdapter(identity: PublicIdentitySession, broker: InProcessLogBroker, socketId: string, deviceId: string, metadataStorage?: InMemorySpaceMetadataStorage): Promise<AutomergeReplicationAdapter> {
-  const messaging = new InMemoryMessagingAdapter({ broker, socketId })
-  await messaging.connect(identity.getDid())
+/** The durable stores that survive a process restart (same device, same disk). */
+interface DurableStores {
+  metadataStorage: InMemorySpaceMetadataStorage
+  keyManagement: InMemoryKeyManagementAdapter
+  repoStorage: InMemoryRepoStorageAdapter
+  docLogStore: InMemoryDocLogStore
+}
+
+async function makeStores(deviceId: string, metadataStorage?: InMemorySpaceMetadataStorage): Promise<DurableStores> {
   const docLogStore = new InMemoryDocLogStore()
   await docLogStore.init()
   await docLogStore.setDeviceId(deviceId)
-  return new AutomergeReplicationAdapter({
-    identity, messaging, brokerUrls: BROKER_URLS,
-    keyManagement: new InMemoryKeyManagementAdapter(),
+  return {
     metadataStorage: metadataStorage ?? new InMemorySpaceMetadataStorage(),
+    keyManagement: new InMemoryKeyManagementAdapter(),
     repoStorage: new InMemoryRepoStorageAdapter(),
-    docLogStore, enableLogSync: true, deviceId,
+    docLogStore,
+  }
+}
+
+async function makeAdapter(identity: PublicIdentitySession, broker: InProcessLogBroker, socketId: string, deviceId: string, stores?: DurableStores): Promise<{ adapter: AutomergeReplicationAdapter; messaging: InMemoryMessagingAdapter }> {
+  const messaging = new InMemoryMessagingAdapter({ broker, socketId })
+  await messaging.connect(identity.getDid())
+  const durable = stores ?? await makeStores(deviceId)
+  const adapter = new AutomergeReplicationAdapter({
+    identity, messaging, brokerUrls: BROKER_URLS,
+    keyManagement: durable.keyManagement,
+    metadataStorage: durable.metadataStorage,
+    repoStorage: durable.repoStorage,
+    docLogStore: durable.docLogStore, enableLogSync: true, deviceId,
   })
+  return { adapter, messaging }
+}
+
+/** Counts space-register control frames a given messaging adapter sends. */
+function countSpaceRegisters(messaging: InMemoryMessagingAdapter): () => number {
+  let count = 0
+  const base = messaging.sendControlFrame!.bind(messaging)
+  ;(messaging as unknown as { sendControlFrame: typeof messaging.sendControlFrame }).sendControlFrame = async (frame) => {
+    if ((frame as { type?: string }).type === SPACE_REGISTER_MESSAGE_TYPE) count += 1
+    return base(frame)
+  }
+  return () => count
 }
 
 /** Fault injection at a durability boundary: the first saveSpaceMetadata throws. */
@@ -56,7 +86,7 @@ describe('Deterministic private space (Sync 001) — Automerge adapter contract'
     const broker = new InProcessLogBroker()
     const { identity } = await createTestIdentity('detps-am-single')
     cleanup.push(async () => { await identity.deleteStoredIdentity() })
-    const adapter = await makeAdapter(identity, broker, 'detps-am-single', 'd1111111-1111-4111-8111-111111111111')
+    const { adapter } = await makeAdapter(identity, broker, 'detps-am-single', 'd1111111-1111-4111-8111-111111111111')
     await adapter.start()
     cleanup.push(async () => { await adapter.stop() })
 
@@ -76,7 +106,7 @@ describe('Deterministic private space (Sync 001) — Automerge adapter contract'
     const { identity } = await createTestIdentity('detps-am-fault')
     cleanup.push(async () => { await identity.deleteStoredIdentity() })
     const { storage, saveCalls } = metadataFailingOnce()
-    const adapter = await makeAdapter(identity, broker, 'detps-am-fault', 'f1111111-1111-4111-8111-111111111111', storage)
+    const { adapter } = await makeAdapter(identity, broker, 'detps-am-fault', 'f1111111-1111-4111-8111-111111111111', await makeStores('f1111111-1111-4111-8111-111111111111', storage))
     await adapter.start()
     cleanup.push(async () => { await adapter.stop() })
 
@@ -92,11 +122,41 @@ describe('Deterministic private space (Sync 001) — Automerge adapter contract'
     expect((await adapter.getSpaces()).filter((s) => s.appTag === 'rls-private')).toHaveLength(1)
   })
 
+  it('publishes on a fresh instance when a previous process died before space-register', async () => {
+    // Restart contract (parity with Yjs): completion must NOT be a RAM claim.
+    const broker = new InProcessLogBroker()
+    const { identity } = await createTestIdentity('detps-am-restart')
+    cleanup.push(async () => { await identity.deleteStoredIdentity() })
+    const DEVICE = 'e1111111-1111-4111-8111-111111111111'
+    const stores = await makeStores(DEVICE)
+
+    const { adapter: adapterA, messaging: messagingA } = await makeAdapter(identity, broker, 'detps-am-restart-a', DEVICE, stores)
+    ;(messagingA as unknown as { sendControlFrame: () => Promise<never> }).sendControlFrame = async () => {
+      throw new Error('injected: control frame never reached the broker')
+    }
+    await adapterA.start()
+    await adapterA.openOrCreateDeterministicPrivateSpace({ items: {} }, PRIVATE_META).catch(() => {})
+    const genesis = await derivePrivateSpaceGenesis((info, length) => identity.deriveFrameworkKey(info, length))
+    expect(await stores.metadataStorage.loadSpaceMetadata(genesis.spaceId)).not.toBeNull()
+    await adapterA.stop()
+
+    // ── restart ──
+    const { adapter: adapterB, messaging: messagingB } = await makeAdapter(identity, broker, 'detps-am-restart-b', DEVICE, stores)
+    const registersB = countSpaceRegisters(messagingB)
+    await adapterB.start()
+    cleanup.push(async () => { await adapterB.stop() })
+    await adapterB.restoreSpacesFromMetadata()
+
+    const space = await adapterB.openOrCreateDeterministicPrivateSpace({ items: {} }, PRIVATE_META)
+    expect(space.id).toBe(genesis.spaceId)
+    expect(registersB()).toBeGreaterThan(0)
+  })
+
   it('concurrent open-or-create calls share one flight and yield one space', async () => {
     const broker = new InProcessLogBroker()
     const { identity } = await createTestIdentity('detps-am-concurrent')
     cleanup.push(async () => { await identity.deleteStoredIdentity() })
-    const adapter = await makeAdapter(identity, broker, 'detps-am-concurrent', 'c1111111-1111-4111-8111-111111111111')
+    const { adapter } = await makeAdapter(identity, broker, 'detps-am-concurrent', 'c1111111-1111-4111-8111-111111111111')
     await adapter.start()
     cleanup.push(async () => { await adapter.stop() })
 
@@ -119,9 +179,9 @@ describe('Deterministic private space (Sync 001) — Automerge adapter contract'
 
     const genesis = await derivePrivateSpaceGenesis((info, length) => a.deriveFrameworkKey(info, length))
 
-    const adapterA = await makeAdapter(a, broker, 'detps-am-a', 'a1111111-1111-4111-8111-111111111111')
+    const { adapter: adapterA } = await makeAdapter(a, broker, 'detps-am-a', 'a1111111-1111-4111-8111-111111111111')
     await adapterA.start(); cleanup.push(async () => { await adapterA.stop() })
-    const adapterB = await makeAdapter(b, broker, 'detps-am-b', 'b2222222-2222-4222-8222-222222222222')
+    const { adapter: adapterB } = await makeAdapter(b, broker, 'detps-am-b', 'b2222222-2222-4222-8222-222222222222')
     await adapterB.start(); cleanup.push(async () => { await adapterB.stop() })
 
     const sa = await adapterA.openOrCreateDeterministicPrivateSpace({ items: {} }, PRIVATE_META)

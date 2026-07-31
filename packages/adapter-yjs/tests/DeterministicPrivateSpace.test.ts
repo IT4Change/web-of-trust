@@ -10,7 +10,7 @@ import {
   InProcessLogBroker,
   PersonalDocSpaceMetadataStorage,
 } from '@web_of_trust/core/adapters'
-import { derivePrivateSpaceGenesis } from '@web_of_trust/core/protocol'
+import { derivePrivateSpaceGenesis, SPACE_REGISTER_MESSAGE_TYPE } from '@web_of_trust/core/protocol'
 import { YjsReplicationAdapter } from '../src/YjsReplicationAdapter'
 
 const BROKER_URLS = ['wss://broker.example.com']
@@ -41,18 +41,46 @@ async function makeDocLogStore(deviceId: string): Promise<InMemoryDocLogStore> {
   return store
 }
 
-async function makeAdapter(identity: PublicIdentitySession, broker: InProcessLogBroker, socketId: string, deviceId: string, metadataStorage?: PersonalDocSpaceMetadataStorage): Promise<YjsReplicationAdapter> {
-  const messaging = new InMemoryMessagingAdapter({ broker, socketId })
-  await messaging.connect(identity.getDid())
-  const doc = new Y.Doc()
-  const adapter = new YjsReplicationAdapter({
-    identity, messaging, brokerUrls: BROKER_URLS,
-    metadataStorage: metadataStorage ?? metadataInPersonalDoc(doc),
+/** The durable stores that survive a process restart (same device, same disk). */
+interface DurableStores {
+  metadataStorage: PersonalDocSpaceMetadataStorage
+  keyManagement: InMemoryKeyManagementAdapter
+  compactStore: InMemoryCompactStore
+  docLogStore: InMemoryDocLogStore
+}
+
+async function makeStores(deviceId: string, metadataStorage?: PersonalDocSpaceMetadataStorage): Promise<DurableStores> {
+  return {
+    metadataStorage: metadataStorage ?? metadataInPersonalDoc(new Y.Doc()),
     keyManagement: new InMemoryKeyManagementAdapter(),
     compactStore: new InMemoryCompactStore(),
-    docLogStore: await makeDocLogStore(deviceId), enableLogSync: true, deviceId,
+    docLogStore: await makeDocLogStore(deviceId),
+  }
+}
+
+async function makeAdapter(identity: PublicIdentitySession, broker: InProcessLogBroker, socketId: string, deviceId: string, stores?: DurableStores): Promise<{ adapter: YjsReplicationAdapter; messaging: InMemoryMessagingAdapter }> {
+  const messaging = new InMemoryMessagingAdapter({ broker, socketId })
+  await messaging.connect(identity.getDid())
+  const durable = stores ?? await makeStores(deviceId)
+  const adapter = new YjsReplicationAdapter({
+    identity, messaging, brokerUrls: BROKER_URLS,
+    metadataStorage: durable.metadataStorage,
+    keyManagement: durable.keyManagement,
+    compactStore: durable.compactStore,
+    docLogStore: durable.docLogStore, enableLogSync: true, deviceId,
   })
-  return adapter
+  return { adapter, messaging }
+}
+
+/** Counts space-register control frames a given messaging adapter sends. */
+function countSpaceRegisters(messaging: InMemoryMessagingAdapter): () => number {
+  let count = 0
+  const base = messaging.sendControlFrame!.bind(messaging)
+  ;(messaging as unknown as { sendControlFrame: typeof messaging.sendControlFrame }).sendControlFrame = async (frame) => {
+    if ((frame as { type?: string }).type === SPACE_REGISTER_MESSAGE_TYPE) count += 1
+    return base(frame)
+  }
+  return () => count
 }
 
 /** Fault injection at a durability boundary: the first saveSpaceMetadata throws. */
@@ -79,7 +107,7 @@ describe('Deterministic private space (Sync 001) — Yjs adapter contract', () =
     const broker = new InProcessLogBroker()
     const { identity } = await createTestIdentity('detps-single')
     cleanup.push(async () => { await identity.deleteStoredIdentity() })
-    const adapter = await makeAdapter(identity, broker, 'detps-single', 'd1111111-1111-4111-8111-111111111111')
+    const { adapter } = await makeAdapter(identity, broker, 'detps-single', 'd1111111-1111-4111-8111-111111111111')
     await adapter.start()
     cleanup.push(async () => { await adapter.stop() })
 
@@ -99,7 +127,7 @@ describe('Deterministic private space (Sync 001) — Yjs adapter contract', () =
     const { identity } = await createTestIdentity('detps-fault')
     cleanup.push(async () => { await identity.deleteStoredIdentity() })
     const { storage, saveCalls } = metadataFailingOnce(new Y.Doc())
-    const adapter = await makeAdapter(identity, broker, 'detps-fault', 'f1111111-1111-4111-8111-111111111111', storage)
+    const { adapter } = await makeAdapter(identity, broker, 'detps-fault', 'f1111111-1111-4111-8111-111111111111', await makeStores('f1111111-1111-4111-8111-111111111111', storage))
     await adapter.start()
     cleanup.push(async () => { await adapter.stop() })
 
@@ -118,11 +146,47 @@ describe('Deterministic private space (Sync 001) — Yjs adapter contract', () =
     expect((await adapter.getSpaces()).filter((s) => s.appTag === 'rls-private')).toHaveLength(1)
   })
 
+  it('publishes on a fresh instance when a previous process died before space-register', async () => {
+    // Restart contract: completion must NOT be a RAM claim. Instance A persists
+    // metadata but its publication never reaches the broker; the process dies.
+    // Instance B (same durable stores, fresh RAM) restores the space and MUST
+    // still register it instead of reporting a complete private space.
+    const broker = new InProcessLogBroker()
+    const { identity } = await createTestIdentity('detps-restart')
+    cleanup.push(async () => { await identity.deleteStoredIdentity() })
+    const DEVICE = 'e1111111-1111-4111-8111-111111111111'
+    const stores = await makeStores(DEVICE)
+
+    const { adapter: adapterA, messaging: messagingA } = await makeAdapter(identity, broker, 'detps-restart-a', DEVICE, stores)
+    // Publication of instance A fails (broker unreachable for control frames).
+    ;(messagingA as unknown as { sendControlFrame: () => Promise<never> }).sendControlFrame = async () => {
+      throw new Error('injected: control frame never reached the broker')
+    }
+    await adapterA.start()
+    await adapterA.openOrCreateDeterministicPrivateSpace({ items: {} }, PRIVATE_META).catch(() => {})
+    const genesis = await derivePrivateSpaceGenesis((info, length) => identity.deriveFrameworkKey(info, length))
+    // Metadata IS durable, so the restart sees the space — but it was never registered.
+    expect(await stores.metadataStorage.loadSpaceMetadata(genesis.spaceId)).not.toBeNull()
+    await adapterA.stop()
+
+    // ── restart ──
+    const { adapter: adapterB, messaging: messagingB } = await makeAdapter(identity, broker, 'detps-restart-b', DEVICE, stores)
+    const registersB = countSpaceRegisters(messagingB)
+    await adapterB.start()
+    cleanup.push(async () => { await adapterB.stop() })
+    await adapterB.restoreSpacesFromMetadata()
+
+    const space = await adapterB.openOrCreateDeterministicPrivateSpace({ items: {} }, PRIVATE_META)
+    expect(space.id).toBe(genesis.spaceId)
+    // The contract: after open-or-create returns, the space IS registered.
+    expect(registersB()).toBeGreaterThan(0)
+  })
+
   it('concurrent open-or-create calls share one flight and yield one space', async () => {
     const broker = new InProcessLogBroker()
     const { identity } = await createTestIdentity('detps-concurrent')
     cleanup.push(async () => { await identity.deleteStoredIdentity() })
-    const adapter = await makeAdapter(identity, broker, 'detps-concurrent', 'c1111111-1111-4111-8111-111111111111')
+    const { adapter } = await makeAdapter(identity, broker, 'detps-concurrent', 'c1111111-1111-4111-8111-111111111111')
     await adapter.start()
     cleanup.push(async () => { await adapter.stop() })
 
@@ -145,9 +209,9 @@ describe('Deterministic private space (Sync 001) — Yjs adapter contract', () =
 
     const genesis = await derivePrivateSpaceGenesis((info, length) => a.deriveFrameworkKey(info, length))
 
-    const adapterA = await makeAdapter(a, broker, 'detps-a', 'a1111111-1111-4111-8111-111111111111')
+    const { adapter: adapterA } = await makeAdapter(a, broker, 'detps-a', 'a1111111-1111-4111-8111-111111111111')
     await adapterA.start(); cleanup.push(async () => { await adapterA.stop() })
-    const adapterB = await makeAdapter(b, broker, 'detps-b', 'b2222222-2222-4222-8222-222222222222')
+    const { adapter: adapterB } = await makeAdapter(b, broker, 'detps-b', 'b2222222-2222-4222-8222-222222222222')
     await adapterB.start(); cleanup.push(async () => { await adapterB.stop() })
 
     const sa = await adapterA.openOrCreateDeterministicPrivateSpace({ items: {} }, PRIVATE_META)

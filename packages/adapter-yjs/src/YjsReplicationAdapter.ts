@@ -438,12 +438,16 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
 
   private spaces = new Map<string, YjsSpaceState>()
   /**
-   * Spaces whose creation entered `this.spaces` but did NOT finish all durability
-   * and publication phases (a throw at CompactStore / metadata / group-key /
-   * first-publication). A retry must RESUME those phases; such an entry must
-   * never take an open-or-create early return.
+   * Spaces whose full provisioning THIS process ran to completion (key material,
+   * metadata, group key, publication). Purely an optimisation for the hot path —
+   * never a durable completion claim: it starts EMPTY on every process start and
+   * is cleared on stop(). So the first open-or-create after a restart always
+   * re-runs the idempotent provisioning tail, which is what closes the
+   * "metadata persisted, process died before space-register" hole. Completion is
+   * therefore re-derived from durable artefacts (key store, metadata store, log
+   * heads) rather than remembered in RAM.
    */
-  private incompleteSpaces = new Set<string>()
+  private fullyProvisionedSpaces = new Set<string>()
   /** Single-flight guard so concurrent open-or-create calls share one creation. */
   private deterministicPrivateSpaceFlight: Promise<SpaceInfo> | null = null
   private spaceListeners = new Set<(spaces: SpaceInfo[]) => void>()
@@ -701,6 +705,11 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
   }
 
   async stop(): Promise<void> {
+    // Provisioning verification is per-session: a flight may still be running its
+    // continuation past this stop(), so the next session must NOT trust it and has
+    // to re-verify (idempotently) instead of taking an early return.
+    this.fullyProvisionedSpaces.clear()
+    this.deterministicPrivateSpaceFlight = null
     // A catch-up Promise can outlive the transport session.  Invalidate it before
     // clearing its bookkeeping so its finally() cannot corrupt the next session.
     this.catchUpReady = false
@@ -810,11 +819,13 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
    * createDeterministicSpaceKey). Callers MUST restore persisted spaces first; a
    * fully-provisioned private space is returned as-is rather than re-created.
    *
-   * Retry-safe: only a COMPLETE entry takes the early return. If an earlier
-   * attempt failed at a durability/publication boundary, the space sits in
-   * `incompleteSpaces` and the create is resumed so the missing phases run —
-   * reporting success on a half-created space would leave it unrestorable or
-   * never published. Concurrent calls share one flight.
+   * Retry- AND restart-safe: the early return is taken ONLY for a space this
+   * process already provisioned end-to-end. After a process restart (or a create
+   * that died at a durability boundary) nothing is marked, so the idempotent
+   * provisioning tail re-runs — re-persisting key material/metadata and, above
+   * all, re-running `ensurePublished()` so a space whose metadata was persisted
+   * but whose `space-register` never reached the broker gets published instead of
+   * being reported as complete. Concurrent calls share one flight.
    */
   openOrCreateDeterministicPrivateSpace<T>(initialDoc: T, meta?: { name?: string; description?: string; appTag?: string; modules?: string[] }): Promise<SpaceInfo> {
     if (this.deterministicPrivateSpaceFlight) return this.deterministicPrivateSpaceFlight
@@ -827,7 +838,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
   private async runOpenOrCreateDeterministicPrivateSpace<T>(initialDoc: T, meta?: { name?: string; description?: string; appTag?: string; modules?: string[] }): Promise<SpaceInfo> {
     const genesis = await derivePrivateSpaceGenesis((info, length) => this.identity.deriveFrameworkKey(info, length))
     const existing = this.spaces.get(genesis.spaceId)
-    if (existing && !this.incompleteSpaces.has(genesis.spaceId)) return existing.info
+    if (existing && this.fullyProvisionedSpaces.has(genesis.spaceId)) return existing.info
     return this.createSpaceWithId(genesis.spaceId, 'shared', initialDoc, meta, {
       contentKey: genesis.contentKey,
       capabilitySigningSeed: genesis.capabilitySigningSeed,
@@ -909,11 +920,10 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
       }
       this.spaces.set(spaceId, state)
     }
-    // From here on a failure leaves a half-provisioned space in `this.spaces`
-    // (metadata / group key / first publication may be missing). Mark it so a
-    // retry RESUMES the missing phases instead of reporting success; cleared
-    // only on the successful paths below.
-    this.incompleteSpaces.add(spaceId)
+    // Until every phase below completed, this space must NOT be treated as
+    // provisioned: a failure (or a process death) leaves metadata / group key /
+    // first publication missing, and the next open-or-create has to resume them.
+    this.fullyProvisionedSpaces.delete(spaceId)
 
     // Setup encrypted sync for this space (a resume keeps its existing observer)
     if (!state.unsubUpdate) this.setupSpaceSync(state)
@@ -965,7 +975,13 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
         // (seq=0) so a cold-start device with NO invite snapshot reconstructs the doc
         // purely from `leere heads → kompletter Log` (sync-request catch-up).
         // Subsequent local edits append from seq=1.
-        await this.writeFullStateViaLog(state).catch((err) => {
+        //
+        // DURABLE guard (restart contract): a resume — e.g. the first open-or-create
+        // after a process died between metadata persistence and publication — must
+        // seed the log if and only if it was never seeded. Empty log heads are that
+        // durable proof; a non-empty log already reconstructs the doc, so re-seeding
+        // on every restart would append a redundant full-state entry.
+        if (await this.spaceLogIsEmpty(spaceId)) await this.writeFullStateViaLog(state).catch((err) => {
           if (err instanceof AuthorMismatchError) {
             console.error('[YjsReplication] AUTHOR_MISMATCH during createSpace seed:', err.message)
           } else if (err instanceof LocalAppendFailedError) {
@@ -979,7 +995,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
         })
       }
       this._scheduleVaultImmediate(state)
-      this.incompleteSpaces.delete(spaceId) // fully provisioned + published
+      this.fullyProvisionedSpaces.add(spaceId) // every phase completed + published
       return info
     }
 
@@ -1014,7 +1030,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
     // Push initial state to Vault so other devices can pull it
     this._scheduleVaultImmediate(state)
 
-    this.incompleteSpaces.delete(spaceId) // fully provisioned
+    this.fullyProvisionedSpaces.add(spaceId) // every phase completed
     return info
   }
 
@@ -1816,6 +1832,22 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
    */
   private authorKid(): string {
     return `${this.identity.getDid()}#sig-0`
+  }
+
+  /**
+   * Durable proof of "this space was never seeded into the log": empty known
+   * heads. Used by the resume path so the genesis full-state entry is written
+   * exactly once across process restarts. Unknown (no log store) → treat as
+   * seeded, so we never append a duplicate on a store-less setup.
+   */
+  private async spaceLogIsEmpty(spaceId: string): Promise<boolean> {
+    if (!this.docLogStore) return false
+    try {
+      const heads = await this.docLogStore.getKnownHeads(spaceId)
+      return Object.keys(heads).length === 0
+    } catch {
+      return false
+    }
   }
 
   /**
