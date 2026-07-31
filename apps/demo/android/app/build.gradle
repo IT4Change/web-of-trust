@@ -20,30 +20,12 @@ android {
         }
     }
 
-    signingConfigs {
-        playstoreRelease {
-            storeFile file(project.findProperty('PLAYSTORE_STORE_FILE') ?: '/dev/null')
-            storePassword project.findProperty('PLAYSTORE_STORE_PASSWORD') ?: ''
-            keyAlias project.findProperty('PLAYSTORE_KEY_ALIAS') ?: ''
-            keyPassword project.findProperty('PLAYSTORE_KEY_PASSWORD') ?: ''
-        }
-    }
-
-    flavorDimensions "store"
-    productFlavors {
-        fdroid {
-            dimension "store"
-            // Use debug signing so Gradle produces a signed APK.
-            // F-Droid strips this and re-signs with their own key.
-            // For self-hosted repo, re-sign with apksigner.
-            signingConfig signingConfigs.debug
-        }
-        playstore {
-            dimension "store"
-            signingConfig signingConfigs.playstoreRelease
-        }
-    }
-
+    // Flavorlos (seit 31.07.2026): EIN Release-Build, kein fdroid/playstore-Split.
+    // Signiert wird NICHT hier, sondern in der Pipeline — das APK mit dem
+    // F-Droid-Key, das AAB (bundleRelease) mit dem Play-Upload-Key. Deshalb weder
+    // signingConfigs noch productFlavors: assembleRelease und bundleRelease
+    // liefern unsignierte Artefakte, die reproduzierbar vom Tag entstehen.
+    // Struktur identisch zu apps/reference (RLS).
     buildTypes {
         release {
             minifyEnabled false
