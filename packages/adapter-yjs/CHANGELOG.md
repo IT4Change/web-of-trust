@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.2.2](https://github.com/real-life-org/web-of-trust/compare/adapter-yjs-v0.2.1...adapter-yjs-v0.2.2) (2026-08-01)
+
+
+### Features
+
+* **adapters:** SpaceHandle.transactDurable — transaction-bound durability ack ([55a758e](https://github.com/real-life-org/web-of-trust/commit/55a758ecfb24859c65ea2cfb2e66ad77aa1af180))
+* **adapters:** SpaceHandle.transactDurable — transaction-bound durability ack ([fc71e42](https://github.com/real-life-org/web-of-trust/commit/fc71e4274fc7a0e08a46a3b15153569fe7cf7794))
+
+
+### Bug Fixes
+
+* **adapter-yjs:** transactDurable fails fast before mutating without log-sync ([4c949d2](https://github.com/real-life-org/web-of-trust/commit/4c949d28db0927f96cb090f4dbaa2f11470d0d30))
+* **adapters:** transactDurable fails closed on missing key; Automerge frees localChanging during the async append ([87a74f3](https://github.com/real-life-org/web-of-trust/commit/87a74f3cbca119aa76d0d1a223d3a154cff06d9e))
+
 ## [0.2.1](https://github.com/real-life-org/web-of-trust/compare/adapter-yjs-v0.2.0...adapter-yjs-v0.2.1) (2026-07-31)
 
 
