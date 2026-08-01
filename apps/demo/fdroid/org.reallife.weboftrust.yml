@@ -43,8 +43,14 @@ Builds:
       - apps/benchmark/dist
     ndk: r27c
 
+# Diese Metadaten sind fuer eine spaetere OFFIZIELLE F-Droid-Aufnahme (fdroiddata)
+# gedacht; unser eigenes Repo baut/signiert per wot-release, ohne sie zu lesen.
+# Seit 31.07.2026: App-Tags heissen app-v*, und version.properties fuehrt KEIN
+# VERSION_CODE mehr — der wird aus VERSION_NAME abgeleitet
+# (major*10000 + minor*100 + patch). Bei der Aufnahme entsprechend eine
+# VercodeOperation ergaenzen, die den Code aus dem Namen bildet.
 AutoUpdateMode: Version
-UpdateCheckMode: Tags ^v
-UpdateCheckData: apps/demo/android/version.properties|VERSION_CODE=(\d+)|.|VERSION_NAME=(.+)
-CurrentVersion: 0.2.1
-CurrentVersionCode: 3
+UpdateCheckMode: Tags ^app-v
+UpdateCheckData: apps/demo/android/version.properties|.|.|VERSION_NAME=(.+)
+CurrentVersion: 0.2.7
+CurrentVersionCode: 207
