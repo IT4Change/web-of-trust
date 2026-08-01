@@ -10,5 +10,6 @@ describe('published ports subpath surface', () => {
     expect(typeof ports.hasMembershipActivity).toBe('function')
     expect(typeof ports.hasSecureSelfLeave).toBe('function')
     expect(typeof ports.hasDeterministicPrivateSpace).toBe('function')
+    expect(typeof ports.hasDurableTransact).toBe('function')
   })
 })

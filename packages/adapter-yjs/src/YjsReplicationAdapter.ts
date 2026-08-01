@@ -2315,7 +2315,13 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
     }
     // Awaitable + error-propagating: appendLocalEntry persists the JWS BEFORE send,
     // so a throw here means the durable record was NOT written.
-    await coordinator.writeLocalUpdate(captured)
+    const entry = await coordinator.writeLocalUpdate(captured)
+    if (entry === null) {
+      // writeLocalUpdate() documents null as "no content key available — nothing
+      // was appended". Resolving here would fake a durability ack while NO log
+      // entry exists (e.g. during key recovery / blocked-by-key). Fail closed.
+      throw new Error('transactDurable: durable append skipped — no content key available for this space')
+    }
   }
 
   onMemberChange(callback: (change: SpaceMemberChange) => void): () => void {

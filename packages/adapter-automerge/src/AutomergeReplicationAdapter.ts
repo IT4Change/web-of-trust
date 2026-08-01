@@ -267,12 +267,18 @@ class AutomergeSpaceHandle<T> implements SpaceHandle<T> {
   async transactDurable(fn: (doc: T) => void): Promise<void> {
     if (this.closed) throw new Error('Handle is closed')
     if (!this.durableWriter) throw new Error('transactDurable requires the log-sync configuration (no durable log path)')
+    // `localChanging` may only cover the SYNCHRONOUS docHandle.change() of the
+    // own mutation (the writer runs it synchronously before its first await).
+    // Holding it across the async append would swallow genuine remote-update
+    // notifications arriving while the append is in flight.
+    let append: Promise<void>
     this.localChanging = true
     try {
-      await this.durableWriter(fn)
+      append = this.durableWriter(fn)
     } finally {
       this.localChanging = false
     }
+    await append
     if (this.vaultScheduler) this.vaultScheduler.pushImmediate()
     if (this.compactScheduler) this.compactScheduler.pushImmediate()
   }
@@ -2064,7 +2070,13 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
     if (!coordinator) {
       throw new Error('transactDurable requires a log-sync coordinator to durably record the update')
     }
-    await coordinator.writeLocalUpdate(frameChanges(changes))
+    const entry = await coordinator.writeLocalUpdate(frameChanges(changes))
+    if (entry === null) {
+      // writeLocalUpdate() documents null as "no content key available — nothing
+      // was appended". Resolving here would fake a durability ack while NO log
+      // entry exists (e.g. during key recovery / blocked-by-key). Fail closed.
+      throw new Error('transactDurable: durable append skipped — no content key available for this space')
+    }
   }
 
   private attachMembershipObserver(space: SpaceState): void {

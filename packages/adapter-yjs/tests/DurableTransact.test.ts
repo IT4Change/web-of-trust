@@ -77,17 +77,18 @@ async function setup() {
   await docLogStore.init()
   await docLogStore.setDeviceId(DEVICE)
   const gate = gateableStore(docLogStore)
+  const keyManagement = new InMemoryKeyManagementAdapter()
   const adapter = new YjsReplicationAdapter({
     identity, messaging, brokerUrls: BROKER_URLS,
     metadataStorage: metadataInPersonalDoc(new Y.Doc()),
-    keyManagement: new InMemoryKeyManagementAdapter(),
+    keyManagement,
     compactStore: new InMemoryCompactStore(),
     docLogStore, enableLogSync: true, deviceId: DEVICE,
   })
   await adapter.start()
   const space = await adapter.createSpace<TestDoc>('shared', { items: {} }, { name: 'Durable' })
   const handle = await adapter.openSpace<TestDoc>(space.id)
-  return { identity, adapter, handle, space, docLogStore, gate }
+  return { identity, adapter, handle, space, docLogStore, gate, keyManagement }
 }
 
 describe('SpaceHandle.transactDurable — Yjs', () => {
@@ -125,6 +126,31 @@ describe('SpaceHandle.transactDurable — Yjs', () => {
     cleanup.push(async () => { handle.close(); await adapter.stop(); await identity.deleteStoredIdentity() })
     gate.failNext(space.id)
     await expect(handle.transactDurable!((doc) => { doc.items['x'] = { title: 'x' } })).rejects.toThrow(/injected append failure/)
+  })
+
+  it('rejects fail-closed when no content key is available (append silently skipped)', async () => {
+    // writeLocalUpdate() returns null without appending when the content key is
+    // missing (key recovery / blocked-by-key). That must NOT count as durable.
+    const { identity, adapter, handle, keyManagement } = await setup()
+    cleanup.push(async () => { handle.close(); await adapter.stop(); await identity.deleteStoredIdentity() })
+    keyManagement.getKeyByGeneration = async () => null // key material gone after openSpace
+    await expect(handle.transactDurable!((doc) => { doc.items['x'] = { title: 'x' } })).rejects.toThrow(/no content key/)
+  })
+
+  it('a failed append followed by the SAME re-set yields a NEW confirmed append (the #192 retry contract)', async () => {
+    const { identity, adapter, handle, space, docLogStore, gate } = await setup()
+    cleanup.push(async () => { handle.close(); await adapter.stop(); await identity.deleteStoredIdentity() })
+
+    gate.failNext(space.id)
+    await expect(handle.transactDurable!((doc) => { doc.items['m'] = { title: 'Precious' } })).rejects.toThrow(/injected append failure/)
+    // The mutation IS locally visible — exactly the crash-retry starting point.
+    expect(handle.getDoc().items['m'].title).toBe('Precious')
+    const seqAfterFailure = (await docLogStore.getKnownHeads(space.id))[DEVICE] ?? 0
+
+    // Idempotent same-bytes re-set: MUST produce a fresh confirmed append.
+    await handle.transactDurable!((doc) => { doc.items['m'] = { title: 'Precious' } })
+    const seqAfterRetry = (await docLogStore.getKnownHeads(space.id))[DEVICE] ?? 0
+    expect(seqAfterRetry).toBeGreaterThan(seqAfterFailure)
   })
 
   it('a no-op transaction resolves immediately without appending', async () => {
