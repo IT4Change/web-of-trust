@@ -16,7 +16,7 @@ export * from './ReplicationAdapter'
 // exported them). Their implementation moved to the application layer; this
 // re-export keeps the shipped surface identical. New code should import them
 // from '@web_of_trust/core/application'.
-export { hasMembershipActivity, hasSecureSelfLeave, hasDeterministicPrivateSpace } from '../application/spaces/replication-capabilities'
+export { hasMembershipActivity, hasSecureSelfLeave, hasDeterministicPrivateSpace, hasDurableTransact } from '../application/spaces/replication-capabilities'
 export * from './spaces'
 export * from './SpaceMetadataStorage'
 export * from './StorageAdapter'

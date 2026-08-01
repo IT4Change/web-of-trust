@@ -28,6 +28,17 @@ export interface SpaceHandle<T = unknown> {
   /** Apply a transactional change to the doc. Encrypts + broadcasts to members. */
   transact(fn: (doc: T) => void, options?: TransactOptions): void
 
+  /**
+   * Optional capability: like {@link transact}, but resolves only after the log
+   * entry produced by EXACTLY this transaction is durably persisted
+   * (persist-before-send) and rejects when that append fails. The durability ack
+   * is bound to this transaction — never to unrelated log-head movement. A no-op
+   * transaction resolves immediately. Callers needing the guarantee must
+   * feature-detect (see hasDurableTransact) and MUST NOT fall back to
+   * fire-and-forget writes for durability-gated flows.
+   */
+  transactDurable?(fn: (doc: T) => void): Promise<void>
+
   /** Fires when remote changes arrive and are applied. */
   onRemoteUpdate(callback: () => void): () => void
 

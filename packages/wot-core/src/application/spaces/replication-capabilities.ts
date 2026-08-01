@@ -19,6 +19,11 @@ export function hasSecureSelfLeave(value: unknown): value is SecureSelfLeaveCapa
   return typeof (value as SecureSelfLeaveCapable | null)?.supportsSecureSelfLeave === 'function'
 }
 
+/** Optional capability: a SpaceHandle whose transactDurable proves the durable append of exactly its own transaction. */
+export function hasDurableTransact<T>(handle: unknown): handle is { transactDurable(fn: (doc: T) => void): Promise<void> } {
+  return typeof (handle as { transactDurable?: unknown } | null)?.transactDurable === 'function'
+}
+
 /** Optional capability: deterministic-genesis private space (Sync 001). */
 export function hasDeterministicPrivateSpace(value: unknown): value is DeterministicPrivateSpaceCapable {
   return typeof (value as DeterministicPrivateSpaceCapable | null)?.openOrCreateDeterministicPrivateSpace === 'function'
