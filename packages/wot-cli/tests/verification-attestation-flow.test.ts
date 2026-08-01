@@ -288,9 +288,13 @@ describe('WotCliClient inbox/1.0 attestation delivery (K2/K3)', () => {
 
     // Manipulierter Ciphertext → decrypt-failed → KEIN ack/1.0 (Redelivery-Pfad).
     const body = envelope.body as Record<string, string>
+    // Deterministic tamper: FLIP the last character instead of overwriting with a
+    // fixed literal — a random base64url ciphertext ends in "AA" once in ~4096
+    // runs, in which case the "tampered" copy equaled the original, decrypt
+    // succeeded and the test flaked with 1 ack instead of 0.
     const tampered = {
       ...envelope,
-      body: { ...body, ciphertext: body.ciphertext.slice(0, -2) + 'AA' },
+      body: { ...body, ciphertext: body.ciphertext.slice(0, -1) + (body.ciphertext.endsWith('A') ? 'B' : 'A') },
     }
     await (alice.client as unknown as TestableWotCliClient).handleInboxMessage(
       tampered as unknown as DidcommPlaintextMessage<object>,
