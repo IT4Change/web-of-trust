@@ -2295,6 +2295,13 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
    * fire-and-forget fallback.
    */
   async _transactDurable(state: YjsSpaceState, apply: () => void): Promise<void> {
+    // FAIL-FAST before mutating (parity with Automerge, where the durable writer
+    // is not even wired without log-sync): applying first and rejecting after
+    // would leave the local doc mutated while the steady-state observer skipped
+    // the durable-transact origin — a silently diverged local document.
+    if (!this.logSyncEnabled) {
+      throw new Error('transactDurable requires the log-sync configuration (no durable log path)')
+    }
     let captured: Uint8Array | null = null
     const captureHandler = (update: Uint8Array, origin: unknown) => {
       if (origin === DURABLE_TRANSACT_ORIGIN) captured = update
@@ -2306,9 +2313,6 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
       state.doc.off('update', captureHandler)
     }
     if (!captured) return // no-op transaction — nothing to prove durable
-    if (!this.logSyncEnabled) {
-      throw new Error('transactDurable requires the log-sync configuration (no durable log path)')
-    }
     const coordinator = await this.getOrCreateCoordinator(state)
     if (!coordinator) {
       throw new Error('transactDurable requires a log-sync coordinator to durably record the update')

@@ -153,6 +153,33 @@ describe('SpaceHandle.transactDurable — Yjs', () => {
     expect(seqAfterRetry).toBeGreaterThan(seqAfterFailure)
   })
 
+  it('rejects BEFORE mutating in the non-log-sync configuration (no silent local divergence)', async () => {
+    // CodeRabbit repro: with enableLogSync:false the old code applied the change
+    // (skipped by the observer via the durable origin) and only then rejected —
+    // leaving a silently diverged local doc. It must fail fast instead.
+    const broker = new InProcessLogBroker()
+    const { identity } = await createTestIdentity('durable-no-logsync')
+    const messaging = new InMemoryMessagingAdapter({ broker, socketId: 'durable-no-logsync' })
+    await messaging.connect(identity.getDid())
+    const docLogStore = new InMemoryDocLogStore()
+    await docLogStore.init()
+    await docLogStore.setDeviceId(DEVICE)
+    const adapter = new YjsReplicationAdapter({
+      identity, messaging, brokerUrls: BROKER_URLS,
+      metadataStorage: metadataInPersonalDoc(new Y.Doc()),
+      keyManagement: new InMemoryKeyManagementAdapter(),
+      compactStore: new InMemoryCompactStore(),
+      docLogStore, enableLogSync: false, deviceId: DEVICE,
+    })
+    await adapter.start()
+    const space = await adapter.createSpace<TestDoc>('shared', { items: {} }, { name: 'NoLogSync' })
+    const handle = await adapter.openSpace<TestDoc>(space.id)
+    cleanup.push(async () => { handle.close(); await adapter.stop(); await identity.deleteStoredIdentity() })
+
+    await expect(handle.transactDurable!((doc) => { doc.items['x'] = { title: 'diverged?' } })).rejects.toThrow(/log-sync configuration/)
+    expect(handle.getDoc().items['x']).toBeUndefined() // the doc must be untouched
+  })
+
   it('a no-op transaction resolves immediately without appending', async () => {
     const { identity, adapter, handle, space, docLogStore } = await setup()
     cleanup.push(async () => { handle.close(); await adapter.stop(); await identity.deleteStoredIdentity() })
