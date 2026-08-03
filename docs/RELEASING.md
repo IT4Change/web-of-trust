@@ -34,6 +34,17 @@ Dependent — also auf die App. Ergebnis: ein Paket-Fix, der in die App kompilie
 erzeugt zuverlässig auch einen `app-v*`-Tag → nativen Build → Play-Auslieferung.
 (F-Droid bekäme dieselbe Änderung ohnehin per OTA; Play nur über diesen Weg.)
 
+> **Der Vertrag dahinter ist zerbrechlich** — `node-workspace` nimmt nur
+> Komponenten mit aufgelöstem `release-type: node` in den Graphen; eine als
+> `simple` konfigurierte App fällt still heraus, und ein root-relativer
+> `extra-files`-Pfad bumpt die Versionsdatei nie. Beides ist sonst unsichtbar und
+> kracht erst beim Release. Deshalb prüft
+> **`scripts/release/test-release-cascade.mjs`** diese Invarianten bei jedem PR
+> (Job `release-cascade` in `ci.yml`): Plugin aktiv, App und alle konsumierten
+> Pakete sind `node`-Komponenten, `extra-files` zeigt auf die echte Datei,
+> Versionen in Manifest / `package.json` / `version.properties` stimmen überein.
+> Lokal: `node scripts/release/test-release-cascade.mjs`.
+
 ---
 
 ## Was wodurch ausgelöst wird
