@@ -45,12 +45,14 @@ Builds:
 
 # Diese Metadaten sind fuer eine spaetere OFFIZIELLE F-Droid-Aufnahme (fdroiddata)
 # gedacht; unser eigenes Repo baut/signiert per wot-release, ohne sie zu lesen.
-# Seit 31.07.2026: App-Tags heissen app-v*, und version.properties fuehrt KEIN
-# VERSION_CODE mehr — der wird aus VERSION_NAME abgeleitet
-# (major*10000 + minor*100 + patch). Bei der Aufnahme entsprechend eine
-# VercodeOperation ergaenzen, die den Code aus dem Namen bildet.
-AutoUpdateMode: Version
-UpdateCheckMode: Tags ^app-v
-UpdateCheckData: apps/demo/android/version.properties|.|.|VERSION_NAME=(.+)
+#
+# Update-Automatik BEWUSST DEAKTIVIERT (None): version.properties fuehrt seit
+# 31.07.2026 kein VERSION_CODE mehr — der wird aus VERSION_NAME abgeleitet
+# (major*10000 + minor*100 + patch). Damit liefert kein UpdateCheckData einen
+# numerischen versionCode-Capture. Vor der Einreichung hier eine valide
+# UpdateCheckMode: Tags ^app-v + VercodeOperation ergaenzen, die den Code aus dem
+# Namen bildet. Bis dahin NICHT so tun, als waere die Automatik aktiv.
+AutoUpdateMode: None
+UpdateCheckMode: None
 CurrentVersion: 0.2.7
 CurrentVersionCode: 207

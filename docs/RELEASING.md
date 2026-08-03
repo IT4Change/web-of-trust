@@ -21,10 +21,18 @@ Merge auf main
                                                         → Server signiert & liefert aus
 ```
 
-Zwei Ausgänge aus einer PR. Sie sind **unabhängiger, als es aussieht**: die App
-baut die Workspace-Pakete **aus dem Quellcode** (`pnpm --filter … build`), nicht
-aus npm — sie wartet nie auf den npm-Publish. Gemeinsam ist nur die
-Versionslogik und die eine Release-PR.
+Zwei Ausgänge aus einer PR, npm und App. Die App baut die Workspace-Pakete **aus
+dem Quellcode** (`pnpm --filter … build`), nicht aus npm — sie wartet nie auf den
+npm-Publish.
+
+**Wichtig — Paket-Änderungen lösen einen App-Release aus.** Die App hängt via
+`workspace:*` an `wot-core` und den Adaptern; ein `fix:`/`feat:` nur unter
+`packages/**` würde für sich genommen nur das Paket bumpen. Damit die Änderung
+auch **Play** erreicht (Play hat kein OTA, updated nur über ein getaggtes AAB),
+kaskadiert das release-please-Plugin **`node-workspace`** den Bump auf jeden
+Dependent — also auf die App. Ergebnis: ein Paket-Fix, der in die App kompiliert,
+erzeugt zuverlässig auch einen `app-v*`-Tag → nativen Build → Play-Auslieferung.
+(F-Droid bekäme dieselbe Änderung ohnehin per OTA; Play nur über diesen Weg.)
 
 ---
 
