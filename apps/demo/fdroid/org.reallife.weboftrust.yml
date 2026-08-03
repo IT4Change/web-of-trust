@@ -43,8 +43,18 @@ Builds:
       - apps/benchmark/dist
     ndk: r27c
 
-AutoUpdateMode: Version
-UpdateCheckMode: Tags ^v
-UpdateCheckData: apps/demo/android/version.properties|VERSION_CODE=(\d+)|.|VERSION_NAME=(.+)
-CurrentVersion: 0.2.1
-CurrentVersionCode: 3
+# Diese Metadaten sind fuer eine spaetere OFFIZIELLE F-Droid-Aufnahme (fdroiddata)
+# gedacht; unser eigenes Repo baut/signiert per wot-release, ohne sie zu lesen.
+#
+# Update-Automatik BEWUSST DEAKTIVIERT (None): version.properties fuehrt seit
+# 31.07.2026 kein VERSION_CODE mehr — der wird aus VERSION_NAME abgeleitet
+# (major*10000 + minor*100 + patch). Damit gibt es keine numerische
+# versionCode-Quelle im Repo, die UpdateCheckData/VercodeOperation lesen koennten:
+# VercodeOperation transformiert nur einen bereits NUMERISCHEN %c und kann den
+# Code NICHT aus %v/VERSION_NAME bilden. Vor einer offiziellen Aufnahme braucht es
+# daher entweder eine numerische versionCode-Quelle (z.B. wieder ein Feld im File)
+# oder einen anderen nachweislich gueltigen Mapping-Pfad. Bis dahin: deaktiviert.
+AutoUpdateMode: None
+UpdateCheckMode: None
+CurrentVersion: 0.2.7
+CurrentVersionCode: 207

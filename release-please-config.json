@@ -24,9 +24,19 @@
     "packages/wot-profiles": {
       "package-name": "@web_of_trust/profiles",
       "changelog-path": "CHANGELOG.md"
+    },
+    "apps/demo": {
+      "release-type": "node",
+      "component": "app",
+      "include-component-in-tag": true,
+      "changelog-path": "CHANGELOG.md",
+      "extra-files": [
+        { "type": "generic", "path": "android/version.properties" }
+      ]
     }
   },
   "separate-pull-requests": false,
   "bump-minor-pre-major": true,
-  "bump-patch-for-minor-pre-major": true
+  "bump-patch-for-minor-pre-major": true,
+  "plugins": ["node-workspace"]
 }
