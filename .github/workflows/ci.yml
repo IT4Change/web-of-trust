@@ -15,6 +15,9 @@ jobs:
   # nie, weil Play bewusst kein OTA hat.
   release-cascade:
     runs-on: ubuntu-latest
+    # Minimalrecht: der Job liest nur Dateien aus dem Checkout.
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
         with:
