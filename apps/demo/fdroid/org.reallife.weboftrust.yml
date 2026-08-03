@@ -48,10 +48,12 @@ Builds:
 #
 # Update-Automatik BEWUSST DEAKTIVIERT (None): version.properties fuehrt seit
 # 31.07.2026 kein VERSION_CODE mehr — der wird aus VERSION_NAME abgeleitet
-# (major*10000 + minor*100 + patch). Damit liefert kein UpdateCheckData einen
-# numerischen versionCode-Capture. Vor der Einreichung hier eine valide
-# UpdateCheckMode: Tags ^app-v + VercodeOperation ergaenzen, die den Code aus dem
-# Namen bildet. Bis dahin NICHT so tun, als waere die Automatik aktiv.
+# (major*10000 + minor*100 + patch). Damit gibt es keine numerische
+# versionCode-Quelle im Repo, die UpdateCheckData/VercodeOperation lesen koennten:
+# VercodeOperation transformiert nur einen bereits NUMERISCHEN %c und kann den
+# Code NICHT aus %v/VERSION_NAME bilden. Vor einer offiziellen Aufnahme braucht es
+# daher entweder eine numerische versionCode-Quelle (z.B. wieder ein Feld im File)
+# oder einen anderen nachweislich gueltigen Mapping-Pfad. Bis dahin: deaktiviert.
 AutoUpdateMode: None
 UpdateCheckMode: None
 CurrentVersion: 0.2.7
