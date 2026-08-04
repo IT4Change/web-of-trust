@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.3.1](https://github.com/real-life-org/web-of-trust/compare/app-v0.3.0...app-v0.3.1) (2026-08-04)
+
+
+### Bug Fixes
+
+* **inbox:** konkreten Prüf-Fehler bei invalid-inner-jws-Reject durchreichen ([35ef0fb](https://github.com/real-life-org/web-of-trust/commit/35ef0fbb0ad077dfce4d5349d9954c045e2bf61c))
+* **inbox:** konkreten Prüf-Fehler bei invalid-inner-jws-Reject durchreichen ([2f819c6](https://github.com/real-life-org/web-of-trust/commit/2f819c67033dba2c64b5d86c19d3c4c5abaf27ca))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * @web_of_trust/adapter-automerge bumped to 0.2.3
+    * @web_of_trust/adapter-yjs bumped to 0.2.3
+    * @web_of_trust/core bumped to 0.5.3
+
 ## [0.3.0](https://github.com/real-life-org/web-of-trust/compare/app-v0.2.7...app-v0.3.0) (2026-08-03)
 
 

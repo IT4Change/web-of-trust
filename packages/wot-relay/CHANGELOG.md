@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.1.5](https://github.com/real-life-org/web-of-trust/compare/relay-v0.1.4...relay-v0.1.5) (2026-08-04)
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * @web_of_trust/core bumped to 0.5.3
+
 ## [0.1.4](https://github.com/real-life-org/web-of-trust/compare/relay-v0.1.3...relay-v0.1.4) (2026-07-20)
 
 
