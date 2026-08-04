@@ -20,7 +20,8 @@ export class InMemoryVerificationStateStore implements VerificationStateStore {
     return this.activeQrChallenge === null ? null : { ...this.activeQrChallenge }
   }
 
-  async clearActiveQrChallenge(): Promise<void> {
+  async clearActiveQrChallenge(expectedNonce?: string): Promise<void> {
+    if (expectedNonce !== undefined && this.activeQrChallenge?.nonce !== expectedNonce) return
     this.activeQrChallenge = null
   }
 

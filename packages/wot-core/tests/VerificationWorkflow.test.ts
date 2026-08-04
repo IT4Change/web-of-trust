@@ -20,7 +20,8 @@ class TestVerificationStateStore {
     return this.activeQrChallenge === null ? null : { ...this.activeQrChallenge }
   }
 
-  async clearActiveQrChallenge(): Promise<void> {
+  async clearActiveQrChallenge(expectedNonce?: string): Promise<void> {
+    if (expectedNonce !== undefined && this.activeQrChallenge?.nonce !== expectedNonce) return
     this.activeQrChallenge = null
   }
 
@@ -1082,5 +1083,98 @@ describe('VerificationWorkflow', () => {
       nonce,
     })
     expect(store.pendingCounterVerifications.size).toBe(1)
+  })
+
+  it('Re-Review #339: Accept-Clear löscht eine neuere Challenge einer zweiten Instanz nicht (compare-and-delete)', async () => {
+    const anna = await createTestIdentity('anna')
+    const nonceX = '550e8400-e29b-41d4-a716-446655440000'
+    const nonceY = '123e4567-e89b-42d3-a456-426614174000'
+    const store = new TestVerificationStateStore()
+    const instanceA = new VerificationWorkflow({
+      crypto: cryptoAdapter,
+      randomId: () => nonceX,
+      now: () => new Date('2026-04-28T08:00:00Z'),
+      stateStore: store,
+    })
+    await instanceA.createOnlineQrChallenge(anna, 'Anna')
+
+    // Zweite Instanz (anderer Tab) erzeugt inzwischen eine NEUERE Challenge.
+    const instanceB = new VerificationWorkflow({
+      crypto: cryptoAdapter,
+      randomId: () => nonceY,
+      now: () => new Date('2026-04-28T08:00:30Z'),
+      stateStore: store,
+    })
+    await instanceB.createOnlineQrChallenge(anna, 'Anna')
+
+    // Instanz A akzeptiert ihre (in-memory) Challenge X — das Clear darf die
+    // persistierte NEUERE Challenge Y nicht wegräumen.
+    expect(
+      await instanceA.acceptVerifiedVerificationAttestation(anna, verificationAttestationPayload(anna.getDid(), nonceX)),
+    ).toEqual({ decision: 'accept-in-person', nonce: nonceX })
+    expect(store.activeQrChallenge).toMatchObject({ nonce: nonceY })
+  })
+
+  it('Re-Review #339: reset löscht nur die eigene Challenge, nicht die einer zweiten Instanz', async () => {
+    const anna = await createTestIdentity('anna')
+    const nonceX = '550e8400-e29b-41d4-a716-446655440000'
+    const nonceY = '123e4567-e89b-42d3-a456-426614174000'
+    const store = new TestVerificationStateStore()
+    const instanceA = new VerificationWorkflow({
+      crypto: cryptoAdapter,
+      randomId: () => nonceX,
+      now: () => new Date('2026-04-28T08:00:00Z'),
+      stateStore: store,
+    })
+    await instanceA.createOnlineQrChallenge(anna, 'Anna')
+    const instanceB = new VerificationWorkflow({
+      crypto: cryptoAdapter,
+      randomId: () => nonceY,
+      now: () => new Date('2026-04-28T08:00:30Z'),
+      stateStore: store,
+    })
+    await instanceB.createOnlineQrChallenge(anna, 'Anna')
+
+    instanceA.resetActiveQrChallenge()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(store.activeQrChallenge).toMatchObject({ nonce: nonceY })
+  })
+
+  it('Re-Review #339: createOnlineQrChallenge meldet einen Persist-Fehler statt still zu bestehen', async () => {
+    const anna = await createTestIdentity('anna')
+    class FailingRecordStore extends TestVerificationStateStore {
+      override async recordActiveQrChallenge(): Promise<void> {
+        throw new Error('record kaputt')
+      }
+    }
+    const workflow = new VerificationWorkflow({
+      crypto: cryptoAdapter,
+      now: () => new Date('2026-04-28T08:00:00Z'),
+      stateStore: new FailingRecordStore(),
+    })
+    await expect(workflow.createOnlineQrChallenge(anna, 'Anna')).rejects.toThrow('record kaputt')
+    // Fehlgeschlagenes create hinterlässt keinen halb-aktiven Zustand.
+    expect(workflow.getActiveQrChallenge()).toBeNull()
+  })
+
+  it('Re-Review #339: ein fehlschlagender Restore-Read bricht den Accept-Pfad nicht ab', async () => {
+    const anna = await createTestIdentity('anna')
+    class FailingGetStore extends TestVerificationStateStore {
+      override async getActiveQrChallenge(): Promise<Record<string, unknown> | null> {
+        throw new Error('get kaputt')
+      }
+    }
+    const workflow = new VerificationWorkflow({
+      crypto: cryptoAdapter,
+      now: () => new Date('2026-04-28T08:00:00Z'),
+      stateStore: new FailingGetStore(),
+    })
+    expect(await workflow.restoreActiveQrChallenge()).toBeNull()
+    expect(
+      await workflow.acceptVerifiedVerificationAttestation(
+        anna,
+        verificationAttestationPayload(anna.getDid(), '550e8400-e29b-41d4-a716-446655440000'),
+      ),
+    ).toEqual({ decision: 'remote-unbound', reason: 'no-active-matching-nonce' })
   })
 })

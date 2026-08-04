@@ -35,8 +35,13 @@ export interface VerificationStateStore {
   /** Load the persisted active QR challenge, if any. */
   getActiveQrChallenge?(): Promise<ActiveQrChallengeRecord | null>
 
-  /** Drop the persisted active QR challenge. */
-  clearActiveQrChallenge?(): Promise<void>
+  /**
+   * Drop the persisted active QR challenge — compare-and-delete: with
+   * `expectedNonce`, delete ONLY when the stored challenge carries that nonce
+   * (atomically, so a clear finishing late or from another workflow instance
+   * can never remove a newer challenge); without it, delete unconditionally.
+   */
+  clearActiveQrChallenge?(expectedNonce?: string): Promise<void>
 
   /** Record a consumed QR challenge nonce. Idempotent by normalized nonce. */
   recordConsumedNonce(nonce: string, consumedAt: string): Promise<void>
