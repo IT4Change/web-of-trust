@@ -192,7 +192,11 @@ describe('deliverInboxMessage / receiveInboxMessage', () => {
       }),
     )
     const result = await receiveInboxMessage(receiveOptions(eavesdropper, envelope))
-    expect(result).toEqual({ decision: 'reject', reason: 'invalid-inner-jws' })
+    expect(result).toEqual({
+      decision: 'reject',
+      reason: 'invalid-inner-jws',
+      detail: 'Inner JWS to does not match own DID',
+    })
   })
 
   it('rejects an expired created_time as invalid-inner-jws', async () => {
@@ -201,7 +205,11 @@ describe('deliverInboxMessage / receiveInboxMessage', () => {
       deliverOptions(sender, recipient, { now: () => new Date(NOW.getTime() - 25 * 60 * 60 * 1000) }),
     )
     const result = await receiveInboxMessage(receiveOptions(recipient, envelope))
-    expect(result).toEqual({ decision: 'reject', reason: 'invalid-inner-jws' })
+    expect(result).toEqual({
+      decision: 'reject',
+      reason: 'invalid-inner-jws',
+      detail: 'Inner JWS created_time too old',
+    })
   })
 
   it('rejects a future-dated created_time as invalid-inner-jws (Clock-Skew-Obergrenze)', async () => {
@@ -212,7 +220,11 @@ describe('deliverInboxMessage / receiveInboxMessage', () => {
       deliverOptions(sender, recipient, { now: () => new Date(NOW.getTime() + 25 * 60 * 60 * 1000) }),
     )
     const result = await receiveInboxMessage(receiveOptions(recipient, envelope))
-    expect(result).toEqual({ decision: 'reject', reason: 'invalid-inner-jws' })
+    expect(result).toEqual({
+      decision: 'reject',
+      reason: 'invalid-inner-jws',
+      detail: 'Inner JWS created_time too far in the future',
+    })
   })
 
   it('rejects a replay after conclusive recording (Pflichtprüfung 5, Sync 003 Z.466)', async () => {
