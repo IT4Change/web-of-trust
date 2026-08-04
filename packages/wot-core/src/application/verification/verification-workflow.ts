@@ -190,6 +190,15 @@ export class VerificationWorkflow {
       const stored = await this.stateStore?.getActiveQrChallenge?.()
       if (!stored) return null
       const parsed = parseQrChallenge(JSON.stringify(stored))
+      // Ownership-Guard (Re-Review #339, 3. Runde): hat ein paralleles create
+      // inzwischen eine NEUERE Challenge gesetzt, gewinnt die — ein
+      // verspäteter Restore meldet dann den aktuellen Zustand statt ihn zu
+      // ersetzen.
+      // Cast nötig: TS narrowt das Feld nach dem frühen Return über die
+      // awaits hinweg fälschlich auf null — ein paralleles create kann es
+      // aber längst neu gesetzt haben.
+      const current = this.activeQrChallenge as QrChallenge | null
+      if (current !== null) return { ...current }
       this.activeQrChallenge = { ...parsed }
       return { ...parsed }
     } catch {
@@ -535,7 +544,10 @@ export class VerificationWorkflow {
       if (!consumed) {
         return { decision: 'reject', reason: 'nonce-consumed' }
       }
-      this.activeQrChallenge = null
+      // Ownership-Guard (Re-Review #339, 3. Runde): nur die EIGENE Challenge
+      // im RAM nullen — hat ein paralleles create inzwischen eine neuere
+      // gesetzt, bleibt sie stehen (Store-Seite schützt compare-and-delete).
+      if (this.activeQrChallenge?.nonce === decision.nonce) this.activeQrChallenge = null
       // Reihenfolge (Review #339): Die Nonce ist ab hier durabel konsumiert —
       // zuerst den pending counter sichern, dann das Challenge-Clear als
       // best-effort, per Nonce an die soeben akzeptierte Challenge gebunden

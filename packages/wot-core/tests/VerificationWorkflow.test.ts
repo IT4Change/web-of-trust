@@ -1235,4 +1235,75 @@ describe('VerificationWorkflow', () => {
     expect(workflow.getActiveQrChallenge()).toMatchObject({ nonce: nonce2 })
     expect(store.activeQrChallenge).toMatchObject({ nonce: nonce2 })
   })
+
+  it('Re-Review #339 (3. Runde): Accept nullt eine parallel erzeugte neuere Challenge nicht im RAM', async () => {
+    const anna = await createTestIdentity('anna')
+    const nonceX = '550e8400-e29b-41d4-a716-446655440000'
+    const nonceY = '123e4567-e89b-42d3-a456-426614174000'
+    class SlowConsumeStore extends TestVerificationStateStore {
+      override async tryConsumeNonce(nonce: string, consumedAt: string): Promise<boolean> {
+        await new Promise((resolve) => setTimeout(resolve, 20))
+        return super.tryConsumeNonce(nonce, consumedAt)
+      }
+    }
+    const store = new SlowConsumeStore()
+    const ids = [nonceX, nonceY]
+    const workflow = new VerificationWorkflow({
+      crypto: cryptoAdapter,
+      randomId: () => ids.shift()!,
+      now: () => new Date('2026-04-28T08:00:00Z'),
+      stateStore: store,
+    })
+    await workflow.createOnlineQrChallenge(anna, 'Anna')
+
+    // Accept für X läuft; währenddessen erzeugt die Session Y (Auto-Regenerate).
+    const accept = workflow.acceptVerifiedVerificationAttestation(anna, verificationAttestationPayload(anna.getDid(), nonceX))
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    await workflow.createOnlineQrChallenge(anna, 'Anna')
+
+    expect(await accept).toEqual({ decision: 'accept-in-person', nonce: nonceX })
+    // RAM und Store müssen übereinstimmend bei der NEUEREN Challenge Y enden.
+    expect(workflow.getActiveQrChallenge()).toMatchObject({ nonce: nonceY })
+    expect(store.activeQrChallenge).toMatchObject({ nonce: nonceY })
+  })
+
+  it('Re-Review #339 (3. Runde): ein verspäteter Restore ersetzt eine inzwischen neuere Challenge nicht', async () => {
+    const anna = await createTestIdentity('anna')
+    const nonceOld = '550e8400-e29b-41d4-a716-446655440000'
+    const nonceNew = '123e4567-e89b-42d3-a456-426614174000'
+    class SlowGetStore extends TestVerificationStateStore {
+      override async getActiveQrChallenge(): Promise<Record<string, unknown> | null> {
+        // Wert VOR der Verzögerung einfrieren: der Restore bekommt den alten
+        // Stand geliefert, obwohl inzwischen eine neuere Challenge existiert.
+        const stale = await super.getActiveQrChallenge()
+        await new Promise((resolve) => setTimeout(resolve, 20))
+        return stale
+      }
+    }
+    const store = new SlowGetStore()
+    // Persistierte alte Challenge aus einer früheren Session.
+    const seeder = new VerificationWorkflow({
+      crypto: cryptoAdapter,
+      randomId: () => nonceOld,
+      now: () => new Date('2026-04-28T08:00:00Z'),
+      stateStore: store,
+    })
+    await seeder.createOnlineQrChallenge(anna, 'Anna')
+
+    const ids = [nonceNew]
+    const workflow = new VerificationWorkflow({
+      crypto: cryptoAdapter,
+      randomId: () => ids.shift()!,
+      now: () => new Date('2026-04-28T08:01:00Z'),
+      stateStore: store,
+    })
+    const restore = workflow.restoreActiveQrChallenge()
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    await workflow.createOnlineQrChallenge(anna, 'Anna')
+
+    // Der verspätete Restore darf die inzwischen erzeugte NEUERE Challenge
+    // nicht ersetzen — er meldet den dann aktiven Zustand.
+    expect(await restore).toMatchObject({ nonce: nonceNew })
+    expect(workflow.getActiveQrChallenge()).toMatchObject({ nonce: nonceNew })
+  })
 })
