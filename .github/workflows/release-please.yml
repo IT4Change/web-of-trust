@@ -99,11 +99,12 @@ jobs:
             echo "Vermutlich hat sich das Output-Schema von release-please geaendert." >&2
             exit 1
           fi
-          # releases_created war true, also MUSS mindestens ein Tag dabei sein.
-          if [ "$started" -eq 0 ]; then
-            echo "ABBRUCH: releases_created=true, aber kein Tag-Output gefunden." >&2
-            exit 1
-          fi
+          # started=0 ist seit dem App-Release-Umbau ein REGULAERER Fall: die App
+          # ist eine eigene release-please-Komponente, also kann releases_created
+          # true sein, ohne dass ein npm-Paket dabei war (reines App-Release →
+          # nur app-v*). Frueher implizierte jedes Release ein Paket; der alte
+          # Abbruch hier hat den ersten echten App-only-Release rot gemacht,
+          # obwohl nichts zu publizieren war.
           echo "$started Publish-Lauf/Laeufe angestossen"
 
   # Wurde die APP released (Tag app-vX.Y.Z), den nativen Build anstossen. Gleiche
