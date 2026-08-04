@@ -68,7 +68,7 @@
 |--------|------|------------|
 | Modify message on relay | Low | E2E encryption + envelope signature |
 | Manipulate CRDT state (external) | Low | Without GroupKey, no valid ciphertext producible |
-| Manipulate CRDT state (member) | Medium | **Not preventable** — whoever has the key can write |
+| Manipulate CRDT state (member) | Medium | **Not preventable** for collaborative content — whoever has the key can write. Authorship claims inside the doc (`createdBy`) are forgeable today; SignedClaims (rls#209) close this for authorial relation records (votes, contacts) |
 | Forge member-update | Low | A valid envelope signature identifies the sender; current adapters still require creator-derived authority before applying membership effects. Core disposition evaluation exists for future pending/unverified adapter handling |
 | Manipulate local data | Medium | Compromised device = game over |
 
@@ -78,7 +78,7 @@
 |--------|------|------------|
 | Deny attestation | Low | Ed25519 signature proves authorship |
 | Deny verification | Low | Signature proves action |
-| Deny CRDT change | Medium | CRDT changes are still not individually signed — no per-change proof. The per-change `fromDid` routing field was removed in the OneShot refactor; it only ever lived in the old `EncryptedChange` envelope and never constituted a cryptographic proof |
+| Deny CRDT change | Medium | Every sync-log entry is an Ed25519 JWS over `(seq, deviceId, docId, authorKid, keyGeneration, ciphertext, timestamp)` — update-level authorship is signed and relay-verified (Sync 002). What is still missing is PER-ITEM binding: the signature covers the whole update blob, is dropped at applyUpdate, and snapshot bootstraps carry no log. A member can therefore still forge in-doc `createdBy` fields. Data-level closure is specified as SignedClaims (RLS spec 08 „Autorbindung", rls#209): authorial relation records carry their author's JWS in the record itself |
 
 ### I — Information Disclosure
 
