@@ -67,6 +67,9 @@ jobs:
           YJS_TAG: ${{ needs.release-please.outputs.adapter_yjs_tag }}
           AUTOMERGE_RELEASED: ${{ needs.release-please.outputs['adapter-automerge_released'] }}
           AUTOMERGE_TAG: ${{ needs.release-please.outputs.adapter_automerge_tag }}
+          # Fuer den started=0-Fall: nur ein NACHGEWIESENES App-Release erklaert,
+          # dass kein Paket dabei war.
+          APP_RELEASED: ${{ needs.release-please.outputs.app_released }}
         run: |
           set -euo pipefail
           started=0
@@ -99,9 +102,17 @@ jobs:
             echo "Vermutlich hat sich das Output-Schema von release-please geaendert." >&2
             exit 1
           fi
-          # releases_created war true, also MUSS mindestens ein Tag dabei sein.
-          if [ "$started" -eq 0 ]; then
-            echo "ABBRUCH: releases_created=true, aber kein Tag-Output gefunden." >&2
+          # started=0 ist seit dem App-Release-Umbau ein REGULAERER Fall — aber NUR,
+          # wenn nachweislich die App released wurde (eigene Komponente, Tag
+          # app-v*). Frueher implizierte jedes Release ein Paket, und der alte
+          # pauschale Abbruch hat den ersten App-only-Release rot gemacht. Ihn
+          # ersatzlos zu streichen waere aber zu viel des Guten: dann bliebe auch
+          # echte Output-/Schema-Drift (alle *_released leer, weil release-please
+          # seine Output-Namen aendert) still gruen — und kein Paket wuerde je
+          # publiziert, ohne dass es jemand merkt.
+          if [ "$started" -eq 0 ] && [ "$APP_RELEASED" != "true" ]; then
+            echo "ABBRUCH: releases_created=true, aber weder ein Paket- noch ein App-Release erkannt." >&2
+            echo "Vermutlich hat sich das Output-Schema von release-please geaendert." >&2
             exit 1
           fi
           echo "$started Publish-Lauf/Laeufe angestossen"
