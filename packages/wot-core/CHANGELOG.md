@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.5.3](https://github.com/real-life-org/web-of-trust/compare/core-v0.5.2...core-v0.5.3) (2026-08-04)
+
+
+### Bug Fixes
+
+* **inbox:** konkreten Prüf-Fehler bei invalid-inner-jws-Reject durchreichen ([35ef0fb](https://github.com/real-life-org/web-of-trust/commit/35ef0fbb0ad077dfce4d5349d9954c045e2bf61c))
+* **inbox:** konkreten Prüf-Fehler bei invalid-inner-jws-Reject durchreichen ([2f819c6](https://github.com/real-life-org/web-of-trust/commit/2f819c67033dba2c64b5d86c19d3c4c5abaf27ca))
+
 ## [0.5.2](https://github.com/real-life-org/web-of-trust/compare/core-v0.5.1...core-v0.5.2) (2026-08-01)
 
 
