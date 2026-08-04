@@ -59,6 +59,12 @@ export type ReceiveInboxMessageResult =
   | {
       decision: 'reject'
       reason: 'malformed-envelope' | 'unexpected-type' | 'decrypt-failed' | 'invalid-inner-jws' | 'replay'
+      /**
+       * Konkreter Prüf-Fehler (z.B. "Inner JWS created_time too old") für
+       * Diagnose-Logs — `reason` allein bündelt alle Inner-JWS-Fehler und war
+       * im Feld nicht unterscheidbar (Uhr-Skew vs. Signatur vs. Binding).
+       */
+      detail?: string
     }
 
 /**
@@ -116,8 +122,12 @@ export async function receiveInboxMessage(options: ReceiveInboxMessageOptions): 
       maxAgeMs: options.maxAgeMs,
       maxClockSkewMs: options.maxClockSkewMs,
     })
-  } catch {
-    return { decision: 'reject', reason: 'invalid-inner-jws' }
+  } catch (error) {
+    return {
+      decision: 'reject',
+      reason: 'invalid-inner-jws',
+      detail: error instanceof Error ? error.message : String(error),
+    }
   }
 
   // Pflichtprüfung 5 NACH der Signatur-Verifikation (lesend), damit ein

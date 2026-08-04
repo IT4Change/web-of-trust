@@ -212,7 +212,7 @@ export class InboxReceptionHost {
       }
       // K1-Pflicht: fehlgeschlagene Verarbeitung → KEIN ack/1.0 — die Nachricht
       // bleibt in der Relay-Queue (Redelivery-Pfad).
-      console.warn('[InboxReception] Rejected inbox/1.0 message:', result.reason)
+      console.warn('[InboxReception] Rejected inbox/1.0 message:', result.reason, result.detail ?? '')
       return
     }
 
