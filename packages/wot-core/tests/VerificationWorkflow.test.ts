@@ -1177,4 +1177,62 @@ describe('VerificationWorkflow', () => {
       ),
     ).toEqual({ decision: 'remote-unbound', reason: 'no-active-matching-nonce' })
   })
+
+  it('Re-Review #339 (2. Runde): ein blinder Reset ohne eigene Challenge räumt fremden Store-Zustand nicht ab', async () => {
+    const anna = await createTestIdentity('anna')
+    const nonceY = '123e4567-e89b-42d3-a456-426614174000'
+    const store = new TestVerificationStateStore()
+    const instanceB = new VerificationWorkflow({
+      crypto: cryptoAdapter,
+      randomId: () => nonceY,
+      now: () => new Date('2026-04-28T08:00:00Z'),
+      stateStore: store,
+    })
+    await instanceB.createOnlineQrChallenge(anna, 'Anna')
+
+    // Frische Instanz ohne in-memory-Challenge: reset kennt keine Nonce und
+    // darf deshalb gar nichts löschen — sie besitzt keine persistierte Challenge.
+    const instanceA = new VerificationWorkflow({
+      crypto: cryptoAdapter,
+      now: () => new Date('2026-04-28T08:00:30Z'),
+      stateStore: store,
+    })
+    instanceA.resetActiveQrChallenge()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(store.activeQrChallenge).toMatchObject({ nonce: nonceY })
+  })
+
+  it('Re-Review #339 (2. Runde): ein gescheiterter älterer Create-Flight rollt ein neueres erfolgreiches create nicht zurück', async () => {
+    const anna = await createTestIdentity('anna')
+    const nonce1 = '550e8400-e29b-41d4-a716-446655440000'
+    const nonce2 = '123e4567-e89b-42d3-a456-426614174000'
+    class FirstRecordFailsSlowly extends TestVerificationStateStore {
+      private calls = 0
+      override async recordActiveQrChallenge(challenge: Record<string, unknown>): Promise<void> {
+        if (++this.calls === 1) {
+          await new Promise((resolve) => setTimeout(resolve, 20))
+          throw new Error('record 1 kaputt')
+        }
+        await super.recordActiveQrChallenge(challenge)
+      }
+    }
+    const store = new FirstRecordFailsSlowly()
+    const ids = [nonce1, nonce2]
+    const workflow = new VerificationWorkflow({
+      crypto: cryptoAdapter,
+      randomId: () => ids.shift()!,
+      now: () => new Date('2026-04-28T08:00:00Z'),
+      stateStore: store,
+    })
+
+    const first = workflow.createOnlineQrChallenge(anna, 'Anna')
+    const second = workflow.createOnlineQrChallenge(anna, 'Anna')
+
+    await expect(first).rejects.toThrow('record 1 kaputt')
+    await second
+    // Der Rollback des gescheiterten Flights darf den Zustand des neueren
+    // erfolgreichen create weder im RAM noch im Store anfassen.
+    expect(workflow.getActiveQrChallenge()).toMatchObject({ nonce: nonce2 })
+    expect(store.activeQrChallenge).toMatchObject({ nonce: nonce2 })
+  })
 })

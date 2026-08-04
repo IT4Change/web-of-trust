@@ -145,7 +145,12 @@ export class VerificationWorkflow {
     try {
       await this.enqueueChallengeStoreOp(() => this.stateStore?.recordActiveQrChallenge?.({ ...parsedChallenge }))
     } catch (error) {
-      this.activeQrChallenge = previousChallenge
+      // Rollback nur, wenn dieser Flight noch den aktiven Zustand besitzt —
+      // ein inzwischen gelaufenes neueres create darf ein älterer Fehlschlag
+      // nicht zurückrollen (Re-Review #339, 2. Runde).
+      if (this.activeQrChallenge?.nonce === parsedChallenge.nonce) {
+        this.activeQrChallenge = previousChallenge
+      }
       throw error
     }
     return { challenge: { ...parsedChallenge }, rawJson }
@@ -196,8 +201,11 @@ export class VerificationWorkflow {
     const nonce = this.activeQrChallenge?.nonce
     this.activeQrChallenge = null
     // Best-effort über die Kette; das Clear ist per Nonce an die EIGENE
-    // Challenge gebunden — die einer parallelen Instanz bleibt stehen
-    // (Re-Review #339). Ohne bekannte Nonce (blinder Reset) unconditional.
+    // Challenge gebunden — die einer parallelen Instanz bleibt stehen.
+    // Ein blinder Reset (keine eigene Challenge) besitzt nichts im Store und
+    // löscht deshalb GAR nichts (Re-Review #339, 2. Runde); den vollständigen
+    // Abraum übernimmt der Identity-Wipe.
+    if (nonce === undefined) return
     void this.enqueueChallengeStoreOp(() => this.stateStore?.clearActiveQrChallenge?.(nonce)).catch(() => {})
   }
 
