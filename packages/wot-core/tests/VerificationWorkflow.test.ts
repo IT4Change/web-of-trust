@@ -1032,4 +1032,55 @@ describe('VerificationWorkflow', () => {
     await new Promise((resolve) => setTimeout(resolve, 0))
     expect(store.activeQrChallenge).toBeNull()
   })
+
+  it('Review #339: ein verspätetes reset-Clear löscht keine danach neu erzeugte Challenge', async () => {
+    // Auto-Regenerate (Entscheidung 3) macht reset → create in schneller Folge.
+    // Ein langsames clear darf die frisch persistierte Challenge nicht wegräumen.
+    const anna = await createTestIdentity('anna')
+    class SlowClearStore extends TestVerificationStateStore {
+      override async clearActiveQrChallenge(): Promise<void> {
+        await new Promise((resolve) => setTimeout(resolve, 20))
+        await super.clearActiveQrChallenge()
+      }
+    }
+    const store = new SlowClearStore()
+    const workflow = new VerificationWorkflow({
+      crypto: cryptoAdapter,
+      now: () => new Date('2026-04-28T08:00:00Z'),
+      stateStore: store,
+    })
+    await workflow.createOnlineQrChallenge(anna, 'Anna')
+    workflow.resetActiveQrChallenge()
+    const { challenge } = await workflow.createOnlineQrChallenge(anna, 'Anna')
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(store.activeQrChallenge).toMatchObject({ nonce: challenge.nonce })
+  })
+
+  it('Review #339: ein fehlschlagendes Clear nach dem Nonce-Consume verliert die Counter-Verification nicht', async () => {
+    const anna = await createTestIdentity('anna')
+    const nonce = '550e8400-e29b-41d4-a716-446655440000'
+    class FailingClearStore extends TestVerificationStateStore {
+      override async clearActiveQrChallenge(): Promise<void> {
+        throw new Error('clear kaputt')
+      }
+    }
+    const store = new FailingClearStore()
+    const workflow = new VerificationWorkflow({
+      crypto: cryptoAdapter,
+      randomId: () => nonce,
+      now: () => new Date('2026-04-28T08:00:00Z'),
+      stateStore: store,
+    })
+    await workflow.createOnlineQrChallenge(anna, 'Anna')
+
+    // Die Annahme MUSS trotz Clear-Fehler durchgehen und den pending counter
+    // durabel hinterlassen — die Nonce ist zu diesem Zeitpunkt schon
+    // konsumiert; ein Abbruch hier wäre dauerhaft nonce-consumed ohne Mutual.
+    const payload = verificationAttestationPayload(anna.getDid(), nonce)
+    expect(await workflow.acceptVerifiedVerificationAttestation(anna, payload)).toEqual({
+      decision: 'accept-in-person',
+      nonce,
+    })
+    expect(store.pendingCounterVerifications.size).toBe(1)
+  })
 })

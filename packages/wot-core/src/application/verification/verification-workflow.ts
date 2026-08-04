@@ -89,6 +89,15 @@ export class VerificationWorkflow {
   private readonly now: () => Date
   private readonly stateStore: VerificationStateStore | undefined
   private activeQrChallenge: QrChallenge | null = null
+  /**
+   * Serialisiert record/clear der persistierten Challenge (Review #339):
+   * reset → create in schneller Folge (Auto-Regenerate) darf nie dazu führen,
+   * dass ein verspätetes clear die frisch persistierte Challenge löscht.
+   * Fehler einzelner Operationen werden geschluckt — Challenge-Persistenz ist
+   * eine Komfort-Capability und darf weder die Kette vergiften noch einen
+   * Accept abbrechen.
+   */
+  private challengeStoreQueue: Promise<void> = Promise.resolve()
   private readonly consumedNonces = new Map<string, number>()
   private readonly pendingCounterVerifications = new Map<string, PendingCounterVerification>()
 
@@ -131,8 +140,19 @@ export class VerificationWorkflow {
     // Entscheidung 2026-08-04 (1c): Challenge überlebt Reload/Re-Login der
     // Owner-Session, wenn der Store die Capability anbietet. Die TTL-Prüfung
     // bleibt vollständig bei decideVerificationAttestationAcceptance.
-    await this.stateStore?.recordActiveQrChallenge?.({ ...parsedChallenge })
+    await this.enqueueChallengeStoreOp(() => this.stateStore?.recordActiveQrChallenge?.({ ...parsedChallenge }))
     return { challenge: { ...parsedChallenge }, rawJson }
+  }
+
+  /** Reihenfolge-treue, fehler-schluckende Kette für Challenge-Store-Operationen. */
+  private enqueueChallengeStoreOp(op: () => Promise<void> | undefined): Promise<void> {
+    const next = this.challengeStoreQueue.then(async () => {
+      try {
+        await op()
+      } catch { /* Capability best-effort — siehe Feld-Kommentar */ }
+    })
+    this.challengeStoreQueue = next
+    return next
   }
 
   getActiveQrChallenge(): QrChallenge | null {
@@ -147,6 +167,9 @@ export class VerificationWorkflow {
    */
   async restoreActiveQrChallenge(): Promise<QrChallenge | null> {
     if (this.activeQrChallenge !== null) return { ...this.activeQrChallenge }
+    // Erst ausstehende record/clear-Operationen abwarten, sonst liest der
+    // Restore einen Zwischenstand derselben Instanz.
+    await this.challengeStoreQueue
     const stored = await this.stateStore?.getActiveQrChallenge?.()
     if (!stored) return null
     try {
@@ -162,9 +185,10 @@ export class VerificationWorkflow {
 
   resetActiveQrChallenge(): void {
     this.activeQrChallenge = null
-    // Best-effort: die sync Signatur ist öffentlicher Vertrag; ein Store-Fehler
-    // darf den Reset nicht blockieren.
-    void this.stateStore?.clearActiveQrChallenge?.()?.catch(() => {})
+    // Best-effort über die Kette: die sync Signatur ist öffentlicher Vertrag,
+    // und die Kette garantiert, dass ein nachfolgendes create dieses clear
+    // nie überholt (Review #339).
+    void this.enqueueChallengeStoreOp(() => this.stateStore?.clearActiveQrChallenge?.())
   }
 
   async createVerificationAttestation(input: CreateVerificationAttestationInput): Promise<Attestation> {
@@ -494,11 +518,15 @@ export class VerificationWorkflow {
         return { decision: 'reject', reason: 'nonce-consumed' }
       }
       this.activeQrChallenge = null
-      await store.clearActiveQrChallenge?.()
+      // Reihenfolge (Review #339): Die Nonce ist ab hier durabel konsumiert —
+      // zuerst den pending counter sichern, dann das Challenge-Clear als
+      // best-effort. Ein Clear-Fehler darf den Accept nie mehr abbrechen,
+      // sonst endet jeder Retry dauerhaft bei nonce-consumed ohne Mutual.
       await this.recordPendingCounterVerification({
         counterpartyDid: payload.iss,
         originalVerificationId: payload.jti!,
       })
+      await this.enqueueChallengeStoreOp(() => store.clearActiveQrChallenge?.())
     }
     return decision
   }
