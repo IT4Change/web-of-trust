@@ -10,6 +10,19 @@ const cryptoAdapter = new WebCryptoProtocolCryptoAdapter()
 class TestVerificationStateStore {
   readonly consumedNonces = new Map<string, string>()
   readonly pendingCounterVerifications = new Map<string, PendingCounterVerification>()
+  activeQrChallenge: Record<string, unknown> | null = null
+
+  async recordActiveQrChallenge(challenge: Record<string, unknown>): Promise<void> {
+    this.activeQrChallenge = { ...challenge }
+  }
+
+  async getActiveQrChallenge(): Promise<Record<string, unknown> | null> {
+    return this.activeQrChallenge === null ? null : { ...this.activeQrChallenge }
+  }
+
+  async clearActiveQrChallenge(): Promise<void> {
+    this.activeQrChallenge = null
+  }
 
   async recordConsumedNonce(nonce: string, consumedAt: string): Promise<void> {
     this.consumedNonces.set(nonce.toLowerCase(), consumedAt)
@@ -925,5 +938,98 @@ describe('VerificationWorkflow', () => {
       reason: 'pending-counter-expired',
     })
     expect(await afterRestart.getPendingCounterVerification(originalVerificationId)).toBeNull()
+  })
+
+  // Entscheidung 1c (04.08.): die aktive QR-Challenge überlebt Reload/Re-Login
+  // über den StateStore, solange ihre 5-Minuten-TTL läuft. Die TTL-Prüfung
+  // bleibt bei decideVerificationAttestationAcceptance — der Store hydriert nur.
+  it('restores the persisted active QR challenge after workflow restart (within TTL)', async () => {
+    const anna = await createTestIdentity('anna')
+    const nonce = '550e8400-e29b-41d4-a716-446655440000'
+    const store = new TestVerificationStateStore()
+    const beforeReload = new VerificationWorkflow({
+      crypto: cryptoAdapter,
+      randomId: () => nonce,
+      now: () => new Date('2026-04-28T08:00:00Z'),
+      stateStore: store,
+    })
+    await beforeReload.createOnlineQrChallenge(anna, 'Anna')
+
+    const afterReload = new VerificationWorkflow({
+      crypto: cryptoAdapter,
+      now: () => new Date('2026-04-28T08:04:59Z'),
+      stateStore: store,
+    })
+    expect(
+      await afterReload.acceptVerifiedVerificationAttestation(anna, verificationAttestationPayload(anna.getDid(), nonce)),
+    ).toEqual({ decision: 'accept-in-person', nonce })
+  })
+
+  it('rejects a stale persisted challenge as challenge-expired, not remote-unbound', async () => {
+    const anna = await createTestIdentity('anna')
+    const nonce = '550e8400-e29b-41d4-a716-446655440000'
+    const store = new TestVerificationStateStore()
+    const beforeReload = new VerificationWorkflow({
+      crypto: cryptoAdapter,
+      randomId: () => nonce,
+      now: () => new Date('2026-04-28T08:00:00Z'),
+      stateStore: store,
+    })
+    await beforeReload.createOnlineQrChallenge(anna, 'Anna')
+
+    const afterReload = new VerificationWorkflow({
+      crypto: cryptoAdapter,
+      now: () => new Date('2026-04-28T08:05:01Z'),
+      stateStore: store,
+    })
+    expect(
+      await afterReload.acceptVerifiedVerificationAttestation(anna, verificationAttestationPayload(anna.getDid(), nonce)),
+    ).toEqual({ decision: 'reject', reason: 'challenge-expired' })
+  })
+
+  it('restoreActiveQrChallenge hydrates the challenge for dialog restore', async () => {
+    const anna = await createTestIdentity('anna')
+    const nonce = '550e8400-e29b-41d4-a716-446655440000'
+    const store = new TestVerificationStateStore()
+    const beforeReload = new VerificationWorkflow({
+      crypto: cryptoAdapter,
+      randomId: () => nonce,
+      now: () => new Date('2026-04-28T08:00:00Z'),
+      stateStore: store,
+    })
+    await beforeReload.createOnlineQrChallenge(anna, 'Anna')
+
+    const afterReload = new VerificationWorkflow({
+      crypto: cryptoAdapter,
+      now: () => new Date('2026-04-28T08:03:00Z'),
+      stateStore: store,
+    })
+    expect(afterReload.getActiveQrChallenge()).toBeNull()
+    const restored = await afterReload.restoreActiveQrChallenge()
+    expect(restored).toMatchObject({ did: anna.getDid(), name: 'Anna', nonce })
+    expect(afterReload.getActiveQrChallenge()).toMatchObject({ nonce })
+  })
+
+  it('accept-in-person and resetActiveQrChallenge clear the persisted challenge', async () => {
+    const anna = await createTestIdentity('anna')
+    const nonce = '550e8400-e29b-41d4-a716-446655440000'
+    const store = new TestVerificationStateStore()
+    const workflow = new VerificationWorkflow({
+      crypto: cryptoAdapter,
+      randomId: () => nonce,
+      now: () => new Date('2026-04-28T08:00:00Z'),
+      stateStore: store,
+    })
+    await workflow.createOnlineQrChallenge(anna, 'Anna')
+    expect(store.activeQrChallenge).not.toBeNull()
+
+    await workflow.acceptVerifiedVerificationAttestation(anna, verificationAttestationPayload(anna.getDid(), nonce))
+    expect(store.activeQrChallenge).toBeNull()
+
+    await workflow.createOnlineQrChallenge(anna, 'Anna')
+    expect(store.activeQrChallenge).not.toBeNull()
+    workflow.resetActiveQrChallenge()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(store.activeQrChallenge).toBeNull()
   })
 })

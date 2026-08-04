@@ -128,6 +128,10 @@ export class VerificationWorkflow {
     // Store and return the normalized Trust 002 JSON form that passed protocol validation.
     const rawJson = JSON.stringify(parsedChallenge)
     this.activeQrChallenge = { ...parsedChallenge }
+    // Entscheidung 2026-08-04 (1c): Challenge überlebt Reload/Re-Login der
+    // Owner-Session, wenn der Store die Capability anbietet. Die TTL-Prüfung
+    // bleibt vollständig bei decideVerificationAttestationAcceptance.
+    await this.stateStore?.recordActiveQrChallenge?.({ ...parsedChallenge })
     return { challenge: { ...parsedChallenge }, rawJson }
   }
 
@@ -135,8 +139,32 @@ export class VerificationWorkflow {
     return this.activeQrChallenge === null ? null : { ...this.activeQrChallenge }
   }
 
+  /**
+   * Hydriert die aktive QR-Challenge aus dem StateStore (Dialog-Restore nach
+   * Reload). Gibt die dann aktive Challenge zurück — die Frische prüft weiter
+   * ausschließlich der Accept-Pfad; für die UI-Anzeige steht
+   * isActiveQrChallengeValid im Protocol-Layer bereit.
+   */
+  async restoreActiveQrChallenge(): Promise<QrChallenge | null> {
+    if (this.activeQrChallenge !== null) return { ...this.activeQrChallenge }
+    const stored = await this.stateStore?.getActiveQrChallenge?.()
+    if (!stored) return null
+    try {
+      // Re-Validierung über den Wire-Parser: ein korruptes Blob aus dem Store
+      // darf nie zur aktiven Challenge werden.
+      const parsed = parseQrChallenge(JSON.stringify(stored))
+      this.activeQrChallenge = { ...parsed }
+      return { ...parsed }
+    } catch {
+      return null
+    }
+  }
+
   resetActiveQrChallenge(): void {
     this.activeQrChallenge = null
+    // Best-effort: die sync Signatur ist öffentlicher Vertrag; ein Store-Fehler
+    // darf den Reset nicht blockieren.
+    void this.stateStore?.clearActiveQrChallenge?.()?.catch(() => {})
   }
 
   async createVerificationAttestation(input: CreateVerificationAttestationInput): Promise<Attestation> {
@@ -443,6 +471,12 @@ export class VerificationWorkflow {
     const now = this.now()
     await store.pruneConsumedNonces(wholeSecondRfc3339(new Date(now.getTime() - CONSUMED_NONCE_RETENTION_MS)))
 
+    // Entscheidung 2026-08-04 (1c): nach Reload/Re-Login die persistierte
+    // Challenge hydrieren, bevor entschieden wird — die Frische-/Nonce-Prüfung
+    // bleibt komplett bei decideVerificationAttestationAcceptance (eine
+    // abgelaufene Challenge wird dort challenge-expired, nie angenommen).
+    if (this.activeQrChallenge === null) await this.restoreActiveQrChallenge()
+
     const decision = decideVerificationAttestationAcceptance({
       payload,
       localDid: identity.getDid(),
@@ -460,6 +494,7 @@ export class VerificationWorkflow {
         return { decision: 'reject', reason: 'nonce-consumed' }
       }
       this.activeQrChallenge = null
+      await store.clearActiveQrChallenge?.()
       await this.recordPendingCounterVerification({
         counterpartyDid: payload.iss,
         originalVerificationId: payload.jti!,

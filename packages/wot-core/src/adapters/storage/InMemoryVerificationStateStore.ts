@@ -1,4 +1,8 @@
-import type { PendingCounterVerificationRecord, VerificationStateStore } from '../../ports/VerificationStateStore'
+import type {
+  ActiveQrChallengeRecord,
+  PendingCounterVerificationRecord,
+  VerificationStateStore,
+} from '../../ports/VerificationStateStore'
 
 /**
  * Volatile Trust 002 verification state store for tests and reference composition.
@@ -6,6 +10,19 @@ import type { PendingCounterVerificationRecord, VerificationStateStore } from '.
 export class InMemoryVerificationStateStore implements VerificationStateStore {
   private readonly consumedNonces = new Map<string, string>()
   private readonly pendingCounterVerifications = new Map<string, PendingCounterVerificationRecord>()
+  private activeQrChallenge: ActiveQrChallengeRecord | null = null
+
+  async recordActiveQrChallenge(challenge: ActiveQrChallengeRecord): Promise<void> {
+    this.activeQrChallenge = { ...challenge }
+  }
+
+  async getActiveQrChallenge(): Promise<ActiveQrChallengeRecord | null> {
+    return this.activeQrChallenge === null ? null : { ...this.activeQrChallenge }
+  }
+
+  async clearActiveQrChallenge(): Promise<void> {
+    this.activeQrChallenge = null
+  }
 
   async recordConsumedNonce(nonce: string, consumedAt: string): Promise<void> {
     this.consumedNonces.set(nonce.toLowerCase(), consumedAt)
@@ -72,5 +89,6 @@ export class InMemoryVerificationStateStore implements VerificationStateStore {
   async clear(): Promise<void> {
     this.consumedNonces.clear()
     this.pendingCounterVerifications.clear()
+    this.activeQrChallenge = null
   }
 }
