@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.2.4](https://github.com/real-life-org/web-of-trust/compare/adapter-yjs-v0.2.3...adapter-yjs-v0.2.4) (2026-08-05)
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * devDependencies
+    * @web_of_trust/core bumped to 0.5.4
+  * peerDependencies
+    * @web_of_trust/core bumped to 0.5.4
+
 ## [0.2.3](https://github.com/real-life-org/web-of-trust/compare/adapter-yjs-v0.2.2...adapter-yjs-v0.2.3) (2026-08-04)
 
 
