@@ -1306,4 +1306,40 @@ describe('VerificationWorkflow', () => {
     expect(await restore).toMatchObject({ nonce: nonceNew })
     expect(workflow.getActiveQrChallenge()).toMatchObject({ nonce: nonceNew })
   })
+
+  it('Epoche: ein verspäteter Restore aufersteht eine inzwischen zurückgesetzte Challenge nicht', async () => {
+    // Die restore/reset-Kombination, die ein reiner null-Check im RAM nicht
+    // abdeckt: reset() lässt den RAM leer zurück — genau dann darf ein
+    // laufender Restore seinen stale Read trotzdem nicht committen.
+    const anna = await createTestIdentity('anna')
+    const nonceOld = '550e8400-e29b-41d4-a716-446655440000'
+    class SlowGetStore extends TestVerificationStateStore {
+      override async getActiveQrChallenge(): Promise<Record<string, unknown> | null> {
+        const stale = await super.getActiveQrChallenge()
+        await new Promise((resolve) => setTimeout(resolve, 20))
+        return stale
+      }
+    }
+    const store = new SlowGetStore()
+    const seeder = new VerificationWorkflow({
+      crypto: cryptoAdapter,
+      randomId: () => nonceOld,
+      now: () => new Date('2026-04-28T08:00:00Z'),
+      stateStore: store,
+    })
+    await seeder.createOnlineQrChallenge(anna, 'Anna')
+
+    const workflow = new VerificationWorkflow({
+      crypto: cryptoAdapter,
+      now: () => new Date('2026-04-28T08:01:00Z'),
+      stateStore: store,
+    })
+    const restore = workflow.restoreActiveQrChallenge()
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    // User schließt den Dialog, während der Restore noch liest.
+    workflow.resetActiveQrChallenge()
+
+    expect(await restore).toBeNull()
+    expect(workflow.getActiveQrChallenge()).toBeNull()
+  })
 })
