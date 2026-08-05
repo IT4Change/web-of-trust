@@ -89,6 +89,24 @@ export class VerificationWorkflow {
   private readonly now: () => Date
   private readonly stateStore: VerificationStateStore | undefined
   private activeQrChallenge: QrChallenge | null = null
+  /**
+   * Serialisiert record/clear der persistierten Challenge (Review #339):
+   * Instanz-lokal garantiert die Kette die Reihenfolge (reset → create beim
+   * Auto-Regenerate); Cross-Instanz schützt zusätzlich das compare-and-delete
+   * per Nonce im Port. Fehler laufen zum jeweiligen Awaiter durch (create
+   * meldet Persist-Fehler), vergiften aber nie die Kette.
+   */
+  private challengeStoreQueue: Promise<void> = Promise.resolve()
+  /**
+   * Monotone Mutations-Epoche der aktiven QR-Challenge (Review #339,
+   * struktureller Umbau): create und reset erhöhen sie; jede asynchrone
+   * Fortsetzung (Create-Rollback, Accept-Null, Restore-Commit) erfasst ihre
+   * Epoche vor dem await und committet über commitChallengeState NUR, wenn
+   * sie noch aktuell ist. Das löst alle Instanz-internen Interleavings
+   * einheitlich statt per Einzelfall-Guard; Cross-Instanz schützt weiterhin
+   * das compare-and-delete per Nonce im Store.
+   */
+  private challengeEpoch = 0
   private readonly consumedNonces = new Map<string, number>()
   private readonly pendingCounterVerifications = new Map<string, PendingCounterVerification>()
 
@@ -127,16 +145,102 @@ export class VerificationWorkflow {
     const parsedChallenge = parseQrChallenge(JSON.stringify(challenge))
     // Store and return the normalized Trust 002 JSON form that passed protocol validation.
     const rawJson = JSON.stringify(parsedChallenge)
+    const epoch = ++this.challengeEpoch
+    const previousChallenge = this.activeQrChallenge
     this.activeQrChallenge = { ...parsedChallenge }
+    // Entscheidung 2026-08-04 (1c): Challenge überlebt Reload/Re-Login der
+    // Owner-Session, wenn der Store die Capability anbietet. Die TTL-Prüfung
+    // bleibt vollständig bei decideVerificationAttestationAcceptance.
+    // Ein Persist-Fehler darf NICHT als Erfolg durchgehen — der Rollback
+    // committet epochen-geprüft (ein neueres create/reset bleibt unberührt).
+    try {
+      await this.enqueueChallengeStoreOp(() => this.stateStore?.recordActiveQrChallenge?.({ ...parsedChallenge }))
+    } catch (error) {
+      this.commitChallengeState(epoch, previousChallenge)
+      throw error
+    }
     return { challenge: { ...parsedChallenge }, rawJson }
+  }
+
+  /**
+   * Reihenfolge-treue Kette für Challenge-Store-Operationen: der Fehler einer
+   * Operation erreicht ihren Awaiter, die Kette selbst läuft immer weiter.
+   */
+  private enqueueChallengeStoreOp(op: () => Promise<void> | undefined): Promise<void> {
+    const run = this.challengeStoreQueue.then(async () => {
+      await op()
+    })
+    this.challengeStoreQueue = run.then(() => undefined, () => undefined)
+    return run
+  }
+
+  /**
+   * Einziger Commit-Pfad für den RAM-Zustand nach einem await: schreibt nur,
+   * wenn die erfasste Epoche noch aktuell ist (siehe challengeEpoch).
+   */
+  private commitChallengeState(epoch: number, next: QrChallenge | null): boolean {
+    if (epoch !== this.challengeEpoch) return false
+    this.activeQrChallenge = next
+    return true
+  }
+
+  /**
+   * Wie commitChallengeState, rückt bei Erfolg zusätzlich die Epoche vor —
+   * für Mutationen, die ältere Flights invalidieren MÜSSEN (erfolgreicher
+   * Accept: die Challenge ist konsumiert, ein hängender Restore darf sie
+   * nicht wiederbeleben). Reject-Pfade rufen das bewusst NICHT auf: sie
+   * verändern den aktiven Zustand nicht.
+   */
+  private commitAndAdvanceChallengeState(epoch: number, next: QrChallenge | null): boolean {
+    if (!this.commitChallengeState(epoch, next)) return false
+    this.challengeEpoch++
+    return true
   }
 
   getActiveQrChallenge(): QrChallenge | null {
     return this.activeQrChallenge === null ? null : { ...this.activeQrChallenge }
   }
 
+  /**
+   * Hydriert die aktive QR-Challenge aus dem StateStore (Dialog-Restore nach
+   * Reload). Gibt die dann aktive Challenge zurück — die Frische prüft weiter
+   * ausschließlich der Accept-Pfad; für die UI-Anzeige steht
+   * isActiveQrChallengeValid im Protocol-Layer bereit.
+   */
+  async restoreActiveQrChallenge(): Promise<QrChallenge | null> {
+    if (this.activeQrChallenge !== null) return { ...this.activeQrChallenge }
+    const epoch = this.challengeEpoch
+    try {
+      // Erst ausstehende record/clear-Operationen abwarten, sonst liest der
+      // Restore einen Zwischenstand derselben Instanz. Ein Lesefehler oder ein
+      // korruptes Blob degradiert auf "keine Challenge" — der Restore ist eine
+      // Komfort-Capability und darf den Accept-Pfad nie abbrechen; die
+      // Wire-Re-Validierung via parseQrChallenge bleibt.
+      await this.challengeStoreQueue
+      const stored = await this.stateStore?.getActiveQrChallenge?.()
+      if (!stored) return null
+      const parsed = parseQrChallenge(JSON.stringify(stored))
+      // Epochen-Commit: hat ein paralleles create/reset inzwischen mutiert,
+      // gewinnt der jüngere Zustand — der verspätete Restore meldet ihn nur.
+      if (!this.commitChallengeState(epoch, { ...parsed })) return this.getActiveQrChallenge()
+      return { ...parsed }
+    } catch {
+      return null
+    }
+  }
+
   resetActiveQrChallenge(): void {
+    this.challengeEpoch++
+    const nonce = this.activeQrChallenge?.nonce
     this.activeQrChallenge = null
+    // Best-effort über die Kette; das Clear ist per Nonce an die EIGENE
+    // Challenge gebunden — die einer parallelen Instanz bleibt stehen.
+    // Ein blinder Reset (keine eigene Challenge) besitzt nichts im Store und
+    // löscht deshalb GAR nichts; den vollständigen Abraum übernimmt der
+    // Identity-Wipe. Die Epoche steigt trotzdem: sie invalidiert auch einen
+    // gerade laufenden Restore (restore/reset-Race).
+    if (nonce === undefined) return
+    void this.enqueueChallengeStoreOp(() => this.stateStore?.clearActiveQrChallenge?.(nonce)).catch(() => {})
   }
 
   async createVerificationAttestation(input: CreateVerificationAttestationInput): Promise<Attestation> {
@@ -443,6 +547,15 @@ export class VerificationWorkflow {
     const now = this.now()
     await store.pruneConsumedNonces(wholeSecondRfc3339(new Date(now.getTime() - CONSUMED_NONCE_RETENTION_MS)))
 
+    // Entscheidung 2026-08-04 (1c): nach Reload/Re-Login die persistierte
+    // Challenge hydrieren, bevor entschieden wird — die Frische-/Nonce-Prüfung
+    // bleibt komplett bei decideVerificationAttestationAcceptance (eine
+    // abgelaufene Challenge wird dort challenge-expired, nie angenommen).
+    if (this.activeQrChallenge === null) await this.restoreActiveQrChallenge()
+    // Epoche NACH der Hydration erfassen: das spätere RAM-Null committet nur,
+    // wenn während Consume/Persist kein create/reset dazwischenkam.
+    const epoch = this.challengeEpoch
+
     const decision = decideVerificationAttestationAcceptance({
       payload,
       localDid: identity.getDid(),
@@ -459,11 +572,22 @@ export class VerificationWorkflow {
       if (!consumed) {
         return { decision: 'reject', reason: 'nonce-consumed' }
       }
-      this.activeQrChallenge = null
+      // Epochen-Commit MIT Vorrücken: der erfolgreiche Accept ist selbst eine
+      // Mutation — er invalidiert ältere Restore-Flights, die die konsumierte
+      // Challenge sonst wiederbeleben könnten. Nur nullen+vorrücken, wenn
+      // seit der Entscheidung kein create/reset mutiert hat (Store-Seite
+      // schützt compare-and-delete).
+      this.commitAndAdvanceChallengeState(epoch, null)
+      // Reihenfolge (Review #339): Die Nonce ist ab hier durabel konsumiert —
+      // zuerst den pending counter sichern, dann das Challenge-Clear als
+      // best-effort, per Nonce an die soeben akzeptierte Challenge gebunden
+      // (eine inzwischen neu erzeugte bleibt stehen). Ein Clear-Fehler darf
+      // den Accept nie abbrechen, sonst dauerhaft nonce-consumed ohne Mutual.
       await this.recordPendingCounterVerification({
         counterpartyDid: payload.iss,
         originalVerificationId: payload.jti!,
       })
+      await this.enqueueChallengeStoreOp(() => store.clearActiveQrChallenge?.(decision.nonce)).catch(() => {})
     }
     return decision
   }

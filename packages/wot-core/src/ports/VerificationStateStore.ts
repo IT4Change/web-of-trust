@@ -7,11 +7,42 @@ export interface PendingCounterVerificationRecord {
 }
 
 /**
+ * Wire-identical Trust 002 QR challenge fields (see protocol/trust/qr-challenge).
+ * Stored verbatim; freshness stays with decideVerificationAttestationAcceptance.
+ */
+export interface ActiveQrChallengeRecord {
+  did: string
+  name: string
+  enc: string
+  nonce: string
+  ts: string
+  broker?: string
+}
+
+/**
  * Persistent state boundary for Trust 002 verification replay and counter-verification checks.
  *
- * Implementations may be durable. Active QR challenge state is intentionally not part of this port.
+ * Implementations may be durable. Active-QR-challenge persistence is an
+ * OPT-IN capability (decision 2026-08-04): stores that implement the three
+ * optional challenge methods let the workflow survive a reload/re-login of
+ * the QR-owning session within the challenge TTL; stores without them keep
+ * the previous session-only behavior. The TTL check itself never moves here.
  */
 export interface VerificationStateStore {
+  /** Persist the active QR challenge of the owning session (replaces any previous one). */
+  recordActiveQrChallenge?(challenge: ActiveQrChallengeRecord): Promise<void>
+
+  /** Load the persisted active QR challenge, if any. */
+  getActiveQrChallenge?(): Promise<ActiveQrChallengeRecord | null>
+
+  /**
+   * Drop the persisted active QR challenge — compare-and-delete: with
+   * `expectedNonce`, delete ONLY when the stored challenge carries that nonce
+   * (atomically, so a clear finishing late or from another workflow instance
+   * can never remove a newer challenge); without it, delete unconditionally.
+   */
+  clearActiveQrChallenge?(expectedNonce?: string): Promise<void>
+
   /** Record a consumed QR challenge nonce. Idempotent by normalized nonce. */
   recordConsumedNonce(nonce: string, consumedAt: string): Promise<void>
 
