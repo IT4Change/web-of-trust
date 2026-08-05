@@ -1,0 +1,138 @@
+import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import type { PublicIdentitySession } from '../../wot-core/src/application/identity'
+import { createTestIdentity } from '../../wot-core/tests/helpers/identity-session'
+import { InMemoryMessagingAdapter, InMemoryKeyManagementAdapter, InMemoryCompactStore } from '@web_of_trust/core/adapters'
+import { YjsReplicationAdapter } from '../src/YjsReplicationAdapter'
+
+interface TestDoc {
+  notes: string
+}
+
+function createAdapter(identity: PublicIdentitySession, messaging: InMemoryMessagingAdapter) {
+  return new YjsReplicationAdapter({
+    identity,
+    messaging,
+    brokerUrls: ['wss://broker.example.com'],
+    keyManagement: new InMemoryKeyManagementAdapter(),
+    // Durable pending store: concurrent cross-device writes can race the key
+    // handshake; an undecryptable update is then buffered as pending, which
+    // requires a durable store (PendingMessageNotDurableError otherwise).
+    compactStore: new InMemoryCompactStore(),
+  })
+}
+
+/**
+ * `_meta.appData` — der erweiterbare App-Metadaten-Container (rls#234).
+ *
+ * Der feste `_meta`-Katalog (name/description/image/modules) deckte nur die
+ * Framework-Felder ab; App-Felder wie eine Akzentfarbe landeten im Connector
+ * nur im RAM-Cache und verschwanden nach Reload. `appData` ist ein flacher
+ * Merge-Patch (null loescht) und lebt als flache, geprefixte Keys in _meta,
+ * damit zwei Geraete, die verschiedene Keys schreiben, per CRDT mergen statt
+ * sich einen Container zu ueberschreiben (eine geschachtelte Y.Map wuerde
+ * beim konkurrierenden Erst-Anlegen racen).
+ */
+describe('YjsReplicationAdapter — _meta.appData', () => {
+  let alice: PublicIdentitySession
+  let bob: PublicIdentitySession
+  let aliceMessaging: InMemoryMessagingAdapter
+  let bobMessaging: InMemoryMessagingAdapter
+  let aliceAdapter: YjsReplicationAdapter
+  let bobAdapter: YjsReplicationAdapter
+
+  beforeEach(async () => {
+    InMemoryMessagingAdapter.resetAll()
+    alice = (await createTestIdentity('alice-pass')).identity
+    bob = (await createTestIdentity('bob-pass')).identity
+    aliceMessaging = new InMemoryMessagingAdapter()
+    bobMessaging = new InMemoryMessagingAdapter()
+    await aliceMessaging.connect(alice.getDid())
+    await bobMessaging.connect(bob.getDid())
+    aliceAdapter = createAdapter(alice, aliceMessaging)
+    bobAdapter = createAdapter(bob, bobMessaging)
+    await aliceAdapter.start()
+    await bobAdapter.start()
+  })
+
+  afterEach(async () => {
+    await aliceAdapter.stop()
+    await bobAdapter.stop()
+    InMemoryMessagingAdapter.resetAll()
+    try { await alice.deleteStoredIdentity() } catch {}
+    try { await bob.deleteStoredIdentity() } catch {}
+  })
+
+  it('persists appData and surfaces it via getMeta AND SpaceInfo', async () => {
+    const space = await aliceAdapter.createSpace<TestDoc>('shared', { notes: '' }, { name: 'A' })
+    await aliceAdapter.updateSpace(space.id, { appData: { primaryColor: '#e84b1c' } })
+
+    const handle = await aliceAdapter.openSpace<TestDoc>(space.id)
+    expect(handle.getMeta().appData).toEqual({ primaryColor: '#e84b1c' })
+    handle.close()
+
+    const info = await aliceAdapter.getSpace(space.id)
+    expect(info!.appData).toEqual({ primaryColor: '#e84b1c' })
+  })
+
+  it('merges per key — a partial patch cannot erase foreign keys', async () => {
+    const space = await aliceAdapter.createSpace<TestDoc>('shared', { notes: '' }, { name: 'A' })
+    await aliceAdapter.updateSpace(space.id, { appData: { primaryColor: '#e84b1c' } })
+    // Zweiter Writer kennt den ersten nicht (stale caller) und schickt NUR sein Feld.
+    await aliceAdapter.updateSpace(space.id, { appData: { theme: 'forest' } })
+
+    const info = await aliceAdapter.getSpace(space.id)
+    expect(info!.appData).toEqual({ primaryColor: '#e84b1c', theme: 'forest' })
+  })
+
+  it('removes a key via null (JSON Merge Patch at depth 1)', async () => {
+    const space = await aliceAdapter.createSpace<TestDoc>('shared', { notes: '' }, { name: 'A' })
+    await aliceAdapter.updateSpace(space.id, { appData: { primaryColor: '#e84b1c', theme: 'forest' } })
+    await aliceAdapter.updateSpace(space.id, { appData: { primaryColor: null } })
+
+    const info = await aliceAdapter.getSpace(space.id)
+    expect(info!.appData).toEqual({ theme: 'forest' })
+  })
+
+  it('leaves framework meta untouched and vice versa', async () => {
+    const space = await aliceAdapter.createSpace<TestDoc>('shared', { notes: '' }, { name: 'Original' })
+    await aliceAdapter.updateSpace(space.id, { appData: { primaryColor: '#e84b1c' } })
+    await aliceAdapter.updateSpace(space.id, { name: 'Renamed' })
+
+    const info = await aliceAdapter.getSpace(space.id)
+    expect(info!.name).toBe('Renamed')
+    expect(info!.appData).toEqual({ primaryColor: '#e84b1c' })
+  })
+
+  it('syncs appData to other members (remote SpaceInfo projection)', async () => {
+    const space = await aliceAdapter.createSpace<TestDoc>('shared', { notes: '' }, { name: 'Shared' })
+    const bobEncKey = await bob.getEncryptionPublicKeyBytes()
+    await aliceAdapter.addMember(space.id, bob.getDid(), bobEncKey)
+    await new Promise(r => setTimeout(r, 200))
+
+    await aliceAdapter.updateSpace(space.id, { appData: { primaryColor: '#e84b1c' } })
+    await new Promise(r => setTimeout(r, 300))
+
+    const bobSpace = await bobAdapter.getSpace(space.id)
+    expect(bobSpace!.appData).toEqual({ primaryColor: '#e84b1c' })
+  })
+
+  it('concurrent patches of DIFFERENT keys merge instead of clobbering (per-key entries)', async () => {
+    const space = await aliceAdapter.createSpace<TestDoc>('shared', { notes: '' }, { name: 'Shared' })
+    const bobEncKey = await bob.getEncryptionPublicKeyBytes()
+    await aliceAdapter.addMember(space.id, bob.getDid(), bobEncKey)
+    await new Promise(r => setTimeout(r, 300))
+
+    // Beide schreiben "gleichzeitig" verschiedene Keys — als ganzer Container
+    // gespeichert wuerde ein Write den anderen verdraengen (Container-LWW).
+    await Promise.all([
+      aliceAdapter.updateSpace(space.id, { appData: { primaryColor: '#e84b1c' } }),
+      bobAdapter.updateSpace(space.id, { appData: { theme: 'forest' } }),
+    ])
+    await new Promise(r => setTimeout(r, 400))
+
+    const aliceView = await aliceAdapter.getSpace(space.id)
+    const bobView = await bobAdapter.getSpace(space.id)
+    expect(aliceView!.appData).toEqual({ primaryColor: '#e84b1c', theme: 'forest' })
+    expect(bobView!.appData).toEqual({ primaryColor: '#e84b1c', theme: 'forest' })
+  })
+})

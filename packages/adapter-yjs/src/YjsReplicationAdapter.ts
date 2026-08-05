@@ -283,6 +283,7 @@ class YjsSpaceHandle<T> implements SpaceHandle<T> {
       name: metaMap.get('name') as string | undefined,
       description: metaMap.get('description') as string | undefined,
       image: metaMap.get('image') as string | undefined,
+      appData: readAppData(metaMap),
     }
   }
 
@@ -337,6 +338,24 @@ class YjsSpaceHandle<T> implements SpaceHandle<T> {
 }
 
 // --- Proxy helpers (same pattern as YjsPersonalDocManager) ---
+
+/** Wire prefix for app-defined meta fields (`appData:primaryColor`, …). */
+const APP_DATA_PREFIX = 'appData:'
+
+/**
+ * Plain-JSON projection of the app-defined meta fields, stored as FLAT
+ * prefixed keys in `_meta` (see updateSpace for why not a nested Y.Map).
+ * `undefined` when the space has no app data yet.
+ */
+function readAppData(metaMap: Y.Map<any>): Record<string, unknown> | undefined {
+  let appData: Record<string, unknown> | undefined
+  metaMap.forEach((value, key) => {
+    if (!key.startsWith(APP_DATA_PREFIX)) return
+    appData ??= {}
+    appData[key.slice(APP_DATA_PREFIX.length)] = value instanceof Y.Map ? ymapToPlain(value) : value
+  })
+  return appData
+}
 
 function ymapToPlain(ymap: Y.Map<any>): Record<string, any> {
   const obj: Record<string, any> = {}
@@ -3066,6 +3085,18 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
       if (meta.description !== undefined) metaMap.set('description', meta.description)
       if (meta.image !== undefined) metaMap.set('image', meta.image)
       if (meta.modules !== undefined) metaMap.set('modules', meta.modules)
+      if (meta.appData !== undefined) {
+        // Shallow merge patch (null deletes) as FLAT prefixed keys in _meta —
+        // per-key CRDT granularity without a nested container. A nested
+        // Y.Map would race on first use: two devices concurrently creating
+        // "the" appData map each set their OWN instance and container-LWW
+        // drops one side's keys. The _meta map itself exists everywhere, so
+        // prefixed top-level keys merge per key by construction.
+        for (const [key, value] of Object.entries(meta.appData)) {
+          if (value === null) metaMap.delete(`${APP_DATA_PREFIX}${key}`)
+          else metaMap.set(`${APP_DATA_PREFIX}${key}`, value)
+        }
+      }
     }, 'local')
 
     // Persistence
@@ -3186,11 +3217,13 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
       const metaImg = metaMap.get('image') as string | undefined
       const metaModules = metaMap.get('modules') as string[] | undefined
       const metaCreatedBy = metaMap.get('createdBy') as string | undefined
+      const metaAppData = readAppData(metaMap)
       if (metaName !== undefined) meta.info.name = metaName
       if (metaDesc !== undefined) meta.info.description = metaDesc
       if (metaImg !== undefined) meta.info.image = metaImg
       if (metaModules !== undefined) meta.info.modules = metaModules
       if (metaCreatedBy !== undefined) meta.info.createdBy = metaCreatedBy
+      if (metaAppData !== undefined) meta.info.appData = metaAppData
       // VE-1: die members-Projektion kommt aus dem Event-Set des Docs — die
       // PersonalDoc-Metadata ist nur ein Cache. Ohne Events (Alt-Space oder
       // noch leeres Doc) bleibt der Cache-Stand bis zum naechsten Sync.
@@ -3326,6 +3359,11 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
       const modules = metaMap.get('modules') as string[] | undefined
       if (modules !== undefined && JSON.stringify(modules) !== JSON.stringify(state.info.modules)) {
         state.info = { ...state.info, modules }
+        changed = true
+      }
+      const appData = readAppData(metaMap)
+      if (appData !== undefined && JSON.stringify(appData) !== JSON.stringify(state.info.appData)) {
+        state.info = { ...state.info, appData }
         changed = true
       }
       // VE-2: createdBy reist im synchronisierten _meta (z.B. via Snapshot oder
@@ -3832,6 +3870,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
         description: metaMap.get('description') as string | undefined,
         image: metaMap.get('image') as string | undefined,
         modules: metaMap.get('modules') as string[] | undefined,
+        appData: readAppData(metaMap),
         appTag: metaMap.get('appTag') as string | undefined,
         // VE-2: Creator-DID aus dem synchronisierten _meta — beim Invitee ist
         // der Inviter (senderDid) NICHT zwingend der Creator/Admin.

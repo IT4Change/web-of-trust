@@ -28,6 +28,14 @@ export interface SpaceInfo {
    */
   admins?: string[]
   createdAt: string
+  /**
+   * App-defined metadata (read-only projection of `_meta.appData`). The fixed
+   * catalog above (name/image/modules) covers framework fields; apps extend
+   * spaces with their own JSON fields here (e.g. RLS accent color) WITHOUT a
+   * schema change per field — the closed catalog was exactly how app fields
+   * ended up cache-only and vanished on reload (rls#234).
+   */
+  appData?: Record<string, unknown>
 }
 
 export interface SpaceDocMeta {
@@ -35,6 +43,15 @@ export interface SpaceDocMeta {
   description?: string
   image?: string
   modules?: string[]
+  /**
+   * Shallow PATCH of the app-defined metadata: listed keys are merged over
+   * the stored ones, `null` removes a key (JSON Merge Patch, RFC 7386, at
+   * depth 1). Values must be JSON-serializable. Adapters MUST store the
+   * fields with per-key CRDT granularity (adapter-yjs: flat prefixed keys in
+   * `_meta`) so concurrent patches of different keys from two devices merge
+   * per key instead of last-writer-wins on a whole container.
+   */
+  appData?: Record<string, unknown>
 }
 
 export interface SpaceMemberChange {
