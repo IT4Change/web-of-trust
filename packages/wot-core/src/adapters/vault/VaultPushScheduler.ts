@@ -131,8 +131,12 @@ export class VaultPushScheduler {
     this.pushing = true
     this.pushFn()
       .then(() => {
-        // Mark as pushed — read heads again (push may have been slow, doc may have changed)
-        this.lastPushedHeads = this.getHeadsFn()
+        // Mark the START heads as pushed — the push captured the doc when it
+        // BEGAN. Reading heads again here would stamp changes that arrived
+        // WHILE the push ran (e.g. a delete) as already pushed, and the
+        // queued follow-up would be deduplicated away — the change would
+        // never persist and resurrect old state on restore.
+        this.lastPushedHeads = currentHeads
       })
       .catch(() => {
         // Push failed — don't update lastPushedHeads so next attempt retries

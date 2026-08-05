@@ -74,3 +74,30 @@ describe('PersonalDocSpaceMetadataStorage — SpaceInfo round-trip', () => {
     expect(loaded?.memberEncryptionKeys[ALICE]).toEqual(new Uint8Array([1, 2, 3]))
   })
 })
+
+describe('PersonalDocSpaceMetadataStorage — appData', () => {
+  // rls#234: appData ist der erweiterbare App-Metadaten-Container. Der
+  // Personal-Doc-Cache ist die Pre-Doc-Load-Projektion auf dem Zweitgeraet —
+  // verwirft er appData, fehlt z.B. die Akzentfarbe bis zum Doc-Sync und
+  // ein Restore-Pfad ohne Doc-Binary verliert sie ganz.
+  it('persistiert appData im Round-trip (save → load + loadAll)', async () => {
+    const { storage } = createStorage()
+    await storage.saveSpaceMetadata(meta({ appData: { primaryColor: '#e84b1c', theme: 'forest' } }))
+
+    const loaded = await storage.loadSpaceMetadata(SPACE)
+    expect(loaded?.info.appData).toEqual({ primaryColor: '#e84b1c', theme: 'forest' })
+
+    const all = await storage.loadAllSpaceMetadata()
+    expect(all[0].info.appData).toEqual({ primaryColor: '#e84b1c', theme: 'forest' })
+  })
+
+  it('laesst appData bei Spaces ohne App-Felder weg (kein undefined-Key)', async () => {
+    const { storage, doc } = createStorage()
+    await storage.saveSpaceMetadata(meta())
+
+    const stored = doc.spaces[SPACE] as { info: Record<string, unknown> }
+    expect('appData' in stored.info).toBe(false)
+    const loaded = await storage.loadSpaceMetadata(SPACE)
+    expect(loaded?.info).not.toHaveProperty('appData')
+  })
+})

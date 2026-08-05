@@ -45,6 +45,11 @@ export class PersonalDocSpaceMetadataStorage implements SpaceMetadataStorage {
       // leben im Doc und werden auf Restore neu projiziert; dies ist nur die
       // Anzeige vor dem Doc-Load. Gleicher null-Guard wie createdBy.
       if (meta.info.admins != null) info.admins = [...meta.info.admins]
+      // appData ist der erweiterbare App-Metadaten-Container (SpaceDocMeta-
+      // Vertrag). Der Personal-Doc-Cache ist die Pre-Doc-Load-Projektion auf
+      // dem Zweitgeraet — ohne Persistenz hier fehlen App-Felder (z.B. die
+      // RLS-Akzentfarbe) bis zum Doc-Sync bzw. gehen im Restore verloren.
+      if (meta.info.appData != null) info.appData = { ...meta.info.appData }
       doc.spaces[meta.info.id] = {
         info: info as any,
         documentId: meta.documentId,
@@ -158,7 +163,7 @@ export class PersonalDocSpaceMetadataStorage implements SpaceMetadataStorage {
   }
 
   private deserialize(stored: {
-    info: { id: string; type: string; name: string | null; description: string | null; appTag?: string; members: string[]; createdBy?: string; admins?: string[]; createdAt: string }
+    info: { id: string; type: string; name: string | null; description: string | null; appTag?: string; members: string[]; createdBy?: string; admins?: string[]; appData?: Record<string, unknown>; createdAt: string }
     documentId: string
     documentUrl: string
     memberEncryptionKeys: Record<string, number[]>
@@ -172,6 +177,7 @@ export class PersonalDocSpaceMetadataStorage implements SpaceMetadataStorage {
         ...(stored.info.appTag != null ? { appTag: stored.info.appTag } : {}),
         ...(stored.info.createdBy != null ? { createdBy: stored.info.createdBy } : {}),
         ...(stored.info.admins != null ? { admins: [...stored.info.admins] } : {}),
+        ...(stored.info.appData != null ? { appData: { ...stored.info.appData } } : {}),
         members: [...(stored.info.members ?? [])],
         createdAt: stored.info.createdAt,
       },

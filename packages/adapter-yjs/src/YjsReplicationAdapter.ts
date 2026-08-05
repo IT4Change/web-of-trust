@@ -283,6 +283,7 @@ class YjsSpaceHandle<T> implements SpaceHandle<T> {
       name: metaMap.get('name') as string | undefined,
       description: metaMap.get('description') as string | undefined,
       image: metaMap.get('image') as string | undefined,
+      appData: readAppData(metaMap),
     }
   }
 
@@ -337,6 +338,62 @@ class YjsSpaceHandle<T> implements SpaceHandle<T> {
 }
 
 // --- Proxy helpers (same pattern as YjsPersonalDocManager) ---
+
+/** Wire prefix for app-defined meta fields (`appData:primaryColor`, …). */
+const APP_DATA_PREFIX = 'appData:'
+
+/** Keys that would let a patch manipulate object prototypes on projection. */
+const APP_DATA_FORBIDDEN_KEYS = new Set(['__proto__', 'constructor', 'prototype'])
+
+/**
+ * Validate an appData patch and normalize its values to canonical JSON.
+ * Throws on prototype-polluting keys and on non-JSON values (functions,
+ * symbols, BigInt, cycles); `null` passes through as the delete marker.
+ * Returns entries ready to write, so validation completes BEFORE the
+ * Yjs transaction starts.
+ */
+function sanitizeAppDataPatch(patch: Record<string, unknown>): Array<[string, unknown]> {
+  const entries: Array<[string, unknown]> = []
+  for (const [key, value] of Object.entries(patch)) {
+    if (APP_DATA_FORBIDDEN_KEYS.has(key)) {
+      throw new TypeError(`appData key "${key}" is not allowed`)
+    }
+    if (value === null) {
+      entries.push([key, null])
+      continue
+    }
+    let json: string | undefined
+    try {
+      json = JSON.stringify(value)
+    } catch (err) {
+      throw new TypeError(`appData value for "${key}" is not JSON-serializable: ${err instanceof Error ? err.message : String(err)}`)
+    }
+    if (json === undefined) {
+      throw new TypeError(`appData value for "${key}" is not JSON-serializable`)
+    }
+    entries.push([key, JSON.parse(json)])
+  }
+  return entries
+}
+
+/**
+ * Plain-JSON projection of the app-defined meta fields, stored as FLAT
+ * prefixed keys in `_meta` (see updateSpace for why not a nested Y.Map).
+ * `undefined` when the space has no app data yet.
+ */
+function readAppData(metaMap: Y.Map<any>): Record<string, unknown> | undefined {
+  let appData: Record<string, unknown> | undefined
+  metaMap.forEach((value, key) => {
+    if (!key.startsWith(APP_DATA_PREFIX)) return
+    const name = key.slice(APP_DATA_PREFIX.length)
+    // Write-side validation covers OUR writes; a remote peer can still put a
+    // forbidden key on the wire — never project it into a plain object.
+    if (APP_DATA_FORBIDDEN_KEYS.has(name)) return
+    appData ??= {}
+    appData[name] = value instanceof Y.Map ? ymapToPlain(value) : value
+  })
+  return appData
+}
 
 function ymapToPlain(ymap: Y.Map<any>): Record<string, any> {
   const obj: Record<string, any> = {}
@@ -3060,12 +3117,29 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
     const state = this.spaces.get(spaceId)
     if (!state) throw new Error(`Space ${spaceId} not found`)
 
+    // Validate + normalize the appData patch BEFORE the transaction — a throw
+    // mid-transact would leave a half-applied patch, and a non-JSON value in
+    // the doc would blow up observers/serializers on EVERY device later.
+    const appDataPatch = meta.appData !== undefined ? sanitizeAppDataPatch(meta.appData) : undefined
+
     state.doc.transact(() => {
       const metaMap = state.doc.getMap('_meta')
       if (meta.name !== undefined) metaMap.set('name', meta.name)
       if (meta.description !== undefined) metaMap.set('description', meta.description)
       if (meta.image !== undefined) metaMap.set('image', meta.image)
       if (meta.modules !== undefined) metaMap.set('modules', meta.modules)
+      if (appDataPatch !== undefined) {
+        // Shallow merge patch (null deletes) as FLAT prefixed keys in _meta —
+        // per-key CRDT granularity without a nested container. A nested
+        // Y.Map would race on first use: two devices concurrently creating
+        // "the" appData map each set their OWN instance and container-LWW
+        // drops one side's keys. The _meta map itself exists everywhere, so
+        // prefixed top-level keys merge per key by construction.
+        for (const [key, value] of appDataPatch) {
+          if (value === null) metaMap.delete(`${APP_DATA_PREFIX}${key}`)
+          else metaMap.set(`${APP_DATA_PREFIX}${key}`, value)
+        }
+      }
     }, 'local')
 
     // Persistence
@@ -3186,11 +3260,22 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
       const metaImg = metaMap.get('image') as string | undefined
       const metaModules = metaMap.get('modules') as string[] | undefined
       const metaCreatedBy = metaMap.get('createdBy') as string | undefined
+      const metaAppData = readAppData(metaMap)
       if (metaName !== undefined) meta.info.name = metaName
       if (metaDesc !== undefined) meta.info.description = metaDesc
       if (metaImg !== undefined) meta.info.image = metaImg
       if (metaModules !== undefined) meta.info.modules = metaModules
       if (metaCreatedBy !== undefined) meta.info.createdBy = metaCreatedBy
+      if (metaAppData !== undefined) {
+        meta.info.appData = metaAppData
+      } else if (!isEmpty) {
+        // The doc IS loaded (binary present) and carries no appData keys —
+        // the cached projection is stale (last key was deleted). Guarding on
+        // _meta CONTENT instead would resurrect the cache for legacy spaces
+        // whose _meta is empty. An unloaded doc (no binary) must still not
+        // wipe the pre-load cache, mirroring the guards on name/image above.
+        delete meta.info.appData
+      }
       // VE-1: die members-Projektion kommt aus dem Event-Set des Docs — die
       // PersonalDoc-Metadata ist nur ein Cache. Ohne Events (Alt-Space oder
       // noch leeres Doc) bleibt der Cache-Stand bis zum naechsten Sync.
@@ -3326,6 +3411,18 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
       const modules = metaMap.get('modules') as string[] | undefined
       if (modules !== undefined && JSON.stringify(modules) !== JSON.stringify(state.info.modules)) {
         state.info = { ...state.info, modules }
+        changed = true
+      }
+      // Full reconcile INCLUDING removal: deleting the last appData key must
+      // clear the projection, not leave the previous value stale.
+      const appData = readAppData(metaMap)
+      if (JSON.stringify(appData) !== JSON.stringify(state.info.appData)) {
+        if (appData === undefined) {
+          const { appData: _gone, ...rest } = state.info
+          state.info = rest as SpaceInfo
+        } else {
+          state.info = { ...state.info, appData }
+        }
         changed = true
       }
       // VE-2: createdBy reist im synchronisierten _meta (z.B. via Snapshot oder
@@ -3832,6 +3929,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
         description: metaMap.get('description') as string | undefined,
         image: metaMap.get('image') as string | undefined,
         modules: metaMap.get('modules') as string[] | undefined,
+        appData: readAppData(metaMap),
         appTag: metaMap.get('appTag') as string | undefined,
         // VE-2: Creator-DID aus dem synchronisierten _meta — beim Invitee ist
         // der Inviter (senderDid) NICHT zwingend der Creator/Admin.
@@ -4515,13 +4613,20 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
   private ensureSchedulers(state: YjsSpaceState): void {
     const spaceId = state.info.id
 
+    // Heads for dedup MUST cover deletions: a pure delete transaction (e.g.
+    // removing the last appData key) adds no insert, so the state vector
+    // alone is DELETION-BLIND — the push would be skipped and the persisted
+    // doc would resurrect the deleted state on restore. Y.snapshot carries
+    // state vector AND delete set.
+    const docHeads = () => {
+      const snapshot = Y.encodeSnapshot(Y.snapshot(state.doc))
+      return Array.from(snapshot).join(',')
+    }
+
     if (!this.compactSchedulers.has(spaceId)) {
       this.compactSchedulers.set(spaceId, new VaultPushScheduler({
         pushFn: () => this._saveToCompactStore(state),
-        getHeadsFn: () => {
-          const sv = Y.encodeStateVector(state.doc)
-          return Array.from(sv).join(',')
-        },
+        getHeadsFn: docHeads,
         debounceMs: 2000,
       }))
     }
@@ -4529,10 +4634,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
     if (this.vault && !this.vaultSchedulers.has(spaceId)) {
       this.vaultSchedulers.set(spaceId, new VaultPushScheduler({
         pushFn: () => this._pushSnapshotToVault(state),
-        getHeadsFn: () => {
-          const sv = Y.encodeStateVector(state.doc)
-          return Array.from(sv).join(',')
-        },
+        getHeadsFn: docHeads,
         debounceMs: 5000,
       }))
     }
@@ -4637,6 +4739,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
       type: state.info.type,
       image: state.info.image,
       modules: state.info.modules,
+      appData: state.info.appData,
       appTag: state.info.appTag,
       // #181 (b): include the actual key bytes, not just the DIDs — a rotated ECIES
       // pubkey for a known DID must change the fingerprint, else stale recipient keys persist.
