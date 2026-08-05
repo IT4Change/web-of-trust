@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.5.4](https://github.com/real-life-org/web-of-trust/compare/core-v0.5.3...core-v0.5.4) (2026-08-05)
+
+
+### Features
+
+* **verification:** aktive QR-Challenge überlebt Reload via StateStore (Entscheidung 1c) ([cc6240c](https://github.com/real-life-org/web-of-trust/commit/cc6240c0dfba0b1fe25bab0b6bb352f32472ebe4))
+* **verification:** aktive QR-Challenge überlebt Reload via StateStore (Entscheidung 1c) ([fdae5c2](https://github.com/real-life-org/web-of-trust/commit/fdae5c2a5886de4f2e7f39b35eb998b7fba6776b))
+
+
+### Bug Fixes
+
+* **verification:** erfolgreicher Accept rückt die Challenge-Epoche vor ([043c3c0](https://github.com/real-life-org/web-of-trust/commit/043c3c036d252c16497ffb988ab278b2669908e3))
+* **verification:** Re-Review [#339](https://github.com/real-life-org/web-of-trust/issues/339) — compare-and-delete per Nonce, Persist-Fehler laut, Restore fehlertolerant ([db9d8af](https://github.com/real-life-org/web-of-trust/commit/db9d8afe9919db3539288f704c9d7c6d273c0a25))
+* **verification:** Re-Review [#339](https://github.com/real-life-org/web-of-trust/issues/339) (2. Runde) — blinder Reset löscht nichts, Flight-gebundener Create-Rollback ([9b54ba0](https://github.com/real-life-org/web-of-trust/commit/9b54ba00018b7aff2ceb860099b534ede0c3784a))
+* **verification:** Re-Review [#339](https://github.com/real-life-org/web-of-trust/issues/339) (3. Runde) — Ownership-Guard auf den RAM-Mutationen ([ff3bb0a](https://github.com/real-life-org/web-of-trust/commit/ff3bb0a2bdd2e9505329d525bf372c906c20a77e))
+* **verification:** Review [#339](https://github.com/real-life-org/web-of-trust/issues/339) — Challenge-Store-Operationen serialisiert, Accept clear-fehlertolerant ([6d56c0a](https://github.com/real-life-org/web-of-trust/commit/6d56c0a955436b7613a17c1536fa32317a3a51d1))
+
 ## [0.5.3](https://github.com/real-life-org/web-of-trust/compare/core-v0.5.2...core-v0.5.3) (2026-08-04)
 
 
