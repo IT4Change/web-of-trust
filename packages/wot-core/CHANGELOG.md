@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.5.5](https://github.com/real-life-org/web-of-trust/compare/core-v0.5.4...core-v0.5.5) (2026-08-05)
+
+
+### Features
+
+* **core+adapter-yjs:** appData — erweiterbare App-Metadaten im Space-_meta ([009eac6](https://github.com/real-life-org/web-of-trust/commit/009eac67713ec4b428e7c41530ef3de1aac56550))
+
+
+### Bug Fixes
+
+* **core+adapter-yjs:** Delete-Persistenz — Scheduler-Heads deletion-fest, Restore-Guard auf Doc-Load ([f373b94](https://github.com/real-life-org/web-of-trust/commit/f373b944417a6adca90834e4e5bf906c5748ceb3))
+* **core:** Personal-Doc-Metadata-Cache persistiert appData im Round-trip ([83899a1](https://github.com/real-life-org/web-of-trust/commit/83899a19f004d8fc5049215f872b0079571367e0))
+
 ## [0.5.4](https://github.com/real-life-org/web-of-trust/compare/core-v0.5.3...core-v0.5.4) (2026-08-05)
 
 
