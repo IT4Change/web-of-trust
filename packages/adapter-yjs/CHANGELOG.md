@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.2.5](https://github.com/real-life-org/web-of-trust/compare/adapter-yjs-v0.2.4...adapter-yjs-v0.2.5) (2026-08-05)
+
+
+### Features
+
+* **core+adapter-yjs:** appData — erweiterbare App-Metadaten im Space-_meta ([009eac6](https://github.com/real-life-org/web-of-trust/commit/009eac67713ec4b428e7c41530ef3de1aac56550))
+
+
+### Bug Fixes
+
+* **adapter-yjs:** appData — Fingerprint, Komplett-Loeschung, Key- und Wert-Validierung ([8aa6fc4](https://github.com/real-life-org/web-of-trust/commit/8aa6fc40a36df827847330cc04e6a38b24a34a7f))
+* **core+adapter-yjs:** Delete-Persistenz — Scheduler-Heads deletion-fest, Restore-Guard auf Doc-Load ([f373b94](https://github.com/real-life-org/web-of-trust/commit/f373b944417a6adca90834e4e5bf906c5748ceb3))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * devDependencies
+    * @web_of_trust/core bumped to 0.5.5
+  * peerDependencies
+    * @web_of_trust/core bumped to 0.5.5
+
 ## [0.2.4](https://github.com/real-life-org/web-of-trust/compare/adapter-yjs-v0.2.3...adapter-yjs-v0.2.4) (2026-08-05)
 
 

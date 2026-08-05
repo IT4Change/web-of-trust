@@ -1,9 +1,9 @@
 {
-  "packages/wot-core": "0.5.4",
-  "packages/adapter-yjs": "0.2.4",
-  "packages/adapter-automerge": "0.2.4",
-  "packages/wot-relay": "0.1.6",
-  "packages/wot-vault": "0.1.5",
-  "packages/wot-profiles": "0.2.2",
-  "apps/demo": "0.3.2"
+  "packages/wot-core": "0.5.5",
+  "packages/adapter-yjs": "0.2.5",
+  "packages/adapter-automerge": "0.2.5",
+  "packages/wot-relay": "0.1.7",
+  "packages/wot-vault": "0.1.6",
+  "packages/wot-profiles": "0.2.3",
+  "apps/demo": "0.3.3"
 }
