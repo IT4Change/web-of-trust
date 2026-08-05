@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import type { PublicIdentitySession } from '../../wot-core/src/application/identity'
 import { createTestIdentity } from '../../wot-core/tests/helpers/identity-session'
-import { InMemoryMessagingAdapter, InMemoryKeyManagementAdapter, InMemoryCompactStore } from '@web_of_trust/core/adapters'
+import { InMemoryMessagingAdapter, InMemoryKeyManagementAdapter, InMemoryCompactStore, InMemorySpaceMetadataStorage } from '@web_of_trust/core/adapters'
 import { YjsReplicationAdapter } from '../src/YjsReplicationAdapter'
 
 interface TestDoc {
@@ -134,5 +134,96 @@ describe('YjsReplicationAdapter — _meta.appData', () => {
     const bobView = await bobAdapter.getSpace(space.id)
     expect(aliceView!.appData).toEqual({ primaryColor: '#e84b1c', theme: 'forest' })
     expect(bobView!.appData).toEqual({ primaryColor: '#e84b1c', theme: 'forest' })
+  })
+})
+
+describe('YjsReplicationAdapter — appData Robustheit (Review-Runde 2)', () => {
+  let alice: PublicIdentitySession
+  let aliceMessaging: InMemoryMessagingAdapter
+  let aliceAdapter: YjsReplicationAdapter
+  let metadataStorage: InMemorySpaceMetadataStorage
+
+  beforeEach(async () => {
+    InMemoryMessagingAdapter.resetAll()
+    alice = (await createTestIdentity('alice-pass')).identity
+    aliceMessaging = new InMemoryMessagingAdapter()
+    await aliceMessaging.connect(alice.getDid())
+    metadataStorage = new InMemorySpaceMetadataStorage()
+    aliceAdapter = new YjsReplicationAdapter({
+      identity: alice,
+      messaging: aliceMessaging,
+      brokerUrls: ['wss://broker.example.com'],
+      keyManagement: new InMemoryKeyManagementAdapter(),
+      compactStore: new InMemoryCompactStore(),
+      metadataStorage,
+    })
+    await aliceAdapter.start()
+  })
+
+  afterEach(async () => {
+    await aliceAdapter.stop()
+    InMemoryMessagingAdapter.resetAll()
+    try { await alice.deleteStoredIdentity() } catch {}
+  })
+
+  it('ein reiner appData-Change ist DIRTY — er erreicht die Metadata-Persistenz', async () => {
+    const space = await aliceAdapter.createSpace<TestDoc>('shared', { notes: '' }, { name: 'A' })
+    await new Promise(r => setTimeout(r, 100))
+
+    // Der SCHARFE Fall ist der zweite appData-only-Change: nach dem ersten
+    // Save sind alle uebrigen Fingerprint-Komponenten identisch — fehlt
+    // appData im Fingerprint, gilt der Change als "nicht dirty" und der
+    // Save wird uebersprungen (stale Persistenz).
+    await aliceAdapter.updateSpace(space.id, { appData: { primaryColor: '#e84b1c' } })
+    await new Promise(r => setTimeout(r, 200))
+    await aliceAdapter.updateSpace(space.id, { appData: { primaryColor: '#123456' } })
+    await new Promise(r => setTimeout(r, 200))
+
+    const persisted = await metadataStorage.loadSpaceMetadata(space.id)
+    expect(persisted?.info.appData).toEqual({ primaryColor: '#123456' })
+  })
+
+  it('Loeschen des LETZTEN Keys laesst keine stale Projektion zurueck', async () => {
+    const space = await aliceAdapter.createSpace<TestDoc>('shared', { notes: '' }, { name: 'A' })
+    await aliceAdapter.updateSpace(space.id, { appData: { primaryColor: '#e84b1c' } })
+    await aliceAdapter.updateSpace(space.id, { appData: { primaryColor: null } })
+
+    const info = await aliceAdapter.getSpace(space.id)
+    expect(info!.appData).toBeUndefined()
+
+    const handle = await aliceAdapter.openSpace<TestDoc>(space.id)
+    expect(handle.getMeta().appData).toBeUndefined()
+    handle.close()
+  })
+
+  it('weist __proto__/constructor/prototype als Keys zurueck (Prototype-Pollution)', async () => {
+    const space = await aliceAdapter.createSpace<TestDoc>('shared', { notes: '' }, { name: 'A' })
+    // JSON.parse erzeugt __proto__ als ECHTEN eigenen Key (ein Objekt-Literal
+    // wuerde stattdessen den Prototyp des Literals setzen).
+    const malicious = JSON.parse('{"__proto__": {"polluted": true}}') as Record<string, unknown>
+    await expect(aliceAdapter.updateSpace(space.id, { appData: malicious })).rejects.toThrow(/appData/)
+    await expect(
+      aliceAdapter.updateSpace(space.id, { appData: { constructor: 1 } as unknown as Record<string, unknown> }),
+    ).rejects.toThrow(/appData/)
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined()
+  })
+
+  it('weist nicht-JSON-Werte zurueck, ohne den Space-Zustand anzufassen', async () => {
+    const space = await aliceAdapter.createSpace<TestDoc>('shared', { notes: '' }, { name: 'A' })
+    await aliceAdapter.updateSpace(space.id, { appData: { keep: 'me' } })
+
+    await expect(
+      aliceAdapter.updateSpace(space.id, { appData: { fn: (() => {}) as unknown } }),
+    ).rejects.toThrow(/appData/)
+    await expect(
+      aliceAdapter.updateSpace(space.id, { appData: { big: BigInt(1) as unknown } }),
+    ).rejects.toThrow(/appData/)
+
+    // Kein Teil-Patch angewendet, Observer lebt: ein valider Folge-Patch geht durch.
+    const before = await aliceAdapter.getSpace(space.id)
+    expect(before!.appData).toEqual({ keep: 'me' })
+    await aliceAdapter.updateSpace(space.id, { appData: { theme: 'forest' } })
+    const after = await aliceAdapter.getSpace(space.id)
+    expect(after!.appData).toEqual({ keep: 'me', theme: 'forest' })
   })
 })
