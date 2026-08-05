@@ -259,3 +259,35 @@ describe('VaultPushScheduler', () => {
     })
   })
 })
+
+describe('VaultPushScheduler — In-flight-Aenderungen (TOCTOU)', () => {
+  it('eine Aenderung WAEHREND eines laufenden Pushes wird nicht wegdedupliziert', async () => {
+    // Der Push captured das Doc bei START; lastPushedHeads darf deshalb nur
+    // den Start-Stand markieren. Wird stattdessen der Abschluss-Stand
+    // gelesen, gilt eine in-flight-Aenderung (z.B. ein Delete) faelschlich
+    // als gepusht und der Follow-up-Push wird uebersprungen — der geloeschte
+    // Zustand aufersteht beim Restore.
+    let heads = 'v1'
+    const pushed: string[] = []
+    let releasePush: () => void = () => {}
+    const scheduler = new VaultPushScheduler({
+      pushFn: () => {
+        pushed.push(heads) // Push captured den Stand bei Start
+        return new Promise<void>((resolve) => { releasePush = resolve })
+      },
+      getHeadsFn: () => heads,
+      debounceMs: 10,
+    })
+
+    scheduler.pushImmediate() // Push 1 startet mit v1 und haengt
+    heads = 'v2' // Doc aendert sich WAEHREND des Pushes (Delete)
+    scheduler.pushImmediate() // Follow-up wird gequeued
+    releasePush() // Push 1 kommt zurueck
+    await new Promise(r => setTimeout(r, 20))
+    releasePush() // ggf. Push 2 freigeben
+    await new Promise(r => setTimeout(r, 20))
+
+    expect(pushed).toEqual(['v1', 'v2'])
+    scheduler.destroy()
+  })
+})

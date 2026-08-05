@@ -3268,11 +3268,12 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
       if (metaCreatedBy !== undefined) meta.info.createdBy = metaCreatedBy
       if (metaAppData !== undefined) {
         meta.info.appData = metaAppData
-      } else if (metaMap.size > 0) {
-        // The doc's _meta IS loaded (it has content) and carries no appData
-        // keys — the cached projection is stale (last key was deleted).
-        // An UNLOADED doc (empty _meta) must not wipe the cache, mirroring
-        // the guards on name/image above.
+      } else if (!isEmpty) {
+        // The doc IS loaded (binary present) and carries no appData keys —
+        // the cached projection is stale (last key was deleted). Guarding on
+        // _meta CONTENT instead would resurrect the cache for legacy spaces
+        // whose _meta is empty. An unloaded doc (no binary) must still not
+        // wipe the pre-load cache, mirroring the guards on name/image above.
         delete meta.info.appData
       }
       // VE-1: die members-Projektion kommt aus dem Event-Set des Docs — die
@@ -4612,13 +4613,20 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
   private ensureSchedulers(state: YjsSpaceState): void {
     const spaceId = state.info.id
 
+    // Heads for dedup MUST cover deletions: a pure delete transaction (e.g.
+    // removing the last appData key) adds no insert, so the state vector
+    // alone is DELETION-BLIND — the push would be skipped and the persisted
+    // doc would resurrect the deleted state on restore. Y.snapshot carries
+    // state vector AND delete set.
+    const docHeads = () => {
+      const snapshot = Y.encodeSnapshot(Y.snapshot(state.doc))
+      return Array.from(snapshot).join(',')
+    }
+
     if (!this.compactSchedulers.has(spaceId)) {
       this.compactSchedulers.set(spaceId, new VaultPushScheduler({
         pushFn: () => this._saveToCompactStore(state),
-        getHeadsFn: () => {
-          const sv = Y.encodeStateVector(state.doc)
-          return Array.from(sv).join(',')
-        },
+        getHeadsFn: docHeads,
         debounceMs: 2000,
       }))
     }
@@ -4626,10 +4634,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
     if (this.vault && !this.vaultSchedulers.has(spaceId)) {
       this.vaultSchedulers.set(spaceId, new VaultPushScheduler({
         pushFn: () => this._pushSnapshotToVault(state),
-        getHeadsFn: () => {
-          const sv = Y.encodeStateVector(state.doc)
-          return Array.from(sv).join(',')
-        },
+        getHeadsFn: docHeads,
         debounceMs: 5000,
       }))
     }

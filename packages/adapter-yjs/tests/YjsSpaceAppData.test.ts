@@ -3,6 +3,7 @@ import type { PublicIdentitySession } from '../../wot-core/src/application/ident
 import { createTestIdentity } from '../../wot-core/tests/helpers/identity-session'
 import { InMemoryMessagingAdapter, InMemoryKeyManagementAdapter, InMemoryCompactStore, InMemorySpaceMetadataStorage } from '@web_of_trust/core/adapters'
 import { YjsReplicationAdapter } from '../src/YjsReplicationAdapter'
+import * as Y from 'yjs'
 
 interface TestDoc {
   notes: string
@@ -225,5 +226,90 @@ describe('YjsReplicationAdapter — appData Robustheit (Review-Runde 2)', () => 
     await aliceAdapter.updateSpace(space.id, { appData: { theme: 'forest' } })
     const after = await aliceAdapter.getSpace(space.id)
     expect(after!.appData).toEqual({ keep: 'me', theme: 'forest' })
+  })
+})
+
+describe('YjsReplicationAdapter — appData Restore/Restart', () => {
+  let alice: PublicIdentitySession
+  let aliceMessaging: InMemoryMessagingAdapter
+  let metadataStorage: InMemorySpaceMetadataStorage
+  let compactStore: InMemoryCompactStore
+  let keyManagement: InMemoryKeyManagementAdapter
+  const adapters: YjsReplicationAdapter[] = []
+
+  function makeAdapter(): YjsReplicationAdapter {
+    const adapter = new YjsReplicationAdapter({
+      identity: alice,
+      messaging: aliceMessaging,
+      brokerUrls: ['wss://broker.example.com'],
+      keyManagement,
+      compactStore,
+      metadataStorage,
+    })
+    adapters.push(adapter)
+    return adapter
+  }
+
+  beforeEach(async () => {
+    InMemoryMessagingAdapter.resetAll()
+    alice = (await createTestIdentity('alice-pass')).identity
+    aliceMessaging = new InMemoryMessagingAdapter()
+    await aliceMessaging.connect(alice.getDid())
+    metadataStorage = new InMemorySpaceMetadataStorage()
+    compactStore = new InMemoryCompactStore()
+    keyManagement = new InMemoryKeyManagementAdapter()
+    adapters.length = 0
+  })
+
+  afterEach(async () => {
+    for (const adapter of adapters) {
+      try { await adapter.stop() } catch {}
+    }
+    InMemoryMessagingAdapter.resetAll()
+    try { await alice.deleteStoredIdentity() } catch {}
+  })
+
+  it('Loeschen des letzten Keys ueberlebt einen Restart (kein Wiederauferstehen)', async () => {
+    const first = makeAdapter()
+    await first.start()
+    const space = await first.createSpace<TestDoc>('shared', { notes: '' }, { name: 'A' })
+    await first.updateSpace(space.id, { appData: { primaryColor: '#e84b1c' } })
+    await first.updateSpace(space.id, { appData: { primaryColor: null } })
+    await new Promise(r => setTimeout(r, 300))
+    await first.stop()
+
+    const second = makeAdapter()
+    await second.start()
+    await new Promise(r => setTimeout(r, 300))
+    const restored = await second.getSpace(space.id)
+    expect(restored).toBeTruthy()
+    expect(restored!.appData).toBeUndefined()
+  })
+
+  it('Legacy-Space mit LEERER _meta-Map: staler appData-Cache aufersteht nicht', async () => {
+    // Realistischer Ursprung des stalen Caches: appData wurde einmal gesetzt
+    // und in den PersonalDoc-Cache persistiert.
+    const first = makeAdapter()
+    await first.start()
+    const space = await first.createSpace<TestDoc>('shared', { notes: '' }, { name: 'Legacy' })
+    await first.updateSpace(space.id, { appData: { primaryColor: '#e84b1c' } })
+    await new Promise(r => setTimeout(r, 300))
+    await first.stop()
+
+    // Legacy-Doc eines alten Clients: Inhalt vorhanden, _meta komplett LEER
+    // (kein name, keine appData-Keys). Der Cache traegt appData noch.
+    const legacyDoc = new Y.Doc()
+    legacyDoc.transact(() => { legacyDoc.getMap('data').set('notes', 'legacy') })
+    await compactStore.save(space.id, Y.encodeStateAsUpdate(legacyDoc))
+
+    const second = makeAdapter()
+    await second.start()
+    await new Promise(r => setTimeout(r, 300))
+    const restored = await second.getSpace(space.id)
+    expect(restored).toBeTruthy()
+    // Das Doc IST geladen (binary nicht leer) und traegt keine appData-Keys —
+    // die Projektion darf den stalen Cache nicht wiederbeleben, auch wenn
+    // _meta insgesamt leer ist (metaMap.size waere hier 0).
+    expect(restored!.appData).toBeUndefined()
   })
 })
