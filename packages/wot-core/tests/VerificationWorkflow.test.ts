@@ -1342,4 +1342,46 @@ describe('VerificationWorkflow', () => {
     expect(await restore).toBeNull()
     expect(workflow.getActiveQrChallenge()).toBeNull()
   })
+
+  it('Epoche: ein erfolgreicher Accept invalidiert einen älteren hängenden Restore-Flight', async () => {
+    // Review-Repro: Restore 1 friert A ein und hängt; Accept (mit eigenem
+    // schnellem Restore) konsumiert A und leert RAM+Store; danach wird
+    // Restore 1 freigegeben — er darf A nicht wiederbeleben.
+    const anna = await createTestIdentity('anna')
+    const nonce = '550e8400-e29b-41d4-a716-446655440000'
+    class GatedFirstGetStore extends TestVerificationStateStore {
+      releaseFirst!: () => void
+      private readonly firstGate = new Promise<void>((resolve) => { this.releaseFirst = resolve })
+      private calls = 0
+      override async getActiveQrChallenge(): Promise<Record<string, unknown> | null> {
+        const stale = await super.getActiveQrChallenge()
+        if (++this.calls === 1) await this.firstGate
+        return stale
+      }
+    }
+    const store = new GatedFirstGetStore()
+    const seeder = new VerificationWorkflow({
+      crypto: cryptoAdapter,
+      randomId: () => nonce,
+      now: () => new Date('2026-04-28T08:00:00Z'),
+      stateStore: store,
+    })
+    await seeder.createOnlineQrChallenge(anna, 'Anna')
+
+    const workflow = new VerificationWorkflow({
+      crypto: cryptoAdapter,
+      now: () => new Date('2026-04-28T08:01:00Z'),
+      stateStore: store,
+    })
+    const staleRestore = workflow.restoreActiveQrChallenge()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(
+      await workflow.acceptVerifiedVerificationAttestation(anna, verificationAttestationPayload(anna.getDid(), nonce)),
+    ).toEqual({ decision: 'accept-in-person', nonce })
+
+    store.releaseFirst()
+    expect(await staleRestore).toBeNull()
+    expect(workflow.getActiveQrChallenge()).toBeNull()
+    expect(store.activeQrChallenge).toBeNull()
+  })
 })

@@ -184,6 +184,19 @@ export class VerificationWorkflow {
     return true
   }
 
+  /**
+   * Wie commitChallengeState, rückt bei Erfolg zusätzlich die Epoche vor —
+   * für Mutationen, die ältere Flights invalidieren MÜSSEN (erfolgreicher
+   * Accept: die Challenge ist konsumiert, ein hängender Restore darf sie
+   * nicht wiederbeleben). Reject-Pfade rufen das bewusst NICHT auf: sie
+   * verändern den aktiven Zustand nicht.
+   */
+  private commitAndAdvanceChallengeState(epoch: number, next: QrChallenge | null): boolean {
+    if (!this.commitChallengeState(epoch, next)) return false
+    this.challengeEpoch++
+    return true
+  }
+
   getActiveQrChallenge(): QrChallenge | null {
     return this.activeQrChallenge === null ? null : { ...this.activeQrChallenge }
   }
@@ -559,9 +572,12 @@ export class VerificationWorkflow {
       if (!consumed) {
         return { decision: 'reject', reason: 'nonce-consumed' }
       }
-      // Epochen-Commit: nur nullen, wenn seit der Entscheidung kein
-      // create/reset mutiert hat (Store-Seite schützt compare-and-delete).
-      this.commitChallengeState(epoch, null)
+      // Epochen-Commit MIT Vorrücken: der erfolgreiche Accept ist selbst eine
+      // Mutation — er invalidiert ältere Restore-Flights, die die konsumierte
+      // Challenge sonst wiederbeleben könnten. Nur nullen+vorrücken, wenn
+      // seit der Entscheidung kein create/reset mutiert hat (Store-Seite
+      // schützt compare-and-delete).
+      this.commitAndAdvanceChallengeState(epoch, null)
       // Reihenfolge (Review #339): Die Nonce ist ab hier durabel konsumiert —
       // zuerst den pending counter sichern, dann das Challenge-Clear als
       // best-effort, per Nonce an die soeben akzeptierte Challenge gebunden
