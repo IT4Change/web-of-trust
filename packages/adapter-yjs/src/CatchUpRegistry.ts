@@ -7,6 +7,13 @@ export interface CatchUpSnapshot {
   syncing: boolean
 }
 
+export interface CatchUpSource {
+  /** Als Hook direkt in eine `LogSyncCoordinatorConfig` einsetzbar. */
+  readonly update: (state: DocCatchUpState) => void
+  /** Lebenszyklus zu Ende: eigenen Eintrag vergessen, spätere Meldungen ignorieren. */
+  release(): void
+}
+
 const EMPTY: CatchUpSnapshot = { outstanding: [], syncing: false }
 
 /**
@@ -23,9 +30,40 @@ const EMPTY: CatchUpSnapshot = { outstanding: [], syncing: false }
 export class CatchUpRegistry {
   private readonly states = new Map<string, DocCatchUpState>()
   private readonly listeners = new Set<(snapshot: CatchUpSnapshot) => void>()
+  private readonly owners = new Map<string, number>()
+  /** Global monoton, wird nie zurückgesetzt — ein Token darf nie wiederkehren. */
+  private sourceSeq = 0
   private snapshot: CatchUpSnapshot = EMPTY
 
-  /** Als Hook direkt in eine `LogSyncCoordinatorConfig` einsetzbar. */
+  /**
+   * Eine Meldequelle für genau einen Coordinator-Lebenszyklus.
+   *
+   * Ohne diese Bindung könnte ein Flight, der einen Space-Cleanup oder ein
+   * `destroy()` überlebt, seinen Zustand nachträglich wieder eintragen — beim
+   * PersonalDoc sogar unter derselben deterministischen `docId` in einer neuen
+   * Sitzung. Wer als Nächster für ein Dokument meldet, entwertet den
+   * Vorgänger; `release()` räumt den eigenen Eintrag ab, fremde nicht.
+   */
+  source(docId: string): CatchUpSource {
+    const token = ++this.sourceSeq
+    this.owners.set(docId, token)
+    return {
+      update: (state: DocCatchUpState) => {
+        if (this.owners.get(docId) !== token) return
+        this.update(state)
+      },
+      release: () => {
+        if (this.owners.get(docId) !== token) return
+        this.owners.delete(docId)
+        this.forget(docId)
+      },
+    }
+  }
+
+  /**
+   * Roher Eingang ohne Lebenszyklusbindung. Für Aufrufer, die den Zustand
+   * selbst besitzen; sonst {@link source} benutzen.
+   */
   readonly update = (state: DocCatchUpState): void => {
     const previous = this.states.get(state.docId)
     if (
@@ -48,6 +86,9 @@ export class CatchUpRegistry {
 
   /** Sitzungsende: alles vergessen, ohne Abonnenten zu verlieren. */
   clear(): void {
+    // Auch die Besitzverhältnisse: eine noch laufende alte Quelle darf nach
+    // einem `clear()` nichts wiederbeleben.
+    this.owners.clear()
     if (this.states.size === 0) return
     this.states.clear()
     this.publish()

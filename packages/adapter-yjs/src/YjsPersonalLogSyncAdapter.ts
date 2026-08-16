@@ -34,7 +34,6 @@ import type {
   ProtocolCryptoAdapter,
   CapabilitySource,
   LogSyncEngineHooks,
-  DocCatchUpState,
 } from '@web_of_trust/core/protocol'
 import {
   LogSyncCoordinator,
@@ -45,6 +44,7 @@ import {
   SYNC_RESPONSE_MESSAGE_TYPE,
 } from '@web_of_trust/core/protocol'
 import { WebCryptoProtocolCryptoAdapter } from '@web_of_trust/core/protocol-adapters'
+import type { CatchUpRegistry, CatchUpSource } from './CatchUpRegistry'
 import { createRestoreCloneHandler } from '@web_of_trust/core/adapters'
 import { InitialCatchUpController } from './InitialCatchUpController'
 
@@ -67,8 +67,14 @@ export interface YjsPersonalLogSyncConfig {
   mintDeviceId?: () => string
   /** Notified after a restore-clone re-binds the deviceId (durable persistence hook). */
   onDeviceIdChanged?: (newDeviceId: string, oldDeviceId: string) => void | Promise<void>
-  /** Beobachtbarkeit (#343): Catch-up-Zustand des persönlichen Dokuments melden. */
-  onCatchUpState?: (state: DocCatchUpState) => void
+  /**
+   * Beobachtbarkeit (#343): Sammelstelle für den Catch-up-Zustand. Die Bindung
+   * läuft über eine {@link CatchUpSource}, nicht über einen rohen Callback —
+   * die docId des persönlichen Dokuments ist deterministisch, ein Flight aus
+   * einem alten Lebenszyklus würde sonst nach einem Re-Login denselben
+   * Eintrag in der neuen Sitzung überschreiben.
+   */
+  catchUpRegistry?: CatchUpRegistry
 }
 
 export class YjsPersonalLogSyncAdapter {
@@ -82,7 +88,8 @@ export class YjsPersonalLogSyncAdapter {
   private readonly mintDeviceId?: () => string
   private readonly onDeviceIdChangedHook?: (newDeviceId: string, oldDeviceId: string) => void | Promise<void>
   /** Built lazily in start() AFTER the deviceId is resolved from the store (BLOCKER-1b). */
-  private readonly onCatchUpState?: (state: DocCatchUpState) => void
+  private readonly catchUpRegistry?: CatchUpRegistry
+  private catchUpSource: CatchUpSource | null = null
   private coordinator: LogSyncCoordinator | null = null
   /** The deviceId fallback until the store-bound id is resolved. */
   private deviceId: string
@@ -98,7 +105,7 @@ export class YjsPersonalLogSyncAdapter {
   private started = false
 
   constructor(config: YjsPersonalLogSyncConfig) {
-    this.onCatchUpState = config.onCatchUpState
+    this.catchUpRegistry = config.catchUpRegistry
     this.doc = config.doc
     this.messaging = config.messaging
     this.identity = config.identity
@@ -159,7 +166,7 @@ export class YjsPersonalLogSyncAdapter {
         send: (envelope) => this.messaging.send(envelope as WireMessage),
       },
       capabilities: this.personalCapabilitySource(),
-      onCatchUpState: this.onCatchUpState,
+      onCatchUpState: this.claimCatchUpSource()?.update,
       hooks: this.yjsEngineHooks(),
       signLogEntry: (input) => this.identity.signEd25519(input),
       // Personal-Doc is single-owner multi-device: recipients = just own DID.
@@ -215,6 +222,14 @@ export class YjsPersonalLogSyncAdapter {
       if (err instanceof LocalAppendFailedError) throw err
       console.debug('[YjsPersonalLogSync] restore-clone re-write failed (retry on reconnect):', err)
     })
+  }
+
+  /** Meldequelle dieses Lebenszyklus; eine neue entwertet die vorige. */
+  private claimCatchUpSource(): CatchUpSource | undefined {
+    if (!this.catchUpRegistry) return undefined
+    this.catchUpSource?.release()
+    this.catchUpSource = this.catchUpRegistry.source(this.docId)
+    return this.catchUpSource
   }
 
   /** The underlying coordinator (test/inspection + manual catch-up); null until start() resolves it. */
@@ -300,6 +315,11 @@ export class YjsPersonalLogSyncAdapter {
 
   destroy(): void {
     this.lifecycleEpoch += 1 // detacht ein noch hängendes init() des alten Lebenszyklus
+    // Ein hängender Catch-up dieses Lebenszyklus darf nach dem Destroy nichts
+    // mehr melden — und schon gar nicht in einer neuen Sitzung unter derselben
+    // deterministischen docId.
+    this.catchUpSource?.release()
+    this.catchUpSource = null
     this.catchUpController?.dispose()
     this.catchUpController = null
     this.unsubDocUpdate?.()

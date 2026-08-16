@@ -791,7 +791,7 @@ export async function initYjsPersonalDoc(identity: IdentitySession, messaging?: 
       // #343: derselbe Sammelpunkt wie für die Spaces — die Mitgliedschaftsliste
       // steckt in diesem Dokument, ihr Catch-up ist also der wichtigste Teil
       // der Aussage „dieses Gerät empfängt noch".
-      onCatchUpState: logSync.catchUpRegistry?.update,
+      catchUpRegistry: logSync.catchUpRegistry,
     })
     logSyncAdapter.start()
   }

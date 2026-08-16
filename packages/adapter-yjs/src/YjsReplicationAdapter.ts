@@ -11,7 +11,7 @@
  * - No compaction needed (Yjs has built-in GC)
  */
 import * as Y from 'yjs'
-import type { CatchUpRegistry } from './CatchUpRegistry'
+import type { CatchUpRegistry, CatchUpSource } from './CatchUpRegistry'
 import type {
   ReplicationAdapter,
   SpaceHandle,
@@ -526,6 +526,8 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
   private readonly capabilityValidityMs?: number
   /** #343: Sammelstelle für den Catch-up-Zustand; optional. */
   private readonly catchUpRegistry?: CatchUpRegistry
+  /** Meldequelle je Space, an den Lebenszyklus des jeweiligen Coordinators gebunden. */
+  private readonly catchUpSources = new Map<string, CatchUpSource>()
   private spaceFilter?: (info: SpaceInfo) => boolean
 
   private spaces = new Map<string, YjsSpaceState>()
@@ -804,6 +806,25 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
     this.catchUpReady = true
   }
 
+  /**
+   * Meldequelle für einen Space. Eine neue Quelle entwertet die vorige für
+   * dieselbe docId — ein Flight, der einen Cleanup überlebt hat, kann seinen
+   * Zustand danach nicht mehr eintragen.
+   */
+  private catchUpSource(spaceId: string): CatchUpSource | undefined {
+    if (!this.catchUpRegistry) return undefined
+    this.catchUpSources.get(spaceId)?.release()
+    const source = this.catchUpRegistry.source(spaceId)
+    this.catchUpSources.set(spaceId, source)
+    return source
+  }
+
+  /** Space ist weg (Cleanup, Leave, Stop): Zustand vergessen, Nachzügler ignorieren. */
+  private releaseCatchUpSource(spaceId: string): void {
+    this.catchUpSources.get(spaceId)?.release()
+    this.catchUpSources.delete(spaceId)
+  }
+
   async stop(): Promise<void> {
     // Provisioning verification is per-session: a flight may still be running its
     // continuation past this stop(), so the next session must NOT trust it and has
@@ -819,6 +840,10 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
     this.spaceCatchUpsInFlight.clear()
     this.pendingSpaceCatchUpBatches = 0
     this.catchUpAppliedWithoutHandle = false
+    // Dieselbe Logik für die Beobachtbarkeit: ein Flight, der diese Sitzung
+    // überlebt, darf in der nächsten nichts mehr melden.
+    for (const source of this.catchUpSources.values()) source.release()
+    this.catchUpSources.clear()
     // Session-Grace neu armieren: nach stop()/start() derselben Instanz darf
     // ein alter First-Seen-Stempel keinen Sofort-Ghost erzeugen.
     this.metadataFirstSeenAt.clear()
@@ -2008,7 +2033,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
       envelopes: { send: (envelope) => this.messaging.send(envelope as WireMessage) },
       capabilities: this.spaceCapabilitySource(spaceId),
       hooks: this.yjsEngineHooks(state),
-      onCatchUpState: this.catchUpRegistry?.update,
+      onCatchUpState: this.catchUpSource(spaceId)?.update,
       signLogEntry: (input) => this.identity.signEd25519(input),
       // VE-2: log entries are broadcast to all active space members (the relay
       // delivers to each member's sockets). state.info.members is the projection
@@ -2589,6 +2614,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
     // stale coordinator can never be replayed by replayBlockedByKeyForSpace afterwards
     // (parity with the Automerge cleanup, which already deletes the coordinator here).
     this.coordinators.delete(spaceId)
+    this.releaseCatchUpSource(spaceId)
     this.replayBlockedInFlight.delete(spaceId)
     this.replayBlockedDirty.delete(spaceId)
     this.capabilityCatchUpBlocked.delete(spaceId)
