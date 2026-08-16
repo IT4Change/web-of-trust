@@ -34,6 +34,7 @@ import type {
   ProtocolCryptoAdapter,
   CapabilitySource,
   LogSyncEngineHooks,
+  DocCatchUpState,
 } from '@web_of_trust/core/protocol'
 import {
   LogSyncCoordinator,
@@ -66,6 +67,8 @@ export interface YjsPersonalLogSyncConfig {
   mintDeviceId?: () => string
   /** Notified after a restore-clone re-binds the deviceId (durable persistence hook). */
   onDeviceIdChanged?: (newDeviceId: string, oldDeviceId: string) => void | Promise<void>
+  /** Beobachtbarkeit (#343): Catch-up-Zustand des persönlichen Dokuments melden. */
+  onCatchUpState?: (state: DocCatchUpState) => void
 }
 
 export class YjsPersonalLogSyncAdapter {
@@ -79,6 +82,7 @@ export class YjsPersonalLogSyncAdapter {
   private readonly mintDeviceId?: () => string
   private readonly onDeviceIdChangedHook?: (newDeviceId: string, oldDeviceId: string) => void | Promise<void>
   /** Built lazily in start() AFTER the deviceId is resolved from the store (BLOCKER-1b). */
+  private readonly onCatchUpState?: (state: DocCatchUpState) => void
   private coordinator: LogSyncCoordinator | null = null
   /** The deviceId fallback until the store-bound id is resolved. */
   private deviceId: string
@@ -94,6 +98,7 @@ export class YjsPersonalLogSyncAdapter {
   private started = false
 
   constructor(config: YjsPersonalLogSyncConfig) {
+    this.onCatchUpState = config.onCatchUpState
     this.doc = config.doc
     this.messaging = config.messaging
     this.identity = config.identity
@@ -154,6 +159,7 @@ export class YjsPersonalLogSyncAdapter {
         send: (envelope) => this.messaging.send(envelope as WireMessage),
       },
       capabilities: this.personalCapabilitySource(),
+      onCatchUpState: this.onCatchUpState,
       hooks: this.yjsEngineHooks(),
       signLogEntry: (input) => this.identity.signEd25519(input),
       // Personal-Doc is single-owner multi-device: recipients = just own DID.

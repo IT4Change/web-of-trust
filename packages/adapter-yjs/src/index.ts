@@ -21,6 +21,8 @@ export { createRestoreCloneHandler } from '@web_of_trust/core/adapters'
 export type { RestoreCloneControllerConfig } from '@web_of_trust/core/adapters'
 
 export { YjsReplicationAdapter } from './YjsReplicationAdapter'
+export { CatchUpRegistry } from './CatchUpRegistry'
+export type { CatchUpSnapshot } from './CatchUpRegistry'
 export type { YjsCompactStore } from './YjsReplicationAdapter'
 
 export { YjsStorageAdapter } from './YjsStorageAdapter'

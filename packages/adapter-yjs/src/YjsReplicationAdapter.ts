@@ -11,6 +11,7 @@
  * - No compaction needed (Yjs has built-in GC)
  */
 import * as Y from 'yjs'
+import type { CatchUpRegistry } from './CatchUpRegistry'
 import type {
   ReplicationAdapter,
   SpaceHandle,
@@ -228,6 +229,13 @@ interface YjsReplicationConfig {
    * as log entries (NOT content envelopes) and the log path converges standalone.
    */
   enableLogSync?: boolean
+  /**
+   * Beobachtbarkeit (#343): Sammelstelle, in die jeder Space-Catch-up seinen
+   * Zustand meldet. Dieselbe Registry lässt sich `initYjsPersonalDoc()`
+   * mitgeben — eine Anwendung hat dann EINE Quelle für „empfängt dieses Gerät
+   * gerade noch Daten". Ohne Registry verhält sich der Adapter unverändert.
+   */
+  catchUpRegistry?: CatchUpRegistry
   /**
    * Stable per-device UUID for the log-entry seq namespace (per (deviceId,docId)).
    * Defaults to a fresh random UUID. SHOULD be the same stable id the messaging
@@ -516,6 +524,8 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
   private readonly crypto: ProtocolCryptoAdapter
   private readonly brokerUrls: readonly string[]
   private readonly capabilityValidityMs?: number
+  /** #343: Sammelstelle für den Catch-up-Zustand; optional. */
+  private readonly catchUpRegistry?: CatchUpRegistry
   private spaceFilter?: (info: SpaceInfo) => boolean
 
   private spaces = new Map<string, YjsSpaceState>()
@@ -600,6 +610,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
   private capabilityCatchUpDirty = new Set<string>()
 
   constructor(config: YjsReplicationConfig) {
+    this.catchUpRegistry = config.catchUpRegistry
     this.identity = config.identity
     this.messaging = config.messaging
     this.keyManagement = config.keyManagement ?? new InMemoryKeyManagementAdapter()
@@ -1997,6 +2008,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
       envelopes: { send: (envelope) => this.messaging.send(envelope as WireMessage) },
       capabilities: this.spaceCapabilitySource(spaceId),
       hooks: this.yjsEngineHooks(state),
+      onCatchUpState: this.catchUpRegistry?.update,
       signLogEntry: (input) => this.identity.signEd25519(input),
       // VE-2: log entries are broadcast to all active space members (the relay
       // delivers to each member's sockets). state.info.members is the projection

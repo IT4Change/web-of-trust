@@ -34,6 +34,7 @@ import {
 } from '@web_of_trust/core/storage'
 // A2: the legacy YjsPersonalSyncAdapter (personal-sync broadcast) is UN-WIRED — replaced by the
 // durable-log adapter. Its class file stays dormant (post-festival cleanup), no longer imported.
+import type { CatchUpRegistry } from './CatchUpRegistry'
 import { YjsPersonalLogSyncAdapter } from './YjsPersonalLogSyncAdapter'
 
 import type {
@@ -599,7 +600,7 @@ function notifyListeners(): void {
  * @param messaging - Optional MessagingAdapter for multi-device sync via relay
  * @param vaultUrl - Optional vault URL for encrypted backup
  */
-export async function initYjsPersonalDoc(identity: IdentitySession, messaging?: MessagingAdapter, vaultUrl?: string | string[], externalCompactStore?: { open(): Promise<void>; save(id: string, data: Uint8Array): Promise<void>; load(id: string): Promise<Uint8Array | null>; delete(id: string): Promise<void>; list(): Promise<string[]>; close(): void }, logSync?: { docLogStore: DocLogStore; deviceId: string }): Promise<PersonalDoc> {
+export async function initYjsPersonalDoc(identity: IdentitySession, messaging?: MessagingAdapter, vaultUrl?: string | string[], externalCompactStore?: { open(): Promise<void>; save(id: string, data: Uint8Array): Promise<void>; load(id: string): Promise<Uint8Array | null>; delete(id: string): Promise<void>; list(): Promise<string[]>; close(): void }, logSync?: { docLogStore: DocLogStore; deviceId: string; catchUpRegistry?: CatchUpRegistry }): Promise<PersonalDoc> {
   // Idempotent
   if (ydoc) return snapshotDoc()
 
@@ -787,6 +788,10 @@ export async function initYjsPersonalDoc(identity: IdentitySession, messaging?: 
       docId: personalDocIdFromKey(vaultPersonalKey),
       docLogStore: logSync.docLogStore,
       deviceId: logSync.deviceId,
+      // #343: derselbe Sammelpunkt wie für die Spaces — die Mitgliedschaftsliste
+      // steckt in diesem Dokument, ihr Catch-up ist also der wichtigste Teil
+      // der Aussage „dieses Gerät empfängt noch".
+      onCatchUpState: logSync.catchUpRegistry?.update,
     })
     logSyncAdapter.start()
   }

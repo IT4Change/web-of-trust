@@ -423,6 +423,13 @@ export interface LogSyncCoordinatorConfig {
    */
   onSecurityError?: (error: Error) => void
   /**
+   * Beobachtbarkeit (#343): wird bei jedem Wechsel des Catch-up-Zustands
+   * gerufen — Beginn eines Durchlaufs und sein Ausgang. Rein informativ; der
+   * Coordinator verhält sich mit und ohne Hook identisch. Fehler des
+   * Aufrufers werden verschluckt, damit Beobachtung den Sync nie stört.
+   */
+  onCatchUpState?: (state: DocCatchUpState) => void
+  /**
    * Slice B / VE-B1: the sync-request page size sent as `body.limit`. Defaults to
    * {@link DEFAULT_CATCH_UP_PAGE_SIZE} (100, matching the relay default). Config-
    * driven so the value is set once here rather than threaded through every adapter
@@ -477,6 +484,29 @@ export type ReceiveLogEntryResult =
  *  The no-progress DoS class (d) does NOT surface here — it THROWS (the only throw
  *  class), so it can never be silently swallowed as "incomplete".
  */
+/**
+ * Beobachtbarer Catch-up-Zustand eines Dokuments (#343).
+ *
+ * Existiert, damit Anwendungen nicht raten müssen, ob ein frisch angemeldetes
+ * Gerät noch Daten empfängt. Bis hierher war dieser Zustand im Coordinator
+ * eingeschlossen; eine App konnte ihn nur aus mitgelesenen Wire-Rahmen und
+ * Zeitfenstern nachbauen (real-life-stack#265).
+ *
+ * `outstanding` ist die Frage, die eine Oberfläche wirklich stellt, und sie ist
+ * NICHT `!complete`: ein Lauf kann sauber enden und trotzdem eine offene Lücke
+ * oder auf Schlüssel wartende Einträge hinterlassen, die später nachgezogen
+ * werden (siehe {@link CatchUpResult}).
+ */
+export interface DocCatchUpState {
+  docId: string
+  /** Gerade läuft ein Catch-up-Durchlauf. */
+  inFlight: boolean
+  /** Für dieses Dokument steht nachweislich noch etwas aus. */
+  outstanding: boolean
+  /** Warum es aussteht — `undefined`, wenn nichts aussteht. */
+  reason?: 'in-flight' | 'gap-pending' | 'blocked-by-key' | 'timeout' | 'no-progress'
+}
+
 export interface CatchUpResult {
   restoreCloneRequired: boolean
   complete: boolean
@@ -1371,6 +1401,7 @@ export class LogSyncCoordinator {
       return { restoreCloneRequired: false, complete: false, incomplete: 'gap-pending', pendingGaps: [] }
     }
     this.catchingUp = true
+    this.emitCatchUpState({ inFlight: true, outstanding: true, reason: 'in-flight' })
     const work = (async (): Promise<CatchUpResult> => {
       // VE-B2 GapRepair driver: re-request any due soft-skipped/pending hole BEFORE the
       // normal catch-up (so a repaired seq is in the store before progress is measured).
@@ -1400,11 +1431,50 @@ export class LogSyncCoordinator {
     inFlight.catch(() => {})
     this.catchUpInFlight = inFlight
     try {
-      return await work
+      const result = await work
+      this.emitCatchUpResult(result)
+      return result
+    } catch (err) {
+      // Ein geworfener Lauf lässt nachweislich etwas offen — die Anzeige darf
+      // hier nicht auf „fertig" fallen.
+      this.emitCatchUpState({ inFlight: false, outstanding: true, reason: 'no-progress' })
+      throw err
     } finally {
       this.catchingUp = false
       this.catchUpInFlight = null
     }
+  }
+
+  /**
+   * Zustandswechsel melden. Beobachtung darf den Sync nie stören: ein Fehler im
+   * Abnehmer wird verschluckt.
+   */
+  private emitCatchUpState(state: Omit<DocCatchUpState, 'docId'>): void {
+    const hook = this.config.onCatchUpState
+    if (!hook) return
+    try {
+      hook({ docId: this.config.docId, ...state })
+    } catch (err) {
+      console.debug('[LogSyncCoordinator] onCatchUpState handler failed:', err)
+    }
+  }
+
+  /**
+   * Den Ausgang eines Durchlaufs als Zustand melden.
+   *
+   * `complete: true` heisst NICHT lückenlos — offene Lücken werden über
+   * Soft-Skip und GapRepair nachgezogen, nicht über die Paginierung. Genau
+   * deshalb zählt `pendingGaps` hier mit: eine Oberfläche, die nur `complete`
+   * liest, meldet „fertig", während noch Einträge fehlen.
+   */
+  private emitCatchUpResult(result: CatchUpResult): void {
+    if (!this.config.onCatchUpState) return
+    const hasGaps = (result.pendingGaps?.length ?? 0) > 0
+    const outstanding = !result.complete || hasGaps
+    const reason = !outstanding
+      ? undefined
+      : (result.incomplete ?? 'gap-pending')
+    this.emitCatchUpState({ inFlight: false, outstanding, reason })
   }
 
   /**
@@ -1814,9 +1884,13 @@ export class LogSyncCoordinator {
     if (truncated) {
       // Late/unsolicited truncated page: the guarded catchUp() (getSyncRequestHeads on the wire)
       // converges the rest. gap-pending, not an error.
-      return { restoreCloneRequired: disposition.restoreCloneRequired, complete: false, incomplete: 'gap-pending', pendingGaps }
+      const result: CatchUpResult = { restoreCloneRequired: disposition.restoreCloneRequired, complete: false, incomplete: 'gap-pending', pendingGaps }
+      this.emitCatchUpResult(result)
+      return result
     }
-    return { restoreCloneRequired: disposition.restoreCloneRequired, complete: true, pendingGaps }
+    const result: CatchUpResult = { restoreCloneRequired: disposition.restoreCloneRequired, complete: true, pendingGaps }
+    this.emitCatchUpResult(result)
+    return result
   }
 
   /**
