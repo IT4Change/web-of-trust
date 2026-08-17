@@ -42,6 +42,9 @@ const DEVICE_A = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
 const DEVICE_B = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
 const DEVICE_C = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'
 
+/** Mikrotask-Grenze: keine Zeit, nur Reihenfolge. */
+const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 0))
+
 const FUTURE = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString()
 const NOW = new Date().toISOString()
 const CONTENT_KEY = new Uint8Array(32).fill(7)
@@ -101,6 +104,15 @@ async function makeHarness(
     catchUpPageTimeoutMs?: number
     recipients?: string[]
     clock?: { now: Date }
+    /**
+     * Torwächter für ausgehende Sync-Requests. Erlaubt Tests, die REIHENFOLGE
+     * zu setzen statt sie über konkurrierende Fristen zu hoffen: `forward()`
+     * schickt die Anfrage wirklich los, wer nicht weiterleitet, lässt den Lauf
+     * in seine Frist laufen.
+     */
+    gateSyncRequest?: (forward: () => Promise<unknown>) => Promise<unknown>
+    /** Dieselbe Idee für die Erstpublikation: Reihenfolge setzen, nicht hoffen. */
+    gateSpaceRegister?: (forward: () => Promise<unknown>) => Promise<unknown>
   },
 ): Promise<Harness> {
   const messaging = new InMemoryMessagingAdapter({ broker })
@@ -129,6 +141,9 @@ async function makeHarness(
         const e = envelope as { type?: string; body?: { heads: Record<string, number>; limit?: number } }
         if (e.type === SYNC_REQUEST_MESSAGE_TYPE && e.body) {
           syncRequests.push({ heads: e.body.heads, limit: e.body.limit })
+          if (opts?.gateSyncRequest) {
+            return opts.gateSyncRequest(() => messaging.send(envelope as never)) as never
+          }
         }
         return messaging.send(envelope as never)
       },
@@ -148,6 +163,14 @@ async function makeHarness(
     now: () => clock.now,
     onCatchUpState: (state) => catchUpStates.push(state),
     sendSpaceRegister: async () => {
+      if (opts?.gateSpaceRegister) {
+        return opts.gateSpaceRegister(async () => sendRegisterNow()) as never
+      }
+      return sendRegisterNow()
+    },
+  })
+
+  async function sendRegisterNow() {
       const register = opts?.registrationJws
         ? { type: 'https://web-of-trust.de/protocols/space-register/1.0' as const, registrationJws: opts.registrationJws }
         : await createSpaceRegisterMessage({
@@ -158,8 +181,7 @@ async function makeHarness(
             signingSeed: new Uint8Array(32).fill(3),
           })
       return messaging.sendControlFrame!(register) as Promise<ControlFrameReceipt>
-    },
-  })
+  }
 
   messaging.onMessage(async (message) => {
     await coordinator.handleIncoming(message)
@@ -394,7 +416,7 @@ describe('LogSyncCoordinator — Slice B VE-B1 pagination', () => {
     expect(transitions.at(-1)).toMatchObject({ inFlight: false, outstanding: false })
   })
 
-  it('#343 BEOBACHTBAR — ein Timeout der ALTEN Verbindung meldet nicht in die neue hinein', async () => {
+  it('#343 BEOBACHTBAR — ein Abschluss der ALTEN Verbindung fasst die neue nicht an', async () => {
     const broker = new InProcessLogBroker()
     const alice = (await createTestIdentity('alice')).identity
     const bob = (await createTestIdentity('bob')).identity
@@ -404,32 +426,102 @@ describe('LogSyncCoordinator — Slice B VE-B1 pagination', () => {
     await a.coordinator.ensurePublished()
     await a.coordinator.writeLocalUpdate(new Uint8Array([1]))
 
-    const b = await makeHarness(bob, DEVICE_B, broker, { registrationJws, catchUpPageTimeoutMs: 50 })
-    // Die Reihenfolge wird GESETZT, nicht gehofft: gleiche Fristen für beide
-    // Läufe ergeben keine deterministische Reihenfolge (und waren in CI flaky).
-    // Der alte Lauf hat eine kurze Frist, der neue eine lange — der alte endet
-    // damit garantiert, WÄHREND der neue noch läuft. Genau dieser Fall ist der
-    // gefährliche.
-    const config = (b.coordinator as unknown as { config: { catchUpPageTimeoutMs?: number } }).config
+    // Die Reihenfolge wird über eine Barriere GESETZT, nicht über Fristen
+    // gehofft: Anfrage 1 (alte Verbindung) wird festgehalten und erst
+    // losgeschickt, wenn die neue schon läuft. Anfrage 2 (neue Verbindung)
+    // wird nie weitergeleitet und hängt damit in ihrer Frist.
+    const gates: Array<{ held: Promise<void>; release: () => void }> = []
+    const gateFor = (nr: number) => {
+      while (gates.length < nr) {
+        let release!: () => void
+        const held = new Promise<void>((resolve) => { release = resolve })
+        gates.push({ held, release })
+      }
+      return gates[nr - 1]
+    }
+    let requestNr = 0
+    const b = await makeHarness(bob, DEVICE_B, broker, {
+      registrationJws,
+      catchUpPageTimeoutMs: 10_000,
+      gateSyncRequest: async (forward) => {
+        const gate = gateFor(++requestNr)
+        await gate.held
+        return forward()
+      },
+    })
+
     const stalled = b.coordinator.catchUp()
+    await tick() // Anfrage 1 ist raus und wartet an der Barriere
 
     b.coordinator.resetForReconnect()
-    config.catchUpPageTimeoutMs = 10_000
     const fresh = b.coordinator.catchUp()
+    await tick() // Anfrage 2 ist raus und wartet an ihrer Barriere
 
+    // Jetzt darf der ALTE Lauf durchlaufen und enden.
+    gateFor(1).release()
     await stalled.catch(() => {})
-    // Solange der neue Lauf läuft, darf der alte NICHTS gemeldet haben: ohne
-    // Epochenprüfung zählte er den Zähler der neuen Epoche auf 0 und
-    // veröffentlichte sein eigenes Timeout-Ergebnis.
+
+    // Der neue Lauf läuft noch — der alte darf weder gemeldet noch seinen
+    // Guard freigegeben noch den Publikationszustand angefasst haben.
     expect(b.catchUpStates.at(-1)).toMatchObject({ inFlight: true })
+    const internals = b.coordinator as unknown as { catchingUp: boolean; publishing: Promise<void> | null }
+    expect(internals.catchingUp).toBe(true)
 
-    // Und er darf auch den Guard des neuen Laufs nicht freigegeben haben —
-    // sonst könnte ein dritter Catch-up parallel starten.
-    expect((b.coordinator as unknown as { catchingUp: boolean }).catchingUp).toBe(true)
-
-    config.catchUpPageTimeoutMs = 50
+    // Den neuen Lauf sauber zu Ende bringen, statt ihn über das Testende
+    // hinaus in seine Frist laufen zu lassen (sonst schlägt er beim Teardown
+    // gegen einen getrennten Adapter und erzeugt eine Unhandled Rejection).
+    gateFor(2).release()
     await fresh.catch(() => {})
     expect(b.catchUpStates.at(-1)).toMatchObject({ inFlight: false })
+  })
+
+  it('#343 BEOBACHTBAR — eine alte Erstpublikation setzt den Zustand der neuen Verbindung nicht', async () => {
+    const broker = new InProcessLogBroker()
+    const alice = (await createTestIdentity('alice')).identity
+    const registrationJws = await inviterRegistrationJws(alice)
+
+    const gates: Array<{ held: Promise<void>; release: () => void }> = []
+    const gateFor = (nr: number) => {
+      while (gates.length < nr) {
+        let release!: () => void
+        const held = new Promise<void>((resolve) => { release = resolve })
+        gates.push({ held, release })
+      }
+      return gates[nr - 1]
+    }
+    let registerNr = 0
+    const h = await makeHarness(alice, DEVICE_A, broker, {
+      registrationJws,
+      gateSpaceRegister: async (forward) => {
+        const gate = gateFor(++registerNr)
+        await gate.held
+        return forward()
+      },
+    })
+
+    // Erstpublikation der ALTEN Verbindung hängt an ihrer Barriere.
+    const oldPublish = h.coordinator.ensurePublished()
+    await tick()
+
+    // Reconnect: neue Verbindung, neuer Scope-Cache, Publikation von vorn.
+    h.coordinator.resetForReconnect()
+    const newPublish = h.coordinator.ensurePublished()
+    await tick()
+
+    const internals = h.coordinator as unknown as { published: boolean; publishing: Promise<void> | null }
+    const publishingOfNewRun = internals.publishing
+
+    // Der alte Lauf läuft jetzt durch — und darf den Zustand der neuen
+    // Verbindung weder auf „publiziert" setzen noch ihren Single-Flight löschen.
+    gateFor(1).release()
+    await oldPublish.catch(() => {})
+
+    expect(internals.published).toBe(false)
+    expect(internals.publishing).toBe(publishingOfNewRun)
+
+    gateFor(2).release()
+    await newPublish.catch(() => {})
+    expect(internals.published).toBe(true)
   })
 
   it('VE-B1 limit-default — without catchUpPageSize the sync-request carries an EXPLICIT body.limit == 100 (not absent)', async () => {

@@ -832,12 +832,18 @@ export class LogSyncCoordinator {
   async ensurePublished(): Promise<void> {
     if (this.published) return
     if (this.publishing) return this.publishing
-    this.publishing = this.runFirstPublication()
+    // Wie beim Catch-up-Guard gehört auch dieser Zustand genau EINEM Lauf.
+    // `resetForReconnect()` setzt `published`/`publishing` bewusst zurück,
+    // damit die neue Verbindung ihre Erstpublikation wiederholt (neuer Socket
+    // = leerer Scope-Cache). Ein alter Lauf, der danach ausläuft, darf weder
+    // `published` der neuen Verbindung setzen noch deren `publishing` löschen.
+    const own = this.runFirstPublication()
+    this.publishing = own
     try {
-      await this.publishing
-      this.published = true
+      await own
+      if (this.publishing === own) this.published = true
     } finally {
-      this.publishing = null
+      if (this.publishing === own) this.publishing = null
     }
   }
 
