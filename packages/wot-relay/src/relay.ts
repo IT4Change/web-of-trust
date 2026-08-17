@@ -1315,6 +1315,7 @@ export class RelayServer {
     } catch {
       this.sendTo(ws, {
         type: 'error',
+        thid: spaceId, // SR-4 / F1: attributable to a space → correlate it
         code: 'AUTH_INVALID',
         message: 'Admin signer DID is not a resolvable did:key.',
       })
@@ -1505,6 +1506,9 @@ export class RelayServer {
     if (result.disposition === 'rejected') {
       this.sendTo(ws, {
         type: 'error',
+        // SR-4 / F1: the sender's control-frame waiter is keyed by docId, so every
+        // reject we can attribute to a space MUST carry thid == spaceId.
+        thid: parsed.payload.spaceId,
         code: result.errorCode,
         message:
           result.errorCode === 'AUTH_INVALID'
@@ -1586,6 +1590,11 @@ export class RelayServer {
     if (result.disposition === 'rejected') {
       this.sendTo(ws, {
         type: 'error',
+        // SR-4 / F1: without thid this reject matches no control-frame waiter, the
+        // sender times out, and the secure-removal workflow reports it as an
+        // unconfirmed space-rotate — a self-leave then repeats forever while the
+        // rotation it complains about has long been installed.
+        thid: parsed.payload.spaceId,
         code: result.errorCode,
         message:
           result.errorCode === 'AUTH_INVALID'

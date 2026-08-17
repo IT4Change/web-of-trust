@@ -38,12 +38,19 @@ import { commitStagedRotation, stageRotateSpaceKey, type StagedRotationMaterial 
  */
 
 /**
- * Signals that a member removal was durably STAGED but is NOT yet enforced: not
- * every home broker has confirmed the `space-rotate`, so the removal was neither
- * committed nor distributed. This is NOT a data-loss error — the staging record
- * persists and VE-C3 crash-recovery (or a later retry) will complete it. The
- * caller MUST NOT treat the removal as effective until it resolves without this
- * error.
+ * Which broker hand-shake a pending removal is still waiting for. A self-leave runs
+ * two of them in sequence, and naming the wrong one sends every later diagnosis
+ * down the wrong path: a removal parked on `admin-remove` has its `space-rotate`
+ * confirmed AND committed long ago.
+ */
+export type RemovalPendingStage = 'space-rotate' | 'admin-remove'
+
+/**
+ * Signals that a member removal was durably STAGED but is NOT yet enforced: the
+ * home brokers have not confirmed the step named by {@link stage}, so the removal
+ * is not complete. This is NOT a data-loss error — the staging record persists and
+ * VE-C3 crash-recovery (or a later retry) will complete it. The caller MUST NOT
+ * treat the removal as effective until it resolves without this error.
  */
 export class RemovalPendingNotEnforcedError extends Error {
   readonly spaceId: string
@@ -52,17 +59,34 @@ export class RemovalPendingNotEnforcedError extends Error {
   readonly targetGeneration: number
   /** Always true — a stable discriminator for callers matching the pending case. */
   readonly pending: true
-  constructor(spaceId: string, removedDid: string, targetGeneration: number) {
+  /** The broker step still outstanding. Defaults to the rotation. */
+  readonly stage: RemovalPendingStage
+  constructor(
+    spaceId: string,
+    removedDid: string,
+    targetGeneration: number,
+    options?: { stage?: RemovalPendingStage; cause?: unknown },
+  ) {
+    const stage = options?.stage ?? 'space-rotate'
     super(
-      `Removal of ${removedDid} from space ${spaceId} is staged but NOT yet enforced ` +
-        `(target generation ${targetGeneration}); not all home brokers confirmed the space-rotate. ` +
-        'The staging is durable and will be retried (VE-C3 crash-recovery).',
+      stage === 'admin-remove'
+        ? `Self-leave of ${removedDid} from space ${spaceId} is rotated and committed ` +
+            `(generation ${targetGeneration}), but not all home brokers confirmed the admin-remove ` +
+            'that hands back its admin authority. The staging is durable and will be retried ' +
+            '(VE-C3 crash-recovery).'
+        : `Removal of ${removedDid} from space ${spaceId} is staged but NOT yet enforced ` +
+            `(target generation ${targetGeneration}); not all home brokers confirmed the space-rotate. ` +
+            'The staging is durable and will be retried (VE-C3 crash-recovery).',
     )
     this.name = 'RemovalPendingNotEnforcedError'
     this.spaceId = spaceId
     this.removedDid = removedDid
     this.targetGeneration = targetGeneration
     this.pending = true
+    this.stage = stage
+    // Keep the transport/broker error that caused the wait: without it the only
+    // signal a caller ever sees is "pending", which is unactionable.
+    if (options?.cause !== undefined) this.cause = options.cause
   }
 }
 
@@ -431,8 +455,15 @@ async function driveRemovalToCompletion(
       if (adminConfirmed.has(brokerUrl)) continue
       try {
         await admin.sendAdminRemove(brokerUrl, adminFrame)
-      } catch {
-        throw new RemovalPendingNotEnforcedError(deps.spaceId, removal.removedDid, removal.newGeneration)
+      } catch (err) {
+        // Same rule as the rotation above: a reject that retrying can never satisfy
+        // must surface. Swallowing it turns an authority bug into an eternal retry
+        // whose message blames the (long-confirmed) space-rotate.
+        if (err instanceof ControlFrameRejectedError && isHardSpaceRotateReject(err.code)) throw err
+        throw new RemovalPendingNotEnforcedError(deps.spaceId, removal.removedDid, removal.newGeneration, {
+          stage: 'admin-remove',
+          cause: err,
+        })
       }
       adminConfirmed.add(brokerUrl)
       removal = { ...removal, adminRemoveConfirmedBrokerUrls: [...adminConfirmed] }

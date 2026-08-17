@@ -333,6 +333,49 @@ describe('recoverPendingRemovals — VE-C3 crash-recovery (single home broker)',
     expect(finalizeSelfLeave).toHaveBeenCalledTimes(1)
   })
 
+  // A hard-stop admin-remove reject can never succeed by retrying, exactly like a
+  // hard-stop space-rotate reject. Reporting it as "pending" makes the self-leave
+  // repeat for ever and hides the real error behind a message about a rotation that
+  // IS confirmed (field report 2026-08-17: the same dialog error on every click
+  // while broker and client had long agreed on generation 1). AUTH_INVALID stays
+  // retryable here, mirroring the rotation path deliberately.
+  it('propagates a hard-stop admin-remove reject instead of parking it as pending', async () => {
+    const h = await makeHarness({ ownerDid: REMOVED })
+    const finalizeSelfLeave = vi.fn(async () => {})
+    h.deps.adminRemove = {
+      createSelfAdminRemoveFrame: async () => ({ type: 'admin-remove' }) as unknown as ControlFrame,
+      sendAdminRemove: async () => {
+        throw new ControlFrameRejectedError({ code: 'AUTHOR_MISMATCH', message: 'coordinator bug class' })
+      },
+      finalizeSelfLeave,
+    }
+
+    await expect(runTwoPhaseRemoval(h.deps, REMOVED)).rejects.toBeInstanceOf(ControlFrameRejectedError)
+    expect(finalizeSelfLeave).not.toHaveBeenCalled()
+    // Still durably staged: the rotation is committed, only the authority hand-back is open.
+    expect((await h.docLogStore.getPendingRemoval(SPACE, REMOVED))!.phase).toBe('committed')
+  })
+
+  it('names the admin-remove as the pending step and keeps the cause', async () => {
+    const h = await makeHarness({ ownerDid: REMOVED })
+    const transport = new Error('WebSocket disconnected before control-frame receipt')
+    h.deps.adminRemove = {
+      createSelfAdminRemoveFrame: async () => ({ type: 'admin-remove' }) as unknown as ControlFrame,
+      sendAdminRemove: async () => { throw transport },
+      finalizeSelfLeave: async () => {},
+    }
+
+    const err = await runTwoPhaseRemoval(h.deps, REMOVED).catch((e: unknown) => e)
+
+    expect(err).toBeInstanceOf(RemovalPendingNotEnforcedError)
+    const pending = err as RemovalPendingNotEnforcedError
+    expect(pending.stage).toBe('admin-remove')
+    expect(pending.cause).toBe(transport)
+    // The message must not blame the space-rotate: it was confirmed and committed.
+    expect(pending.message).toContain('admin-remove')
+    expect(pending.message).not.toContain('not all home brokers confirmed the space-rotate')
+  })
+
   it('resumes a staged removal once the broker is reachable and drives it to commit', async () => {
     let online = false
     const h = await makeHarness({
