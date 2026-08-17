@@ -7,7 +7,7 @@
  * key-management + metadata storage of an already-invited identity while starting
  * with an EMPTY docLogStore + EMPTY CompactStore (forcing sync-request catch-up).
  */
-import { YjsReplicationAdapter } from '@web_of_trust/adapter-yjs'
+import { YjsReplicationAdapter, initYjsPersonalDoc, flushYjsPersonalDoc } from '@web_of_trust/adapter-yjs'
 import {
   InMemorySpaceMetadataStorage,
   InMemoryCompactStore,
@@ -54,6 +54,14 @@ export interface MakeYjsClientOptions {
   capabilityValidityMs?: number
   /** Do not call adapter.start() (caller controls lifecycle). Default: start. */
   noStart?: boolean
+  /**
+   * Initialize the (process-global) Yjs PersonalDoc for this identity and wire
+   * `flushPersonalDoc` — required by flows that durably record membership
+   * removals (admin self-leave). At most ONE client per test may use this (the
+   * PersonalDoc is a module singleton); pair it with `resetYjsPersonalDoc()` in
+   * the test's afterEach.
+   */
+  withPersonalDoc?: boolean
 }
 
 /**
@@ -78,6 +86,8 @@ export async function makeYjsClient(opts: MakeYjsClientOptions): Promise<YjsClie
   const deviceId = await docLogStore.getOrCreateDeviceId()
   const { messaging, probe } = await connectMessaging(opts.relay.url, opts.identity, deviceId)
 
+  if (opts.withPersonalDoc) await initYjsPersonalDoc(opts.identity)
+
   const adapter = new YjsReplicationAdapter({
     identity: opts.identity,
     messaging,
@@ -92,6 +102,7 @@ export async function makeYjsClient(opts: MakeYjsClientOptions): Promise<YjsClie
     enableLogSync: true,
     deviceId,
     capabilityValidityMs: opts.capabilityValidityMs,
+    ...(opts.withPersonalDoc ? { flushPersonalDoc: flushYjsPersonalDoc } : {}),
   })
 
   if (!opts.noStart) await adapter.start()

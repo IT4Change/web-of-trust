@@ -1315,6 +1315,7 @@ export class RelayServer {
     } catch {
       this.sendTo(ws, {
         type: 'error',
+        thid: spaceId, // SR-4 / F1: attributable to a space → correlate it
         code: 'AUTH_INVALID',
         message: 'Admin signer DID is not a resolvable did:key.',
       })
@@ -1380,7 +1381,7 @@ export class RelayServer {
         crypto: protocolCrypto,
       })
     } catch (err) {
-      this.sendInternalError(ws, err, 'space-rotate verification failed')
+      this.sendInternalError(ws, err, 'space-rotate verification failed', signer.spaceId)
       return
     }
 
@@ -1498,13 +1499,16 @@ export class RelayServer {
         crypto: protocolCrypto,
       })
     } catch (err) {
-      this.sendInternalError(ws, err, 'admin-add verification failed')
+      this.sendInternalError(ws, err, 'admin-add verification failed', signer.spaceId)
       return
     }
 
     if (result.disposition === 'rejected') {
       this.sendTo(ws, {
         type: 'error',
+        // SR-4 / F1: the sender's control-frame waiter is keyed by docId, so every
+        // reject we can attribute to a space MUST carry thid == spaceId.
+        thid: parsed.payload.spaceId,
         code: result.errorCode,
         message:
           result.errorCode === 'AUTH_INVALID'
@@ -1579,13 +1583,18 @@ export class RelayServer {
         crypto: protocolCrypto,
       })
     } catch (err) {
-      this.sendInternalError(ws, err, 'admin-remove verification failed')
+      this.sendInternalError(ws, err, 'admin-remove verification failed', signer.spaceId)
       return
     }
 
     if (result.disposition === 'rejected') {
       this.sendTo(ws, {
         type: 'error',
+        // SR-4 / F1: without thid this reject matches no control-frame waiter, the
+        // sender times out, and the secure-removal workflow reports it as an
+        // unconfirmed space-rotate — a self-leave then repeats forever while the
+        // rotation it complains about has long been installed.
+        thid: parsed.payload.spaceId,
         code: result.errorCode,
         message:
           result.errorCode === 'AUTH_INVALID'
@@ -2592,10 +2601,18 @@ export class RelayServer {
    * promotes the relay to a durable source of truth, so one bad write must not be
    * fatal.
    */
-  private sendInternalError(ws: WebSocket, err: unknown, context: string): void {
+  /**
+   * SR-4 / F1 applies here too: when the failed operation is attributable to a
+   * doc/space, pass its id as `thid` so the sender's per-docId control-frame
+   * waiter rejects immediately with the real code instead of timing out into a
+   * generic transport error (PR #347 Major 1 — verifier-internal errors on
+   * admin-change frames were the uncorrelated remnant).
+   */
+  private sendInternalError(ws: WebSocket, err: unknown, context: string, thid?: string): void {
     console.error(`[relay] ${context}:`, err)
     this.sendTo(ws, {
       type: 'error',
+      ...(thid !== undefined ? { thid } : {}),
       code: 'INTERNAL_ERROR',
       message: err instanceof Error ? err.message : context,
     })
