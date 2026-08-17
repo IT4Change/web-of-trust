@@ -158,7 +158,7 @@ describe('VE-11 Yjs — real gated relay', () => {
     const bobHandle = await bobLate.adapter.openSpace<TestDoc>(spaceId)
     const converged = await waitFor(() => {
       const d = bobHandle.getDoc()
-      return Array.from({ length: 3 }).every((_, i) => d.items[`pre-${i}`]?.title === `pre-${i}`)
+      return Array.from({ length: 3 }).every((_, i) => d.items?.[`pre-${i}`]?.title === `pre-${i}`)
     })
     expect(converged).toBe(true)
     // Catch-up rode sync-response (positive proof), NOT content.
@@ -227,7 +227,7 @@ describe('VE-11 Yjs — real gated relay', () => {
     expect(bob2.deviceId).not.toBe(bob.deviceId)
     await bob2.adapter.requestSync(spaceId)
     const bob2Handle = await bob2.adapter.openSpace<TestDoc>(spaceId)
-    expect(await waitFor(() => bob2Handle.getDoc().items['base']?.title === 'base')).toBe(true)
+    expect(await waitFor(() => bob2Handle.getDoc().items?.['base']?.title === 'base')).toBe(true)
 
     // The new device can also WRITE under its fresh namespace and Alice converges.
     bob2Handle.transact((d: TestDoc) => { d.items['from-bob2'] = { title: 'b2' } })
@@ -510,7 +510,7 @@ describe('VE-11 Yjs — real gated relay', () => {
     const freshHandle = await fresh.adapter.openSpace<TestDoc>(spaceId)
     const reconstructed = await waitFor(() => {
       const d = freshHandle.getDoc()
-      return d.items['a1']?.title === 'A1' && d.items['a2']?.title === 'A2' && d.items['b1']?.title === 'B1'
+      return d.items?.['a1']?.title === 'A1' && d.items?.['a2']?.title === 'A2' && d.items?.['b1']?.title === 'B1'
     }, { timeoutMs: 10_000 })
     expect(reconstructed).toBe(true)
     // Full doc equality with the original.
@@ -568,7 +568,7 @@ describe('VE-11 Yjs — real gated relay', () => {
     const reconstructed = await waitFor(() => {
       const d = freshHandle.getDoc()
       // ALL keys present — not just the first page's worth.
-      return Object.keys(expected.items).every((k) => d.items[k]?.title === expected.items[k].title)
+      return Object.keys(expected.items).every((k) => d.items?.[k]?.title === expected.items[k].title)
     }, { timeoutMs: 20_000 })
     expect(reconstructed).toBe(true)
     expect(freshHandle.getDoc()).toEqual(expected) // full doc equality, all 120

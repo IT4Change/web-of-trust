@@ -149,6 +149,38 @@ describe('Space-Coordinator — Lebenszyklus unter Überlappung', () => {
     expect(fake.catchUpSources.size).toBe(1)
   })
 
+  it('ein neuer Lebenszyklus hängt sich NICHT an den Aufbau des alten', async () => {
+    const registry = new CatchUpRegistry()
+    const oldGate = deferred<void>()
+    const oldState = { info: { id: 'space-1', members: [] } }
+    const fake = makeAdapterFake(registry, oldState, oldGate.promise)
+
+    const oldBuild = build(fake, oldState) // hängt im Await
+
+    // stop() + sofortiges Neuladen derselben spaceId. Der alte Eintrag steht
+    // ABSICHTLICH noch in der Map — die Bindung an (epoch, state) muss ihn
+    // entwerten, nicht ein Aufräumen des Aufrufers.
+    fake.lifecycleEpoch = 2
+    const newGate = deferred<void>()
+    const newState = { info: { id: 'space-1', members: [] } }
+    fake.spaces.set('space-1', newState)
+    fake.ensureDocLogStore = async () => { await newGate.promise; return { init: async () => {} } }
+
+    const newBuild = build(fake, newState)
+
+    // Der alte Aufbau löst zuerst auf, WÄHREND der neue noch hängt: sein
+    // `finally` darf den Eintrag des neuen nicht mitnehmen (ABA).
+    oldGate.resolve()
+    expect(await oldBuild).toBeNull()
+    expect(fake.coordinatorFlights.get('space-1')).toBeDefined()
+
+    newGate.resolve()
+    const created = await newBuild
+    expect(created).not.toBeNull()
+    expect(fake.coordinators.get('space-1')).toBe(created)
+    expect(fake.catchUpSources.size).toBe(1)
+  })
+
   it('nach dem Freigeben meldet der Space nicht mehr in die Registry', async () => {
     const registry = new CatchUpRegistry()
     const gate = deferred<void>()

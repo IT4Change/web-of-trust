@@ -511,6 +511,12 @@ function applyInitialDoc(doc: Y.Doc, initialDoc: Record<string, any>): void {
 
 // --- YjsReplicationAdapter ---
 
+interface CoordinatorFlight {
+  epoch: number
+  state: YjsSpaceState
+  promise: Promise<LogSyncCoordinator | null>
+}
+
 export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActivityCapable, SecureSelfLeaveCapable {
   private identity: IdentitySession
   private messaging: MessagingAdapter
@@ -530,8 +536,16 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
   private readonly catchUpSources = new Map<string, CatchUpSource>()
   /** Abmelder je Space — ein beendeter Lebenszyklus hört auf zuzuhören. */
   private readonly catchUpUnsubs = new Map<string, () => void>()
-  /** Laufende Coordinator-Aufbauten je docId (Single-Flight). */
-  private readonly coordinatorFlights = new Map<string, Promise<LogSyncCoordinator | null>>()
+  /**
+   * Laufende Coordinator-Aufbauten je docId (Single-Flight).
+   *
+   * Der Eintrag trägt Epoche und konkreten `state` mit: ein neuer Lebenszyklus
+   * derselben spaceId darf sich NICHT an den Aufbau des alten hängen — dessen
+   * Lebenszyklusprüfung schlägt zu Recht fehl, und beide Aufrufer bekämen
+   * `null`. Entfernt wird nur die eigene Promise (Identitätsprüfung im
+   * `finally`), sonst löschte ein alter Abschluss den Flight des neuen (ABA).
+   */
+  private readonly coordinatorFlights = new Map<string, CoordinatorFlight>()
   private spaceFilter?: (info: SpaceInfo) => boolean
 
   private spaces = new Map<string, YjsSpaceState>()
@@ -825,6 +839,9 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
 
   /** Space ist weg (Cleanup, Leave, Stop): Zustand vergessen, Nachzügler ignorieren. */
   private releaseCatchUpSource(spaceId: string): void {
+    // Ein noch laufender Aufbau gehört nicht mehr zu diesem Space: entwerten,
+    // damit ein sofortiges Recreate frisch baut statt sich anzuhängen.
+    this.coordinatorFlights.delete(spaceId)
     this.catchUpUnsubs.get(spaceId)?.()
     this.catchUpUnsubs.delete(spaceId)
     this.catchUpSources.get(spaceId)?.release()
@@ -848,6 +865,9 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
     this.catchUpAppliedWithoutHandle = false
     // Dieselbe Logik für die Beobachtbarkeit: ein Flight, der diese Sitzung
     // überlebt, darf in der nächsten nichts mehr melden.
+    // Aufbauten dieser Sitzung entwerten — ihre `finally` löschen dank
+    // Identitätsprüfung keinen Flight des nächsten Lebenszyklus.
+    this.coordinatorFlights.clear()
     for (const unsub of this.catchUpUnsubs.values()) unsub()
     this.catchUpUnsubs.clear()
     for (const source of this.catchUpSources.values()) source.release()
@@ -2027,12 +2047,16 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
     // unten liegen Awaits. Zwei nebenläufige Aufrufer bauten sonst ZWEI
     // Coordinatoren — der zweite überschriebe den Map-Eintrag des ersten, an
     // dem dessen Listener und Meldequelle hängen.
-    const inFlight = this.coordinatorFlights.get(spaceId)
-    if (inFlight) return inFlight
-    const flight = this.buildSpaceCoordinator(state, lease)
-      .finally(() => { this.coordinatorFlights.delete(spaceId) })
+    const epoch = this.lifecycleEpoch
+    const pending = this.coordinatorFlights.get(spaceId)
+    if (pending && pending.epoch === epoch && pending.state === state) return pending.promise
+
+    const flight: CoordinatorFlight = { epoch, state, promise: null as never }
+    flight.promise = this.buildSpaceCoordinator(state, lease).finally(() => {
+      if (this.coordinatorFlights.get(spaceId) === flight) this.coordinatorFlights.delete(spaceId)
+    })
     this.coordinatorFlights.set(spaceId, flight)
-    return flight
+    return flight.promise
   }
 
   /** Der eigentliche Aufbau; Single-Flight und Cache liegen im Aufrufer. */
