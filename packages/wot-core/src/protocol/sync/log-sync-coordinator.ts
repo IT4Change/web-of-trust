@@ -593,9 +593,17 @@ export class LogSyncCoordinator {
   /** Aktueller Catch-up-Zustand — Grundlage der Erstzustellung an neue Abonnenten. */
   private catchUpState: DocCatchUpState
   private readonly catchUpListeners = new Set<(state: DocCatchUpState) => void>()
-  /** Token des Laufs, der gerade melden darf; null = kein Lauf aktiv. */
-  private activeCatchUpEmit: number | null = null
-  private catchUpEmitSeq = 0
+  /**
+   * Wie viele Catch-up-Durchläufe gerade laufen.
+   *
+   * Bewusst ein Zähler und KEIN Besitz-Token: bei überlappenden Läufen wandert
+   * ein Token zum jeweils letzten Starter, und dessen eigener Abschluss kann
+   * von einem noch späteren Lauf unterdrückt werden — am Ende meldet niemand
+   * mehr „fertig" und der Zustand bleibt für immer auf `in-flight` stehen.
+   * Ein Zähler kann das nicht: jeder Start hat genau einen Abschluss, und der
+   * letzte, der auf 0 geht, meldet.
+   */
+  private activeCatchUps = 0
 
   /**
    * Slice B v3: the in-flight catch-up's settle-promise (set whenever `catchingUp` is set, by
@@ -1522,21 +1530,22 @@ export class LogSyncCoordinator {
    * Gerätephase unsichtbar zu lassen, für die diese API da ist.
    */
   private async withCatchUpReporting(run: () => Promise<CatchUpResult>): Promise<CatchUpResult> {
-    const token = ++this.catchUpEmitSeq
-    this.activeCatchUpEmit = token
-    const mine = () => this.activeCatchUpEmit === token
+    this.activeCatchUps += 1
     this.emitCatchUpState({ inFlight: true, outstanding: true, reason: 'in-flight' })
+    let result: CatchUpResult | null = null
     try {
-      const result = await run()
-      if (mine()) this.emitCatchUpResult(result)
+      result = await run()
       return result
-    } catch (err) {
-      // Ein geworfener Lauf lässt nachweislich etwas offen — die Anzeige darf
-      // hier nicht auf „fertig" fallen.
-      if (mine()) this.emitCatchUpState({ inFlight: false, outstanding: true, reason: 'no-progress' })
-      throw err
     } finally {
-      if (mine()) this.activeCatchUpEmit = null
+      this.activeCatchUps -= 1
+      // Nur der letzte laufende Durchlauf meldet den Ausgang — sonst setzte
+      // ein früh fertiger Lauf den Zustand auf „beendet", während ein anderer
+      // noch läuft.
+      if (this.activeCatchUps === 0) {
+        if (result) this.emitCatchUpResult(result)
+        // Ein geworfener Lauf lässt nachweislich etwas offen.
+        else this.emitCatchUpState({ inFlight: false, outstanding: true, reason: 'no-progress' })
+      }
     }
   }
 
@@ -1549,7 +1558,11 @@ export class LogSyncCoordinator {
    * liest, meldet „fertig", während noch Einträge fehlen.
    */
   private emitCatchUpResult(result: CatchUpResult): void {
-    if (!this.config.onCatchUpState) return
+    // KEIN Kurzschluss auf `config.onCatchUpState`: seit der Umstellung auf
+    // Subscriptions ist der Konfigurations-Hook meist gar nicht gesetzt, und
+    // Abonnenten kämen nie an einen Ausgang. Genau das ist passiert — Starts
+    // wurden zugestellt, Abschlüsse nie, und die Anzeige blieb ewig stehen.
+    // `emitCatchUpState` entscheidet selbst, ob es etwas zu melden gibt.
     const hasGaps = (result.pendingGaps?.length ?? 0) > 0
     const outstanding = !result.complete || hasGaps
     const reason = !outstanding
@@ -1968,7 +1981,7 @@ export class LogSyncCoordinator {
     // ein Lauf aktiv ist. Sonst setzte diese Zeile einen laufenden Catch-up auf
     // „beendet" und die Registry behauptete das Gegenteil dessen, was passiert.
     // Ein aktiver Lauf meldet seinen Ausgang selbst.
-    if (this.activeCatchUpEmit === null) this.emitCatchUpResult(result)
+    if (this.activeCatchUps === 0) this.emitCatchUpResult(result)
     if (truncated || pendingGaps.length > 0) {
       this.triggerGapCatchUp()
     }
