@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.1.8](https://github.com/real-life-org/web-of-trust/compare/relay-v0.1.7...relay-v0.1.8) (2026-08-17)
+
+
+### Bug Fixes
+
+* abgelehnter admin-remove ist korrelierbar und wird nicht als Rotations-Fehler gemeldet ([06c9c70](https://github.com/real-life-org/web-of-trust/commit/06c9c708226b91f676cf409ed7c891ef209bc1b1))
+* abgelehnter admin-remove ist korrelierbar und wird nicht als Rotations-Fehler gemeldet ([3983a89](https://github.com/real-life-org/web-of-trust/commit/3983a89ea69b78bf91fe3b0e94a7f19b405c2f14))
+* Review-Majors — INTERNAL_ERROR mit thid, admin-change-eigene Hard-Reject-Klassifikation ([b6e98bf](https://github.com/real-life-org/web-of-trust/commit/b6e98bfb712bf0ca2fa214055e71a811ba547e5f))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * @web_of_trust/core bumped to 0.5.6
+
 ## [0.1.7](https://github.com/real-life-org/web-of-trust/compare/relay-v0.1.6...relay-v0.1.7) (2026-08-05)
 
 

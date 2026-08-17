@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.2.6](https://github.com/real-life-org/web-of-trust/compare/adapter-yjs-v0.2.5...adapter-yjs-v0.2.6) (2026-08-17)
+
+
+### Features
+
+* **sync:** Catch-up-Zustand beobachtbar machen ([1704181](https://github.com/real-life-org/web-of-trust/commit/1704181392ed7adab617a2eda6493c28600123a7))
+* **sync:** Catch-up-Zustand beobachtbar machen ([29ab1ed](https://github.com/real-life-org/web-of-trust/commit/29ab1ed310048797b159a18170c4a4d4478c3b0b))
+
+
+### Bug Fixes
+
+* **sync:** Abschluss eines Catch-ups auch ohne Konfigurations-Hook melden ([864652c](https://github.com/real-life-org/web-of-trust/commit/864652c1e9c4d43a96eae8a7535e20c2e1e480ae))
+* **sync:** Abschluss eines Catch-ups auch ohne Konfigurations-Hook melden ([c25dd45](https://github.com/real-life-org/web-of-trust/commit/c25dd45ea08c8e7a83d753dd801a5aa1a186c5dd))
+* **sync:** Lifecycle-Besitz, Meldereihenfolge und der First-Publication-Pfad ([5a228b0](https://github.com/real-life-org/web-of-trust/commit/5a228b0bed2a0eb3173bb4582afad85929b07ec4))
+* **sync:** Meldequelle über Neustart und Aufbau-Wettläufe hinweg gültig halten ([3bfdc0c](https://github.com/real-life-org/web-of-trust/commit/3bfdc0cea6f25b8410fb6fb544e1e5e09590d5fb))
+* **sync:** Meldezähler an die Verbindungsepoche binden ([5686bd7](https://github.com/real-life-org/web-of-trust/commit/5686bd7a7637ffe98de39fe147fec3124681b888))
+* **sync:** Single-Flight an den Lebenszyklus binden; E2E-Polling null-sicher ([b2ad58c](https://github.com/real-life-org/web-of-trust/commit/b2ad58c875a104fcdeffc2336470b6313c5f4af2))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * devDependencies
+    * @web_of_trust/core bumped to 0.5.6
+  * peerDependencies
+    * @web_of_trust/core bumped to 0.5.6
+
 ## [0.2.5](https://github.com/real-life-org/web-of-trust/compare/adapter-yjs-v0.2.4...adapter-yjs-v0.2.5) (2026-08-05)
 
 
