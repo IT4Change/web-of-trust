@@ -235,8 +235,8 @@ export class YjsPersonalLogSyncAdapter {
     this.catchUpSource?.release()
     this.catchUpSource = this.catchUpRegistry.source(this.docId)
     // Abonnieren statt einfrieren: der Coordinator überlebt diesen
-    // Lebenszyklus (Single-Flight, #293). Das Abo liefert sofort seinen
-    // aktuellen Snapshot mit — ein bereits laufender Catch-up ist damit auch
+    // Lebenszyklus (Single-Flight, #293). Die Erstzustellung des Abos bringt
+    // den aktuellen Zustand mit — ein bereits laufender Catch-up ist damit auch
     // für den neuen Lebenszyklus sichtbar, statt verloren zu gehen.
     const source = this.catchUpSource
     this.catchUpUnsub = coordinator.subscribeCatchUpState(source.update)

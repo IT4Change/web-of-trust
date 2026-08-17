@@ -76,8 +76,8 @@ function expectNothingInstalled(fake: AdapterFake, registry: CatchUpRegistry) {
   expect(fake.catchUpSources.size).toBe(0)
   expect(fake.catchUpUnsubs.size).toBe(0)
   expect(fake.coordinatorFlights.size).toBe(0)
-  expect(registry.getSnapshot().syncing).toBe(false)
-  expect(registry.getSnapshot().outstanding).toEqual([])
+  expect(registry.getOverview().syncing).toBe(false)
+  expect(registry.getOverview().outstanding).toEqual([])
 }
 
 describe('Space-Coordinator — Lebenszyklus unter Überlappung', () => {
@@ -199,7 +199,7 @@ describe('Space-Coordinator — Lebenszyklus unter Überlappung', () => {
 
     expect(fake.catchUpSources.size).toBe(0)
     expect(fake.catchUpUnsubs.size).toBe(0)
-    expect(registry.getSnapshot().syncing).toBe(false)
+    expect(registry.getOverview().syncing).toBe(false)
   })
 
   it('meldet einen laufenden Catch-up sofort beim Abonnieren', async () => {

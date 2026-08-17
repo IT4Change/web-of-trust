@@ -457,7 +457,7 @@ describe('YjsPersonalLogSyncAdapter — Slice A VE-6 (Personal-Doc on the log co
 
     sync.destroy()
     // Abgemeldet: der alte Lebenszyklus hält nichts mehr in der Registry.
-    expect(registry.getSnapshot().syncing).toBe(false)
+    expect(registry.getOverview().syncing).toBe(false)
 
     sync.start()
     await wait(150)
@@ -468,7 +468,7 @@ describe('YjsPersonalLogSyncAdapter — Slice A VE-6 (Personal-Doc on the log co
     // Der neue Lebenszyklus abonniert und ÜBERNIMMT dabei den aktuellen Stand
     // des weiterlaufenden Catch-ups — statt ihn zu verpassen. Mit einer
     // eingefrorenen Quelle bliebe die Registry hier für immer leer.
-    expect(registry.getSnapshot().outstanding.map((state) => state.docId)).toEqual([docId])
+    expect(registry.getOverview().outstanding.map((state) => state.docId)).toEqual([docId])
   })
 
   it('VE-6 — a local Personal-Doc change produces exactly one log-entry; the other device applies it (origin=remote) with NO re-broadcast; multi-device converges loop-free', async () => {

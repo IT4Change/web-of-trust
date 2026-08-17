@@ -10,14 +10,14 @@ describe('CatchUpRegistry', () => {
 
     registry.update({ docId: 'personal', inFlight: true, outstanding: true, reason: 'in-flight' })
     registry.update({ docId: 'space-a', inFlight: true, outstanding: true, reason: 'in-flight' })
-    expect(registry.getSnapshot().outstanding.map((s) => s.docId)).toEqual(['personal', 'space-a'])
+    expect(registry.getOverview().outstanding.map((s) => s.docId)).toEqual(['personal', 'space-a'])
 
     registry.update({ docId: 'personal', inFlight: false, outstanding: false })
-    expect(registry.getSnapshot().outstanding.map((s) => s.docId)).toEqual(['space-a'])
-    expect(registry.getSnapshot().syncing).toBe(true)
+    expect(registry.getOverview().outstanding.map((s) => s.docId)).toEqual(['space-a'])
+    expect(registry.getOverview().syncing).toBe(true)
 
     registry.update({ docId: 'space-a', inFlight: false, outstanding: false })
-    expect(registry.getSnapshot().syncing).toBe(false)
+    expect(registry.getOverview().syncing).toBe(false)
     expect(seen).toEqual([true, true, true, false])
   })
 
@@ -25,8 +25,8 @@ describe('CatchUpRegistry', () => {
     const registry = new CatchUpRegistry()
     registry.update({ docId: 'space-a', inFlight: false, outstanding: true, reason: 'gap-pending' })
 
-    expect(registry.getSnapshot().syncing).toBe(true)
-    expect(registry.getSnapshot().outstanding[0]).toMatchObject({ inFlight: false, reason: 'gap-pending' })
+    expect(registry.getOverview().syncing).toBe(true)
+    expect(registry.getOverview().outstanding[0]).toMatchObject({ inFlight: false, reason: 'gap-pending' })
   })
 
   it('meldet nur echte Wechsel', () => {
@@ -55,24 +55,24 @@ describe('CatchUpRegistry', () => {
     registry.update({ docId: 'b', inFlight: true, outstanding: true, reason: 'in-flight' })
 
     registry.forget('a')
-    expect(registry.getSnapshot().outstanding.map((s) => s.docId)).toEqual(['b'])
+    expect(registry.getOverview().outstanding.map((s) => s.docId)).toEqual(['b'])
 
     registry.clear()
-    expect(registry.getSnapshot().syncing).toBe(false)
+    expect(registry.getOverview().syncing).toBe(false)
   })
 
   it('eine freigegebene Quelle meldet nichts mehr und räumt ihren Eintrag ab', () => {
     const registry = new CatchUpRegistry()
     const source = registry.source('personal')
     source.update({ docId: 'personal', inFlight: true, outstanding: true, reason: 'in-flight' })
-    expect(registry.getSnapshot().syncing).toBe(true)
+    expect(registry.getOverview().syncing).toBe(true)
 
     source.release()
-    expect(registry.getSnapshot().syncing).toBe(false)
+    expect(registry.getOverview().syncing).toBe(false)
 
     // Der hängende alte Flight kehrt zurück — und bleibt wirkungslos.
     source.update({ docId: 'personal', inFlight: false, outstanding: true, reason: 'gap-pending' })
-    expect(registry.getSnapshot().syncing).toBe(false)
+    expect(registry.getOverview().syncing).toBe(false)
   })
 
   it('eine neue Quelle entwertet die alte für dieselbe docId (Re-Login)', () => {
@@ -83,11 +83,11 @@ describe('CatchUpRegistry', () => {
     neu.update({ docId: 'personal', inFlight: true, outstanding: true, reason: 'in-flight' })
     // Der alte Lebenszyklus meldet „fertig" — das gilt der neuen Sitzung nicht.
     alt.update({ docId: 'personal', inFlight: false, outstanding: false })
-    expect(registry.getSnapshot().syncing).toBe(true)
+    expect(registry.getOverview().syncing).toBe(true)
 
     // Und er darf auch den Eintrag der neuen Quelle nicht abräumen.
     alt.release()
-    expect(registry.getSnapshot().syncing).toBe(true)
+    expect(registry.getOverview().syncing).toBe(true)
   })
 
   it('clear() nimmt auch den Besitz weg — nichts lässt sich wiederbeleben', () => {
@@ -97,6 +97,6 @@ describe('CatchUpRegistry', () => {
 
     registry.clear()
     source.update({ docId: 'a', inFlight: true, outstanding: true, reason: 'in-flight' })
-    expect(registry.getSnapshot().syncing).toBe(false)
+    expect(registry.getOverview().syncing).toBe(false)
   })
 })

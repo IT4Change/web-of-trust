@@ -2133,8 +2133,8 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
       return null
     }
     this.coordinators.set(spaceId, coordinator)
-    // Erst jetzt abonnieren: die Quelle gehört diesem Lebenszyklus, und der
-    // Coordinator liefert seinen aktuellen Snapshot sofort mit.
+    // Erst jetzt abonnieren: die Quelle gehört diesem Lebenszyklus, und die
+    // Erstzustellung des Abos bringt den aktuellen Zustand sofort mit.
     const source = this.catchUpSource(spaceId)
     if (source) {
       this.catchUpUnsubs.set(spaceId, coordinator.subscribeCatchUpState(source.update))

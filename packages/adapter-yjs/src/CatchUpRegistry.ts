@@ -1,6 +1,6 @@
 import type { DocCatchUpState } from '@web_of_trust/core/protocol'
 
-export interface CatchUpSnapshot {
+export interface CatchUpOverview {
   /** Dokumente, für die nachweislich noch etwas aussteht. */
   outstanding: DocCatchUpState[]
   /** Kurzform: steht irgendwo noch etwas aus? */
@@ -14,7 +14,7 @@ export interface CatchUpSource {
   release(): void
 }
 
-const EMPTY: CatchUpSnapshot = { outstanding: [], syncing: false }
+const EMPTY: CatchUpOverview = { outstanding: [], syncing: false }
 
 /**
  * Sammelstelle für den Catch-up-Zustand aller Dokumente einer Sitzung (#343).
@@ -29,11 +29,11 @@ const EMPTY: CatchUpSnapshot = { outstanding: [], syncing: false }
  */
 export class CatchUpRegistry {
   private readonly states = new Map<string, DocCatchUpState>()
-  private readonly listeners = new Set<(snapshot: CatchUpSnapshot) => void>()
+  private readonly listeners = new Set<(overview: CatchUpOverview) => void>()
   private readonly owners = new Map<string, number>()
   /** Global monoton, wird nie zurückgesetzt — ein Token darf nie wiederkehren. */
   private sourceSeq = 0
-  private snapshot: CatchUpSnapshot = EMPTY
+  private overview: CatchUpOverview = EMPTY
 
   /**
    * Eine Meldequelle für genau einen Coordinator-Lebenszyklus.
@@ -94,21 +94,22 @@ export class CatchUpRegistry {
     this.publish()
   }
 
-  getSnapshot(): CatchUpSnapshot {
-    return this.snapshot
+  /** Aktueller Gesamtstand aller Dokumente dieser Sitzung. */
+  getOverview(): CatchUpOverview {
+    return this.overview
   }
 
-  subscribe(listener: (snapshot: CatchUpSnapshot) => void): () => void {
+  subscribe(listener: (overview: CatchUpOverview) => void): () => void {
     this.listeners.add(listener)
     return () => { this.listeners.delete(listener) }
   }
 
   private publish(): void {
     const outstanding = Array.from(this.states.values())
-    this.snapshot = { outstanding, syncing: outstanding.length > 0 }
+    this.overview = { outstanding, syncing: outstanding.length > 0 }
     for (const listener of this.listeners) {
       try {
-        listener(this.snapshot)
+        listener(this.overview)
       } catch (err) {
         console.debug('[CatchUpRegistry] listener failed:', err)
       }

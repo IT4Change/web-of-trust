@@ -590,7 +590,7 @@ export class LogSyncCoordinator {
    * this.restoreCloneInFlight and this.reemitInFlight — the established SR guard pattern.
    */
   private catchingUp = false
-  /** Aktueller Catch-up-Zustand — Snapshot für neue Abonnenten. */
+  /** Aktueller Catch-up-Zustand — Grundlage der Erstzustellung an neue Abonnenten. */
   private catchUpState: DocCatchUpState
   private readonly catchUpListeners = new Set<(state: DocCatchUpState) => void>()
   /** Token des Laufs, der gerade melden darf; null = kein Lauf aktiv. */
@@ -1466,6 +1466,9 @@ export class LogSyncCoordinator {
    * Zusammen mit {@link subscribeCatchUpState} macht das den Zustand zu einer
    * abfragbaren Quelle statt zu einem Ereignisstrom, den man verpassen kann:
    * ein Abonnent, der mitten in einen laufenden Catch-up kommt, sieht ihn.
+   *
+   * NICHT zu verwechseln mit den Dokument-Snapshots aus CompactStore und
+   * Vault — hier werden keine Daten festgehalten, nur der Empfangsstand.
    */
   getCatchUpState(): DocCatchUpState {
     return this.catchUpState
@@ -1473,7 +1476,8 @@ export class LogSyncCoordinator {
 
   /**
    * Den Catch-up-Zustand abonnieren. Der Abonnent bekommt SOFORT den aktuellen
-   * Snapshot und danach jeden Wechsel; die Rückgabe meldet ihn wieder ab.
+   * Zustand zugestellt (Erstzustellung) und danach jeden Wechsel; die Rückgabe
+   * meldet ihn wieder ab.
    *
    * Bewusst eine Subscription und kein im Konstruktor eingefrorener Callback:
    * der Coordinator lebt pro docId länger als der Adapter-Lebenszyklus, der ihn
@@ -1487,7 +1491,7 @@ export class LogSyncCoordinator {
     try {
       listener(this.catchUpState)
     } catch (err) {
-      console.debug('[LogSyncCoordinator] catch-up listener failed on snapshot:', err)
+      console.debug('[LogSyncCoordinator] catch-up listener failed on initial delivery:', err)
     }
     return () => { this.catchUpListeners.delete(listener) }
   }
