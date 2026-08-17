@@ -528,6 +528,10 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
   private readonly catchUpRegistry?: CatchUpRegistry
   /** Meldequelle je Space, an den Lebenszyklus des jeweiligen Coordinators gebunden. */
   private readonly catchUpSources = new Map<string, CatchUpSource>()
+  /** Abmelder je Space — ein beendeter Lebenszyklus hört auf zuzuhören. */
+  private readonly catchUpUnsubs = new Map<string, () => void>()
+  /** Laufende Coordinator-Aufbauten je docId (Single-Flight). */
+  private readonly coordinatorFlights = new Map<string, Promise<LogSyncCoordinator | null>>()
   private spaceFilter?: (info: SpaceInfo) => boolean
 
   private spaces = new Map<string, YjsSpaceState>()
@@ -821,6 +825,8 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
 
   /** Space ist weg (Cleanup, Leave, Stop): Zustand vergessen, Nachzügler ignorieren. */
   private releaseCatchUpSource(spaceId: string): void {
+    this.catchUpUnsubs.get(spaceId)?.()
+    this.catchUpUnsubs.delete(spaceId)
     this.catchUpSources.get(spaceId)?.release()
     this.catchUpSources.delete(spaceId)
   }
@@ -842,6 +848,8 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
     this.catchUpAppliedWithoutHandle = false
     // Dieselbe Logik für die Beobachtbarkeit: ein Flight, der diese Sitzung
     // überlebt, darf in der nächsten nichts mehr melden.
+    for (const unsub of this.catchUpUnsubs.values()) unsub()
+    this.catchUpUnsubs.clear()
     for (const source of this.catchUpSources.values()) source.release()
     this.catchUpSources.clear()
     // Session-Grace neu armieren: nach stop()/start() derselben Instanz darf
@@ -2015,6 +2023,21 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
     const spaceId = state.info.id
     const existing = this.coordinators.get(spaceId)
     if (existing) return existing
+    // Single-Flight je docId: zwischen der Prüfung oben und der Installation
+    // unten liegen Awaits. Zwei nebenläufige Aufrufer bauten sonst ZWEI
+    // Coordinatoren — der zweite überschriebe den Map-Eintrag des ersten, an
+    // dem dessen Listener und Meldequelle hängen.
+    const inFlight = this.coordinatorFlights.get(spaceId)
+    if (inFlight) return inFlight
+    const flight = this.buildSpaceCoordinator(state, lease)
+      .finally(() => { this.coordinatorFlights.delete(spaceId) })
+    this.coordinatorFlights.set(spaceId, flight)
+    return flight
+  }
+
+  /** Der eigentliche Aufbau; Single-Flight und Cache liegen im Aufrufer. */
+  private async buildSpaceCoordinator(state: YjsSpaceState, lease?: LifecycleLease): Promise<LogSyncCoordinator | null> {
+    const spaceId = state.info.id
     // Nicht jeder Aufrufer übergibt eine Lease, die Awaits unten sind aber echte
     // Fenster: fällt ein cleanupSpaceLocally() oder stop() hinein, würde diese
     // Fortsetzung danach eine frische Source claimen und einen Coordinator über
@@ -2045,7 +2068,6 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
       envelopes: { send: (envelope) => this.messaging.send(envelope as WireMessage) },
       capabilities: this.spaceCapabilitySource(spaceId),
       hooks: this.yjsEngineHooks(state),
-      onCatchUpState: this.catchUpSource(spaceId)?.update,
       signLogEntry: (input) => this.identity.signEd25519(input),
       // VE-2: log entries are broadcast to all active space members (the relay
       // delivers to each member's sockets). state.info.members is the projection
@@ -2087,6 +2109,12 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
       return null
     }
     this.coordinators.set(spaceId, coordinator)
+    // Erst jetzt abonnieren: die Quelle gehört diesem Lebenszyklus, und der
+    // Coordinator liefert seinen aktuellen Snapshot sofort mit.
+    const source = this.catchUpSource(spaceId)
+    if (source) {
+      this.catchUpUnsubs.set(spaceId, coordinator.subscribeCatchUpState(source.update))
+    }
     return coordinator
   }
 

@@ -278,8 +278,10 @@ describe('LogSyncCoordinator — Slice B VE-B1 pagination', () => {
     const result = await b.coordinator.catchUp()
     expect(result.complete).toBe(true)
 
-    // Genau das, was eine App braucht: läuft gerade / steht noch etwas aus.
+    // Der erste Eintrag ist der Snapshot beim Abonnieren (nichts läuft), dann
+    // der Lauf. Genau das, was eine App braucht: läuft gerade / steht aus.
     expect(b.catchUpStates.map((s) => [s.inFlight, s.outstanding])).toEqual([
+      [false, false],
       [true, true],
       [false, false],
     ])
@@ -386,9 +388,10 @@ describe('LogSyncCoordinator — Slice B VE-B1 pagination', () => {
     // Phase, für die diese API da ist.
     await a.coordinator.ensurePublished()
 
-    expect(a.catchUpStates.length).toBeGreaterThan(0)
-    expect(a.catchUpStates[0]).toMatchObject({ inFlight: true, outstanding: true, reason: 'in-flight' })
-    expect(a.catchUpStates.at(-1)).toMatchObject({ inFlight: false, outstanding: false })
+    // Ohne den Eröffnungs-Snapshot: der Lauf selbst muss sichtbar sein.
+    const transitions = a.catchUpStates.slice(1)
+    expect(transitions[0]).toMatchObject({ inFlight: true, outstanding: true, reason: 'in-flight' })
+    expect(transitions.at(-1)).toMatchObject({ inFlight: false, outstanding: false })
   })
 
   it('VE-B1 limit-default — without catchUpPageSize the sync-request carries an EXPLICIT body.limit == 100 (not absent)', async () => {

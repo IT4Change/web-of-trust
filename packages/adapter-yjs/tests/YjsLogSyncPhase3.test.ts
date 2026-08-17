@@ -445,32 +445,30 @@ describe('YjsPersonalLogSyncAdapter — Slice A VE-6 (Personal-Doc on the log co
     })
   }
 
-  it('#343 — nach start → destroy → start meldet der WIEDERVERWENDETE Coordinator weiter', async () => {
+  it('#343 — nach start → destroy → start hört der neue Lebenszyklus wieder zu', async () => {
     const registry = new CatchUpRegistry()
     const doc = new Y.Doc()
     const sync = await makePersonalAdapter(doc, messaging1, DEVICE_ALICE, undefined, registry)
 
     sync.start()
     await wait(150)
-    expect(sync.getCoordinator()).not.toBeNull()
     const firstCoordinator = sync.getCoordinator()
+    expect(firstCoordinator).not.toBeNull()
 
     sync.destroy()
+    // Abgemeldet: der alte Lebenszyklus hält nichts mehr in der Registry.
     expect(registry.getSnapshot().syncing).toBe(false)
 
     sync.start()
     await wait(150)
-    // Der Coordinator ist derselbe (Single-Flight, #293) — genau deshalb darf
-    // die Meldequelle nicht in ihm eingefroren sein.
+    // Derselbe Coordinator (Single-Flight, #293) — genau deshalb darf die
+    // Meldequelle nicht in ihm eingefroren sein.
     expect(sync.getCoordinator()).toBe(firstCoordinator)
 
-    const seen: boolean[] = []
-    registry.subscribe((snapshot) => seen.push(snapshot.syncing))
-    await sync.getCoordinator()!.catchUp().catch(() => {})
-
-    // Der neue Lebenszyklus meldet wieder. Mit einer im Coordinator
-    // eingefrorenen Quelle bliebe es hier für immer still.
-    expect(seen).toContain(true)
+    // Der neue Lebenszyklus abonniert und ÜBERNIMMT dabei den aktuellen Stand
+    // des weiterlaufenden Catch-ups — statt ihn zu verpassen. Mit einer
+    // eingefrorenen Quelle bliebe die Registry hier für immer leer.
+    expect(registry.getSnapshot().outstanding.map((state) => state.docId)).toEqual([docId])
   })
 
   it('VE-6 — a local Personal-Doc change produces exactly one log-entry; the other device applies it (origin=remote) with NO re-broadcast; multi-device converges loop-free', async () => {

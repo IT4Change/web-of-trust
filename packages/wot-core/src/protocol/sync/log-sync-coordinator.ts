@@ -423,10 +423,11 @@ export interface LogSyncCoordinatorConfig {
    */
   onSecurityError?: (error: Error) => void
   /**
-   * Beobachtbarkeit (#343): wird bei jedem Wechsel des Catch-up-Zustands
-   * gerufen — Beginn eines Durchlaufs und sein Ausgang. Rein informativ; der
-   * Coordinator verhält sich mit und ohne Hook identisch. Fehler des
-   * Aufrufers werden verschluckt, damit Beobachtung den Sync nie stört.
+   * Beobachtbarkeit (#343): Bequemlichkeits-Abo ab Konstruktion. Wer sich
+   * später anmelden oder wieder abmelden muss — jeder Adapter-Lebenszyklus —
+   * benutzt {@link LogSyncCoordinator.subscribeCatchUpState}. Rein informativ;
+   * der Coordinator verhält sich mit und ohne Abnehmer identisch, und Fehler
+   * eines Abnehmers werden verschluckt.
    */
   onCatchUpState?: (state: DocCatchUpState) => void
   /**
@@ -589,8 +590,9 @@ export class LogSyncCoordinator {
    * this.restoreCloneInFlight and this.reemitInFlight — the established SR guard pattern.
    */
   private catchingUp = false
-  /** Letzte gemeldete Zustandssignatur — nur echte Wechsel gehen raus. */
-  private lastCatchUpStateKey: string | null = null
+  /** Aktueller Catch-up-Zustand — Snapshot für neue Abonnenten. */
+  private catchUpState: DocCatchUpState
+  private readonly catchUpListeners = new Set<(state: DocCatchUpState) => void>()
   /** Token des Laufs, der gerade melden darf; null = kein Lauf aktiv. */
   private activeCatchUpEmit: number | null = null
   private catchUpEmitSeq = 0
@@ -668,6 +670,10 @@ export class LogSyncCoordinator {
     this.config = config
     this.now = config.now ?? (() => new Date())
     this.deviceId = config.deviceId
+    this.catchUpState = { docId: config.docId, inFlight: false, outstanding: false }
+    // Der Konfigurations-Hook ist nur Zucker für ein Abo ab Konstruktion —
+    // dieselbe Zustellung, kein zweiter Pfad.
+    if (config.onCatchUpState) this.subscribeCatchUpState(config.onCatchUpState)
   }
 
   /** The current active local deviceId (re-bound by a restore-clone). */
@@ -1454,19 +1460,53 @@ export class LogSyncCoordinator {
    * Zustandswechsel melden. Beobachtung darf den Sync nie stören: ein Fehler im
    * Abnehmer wird verschluckt.
    */
-  private emitCatchUpState(state: Omit<DocCatchUpState, 'docId'>): void {
-    const hook = this.config.onCatchUpState
-    if (!hook) return
-    // Zustand, nicht Ereignisstrom: identische Meldungen werden hier
-    // unterdrückt, damit auch ein direkter Abnehmer ohne Registry nur echte
-    // Wechsel sieht — so, wie die Dokumentation es verspricht.
-    const key = `${state.inFlight}|${state.outstanding}|${state.reason ?? ''}`
-    if (key === this.lastCatchUpStateKey) return
-    this.lastCatchUpStateKey = key
+  /**
+   * Aktueller Catch-up-Zustand dieses Dokuments.
+   *
+   * Zusammen mit {@link subscribeCatchUpState} macht das den Zustand zu einer
+   * abfragbaren Quelle statt zu einem Ereignisstrom, den man verpassen kann:
+   * ein Abonnent, der mitten in einen laufenden Catch-up kommt, sieht ihn.
+   */
+  getCatchUpState(): DocCatchUpState {
+    return this.catchUpState
+  }
+
+  /**
+   * Den Catch-up-Zustand abonnieren. Der Abonnent bekommt SOFORT den aktuellen
+   * Snapshot und danach jeden Wechsel; die Rückgabe meldet ihn wieder ab.
+   *
+   * Bewusst eine Subscription und kein im Konstruktor eingefrorener Callback:
+   * der Coordinator lebt pro docId länger als der Adapter-Lebenszyklus, der ihn
+   * benutzt (Single-Flight, #293). Ein eingefrorener Empfänger gehörte für
+   * immer dem ERSTEN Lebenszyklus — mit einer Subscription ist dagegen
+   * eindeutig, wer gerade zuhört, und ein alter Abonnent ist nach seinem
+   * Abmelden endgültig still.
+   */
+  subscribeCatchUpState(listener: (state: DocCatchUpState) => void): () => void {
+    this.catchUpListeners.add(listener)
     try {
-      hook({ docId: this.config.docId, ...state } as DocCatchUpState)
+      listener(this.catchUpState)
     } catch (err) {
-      console.debug('[LogSyncCoordinator] onCatchUpState handler failed:', err)
+      console.debug('[LogSyncCoordinator] catch-up listener failed on snapshot:', err)
+    }
+    return () => { this.catchUpListeners.delete(listener) }
+  }
+
+  private emitCatchUpState(state: Omit<DocCatchUpState, 'docId'>): void {
+    const next = { docId: this.config.docId, ...state } as DocCatchUpState
+    // Zustand, nicht Ereignisstrom: identische Meldungen werden unterdrückt.
+    if (
+      next.inFlight === this.catchUpState.inFlight &&
+      next.outstanding === this.catchUpState.outstanding &&
+      next.reason === this.catchUpState.reason
+    ) return
+    this.catchUpState = next
+    for (const listener of this.catchUpListeners) {
+      try {
+        listener(next)
+      } catch (err) {
+        console.debug('[LogSyncCoordinator] catch-up listener failed:', err)
+      }
     }
   }
 

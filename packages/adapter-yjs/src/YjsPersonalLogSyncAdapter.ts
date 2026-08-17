@@ -90,6 +90,7 @@ export class YjsPersonalLogSyncAdapter {
   /** Built lazily in start() AFTER the deviceId is resolved from the store (BLOCKER-1b). */
   private readonly catchUpRegistry?: CatchUpRegistry
   private catchUpSource: CatchUpSource | null = null
+  private catchUpUnsub: (() => void) | null = null
   private coordinator: LogSyncCoordinator | null = null
   /** The deviceId fallback until the store-bound id is resolved. */
   private deviceId: string
@@ -166,14 +167,6 @@ export class YjsPersonalLogSyncAdapter {
         send: (envelope) => this.messaging.send(envelope as WireMessage),
       },
       capabilities: this.personalCapabilitySource(),
-      // SPÄT gebunden: der Coordinator wird über start → destroy → start hinweg
-      // WIEDERVERWENDET (Single-Flight, #293). Eine hier eingefrorene Source
-      // wäre nach dem ersten destroy() freigegeben und damit für immer stumm.
-      // Der Umweg über das Feld greift immer die Quelle des aktuellen
-      // Lebenszyklus ab.
-      onCatchUpState: this.catchUpRegistry
-        ? (state) => this.catchUpSource?.update(state)
-        : undefined,
       hooks: this.yjsEngineHooks(),
       signLogEntry: (input) => this.identity.signEd25519(input),
       // Personal-Doc is single-owner multi-device: recipients = just own DID.
@@ -236,10 +229,17 @@ export class YjsPersonalLogSyncAdapter {
    * vorige. Wird in `init()` gerufen, nachdem die Epoche geprüft ist — eine
    * überholte Fortsetzung darf sich die Quelle nicht zurückholen.
    */
-  private claimCatchUpSource(): void {
+  private claimCatchUpSource(coordinator: LogSyncCoordinator): void {
     if (!this.catchUpRegistry) return
+    this.catchUpUnsub?.()
     this.catchUpSource?.release()
     this.catchUpSource = this.catchUpRegistry.source(this.docId)
+    // Abonnieren statt einfrieren: der Coordinator überlebt diesen
+    // Lebenszyklus (Single-Flight, #293). Das Abo liefert sofort seinen
+    // aktuellen Snapshot mit — ein bereits laufender Catch-up ist damit auch
+    // für den neuen Lebenszyklus sichtbar, statt verloren zu gehen.
+    const source = this.catchUpSource
+    this.catchUpUnsub = coordinator.subscribeCatchUpState(source.update)
   }
 
   /** The underlying coordinator (test/inspection + manual catch-up); null until start() resolves it. */
@@ -267,8 +267,9 @@ export class YjsPersonalLogSyncAdapter {
     // wieder true, aber diese Fortsetzung gehört zum ALTEN Lebenszyklus — sie
     // dürfte sonst einen ZWEITEN Satz Listener neben dem neuen init() anlegen.
     if (epoch !== this.lifecycleEpoch || !this.started) return
-    // Ab hier gehört der Lebenszyklus diesem init(): eigene Meldequelle nehmen.
-    this.claimCatchUpSource()
+    // Ab hier gehört der Lebenszyklus diesem init(): eigene Meldequelle nehmen
+    // und den Coordinator abonnieren.
+    this.claimCatchUpSource(coordinator)
 
     // LOOP-GUARD: write a log entry ONLY for LOCAL changes.
     const updateHandler = (update: Uint8Array, origin: unknown) => {
@@ -330,6 +331,10 @@ export class YjsPersonalLogSyncAdapter {
     // Ein hängender Catch-up dieses Lebenszyklus darf nach dem Destroy nichts
     // mehr melden — und schon gar nicht in einer neuen Sitzung unter derselben
     // deterministischen docId.
+    // Abmelden ZUERST: ein noch laufender Catch-up dieses Lebenszyklus darf
+    // nach dem Destroy nichts mehr zustellen — auch nicht in den nächsten.
+    this.catchUpUnsub?.()
+    this.catchUpUnsub = null
     this.catchUpSource?.release()
     this.catchUpSource = null
     this.catchUpController?.dispose()
