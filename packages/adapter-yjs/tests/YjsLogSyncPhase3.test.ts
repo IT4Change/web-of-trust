@@ -20,6 +20,7 @@ import {
 } from '@web_of_trust/core/protocol'
 import { YjsReplicationAdapter } from '../src/YjsReplicationAdapter'
 import { YjsPersonalLogSyncAdapter } from '../src/YjsPersonalLogSyncAdapter'
+import { CatchUpRegistry } from '../src/CatchUpRegistry'
 
 const wait = (ms = 120) => new Promise((r) => setTimeout(r, ms))
 const BROKER_URLS = ['wss://broker.example.com']
@@ -427,7 +428,7 @@ describe('YjsPersonalLogSyncAdapter — Slice A VE-6 (Personal-Doc on the log co
 
   // BLOCKER-1b: the personal-doc deviceId is store-bound; seed the store so the
   // log authors under the desired id (broker arming scoped to it still matches).
-  async function makePersonalAdapter(doc: Y.Doc, messaging: InMemoryMessagingAdapter, deviceId: string, mintDeviceId?: () => string) {
+  async function makePersonalAdapter(doc: Y.Doc, messaging: InMemoryMessagingAdapter, deviceId: string, mintDeviceId?: () => string, catchUpRegistry?: CatchUpRegistry) {
     const docLogStore = new InMemoryDocLogStore()
     await docLogStore.init()
     await docLogStore.setDeviceId(deviceId)
@@ -440,8 +441,35 @@ describe('YjsPersonalLogSyncAdapter — Slice A VE-6 (Personal-Doc on the log co
       docLogStore,
       deviceId,
       mintDeviceId,
+      catchUpRegistry,
     })
   }
+
+  it('#343 — nach start → destroy → start hört der neue Lebenszyklus wieder zu', async () => {
+    const registry = new CatchUpRegistry()
+    const doc = new Y.Doc()
+    const sync = await makePersonalAdapter(doc, messaging1, DEVICE_ALICE, undefined, registry)
+
+    sync.start()
+    await wait(150)
+    const firstCoordinator = sync.getCoordinator()
+    expect(firstCoordinator).not.toBeNull()
+
+    sync.destroy()
+    // Abgemeldet: der alte Lebenszyklus hält nichts mehr in der Registry.
+    expect(registry.getOverview().syncing).toBe(false)
+
+    sync.start()
+    await wait(150)
+    // Derselbe Coordinator (Single-Flight, #293) — genau deshalb darf die
+    // Meldequelle nicht in ihm eingefroren sein.
+    expect(sync.getCoordinator()).toBe(firstCoordinator)
+
+    // Der neue Lebenszyklus abonniert und ÜBERNIMMT dabei den aktuellen Stand
+    // des weiterlaufenden Catch-ups — statt ihn zu verpassen. Mit einer
+    // eingefrorenen Quelle bliebe die Registry hier für immer leer.
+    expect(registry.getOverview().outstanding.map((state) => state.docId)).toEqual([docId])
+  })
 
   it('VE-6 — a local Personal-Doc change produces exactly one log-entry; the other device applies it (origin=remote) with NO re-broadcast; multi-device converges loop-free', async () => {
     const doc1 = new Y.Doc()

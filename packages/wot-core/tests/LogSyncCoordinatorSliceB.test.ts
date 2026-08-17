@@ -16,6 +16,7 @@ import {
   SYNC_REQUEST_MESSAGE_TYPE,
   type LogSyncEngineHooks,
   type ControlFrameReceipt,
+  type DocCatchUpState,
 } from '../src/protocol'
 
 /**
@@ -58,6 +59,8 @@ interface Harness {
   sentEnvelopes: number
   /** Mutable clock the harness wires into the coordinator (60s soft-skip gate). */
   clock: { now: Date }
+  /** Beobachtete Catch-up-Zustände (#343): jeder Wechsel in Reihenfolge. */
+  catchUpStates: DocCatchUpState[]
 }
 
 async function makeCapability(audience: string, generation = 0): Promise<string> {
@@ -109,7 +112,8 @@ async function makeHarness(
   const applied: Uint8Array[] = []
   const syncRequests: Array<{ heads: Record<string, number>; limit?: number }> = []
   const clock = opts?.clock ?? { now: new Date() }
-  const harness: Partial<Harness> = { identity, messaging, logStore, applied, syncRequests, sentEnvelopes: 0, clock }
+  const catchUpStates: DocCatchUpState[] = []
+  const harness: Partial<Harness> = { identity, messaging, logStore, applied, syncRequests, sentEnvelopes: 0, clock, catchUpStates }
 
   const coordinator = new LogSyncCoordinator({
     docId: SPACE_ID,
@@ -142,6 +146,7 @@ async function makeHarness(
     // Only the multi-epoch CONVERGENCE tests opt into a wider value (see their call sites).
     catchUpPageTimeoutMs: opts?.catchUpPageTimeoutMs,
     now: () => clock.now,
+    onCatchUpState: (state) => catchUpStates.push(state),
     sendSpaceRegister: async () => {
       const register = opts?.registrationJws
         ? { type: 'https://web-of-trust.de/protocols/space-register/1.0' as const, registrationJws: opts.registrationJws }
@@ -257,6 +262,136 @@ describe('LogSyncCoordinator — Slice B VE-B1 pagination', () => {
     // Heads advanced across rounds (page-2 request asks above page-1's last seq) — and
     // the WIRE head is the strict-contiguous cursor, not the broker MAX.
     expect(b.syncRequests[1].heads[DEVICE_A]).toBeGreaterThanOrEqual(99)
+  })
+
+  it('#343 BEOBACHTBAR — ein vollständiger Catch-up meldet erst inFlight, dann erledigt', async () => {
+    const broker = new InProcessLogBroker()
+    const alice = (await createTestIdentity('alice')).identity
+    const bob = (await createTestIdentity('bob')).identity
+    const registrationJws = await inviterRegistrationJws(alice)
+
+    const a = await makeHarness(alice, DEVICE_A, broker, { registrationJws })
+    await a.coordinator.ensurePublished()
+    await a.coordinator.writeLocalUpdate(new Uint8Array([1]))
+
+    const b = await makeHarness(bob, DEVICE_B, broker, { registrationJws })
+    const result = await b.coordinator.catchUp()
+    expect(result.complete).toBe(true)
+
+    // Der erste Eintrag ist der Snapshot beim Abonnieren (nichts läuft), dann
+    // der Lauf. Genau das, was eine App braucht: läuft gerade / steht aus.
+    expect(b.catchUpStates.map((s) => [s.inFlight, s.outstanding])).toEqual([
+      [false, false],
+      [true, true],
+      [false, false],
+    ])
+    expect(b.catchUpStates[0].docId).toBe(SPACE_ID)
+  })
+
+  it('#343 BEOBACHTBAR — eine offene Lücke bleibt „steht noch aus", obwohl der Lauf endet', async () => {
+    const broker = new InProcessLogBroker()
+    const alice = (await createTestIdentity('alice')).identity
+    const bob = (await createTestIdentity('bob')).identity
+    const registrationJws = await inviterRegistrationJws(alice)
+    const b = await makeHarness(bob, DEVICE_B, broker, { registrationJws })
+    await b.coordinator.ensurePublished()
+
+    // Seiten 5,6 über einem Loch bei 0..4 — der Lauf endet, lückenlos ist es nicht.
+    const e5 = await buildEntryJws(alice, DEVICE_A, 5, new Uint8Array([5]))
+    const e6 = await buildEntryJws(alice, DEVICE_A, 6, new Uint8Array([6]))
+    const page = createSyncResponseMessage({
+      id: globalThis.crypto.randomUUID(),
+      from: bob.getDid(),
+      to: [bob.getDid()],
+      createdTime: Math.floor(Date.now() / 1000),
+      thid: globalThis.crypto.randomUUID(),
+      body: { docId: SPACE_ID, entries: [e5, e6], heads: { [DEVICE_A]: 6 }, truncated: true },
+    })
+    b.catchUpStates.length = 0
+    await b.coordinator.applySyncResponse(page)
+
+    // Der von dieser Seite angestossene Lauf trägt die Aussage weiter; das
+    // Seitenergebnis schweigt, solange er läuft.
+    expect(b.catchUpStates.at(-1)).toMatchObject({ outstanding: true })
+    expect(b.catchUpStates.every((state) => state.outstanding)).toBe(true)
+  })
+
+  it('#343 BEOBACHTBAR — ein sauber beendeter Lauf mit offener Lücke steht trotzdem aus (complete !== lückenlos)', async () => {
+    const broker = new InProcessLogBroker()
+    const alice = (await createTestIdentity('alice')).identity
+    const bob = (await createTestIdentity('bob')).identity
+    const registrationJws = await inviterRegistrationJws(alice)
+    const b = await makeHarness(bob, DEVICE_B, broker, { registrationJws })
+    await b.coordinator.ensurePublished()
+    const coordInternal = b.coordinator as unknown as { triggerGapCatchUp: () => void }
+    coordInternal.triggerGapCatchUp = () => {} // vom Auto-Catch-up isolieren
+
+    // 0 und 2 zustellen, 1 fehlt — ein Loch, das der Relay nicht mehr füllt.
+    await b.coordinator.receiveLogEntry(wrapLogEntry(alice, await buildEntryJws(alice, DEVICE_A, 0, new Uint8Array([0xa0]))))
+    await b.coordinator.receiveLogEntry(wrapLogEntry(alice, await buildEntryJws(alice, DEVICE_A, 2, new Uint8Array([0xa2]))))
+
+    b.catchUpStates.length = 0
+    const result = await b.coordinator.catchUp()
+
+    // Der Lauf endet sauber — und lässt trotzdem etwas offen. Genau hier meldete
+    // eine Oberfläche bisher „fertig", während Einträge fehlten.
+    expect(result.complete).toBe(true)
+    expect(result.pendingGaps?.length).toBeGreaterThan(0)
+    // Nicht nur „irgendwie offen": die Klasse muss stimmen, sonst bliebe eine
+    // Fehleinordnung als timeout oder no-progress unbemerkt grün.
+    expect(b.catchUpStates.at(-1)).toMatchObject({
+      inFlight: false,
+      outstanding: true,
+      reason: 'gap-pending',
+    })
+  })
+
+  it('#343 BEOBACHTBAR — ein später Rahmen meldet nicht „fertig" über seinen eigenen Folgelauf', async () => {
+    const broker = new InProcessLogBroker()
+    const alice = (await createTestIdentity('alice')).identity
+    const bob = (await createTestIdentity('bob')).identity
+    const registrationJws = await inviterRegistrationJws(alice)
+    const b = await makeHarness(bob, DEVICE_B, broker, { registrationJws })
+    await b.coordinator.ensurePublished()
+
+    // Eine truncated-Seite stösst einen Folgelauf an. Der läuft, während diese
+    // Zeile zurückkehrt — der ZULETZT gemeldete Zustand muss das abbilden.
+    const e5 = await buildEntryJws(alice, DEVICE_A, 5, new Uint8Array([5]))
+    const page = createSyncResponseMessage({
+      id: globalThis.crypto.randomUUID(),
+      from: bob.getDid(),
+      to: [bob.getDid()],
+      createdTime: Math.floor(Date.now() / 1000),
+      thid: globalThis.crypto.randomUUID(),
+      body: { docId: SPACE_ID, entries: [e5], heads: { [DEVICE_A]: 5 }, truncated: true },
+    })
+    b.catchUpStates.length = 0
+    await b.coordinator.applySyncResponse(page)
+
+    // Die REIHENFOLGE ist der Punkt: das Ergebnis dieser Seite muss vor dem
+    // Start des Folgelaufs stehen. Andersherum meldete die Registry „beendet",
+    // während der Folgelauf gerade erst begonnen hatte.
+    // Solange ein Lauf aktiv ist, darf KEIN „beendet" dazwischenfunken. Das
+    // Anwenden der Seite stösst selbst schon einen Lauf an; dessen Ausgang
+    // meldet er selbst, das späte Seitenergebnis schweigt.
+    expect(b.catchUpStates.map((state) => state.inFlight)).toEqual([true])
+    expect(b.catchUpStates.at(-1)).toMatchObject({ outstanding: true })
+  })
+
+  it('#343 BEOBACHTBAR — auch die First-Publication meldet ihren Catch-up', async () => {
+    const broker = new InProcessLogBroker()
+    const alice = (await createTestIdentity('alice')).identity
+    const registrationJws = await inviterRegistrationJws(alice)
+    const a = await makeHarness(alice, DEVICE_A, broker, { registrationJws })
+
+    // ensurePublished() läuft über runFirstPublication() — genau die frühe
+    // Phase, für die diese API da ist.
+    await a.coordinator.ensurePublished()
+
+    // Ohne den Eröffnungs-Snapshot: der Lauf selbst muss sichtbar sein.
+    const transitions = a.catchUpStates.slice(1)
+    expect(transitions[0]).toMatchObject({ inFlight: true, outstanding: true, reason: 'in-flight' })
+    expect(transitions.at(-1)).toMatchObject({ inFlight: false, outstanding: false })
   })
 
   it('VE-B1 limit-default — without catchUpPageSize the sync-request carries an EXPLICIT body.limit == 100 (not absent)', async () => {

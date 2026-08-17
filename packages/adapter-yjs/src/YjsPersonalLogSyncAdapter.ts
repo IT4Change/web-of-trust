@@ -44,6 +44,7 @@ import {
   SYNC_RESPONSE_MESSAGE_TYPE,
 } from '@web_of_trust/core/protocol'
 import { WebCryptoProtocolCryptoAdapter } from '@web_of_trust/core/protocol-adapters'
+import type { CatchUpRegistry, CatchUpSource } from './CatchUpRegistry'
 import { createRestoreCloneHandler } from '@web_of_trust/core/adapters'
 import { InitialCatchUpController } from './InitialCatchUpController'
 
@@ -66,6 +67,14 @@ export interface YjsPersonalLogSyncConfig {
   mintDeviceId?: () => string
   /** Notified after a restore-clone re-binds the deviceId (durable persistence hook). */
   onDeviceIdChanged?: (newDeviceId: string, oldDeviceId: string) => void | Promise<void>
+  /**
+   * Beobachtbarkeit (#343): Sammelstelle für den Catch-up-Zustand. Die Bindung
+   * läuft über eine {@link CatchUpSource}, nicht über einen rohen Callback —
+   * die docId des persönlichen Dokuments ist deterministisch, ein Flight aus
+   * einem alten Lebenszyklus würde sonst nach einem Re-Login denselben
+   * Eintrag in der neuen Sitzung überschreiben.
+   */
+  catchUpRegistry?: CatchUpRegistry
 }
 
 export class YjsPersonalLogSyncAdapter {
@@ -79,6 +88,9 @@ export class YjsPersonalLogSyncAdapter {
   private readonly mintDeviceId?: () => string
   private readonly onDeviceIdChangedHook?: (newDeviceId: string, oldDeviceId: string) => void | Promise<void>
   /** Built lazily in start() AFTER the deviceId is resolved from the store (BLOCKER-1b). */
+  private readonly catchUpRegistry?: CatchUpRegistry
+  private catchUpSource: CatchUpSource | null = null
+  private catchUpUnsub: (() => void) | null = null
   private coordinator: LogSyncCoordinator | null = null
   /** The deviceId fallback until the store-bound id is resolved. */
   private deviceId: string
@@ -94,6 +106,7 @@ export class YjsPersonalLogSyncAdapter {
   private started = false
 
   constructor(config: YjsPersonalLogSyncConfig) {
+    this.catchUpRegistry = config.catchUpRegistry
     this.doc = config.doc
     this.messaging = config.messaging
     this.identity = config.identity
@@ -211,6 +224,24 @@ export class YjsPersonalLogSyncAdapter {
     })
   }
 
+  /**
+   * Meldequelle für DIESEN Lebenszyklus beanspruchen; eine neue entwertet die
+   * vorige. Wird in `init()` gerufen, nachdem die Epoche geprüft ist — eine
+   * überholte Fortsetzung darf sich die Quelle nicht zurückholen.
+   */
+  private claimCatchUpSource(coordinator: LogSyncCoordinator): void {
+    if (!this.catchUpRegistry) return
+    this.catchUpUnsub?.()
+    this.catchUpSource?.release()
+    this.catchUpSource = this.catchUpRegistry.source(this.docId)
+    // Abonnieren statt einfrieren: der Coordinator überlebt diesen
+    // Lebenszyklus (Single-Flight, #293). Die Erstzustellung des Abos bringt
+    // den aktuellen Zustand mit — ein bereits laufender Catch-up ist damit auch
+    // für den neuen Lebenszyklus sichtbar, statt verloren zu gehen.
+    const source = this.catchUpSource
+    this.catchUpUnsub = coordinator.subscribeCatchUpState(source.update)
+  }
+
   /** The underlying coordinator (test/inspection + manual catch-up); null until start() resolves it. */
   getCoordinator(): LogSyncCoordinator | null {
     return this.coordinator
@@ -236,6 +267,9 @@ export class YjsPersonalLogSyncAdapter {
     // wieder true, aber diese Fortsetzung gehört zum ALTEN Lebenszyklus — sie
     // dürfte sonst einen ZWEITEN Satz Listener neben dem neuen init() anlegen.
     if (epoch !== this.lifecycleEpoch || !this.started) return
+    // Ab hier gehört der Lebenszyklus diesem init(): eigene Meldequelle nehmen
+    // und den Coordinator abonnieren.
+    this.claimCatchUpSource(coordinator)
 
     // LOOP-GUARD: write a log entry ONLY for LOCAL changes.
     const updateHandler = (update: Uint8Array, origin: unknown) => {
@@ -294,6 +328,15 @@ export class YjsPersonalLogSyncAdapter {
 
   destroy(): void {
     this.lifecycleEpoch += 1 // detacht ein noch hängendes init() des alten Lebenszyklus
+    // Ein hängender Catch-up dieses Lebenszyklus darf nach dem Destroy nichts
+    // mehr melden — und schon gar nicht in einer neuen Sitzung unter derselben
+    // deterministischen docId.
+    // Abmelden ZUERST: ein noch laufender Catch-up dieses Lebenszyklus darf
+    // nach dem Destroy nichts mehr zustellen — auch nicht in den nächsten.
+    this.catchUpUnsub?.()
+    this.catchUpUnsub = null
+    this.catchUpSource?.release()
+    this.catchUpSource = null
     this.catchUpController?.dispose()
     this.catchUpController = null
     this.unsubDocUpdate?.()

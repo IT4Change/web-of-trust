@@ -423,6 +423,14 @@ export interface LogSyncCoordinatorConfig {
    */
   onSecurityError?: (error: Error) => void
   /**
+   * Beobachtbarkeit (#343): Bequemlichkeits-Abo ab Konstruktion. Wer sich
+   * später anmelden oder wieder abmelden muss — jeder Adapter-Lebenszyklus —
+   * benutzt {@link LogSyncCoordinator.subscribeCatchUpState}. Rein informativ;
+   * der Coordinator verhält sich mit und ohne Abnehmer identisch, und Fehler
+   * eines Abnehmers werden verschluckt.
+   */
+  onCatchUpState?: (state: DocCatchUpState) => void
+  /**
    * Slice B / VE-B1: the sync-request page size sent as `body.limit`. Defaults to
    * {@link DEFAULT_CATCH_UP_PAGE_SIZE} (100, matching the relay default). Config-
    * driven so the value is set once here rather than threaded through every adapter
@@ -477,6 +485,32 @@ export type ReceiveLogEntryResult =
  *  The no-progress DoS class (d) does NOT surface here — it THROWS (the only throw
  *  class), so it can never be silently swallowed as "incomplete".
  */
+/**
+ * Beobachtbarer Catch-up-Zustand eines Dokuments (#343).
+ *
+ * Existiert, damit Anwendungen nicht raten müssen, ob ein frisch angemeldetes
+ * Gerät noch Daten empfängt. Bis hierher war dieser Zustand im Coordinator
+ * eingeschlossen; eine App konnte ihn nur aus mitgelesenen Wire-Rahmen und
+ * Zeitfenstern nachbauen (real-life-stack#265).
+ *
+ * `outstanding` ist die Frage, die eine Oberfläche wirklich stellt, und sie ist
+ * NICHT `!complete`: ein Lauf kann sauber enden und trotzdem eine offene Lücke
+ * oder auf Schlüssel wartende Einträge hinterlassen, die später nachgezogen
+ * werden (siehe {@link CatchUpResult}).
+ */
+export type CatchUpOutstandingReason =
+  | 'in-flight'
+  | 'gap-pending'
+  | 'blocked-by-key'
+  | 'timeout'
+  | 'no-progress'
+
+export type DocCatchUpState =
+  /** Es steht etwas aus — dann gibt es immer einen Grund. */
+  | { docId: string; inFlight: boolean; outstanding: true; reason: CatchUpOutstandingReason }
+  /** Nichts steht aus — dann gibt es keinen Grund zu nennen. */
+  | { docId: string; inFlight: boolean; outstanding: false; reason?: undefined }
+
 export interface CatchUpResult {
   restoreCloneRequired: boolean
   complete: boolean
@@ -556,6 +590,12 @@ export class LogSyncCoordinator {
    * this.restoreCloneInFlight and this.reemitInFlight — the established SR guard pattern.
    */
   private catchingUp = false
+  /** Aktueller Catch-up-Zustand — Grundlage der Erstzustellung an neue Abonnenten. */
+  private catchUpState: DocCatchUpState
+  private readonly catchUpListeners = new Set<(state: DocCatchUpState) => void>()
+  /** Token des Laufs, der gerade melden darf; null = kein Lauf aktiv. */
+  private activeCatchUpEmit: number | null = null
+  private catchUpEmitSeq = 0
 
   /**
    * Slice B v3: the in-flight catch-up's settle-promise (set whenever `catchingUp` is set, by
@@ -630,6 +670,10 @@ export class LogSyncCoordinator {
     this.config = config
     this.now = config.now ?? (() => new Date())
     this.deviceId = config.deviceId
+    this.catchUpState = { docId: config.docId, inFlight: false, outstanding: false }
+    // Der Konfigurations-Hook ist nur Zucker für ein Abo ab Konstruktion —
+    // dieselbe Zustellung, kein zweiter Pfad.
+    if (config.onCatchUpState) this.subscribeCatchUpState(config.onCatchUpState)
   }
 
   /** The current active local deviceId (re-bound by a restore-clone). */
@@ -825,7 +869,12 @@ export class LogSyncCoordinator {
     }
     this.catchingUp = true
     const work = (async (): Promise<void> => {
-      const result = await this.catchUpInternal({ presentCapabilityFirst: false })
+      // Über denselben Meldeweg wie catchUp(): ensurePublished() und der erste
+      // writeLocalUpdate() sind genau die frühe Phase, in der eine App wissen
+      // will, ob noch etwas eintrifft.
+      const result = await this.withCatchUpReporting(
+        () => this.catchUpInternal({ presentCapabilityFirst: false }),
+      )
       await this.actOnRestoreDisposition(result)
     })()
     // Same non-swallowing handle as catchUp() (rejects on failure; detached no-op guards against
@@ -1371,7 +1420,7 @@ export class LogSyncCoordinator {
       return { restoreCloneRequired: false, complete: false, incomplete: 'gap-pending', pendingGaps: [] }
     }
     this.catchingUp = true
-    const work = (async (): Promise<CatchUpResult> => {
+    const work = this.withCatchUpReporting(async (): Promise<CatchUpResult> => {
       // VE-B2 GapRepair driver: re-request any due soft-skipped/pending hole BEFORE the
       // normal catch-up (so a repaired seq is in the store before progress is measured).
       await this.driveGapRepairs().catch((err) => {
@@ -1391,7 +1440,7 @@ export class LogSyncCoordinator {
       }
       await this.actOnRestoreDisposition(result)
       return result
-    })()
+    })
     // catchUpInFlight settles WITH the catch-up's outcome — it REJECTS if the catch-up failed,
     // so a runFirstPublication() coalescing onto it propagates the error and does NOT publish on
     // an incomplete head-abgleich / restore-clone (BLOCKER-1b). A detached no-op handler prevents
@@ -1405,6 +1454,108 @@ export class LogSyncCoordinator {
       this.catchingUp = false
       this.catchUpInFlight = null
     }
+  }
+
+  /**
+   * Zustandswechsel melden. Beobachtung darf den Sync nie stören: ein Fehler im
+   * Abnehmer wird verschluckt.
+   */
+  /**
+   * Aktueller Catch-up-Zustand dieses Dokuments.
+   *
+   * Zusammen mit {@link subscribeCatchUpState} macht das den Zustand zu einer
+   * abfragbaren Quelle statt zu einem Ereignisstrom, den man verpassen kann:
+   * ein Abonnent, der mitten in einen laufenden Catch-up kommt, sieht ihn.
+   *
+   * NICHT zu verwechseln mit den Dokument-Snapshots aus CompactStore und
+   * Vault — hier werden keine Daten festgehalten, nur der Empfangsstand.
+   */
+  getCatchUpState(): DocCatchUpState {
+    return this.catchUpState
+  }
+
+  /**
+   * Den Catch-up-Zustand abonnieren. Der Abonnent bekommt SOFORT den aktuellen
+   * Zustand zugestellt (Erstzustellung) und danach jeden Wechsel; die Rückgabe
+   * meldet ihn wieder ab.
+   *
+   * Bewusst eine Subscription und kein im Konstruktor eingefrorener Callback:
+   * der Coordinator lebt pro docId länger als der Adapter-Lebenszyklus, der ihn
+   * benutzt (Single-Flight, #293). Ein eingefrorener Empfänger gehörte für
+   * immer dem ERSTEN Lebenszyklus — mit einer Subscription ist dagegen
+   * eindeutig, wer gerade zuhört, und ein alter Abonnent ist nach seinem
+   * Abmelden endgültig still.
+   */
+  subscribeCatchUpState(listener: (state: DocCatchUpState) => void): () => void {
+    this.catchUpListeners.add(listener)
+    try {
+      listener(this.catchUpState)
+    } catch (err) {
+      console.debug('[LogSyncCoordinator] catch-up listener failed on initial delivery:', err)
+    }
+    return () => { this.catchUpListeners.delete(listener) }
+  }
+
+  private emitCatchUpState(state: Omit<DocCatchUpState, 'docId'>): void {
+    const next = { docId: this.config.docId, ...state } as DocCatchUpState
+    // Zustand, nicht Ereignisstrom: identische Meldungen werden unterdrückt.
+    if (
+      next.inFlight === this.catchUpState.inFlight &&
+      next.outstanding === this.catchUpState.outstanding &&
+      next.reason === this.catchUpState.reason
+    ) return
+    this.catchUpState = next
+    for (const listener of this.catchUpListeners) {
+      try {
+        listener(next)
+      } catch (err) {
+        console.debug('[LogSyncCoordinator] catch-up listener failed:', err)
+      }
+    }
+  }
+
+  /**
+   * Gemeinsamer Meldeweg für JEDEN echten Catch-up-Durchlauf.
+   *
+   * `catchUp()` und die First-Publication führen beide eine Paginierung aus;
+   * nur einen davon zu instrumentieren hiesse, ausgerechnet die frühe
+   * Gerätephase unsichtbar zu lassen, für die diese API da ist.
+   */
+  private async withCatchUpReporting(run: () => Promise<CatchUpResult>): Promise<CatchUpResult> {
+    const token = ++this.catchUpEmitSeq
+    this.activeCatchUpEmit = token
+    const mine = () => this.activeCatchUpEmit === token
+    this.emitCatchUpState({ inFlight: true, outstanding: true, reason: 'in-flight' })
+    try {
+      const result = await run()
+      if (mine()) this.emitCatchUpResult(result)
+      return result
+    } catch (err) {
+      // Ein geworfener Lauf lässt nachweislich etwas offen — die Anzeige darf
+      // hier nicht auf „fertig" fallen.
+      if (mine()) this.emitCatchUpState({ inFlight: false, outstanding: true, reason: 'no-progress' })
+      throw err
+    } finally {
+      if (mine()) this.activeCatchUpEmit = null
+    }
+  }
+
+  /**
+   * Den Ausgang eines Durchlaufs als Zustand melden.
+   *
+   * `complete: true` heisst NICHT lückenlos — offene Lücken werden über
+   * Soft-Skip und GapRepair nachgezogen, nicht über die Paginierung. Genau
+   * deshalb zählt `pendingGaps` hier mit: eine Oberfläche, die nur `complete`
+   * liest, meldet „fertig", während noch Einträge fehlen.
+   */
+  private emitCatchUpResult(result: CatchUpResult): void {
+    if (!this.config.onCatchUpState) return
+    const hasGaps = (result.pendingGaps?.length ?? 0) > 0
+    const outstanding = !result.complete || hasGaps
+    const reason = !outstanding
+      ? undefined
+      : (result.incomplete ?? 'gap-pending')
+    this.emitCatchUpState({ inFlight: false, outstanding, reason })
   }
 
   /**
@@ -1808,15 +1959,20 @@ export class LogSyncCoordinator {
     // guarded catch-up to do it: on truncated (more to fetch) OR any OPEN gap at the frontier (so
     // a permanent hole surfaced by this late page still gets observed/soft-skipped there).
     const pendingGaps = await this.openGaps()
+    const result: CatchUpResult = truncated
+      // Late/unsolicited truncated page: the guarded catchUp() (getSyncRequestHeads on the wire)
+      // converges the rest. gap-pending, not an error.
+      ? { restoreCloneRequired: disposition.restoreCloneRequired, complete: false, incomplete: 'gap-pending', pendingGaps }
+      : { restoreCloneRequired: disposition.restoreCloneRequired, complete: true, pendingGaps }
+    // Das Ergebnis DIESER Seite melden — aber nur, wenn nicht ohnehin gerade
+    // ein Lauf aktiv ist. Sonst setzte diese Zeile einen laufenden Catch-up auf
+    // „beendet" und die Registry behauptete das Gegenteil dessen, was passiert.
+    // Ein aktiver Lauf meldet seinen Ausgang selbst.
+    if (this.activeCatchUpEmit === null) this.emitCatchUpResult(result)
     if (truncated || pendingGaps.length > 0) {
       this.triggerGapCatchUp()
     }
-    if (truncated) {
-      // Late/unsolicited truncated page: the guarded catchUp() (getSyncRequestHeads on the wire)
-      // converges the rest. gap-pending, not an error.
-      return { restoreCloneRequired: disposition.restoreCloneRequired, complete: false, incomplete: 'gap-pending', pendingGaps }
-    }
-    return { restoreCloneRequired: disposition.restoreCloneRequired, complete: true, pendingGaps }
+    return result
   }
 
   /**
