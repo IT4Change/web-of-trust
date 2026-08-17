@@ -166,7 +166,14 @@ export class YjsPersonalLogSyncAdapter {
         send: (envelope) => this.messaging.send(envelope as WireMessage),
       },
       capabilities: this.personalCapabilitySource(),
-      onCatchUpState: this.claimCatchUpSource()?.update,
+      // SPÄT gebunden: der Coordinator wird über start → destroy → start hinweg
+      // WIEDERVERWENDET (Single-Flight, #293). Eine hier eingefrorene Source
+      // wäre nach dem ersten destroy() freigegeben und damit für immer stumm.
+      // Der Umweg über das Feld greift immer die Quelle des aktuellen
+      // Lebenszyklus ab.
+      onCatchUpState: this.catchUpRegistry
+        ? (state) => this.catchUpSource?.update(state)
+        : undefined,
       hooks: this.yjsEngineHooks(),
       signLogEntry: (input) => this.identity.signEd25519(input),
       // Personal-Doc is single-owner multi-device: recipients = just own DID.
@@ -224,12 +231,15 @@ export class YjsPersonalLogSyncAdapter {
     })
   }
 
-  /** Meldequelle dieses Lebenszyklus; eine neue entwertet die vorige. */
-  private claimCatchUpSource(): CatchUpSource | undefined {
-    if (!this.catchUpRegistry) return undefined
+  /**
+   * Meldequelle für DIESEN Lebenszyklus beanspruchen; eine neue entwertet die
+   * vorige. Wird in `init()` gerufen, nachdem die Epoche geprüft ist — eine
+   * überholte Fortsetzung darf sich die Quelle nicht zurückholen.
+   */
+  private claimCatchUpSource(): void {
+    if (!this.catchUpRegistry) return
     this.catchUpSource?.release()
     this.catchUpSource = this.catchUpRegistry.source(this.docId)
-    return this.catchUpSource
   }
 
   /** The underlying coordinator (test/inspection + manual catch-up); null until start() resolves it. */
@@ -257,6 +267,8 @@ export class YjsPersonalLogSyncAdapter {
     // wieder true, aber diese Fortsetzung gehört zum ALTEN Lebenszyklus — sie
     // dürfte sonst einen ZWEITEN Satz Listener neben dem neuen init() anlegen.
     if (epoch !== this.lifecycleEpoch || !this.started) return
+    // Ab hier gehört der Lebenszyklus diesem init(): eigene Meldequelle nehmen.
+    this.claimCatchUpSource()
 
     // LOOP-GUARD: write a log entry ONLY for LOCAL changes.
     const updateHandler = (update: Uint8Array, origin: unknown) => {

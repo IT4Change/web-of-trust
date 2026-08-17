@@ -2015,11 +2015,23 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
     const spaceId = state.info.id
     const existing = this.coordinators.get(spaceId)
     if (existing) return existing
+    // Nicht jeder Aufrufer übergibt eine Lease, die Awaits unten sind aber echte
+    // Fenster: fällt ein cleanupSpaceLocally() oder stop() hinein, würde diese
+    // Fortsetzung danach eine frische Source claimen und einen Coordinator über
+    // einem zerstörten `state` installieren. Epoche UND konkrete state-Identität
+    // hier festhalten und vor jeder Wirkung prüfen.
+    const epoch = this.lifecycleEpoch
+    const inThisLifecycle = () =>
+      epoch === this.lifecycleEpoch && this.spaces.get(spaceId) === state
+    if (!inThisLifecycle()) return null
     const logStore = await this.ensureDocLogStore()
     if (!logStore) return null
     // BLOCKER-1b: bind the deviceId to the durable store BEFORE constructing the
     // coordinator (the seq-namespace owner), so a wiped store yields a fresh id.
     const deviceId = await this.ensureDeviceId()
+    // Vor dem Source-Claim: eine überholte Fortsetzung darf hier nicht mehr
+    // erscheinen — weder in der Registry noch in `coordinators`.
+    if (!inThisLifecycle()) return null
 
     const sendControlFrame = (this.messaging as MessagingAdapter).sendControlFrame!
     const coordinator = new LogSyncCoordinator({
@@ -2068,6 +2080,12 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
     // Last boundary before the install: ensureDocLogStore()/ensureDeviceId() awaited,
     // so a stop() may have landed since the caller's own check.
     lease?.check()
+    if (!inThisLifecycle()) {
+      // Zwischen Claim und Installation abgeräumt: die eigene Quelle wieder
+      // hergeben, statt sie über dem entfernten Space stehen zu lassen.
+      this.releaseCatchUpSource(spaceId)
+      return null
+    }
     this.coordinators.set(spaceId, coordinator)
     return coordinator
   }

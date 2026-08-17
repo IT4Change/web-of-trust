@@ -335,7 +335,13 @@ describe('LogSyncCoordinator — Slice B VE-B1 pagination', () => {
     // eine Oberfläche bisher „fertig", während Einträge fehlten.
     expect(result.complete).toBe(true)
     expect(result.pendingGaps?.length).toBeGreaterThan(0)
-    expect(b.catchUpStates.at(-1)).toMatchObject({ inFlight: false, outstanding: true })
+    // Nicht nur „irgendwie offen": die Klasse muss stimmen, sonst bliebe eine
+    // Fehleinordnung als timeout oder no-progress unbemerkt grün.
+    expect(b.catchUpStates.at(-1)).toMatchObject({
+      inFlight: false,
+      outstanding: true,
+      reason: 'gap-pending',
+    })
   })
 
   it('#343 BEOBACHTBAR — ein später Rahmen meldet nicht „fertig" über seinen eigenen Folgelauf', async () => {

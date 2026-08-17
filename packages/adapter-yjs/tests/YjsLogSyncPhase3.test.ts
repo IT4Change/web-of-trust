@@ -20,6 +20,7 @@ import {
 } from '@web_of_trust/core/protocol'
 import { YjsReplicationAdapter } from '../src/YjsReplicationAdapter'
 import { YjsPersonalLogSyncAdapter } from '../src/YjsPersonalLogSyncAdapter'
+import { CatchUpRegistry } from '../src/CatchUpRegistry'
 
 const wait = (ms = 120) => new Promise((r) => setTimeout(r, ms))
 const BROKER_URLS = ['wss://broker.example.com']
@@ -427,7 +428,7 @@ describe('YjsPersonalLogSyncAdapter — Slice A VE-6 (Personal-Doc on the log co
 
   // BLOCKER-1b: the personal-doc deviceId is store-bound; seed the store so the
   // log authors under the desired id (broker arming scoped to it still matches).
-  async function makePersonalAdapter(doc: Y.Doc, messaging: InMemoryMessagingAdapter, deviceId: string, mintDeviceId?: () => string) {
+  async function makePersonalAdapter(doc: Y.Doc, messaging: InMemoryMessagingAdapter, deviceId: string, mintDeviceId?: () => string, catchUpRegistry?: CatchUpRegistry) {
     const docLogStore = new InMemoryDocLogStore()
     await docLogStore.init()
     await docLogStore.setDeviceId(deviceId)
@@ -440,8 +441,37 @@ describe('YjsPersonalLogSyncAdapter — Slice A VE-6 (Personal-Doc on the log co
       docLogStore,
       deviceId,
       mintDeviceId,
+      catchUpRegistry,
     })
   }
+
+  it('#343 — nach start → destroy → start meldet der WIEDERVERWENDETE Coordinator weiter', async () => {
+    const registry = new CatchUpRegistry()
+    const doc = new Y.Doc()
+    const sync = await makePersonalAdapter(doc, messaging1, DEVICE_ALICE, undefined, registry)
+
+    sync.start()
+    await wait(150)
+    expect(sync.getCoordinator()).not.toBeNull()
+    const firstCoordinator = sync.getCoordinator()
+
+    sync.destroy()
+    expect(registry.getSnapshot().syncing).toBe(false)
+
+    sync.start()
+    await wait(150)
+    // Der Coordinator ist derselbe (Single-Flight, #293) — genau deshalb darf
+    // die Meldequelle nicht in ihm eingefroren sein.
+    expect(sync.getCoordinator()).toBe(firstCoordinator)
+
+    const seen: boolean[] = []
+    registry.subscribe((snapshot) => seen.push(snapshot.syncing))
+    await sync.getCoordinator()!.catchUp().catch(() => {})
+
+    // Der neue Lebenszyklus meldet wieder. Mit einer im Coordinator
+    // eingefrorenen Quelle bliebe es hier für immer still.
+    expect(seen).toContain(true)
+  })
 
   it('VE-6 — a local Personal-Doc change produces exactly one log-entry; the other device applies it (origin=remote) with NO re-broadcast; multi-device converges loop-free', async () => {
     const doc1 = new Y.Doc()
