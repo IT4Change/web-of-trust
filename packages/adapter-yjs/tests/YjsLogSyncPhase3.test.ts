@@ -119,13 +119,21 @@ describe('YjsReplicationAdapter — Slice A Phase 3 (VE-5/6/7/10 + write-reject 
   // ── Group 4: VE-7 — content channel carries only log-entry under log sync ─────
   it('#343 — ein Space-Catch-up meldet seinen Abschluss an die Registry', async () => {
     const registry = new CatchUpRegistry()
+    // Mitschreiben AB DEM START: sonst kann der Test im Anfangszustand
+    // `syncing: false` durchlaufen, ohne je einen Lauf gesehen zu haben.
+    const seen: boolean[] = []
+    registry.subscribe((overview) => seen.push(overview.syncing))
+
     const adapter = await makeAdapter(alice, aliceMessaging, DEVICE_ALICE, true, registry)
     await adapter.start()
     await adapter.createSpace('shared', { items: {} } as never, { name: 'Test' })
 
-    for (let i = 0; i < 40 && registry.getOverview().syncing !== false; i++) await wait(100)
+    for (let i = 0; i < 40 && !(seen.includes(true) && registry.getOverview().syncing === false); i++) await wait(100)
 
+    // Der Übergang muss beobachtet worden sein, nicht nur der Endzustand.
+    expect(seen).toContain(true)
     expect(registry.getOverview().outstanding.map((o) => [o.inFlight, o.reason])).toEqual([])
+    expect(registry.getOverview().syncing).toBe(false)
     await adapter.stop()
   })
 
@@ -461,13 +469,17 @@ describe('YjsPersonalLogSyncAdapter — Slice A VE-6 (Personal-Doc on the log co
 
   it('#343 — der PersonalDoc-Catch-up meldet seinen Abschluss an die Registry', async () => {
     const registry = new CatchUpRegistry()
+    // Mitschreiben AB DEM START — der Anfangszustand ist bereits `false`, ein
+    // Test, der nur darauf wartet, prüfte gar nichts.
+    const seen: boolean[] = []
+    registry.subscribe((overview) => seen.push(overview.syncing))
+
     const doc = new Y.Doc()
     const sync = await makePersonalAdapter(doc, messaging1, DEVICE_ALICE, undefined, registry)
-
     sync.start()
-    // Grosszügig warten: die Frage ist nicht „wie schnell", sondern „überhaupt".
-    for (let i = 0; i < 40 && registry.getOverview().syncing !== false; i++) await wait(100)
+    for (let i = 0; i < 40 && !(seen.includes(true) && registry.getOverview().syncing === false); i++) await wait(100)
 
+    expect(seen).toContain(true)
     expect(registry.getOverview().outstanding.map((o) => o.reason)).toEqual([])
     expect(registry.getOverview().syncing).toBe(false)
   })

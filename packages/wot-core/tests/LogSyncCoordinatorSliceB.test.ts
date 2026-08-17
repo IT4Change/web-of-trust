@@ -394,6 +394,35 @@ describe('LogSyncCoordinator — Slice B VE-B1 pagination', () => {
     expect(transitions.at(-1)).toMatchObject({ inFlight: false, outstanding: false })
   })
 
+  it('#343 BEOBACHTBAR — ein Timeout der ALTEN Verbindung meldet nicht in die neue hinein', async () => {
+    const broker = new InProcessLogBroker()
+    const alice = (await createTestIdentity('alice')).identity
+    const bob = (await createTestIdentity('bob')).identity
+    const registrationJws = await inviterRegistrationJws(alice)
+
+    const a = await makeHarness(alice, DEVICE_A, broker, { registrationJws })
+    await a.coordinator.ensurePublished()
+    await a.coordinator.writeLocalUpdate(new Uint8Array([1]))
+
+    // Seiten-Timeout kurz halten: beide Läufe enden von selbst, der alte zuerst.
+    const b = await makeHarness(bob, DEVICE_B, broker, { registrationJws, catchUpPageTimeoutMs: 400 })
+    const stalled = b.coordinator.catchUp()
+
+    // Reconnect mitten hinein, dann startet die neue Verbindung ihren Lauf —
+    // der läuft noch, wenn der alte ausläuft.
+    b.coordinator.resetForReconnect()
+    const fresh = b.coordinator.catchUp()
+
+    await stalled.catch(() => {})
+    // Solange der neue Lauf läuft, darf der alte NICHTS gemeldet haben:
+    // ohne Epochenprüfung zählte er den Zähler der neuen Epoche auf 0 und
+    // veröffentlichte sein eigenes (Timeout-)Ergebnis.
+    expect(b.catchUpStates.at(-1)).toMatchObject({ inFlight: true })
+
+    await fresh.catch(() => {})
+    expect(b.catchUpStates.at(-1)).toMatchObject({ inFlight: false })
+  })
+
   it('VE-B1 limit-default — without catchUpPageSize the sync-request carries an EXPLICIT body.limit == 100 (not absent)', async () => {
     const broker = new InProcessLogBroker()
     const alice = (await createTestIdentity('alice')).identity

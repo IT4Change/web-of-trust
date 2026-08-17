@@ -602,6 +602,10 @@ export class LogSyncCoordinator {
    * mehr „fertig" und der Zustand bleibt für immer auf `in-flight` stehen.
    * Ein Zähler kann das nicht: jeder Start hat genau einen Abschluss, und der
    * letzte, der auf 0 geht, meldet.
+   *
+   * Gezählt wird PRO VERBINDUNGSEPOCHE: ein Lauf der alten Verbindung, der
+   * nach einem Reconnect verspätet in seinen Timeout läuft, darf den frisch
+   * erreichten Zustand der neuen nicht überschreiben.
    */
   private activeCatchUps = 0
 
@@ -709,6 +713,10 @@ export class LogSyncCoordinator {
     // were just cleared). Reset the guard so the reconnect's catch-up is not coalesced
     // into a stale in-flight flag.
     this.catchingUp = false
+    // Beobachtbarkeit (#343): die Läufe der alten Verbindung zählen ab jetzt
+    // nicht mehr mit — sie melden auch nichts mehr (Epochenprüfung im
+    // finally von withCatchUpReporting).
+    this.activeCatchUps = 0
     // VE-B2: a real reconnect is a NEW connection epoch. This is the mechanical carrier
     // of the "3 distinct epochs" soft-skip gate — without the bump, three catch-ups of
     // one connection would all share epoch 0 and never reach the 3-epoch threshold.
@@ -1530,6 +1538,7 @@ export class LogSyncCoordinator {
    * Gerätephase unsichtbar zu lassen, für die diese API da ist.
    */
   private async withCatchUpReporting(run: () => Promise<CatchUpResult>): Promise<CatchUpResult> {
+    const epoch = this.connectionEpoch
     this.activeCatchUps += 1
     this.emitCatchUpState({ inFlight: true, outstanding: true, reason: 'in-flight' })
     let result: CatchUpResult | null = null
@@ -1537,14 +1546,21 @@ export class LogSyncCoordinator {
       result = await run()
       return result
     } finally {
-      this.activeCatchUps -= 1
-      // Nur der letzte laufende Durchlauf meldet den Ausgang — sonst setzte
-      // ein früh fertiger Lauf den Zustand auf „beendet", während ein anderer
-      // noch läuft.
-      if (this.activeCatchUps === 0) {
-        if (result) this.emitCatchUpResult(result)
-        // Ein geworfener Lauf lässt nachweislich etwas offen.
-        else this.emitCatchUpState({ inFlight: false, outstanding: true, reason: 'no-progress' })
+      // Aus einer abgelösten Verbindung: weder mitzählen noch melden. Der
+      // Zähler der neuen Epoche gehört ihren eigenen Läufen.
+      //
+      // Als Bedingung, NICHT als `return` im finally — das verschluckte den
+      // geworfenen Fehler des Laufs (der Compiler hat es angezeigt).
+      if (epoch === this.connectionEpoch) {
+        this.activeCatchUps -= 1
+        // Nur der letzte laufende Durchlauf meldet den Ausgang — sonst setzte
+        // ein früh fertiger Lauf den Zustand auf „beendet", während ein
+        // anderer noch läuft.
+        if (this.activeCatchUps === 0) {
+          if (result) this.emitCatchUpResult(result)
+          // Ein geworfener Lauf lässt nachweislich etwas offen.
+          else this.emitCatchUpState({ inFlight: false, outstanding: true, reason: 'no-progress' })
+        }
       }
     }
   }
