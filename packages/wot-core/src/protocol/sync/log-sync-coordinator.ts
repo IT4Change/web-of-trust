@@ -901,8 +901,7 @@ export class LogSyncCoordinator {
     try {
       await work
     } finally {
-      this.catchingUp = false
-      this.catchUpInFlight = null
+      this.releaseCatchUpGuard(ownInFlight)
     }
   }
 
@@ -1467,9 +1466,20 @@ export class LogSyncCoordinator {
     try {
       return await work
     } finally {
-      this.catchingUp = false
-      this.catchUpInFlight = null
+      // NUR der eigene Lauf gibt den Guard frei. `resetForReconnect()` setzt
+      // `catchingUp` bewusst zurück, damit die neue Verbindung sofort
+      // aufholen kann — läuft der alte Lauf danach aus, würde ein
+      // unbedingtes Aufräumen den Guard des NEUEN Laufs löschen und einen
+      // dritten Catch-up parallel zulassen.
+      this.releaseCatchUpGuard(inFlight)
     }
+  }
+
+  /** Guard nur freigeben, wenn er noch diesem Lauf gehört. */
+  private releaseCatchUpGuard(own: Promise<void>): void {
+    if (this.catchUpInFlight !== own) return
+    this.catchingUp = false
+    this.catchUpInFlight = null
   }
 
   /**

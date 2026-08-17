@@ -404,21 +404,30 @@ describe('LogSyncCoordinator — Slice B VE-B1 pagination', () => {
     await a.coordinator.ensurePublished()
     await a.coordinator.writeLocalUpdate(new Uint8Array([1]))
 
-    // Seiten-Timeout kurz halten: beide Läufe enden von selbst, der alte zuerst.
-    const b = await makeHarness(bob, DEVICE_B, broker, { registrationJws, catchUpPageTimeoutMs: 400 })
+    const b = await makeHarness(bob, DEVICE_B, broker, { registrationJws, catchUpPageTimeoutMs: 50 })
+    // Die Reihenfolge wird GESETZT, nicht gehofft: gleiche Fristen für beide
+    // Läufe ergeben keine deterministische Reihenfolge (und waren in CI flaky).
+    // Der alte Lauf hat eine kurze Frist, der neue eine lange — der alte endet
+    // damit garantiert, WÄHREND der neue noch läuft. Genau dieser Fall ist der
+    // gefährliche.
+    const config = (b.coordinator as unknown as { config: { catchUpPageTimeoutMs?: number } }).config
     const stalled = b.coordinator.catchUp()
 
-    // Reconnect mitten hinein, dann startet die neue Verbindung ihren Lauf —
-    // der läuft noch, wenn der alte ausläuft.
     b.coordinator.resetForReconnect()
+    config.catchUpPageTimeoutMs = 10_000
     const fresh = b.coordinator.catchUp()
 
     await stalled.catch(() => {})
-    // Solange der neue Lauf läuft, darf der alte NICHTS gemeldet haben:
-    // ohne Epochenprüfung zählte er den Zähler der neuen Epoche auf 0 und
-    // veröffentlichte sein eigenes (Timeout-)Ergebnis.
+    // Solange der neue Lauf läuft, darf der alte NICHTS gemeldet haben: ohne
+    // Epochenprüfung zählte er den Zähler der neuen Epoche auf 0 und
+    // veröffentlichte sein eigenes Timeout-Ergebnis.
     expect(b.catchUpStates.at(-1)).toMatchObject({ inFlight: true })
 
+    // Und er darf auch den Guard des neuen Laufs nicht freigegeben haben —
+    // sonst könnte ein dritter Catch-up parallel starten.
+    expect((b.coordinator as unknown as { catchingUp: boolean }).catchingUp).toBe(true)
+
+    config.catchUpPageTimeoutMs = 50
     await fresh.catch(() => {})
     expect(b.catchUpStates.at(-1)).toMatchObject({ inFlight: false })
   })
