@@ -593,9 +593,21 @@ export class LogSyncCoordinator {
   /** Aktueller Catch-up-Zustand — Grundlage der Erstzustellung an neue Abonnenten. */
   private catchUpState: DocCatchUpState
   private readonly catchUpListeners = new Set<(state: DocCatchUpState) => void>()
-  /** Token des Laufs, der gerade melden darf; null = kein Lauf aktiv. */
-  private activeCatchUpEmit: number | null = null
-  private catchUpEmitSeq = 0
+  /**
+   * Wie viele Catch-up-Durchläufe gerade laufen.
+   *
+   * Bewusst ein Zähler und KEIN Besitz-Token: bei überlappenden Läufen wandert
+   * ein Token zum jeweils letzten Starter, und dessen eigener Abschluss kann
+   * von einem noch späteren Lauf unterdrückt werden — am Ende meldet niemand
+   * mehr „fertig" und der Zustand bleibt für immer auf `in-flight` stehen.
+   * Ein Zähler kann das nicht: jeder Start hat genau einen Abschluss, und der
+   * letzte, der auf 0 geht, meldet.
+   *
+   * Gezählt wird PRO VERBINDUNGSEPOCHE: ein Lauf der alten Verbindung, der
+   * nach einem Reconnect verspätet in seinen Timeout läuft, darf den frisch
+   * erreichten Zustand der neuen nicht überschreiben.
+   */
+  private activeCatchUps = 0
 
   /**
    * Slice B v3: the in-flight catch-up's settle-promise (set whenever `catchingUp` is set, by
@@ -701,6 +713,10 @@ export class LogSyncCoordinator {
     // were just cleared). Reset the guard so the reconnect's catch-up is not coalesced
     // into a stale in-flight flag.
     this.catchingUp = false
+    // Beobachtbarkeit (#343): die Läufe der alten Verbindung zählen ab jetzt
+    // nicht mehr mit — sie melden auch nichts mehr (Epochenprüfung im
+    // finally von withCatchUpReporting).
+    this.activeCatchUps = 0
     // VE-B2: a real reconnect is a NEW connection epoch. This is the mechanical carrier
     // of the "3 distinct epochs" soft-skip gate — without the bump, three catch-ups of
     // one connection would all share epoch 0 and never reach the 3-epoch threshold.
@@ -816,12 +832,18 @@ export class LogSyncCoordinator {
   async ensurePublished(): Promise<void> {
     if (this.published) return
     if (this.publishing) return this.publishing
-    this.publishing = this.runFirstPublication()
+    // Wie beim Catch-up-Guard gehört auch dieser Zustand genau EINEM Lauf.
+    // `resetForReconnect()` setzt `published`/`publishing` bewusst zurück,
+    // damit die neue Verbindung ihre Erstpublikation wiederholt (neuer Socket
+    // = leerer Scope-Cache). Ein alter Lauf, der danach ausläuft, darf weder
+    // `published` der neuen Verbindung setzen noch deren `publishing` löschen.
+    const own = this.runFirstPublication()
+    this.publishing = own
     try {
-      await this.publishing
-      this.published = true
+      await own
+      if (this.publishing === own) this.published = true
     } finally {
-      this.publishing = null
+      if (this.publishing === own) this.publishing = null
     }
   }
 
@@ -885,8 +907,7 @@ export class LogSyncCoordinator {
     try {
       await work
     } finally {
-      this.catchingUp = false
-      this.catchUpInFlight = null
+      this.releaseCatchUpGuard(ownInFlight)
     }
   }
 
@@ -1451,9 +1472,20 @@ export class LogSyncCoordinator {
     try {
       return await work
     } finally {
-      this.catchingUp = false
-      this.catchUpInFlight = null
+      // NUR der eigene Lauf gibt den Guard frei. `resetForReconnect()` setzt
+      // `catchingUp` bewusst zurück, damit die neue Verbindung sofort
+      // aufholen kann — läuft der alte Lauf danach aus, würde ein
+      // unbedingtes Aufräumen den Guard des NEUEN Laufs löschen und einen
+      // dritten Catch-up parallel zulassen.
+      this.releaseCatchUpGuard(inFlight)
     }
+  }
+
+  /** Guard nur freigeben, wenn er noch diesem Lauf gehört. */
+  private releaseCatchUpGuard(own: Promise<void>): void {
+    if (this.catchUpInFlight !== own) return
+    this.catchingUp = false
+    this.catchUpInFlight = null
   }
 
   /**
@@ -1522,21 +1554,30 @@ export class LogSyncCoordinator {
    * Gerätephase unsichtbar zu lassen, für die diese API da ist.
    */
   private async withCatchUpReporting(run: () => Promise<CatchUpResult>): Promise<CatchUpResult> {
-    const token = ++this.catchUpEmitSeq
-    this.activeCatchUpEmit = token
-    const mine = () => this.activeCatchUpEmit === token
+    const epoch = this.connectionEpoch
+    this.activeCatchUps += 1
     this.emitCatchUpState({ inFlight: true, outstanding: true, reason: 'in-flight' })
+    let result: CatchUpResult | null = null
     try {
-      const result = await run()
-      if (mine()) this.emitCatchUpResult(result)
+      result = await run()
       return result
-    } catch (err) {
-      // Ein geworfener Lauf lässt nachweislich etwas offen — die Anzeige darf
-      // hier nicht auf „fertig" fallen.
-      if (mine()) this.emitCatchUpState({ inFlight: false, outstanding: true, reason: 'no-progress' })
-      throw err
     } finally {
-      if (mine()) this.activeCatchUpEmit = null
+      // Aus einer abgelösten Verbindung: weder mitzählen noch melden. Der
+      // Zähler der neuen Epoche gehört ihren eigenen Läufen.
+      //
+      // Als Bedingung, NICHT als `return` im finally — das verschluckte den
+      // geworfenen Fehler des Laufs (der Compiler hat es angezeigt).
+      if (epoch === this.connectionEpoch) {
+        this.activeCatchUps -= 1
+        // Nur der letzte laufende Durchlauf meldet den Ausgang — sonst setzte
+        // ein früh fertiger Lauf den Zustand auf „beendet", während ein
+        // anderer noch läuft.
+        if (this.activeCatchUps === 0) {
+          if (result) this.emitCatchUpResult(result)
+          // Ein geworfener Lauf lässt nachweislich etwas offen.
+          else this.emitCatchUpState({ inFlight: false, outstanding: true, reason: 'no-progress' })
+        }
+      }
     }
   }
 
@@ -1549,7 +1590,11 @@ export class LogSyncCoordinator {
    * liest, meldet „fertig", während noch Einträge fehlen.
    */
   private emitCatchUpResult(result: CatchUpResult): void {
-    if (!this.config.onCatchUpState) return
+    // KEIN Kurzschluss auf `config.onCatchUpState`: seit der Umstellung auf
+    // Subscriptions ist der Konfigurations-Hook meist gar nicht gesetzt, und
+    // Abonnenten kämen nie an einen Ausgang. Genau das ist passiert — Starts
+    // wurden zugestellt, Abschlüsse nie, und die Anzeige blieb ewig stehen.
+    // `emitCatchUpState` entscheidet selbst, ob es etwas zu melden gibt.
     const hasGaps = (result.pendingGaps?.length ?? 0) > 0
     const outstanding = !result.complete || hasGaps
     const reason = !outstanding
@@ -1968,7 +2013,7 @@ export class LogSyncCoordinator {
     // ein Lauf aktiv ist. Sonst setzte diese Zeile einen laufenden Catch-up auf
     // „beendet" und die Registry behauptete das Gegenteil dessen, was passiert.
     // Ein aktiver Lauf meldet seinen Ausgang selbst.
-    if (this.activeCatchUpEmit === null) this.emitCatchUpResult(result)
+    if (this.activeCatchUps === 0) this.emitCatchUpResult(result)
     if (truncated || pendingGaps.length > 0) {
       this.triggerGapCatchUp()
     }

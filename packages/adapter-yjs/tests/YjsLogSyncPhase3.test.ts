@@ -65,6 +65,7 @@ describe('YjsReplicationAdapter — Slice A Phase 3 (VE-5/6/7/10 + write-reject 
     messaging: InMemoryMessagingAdapter,
     deviceId: string,
     enableLogSync = true,
+    catchUpRegistry?: CatchUpRegistry,
   ): Promise<YjsReplicationAdapter> {
     const docLogStore = new InMemoryDocLogStore()
     await docLogStore.init()
@@ -79,6 +80,7 @@ describe('YjsReplicationAdapter — Slice A Phase 3 (VE-5/6/7/10 + write-reject 
       docLogStore,
       enableLogSync,
       deviceId,
+      catchUpRegistry,
     })
   }
 
@@ -115,6 +117,26 @@ describe('YjsReplicationAdapter — Slice A Phase 3 (VE-5/6/7/10 + write-reject 
   }
 
   // ── Group 4: VE-7 — content channel carries only log-entry under log sync ─────
+  it('#343 — ein Space-Catch-up meldet seinen Abschluss an die Registry', async () => {
+    const registry = new CatchUpRegistry()
+    // Mitschreiben AB DEM START: sonst kann der Test im Anfangszustand
+    // `syncing: false` durchlaufen, ohne je einen Lauf gesehen zu haben.
+    const seen: boolean[] = []
+    registry.subscribe((overview) => seen.push(overview.syncing))
+
+    const adapter = await makeAdapter(alice, aliceMessaging, DEVICE_ALICE, true, registry)
+    await adapter.start()
+    await adapter.createSpace('shared', { items: {} } as never, { name: 'Test' })
+
+    for (let i = 0; i < 40 && !(seen.includes(true) && registry.getOverview().syncing === false); i++) await wait(100)
+
+    // Der Übergang muss beobachtet worden sein, nicht nur der Endzustand.
+    expect(seen).toContain(true)
+    expect(registry.getOverview().outstanding.map((o) => [o.inFlight, o.reason])).toEqual([])
+    expect(registry.getOverview().syncing).toBe(false)
+    await adapter.stop()
+  })
+
   it('VE-7 — with enableLogSync=true, the content channel sends only log-entry/1.0 (NO content) in steady state', async () => {
     const spaceId = await createSharedSpace()
     const tally = instrumentSentTypes(aliceMessaging)
@@ -445,6 +467,23 @@ describe('YjsPersonalLogSyncAdapter — Slice A VE-6 (Personal-Doc on the log co
     })
   }
 
+  it('#343 — der PersonalDoc-Catch-up meldet seinen Abschluss an die Registry', async () => {
+    const registry = new CatchUpRegistry()
+    // Mitschreiben AB DEM START — der Anfangszustand ist bereits `false`, ein
+    // Test, der nur darauf wartet, prüfte gar nichts.
+    const seen: boolean[] = []
+    registry.subscribe((overview) => seen.push(overview.syncing))
+
+    const doc = new Y.Doc()
+    const sync = await makePersonalAdapter(doc, messaging1, DEVICE_ALICE, undefined, registry)
+    sync.start()
+    for (let i = 0; i < 40 && !(seen.includes(true) && registry.getOverview().syncing === false); i++) await wait(100)
+
+    expect(seen).toContain(true)
+    expect(registry.getOverview().outstanding.map((o) => o.reason)).toEqual([])
+    expect(registry.getOverview().syncing).toBe(false)
+  })
+
   it('#343 — nach start → destroy → start hört der neue Lebenszyklus wieder zu', async () => {
     const registry = new CatchUpRegistry()
     const doc = new Y.Doc()
@@ -465,10 +504,15 @@ describe('YjsPersonalLogSyncAdapter — Slice A VE-6 (Personal-Doc on the log co
     // Meldequelle nicht in ihm eingefroren sein.
     expect(sync.getCoordinator()).toBe(firstCoordinator)
 
-    // Der neue Lebenszyklus abonniert und ÜBERNIMMT dabei den aktuellen Stand
-    // des weiterlaufenden Catch-ups — statt ihn zu verpassen. Mit einer
-    // eingefrorenen Quelle bliebe die Registry hier für immer leer.
-    expect(registry.getOverview().outstanding.map((state) => state.docId)).toEqual([docId])
+    // Der neue Lebenszyklus hört wieder zu: ein Catch-up ab jetzt landet in
+    // der Registry. Mit einer im Coordinator eingefrorenen Quelle bliebe sie
+    // für immer still.
+    const seen: boolean[] = []
+    registry.subscribe((overview) => seen.push(overview.syncing))
+    await sync.getCoordinator()!.catchUp().catch(() => {})
+
+    expect(seen).toContain(true)
+    expect(registry.getOverview().outstanding.map((state) => state.docId)).toEqual([])
   })
 
   it('VE-6 — a local Personal-Doc change produces exactly one log-entry; the other device applies it (origin=remote) with NO re-broadcast; multi-device converges loop-free', async () => {
