@@ -333,19 +333,20 @@ describe('recoverPendingRemovals — VE-C3 crash-recovery (single home broker)',
     expect(finalizeSelfLeave).toHaveBeenCalledTimes(1)
   })
 
-  // A hard-stop admin-remove reject can never succeed by retrying, exactly like a
-  // hard-stop space-rotate reject. Reporting it as "pending" makes the self-leave
-  // repeat for ever and hides the real error behind a message about a rotation that
-  // IS confirmed (field report 2026-08-17: the same dialog error on every click
-  // while broker and client had long agreed on generation 1). AUTH_INVALID stays
-  // retryable here, mirroring the rotation path deliberately.
-  it('propagates a hard-stop admin-remove reject instead of parking it as pending', async () => {
+  // A hard admin-remove reject can never succeed by retrying. Reporting it as
+  // "pending" makes the self-leave repeat for ever and hides the real error behind
+  // a message about a rotation that IS confirmed (field report 2026-08-17: the same
+  // dialog error on every click while broker and client had long agreed on
+  // generation 1). The relay's admin-remove path really emits DOC_NOT_FOUND /
+  // AUTH_INVALID / MALFORMED_MESSAGE / INTERNAL_ERROR — the deterministic one is
+  // MALFORMED_MESSAGE: a byte-identical retry of the same frame stays malformed.
+  it('propagates a MALFORMED_MESSAGE admin-remove reject instead of parking it as pending', async () => {
     const h = await makeHarness({ ownerDid: REMOVED })
     const finalizeSelfLeave = vi.fn(async () => {})
     h.deps.adminRemove = {
       createSelfAdminRemoveFrame: async () => ({ type: 'admin-remove' }) as unknown as ControlFrame,
       sendAdminRemove: async () => {
-        throw new ControlFrameRejectedError({ code: 'AUTHOR_MISMATCH', message: 'coordinator bug class' })
+        throw new ControlFrameRejectedError({ code: 'MALFORMED_MESSAGE', message: 'Malformed admin-remove control-frame.' })
       },
       finalizeSelfLeave,
     }
@@ -354,6 +355,21 @@ describe('recoverPendingRemovals — VE-C3 crash-recovery (single home broker)',
     expect(finalizeSelfLeave).not.toHaveBeenCalled()
     // Still durably staged: the rotation is committed, only the authority hand-back is open.
     expect((await h.docLogStore.getPendingRemoval(SPACE, REMOVED))!.phase).toBe('committed')
+  })
+
+  it('keeps an AUTH_INVALID admin-remove reject retryable (the deliberately deferred product question)', async () => {
+    const h = await makeHarness({ ownerDid: REMOVED })
+    h.deps.adminRemove = {
+      createSelfAdminRemoveFrame: async () => ({ type: 'admin-remove' }) as unknown as ControlFrame,
+      sendAdminRemove: async () => {
+        throw new ControlFrameRejectedError({ code: 'AUTH_INVALID', message: 'not signed by a registered admin' })
+      },
+      finalizeSelfLeave: async () => {},
+    }
+
+    const err = await runTwoPhaseRemoval(h.deps, REMOVED).catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(RemovalPendingNotEnforcedError)
+    expect((err as RemovalPendingNotEnforcedError).stage).toBe('admin-remove')
   })
 
   it('names the admin-remove as the pending step and keeps the cause', async () => {

@@ -1381,7 +1381,7 @@ export class RelayServer {
         crypto: protocolCrypto,
       })
     } catch (err) {
-      this.sendInternalError(ws, err, 'space-rotate verification failed')
+      this.sendInternalError(ws, err, 'space-rotate verification failed', signer.spaceId)
       return
     }
 
@@ -1499,7 +1499,7 @@ export class RelayServer {
         crypto: protocolCrypto,
       })
     } catch (err) {
-      this.sendInternalError(ws, err, 'admin-add verification failed')
+      this.sendInternalError(ws, err, 'admin-add verification failed', signer.spaceId)
       return
     }
 
@@ -1583,7 +1583,7 @@ export class RelayServer {
         crypto: protocolCrypto,
       })
     } catch (err) {
-      this.sendInternalError(ws, err, 'admin-remove verification failed')
+      this.sendInternalError(ws, err, 'admin-remove verification failed', signer.spaceId)
       return
     }
 
@@ -2601,10 +2601,18 @@ export class RelayServer {
    * promotes the relay to a durable source of truth, so one bad write must not be
    * fatal.
    */
-  private sendInternalError(ws: WebSocket, err: unknown, context: string): void {
+  /**
+   * SR-4 / F1 applies here too: when the failed operation is attributable to a
+   * doc/space, pass its id as `thid` so the sender's per-docId control-frame
+   * waiter rejects immediately with the real code instead of timing out into a
+   * generic transport error (PR #347 Major 1 — verifier-internal errors on
+   * admin-change frames were the uncorrelated remnant).
+   */
+  private sendInternalError(ws: WebSocket, err: unknown, context: string, thid?: string): void {
     console.error(`[relay] ${context}:`, err)
     this.sendTo(ws, {
       type: 'error',
+      ...(thid !== undefined ? { thid } : {}),
       code: 'INTERNAL_ERROR',
       message: err instanceof Error ? err.message : context,
     })

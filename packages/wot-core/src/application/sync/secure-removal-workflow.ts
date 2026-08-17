@@ -457,9 +457,11 @@ async function driveRemovalToCompletion(
         await admin.sendAdminRemove(brokerUrl, adminFrame)
       } catch (err) {
         // Same rule as the rotation above: a reject that retrying can never satisfy
-        // must surface. Swallowing it turns an authority bug into an eternal retry
-        // whose message blames the (long-confirmed) space-rotate.
-        if (err instanceof ControlFrameRejectedError && isHardSpaceRotateReject(err.code)) throw err
+        // must surface. Swallowing it turns a deterministic reject into an eternal
+        // retry whose message blames the (long-confirmed) space-rotate. The hard
+        // set is admin-change-specific (isHardAdminChangeReject) — the rotate
+        // classifier knows none of the codes this handler really emits.
+        if (err instanceof ControlFrameRejectedError && isHardAdminChangeReject(err.code)) throw err
         throw new RemovalPendingNotEnforcedError(deps.spaceId, removal.removedDid, removal.newGeneration, {
           stage: 'admin-remove',
           cause: err,
@@ -594,11 +596,31 @@ async function handleGenerationTaken(deps: SecureRemovalDeps, removal: PendingRe
  * genuine signature/authorization failure and remains retryable here; it never
  * authorizes commit or material replacement.
  *
- * NOTE: this is deliberately NOT {@link classifyRejectDisposition} — that table is
- * the log-entry WRITE-path (VE-4) disposition, where AUTH_INVALID is not even a
- * member; reusing it here mis-classifies AUTH_INVALID as `unknown` (→ retry) and
- * silently downgrades a hard rotate reject to a pending removal.
+ * NOTE on {@link classifyRejectDisposition}: that table is the log-entry
+ * WRITE-path (VE-4) disposition. This helper borrows ONLY its `hard-stop` verdict
+ * (the bug classes AUTHOR_MISMATCH / PERSONAL_DOC_OWNER_MISMATCH); every other
+ * disposition the table would suggest (capability-re-present, restore-clone, …)
+ * deliberately does NOT apply to the rotate path — those codes stay in the
+ * pending/retry branch of the caller, and AUTH_INVALID stays retryable by the
+ * documented decision above.
  */
 function isHardSpaceRotateReject(code: ControlFrameRejectedError['code']): boolean {
   return classifyRejectDisposition(code) === 'hard-stop'
+}
+
+/**
+ * Hard rejects of the ADMIN-CHANGE frames (`admin-remove` on the self-leave
+ * hand-back). The relay's admin-change handlers really emit DOC_NOT_FOUND /
+ * AUTH_INVALID / MALFORMED_MESSAGE / INTERNAL_ERROR — none of which the
+ * write-path table classifies as hard-stop, so delegating alone would park every
+ * one of them as eternally retryable. Deterministic among them is
+ * MALFORMED_MESSAGE: a byte-identical retry of the SAME frame stays malformed
+ * for ever (the frame is minted once per removal attempt), so parking it as
+ * pending is an unbounded retry loop with no possible exit. DOC_NOT_FOUND stays
+ * retryable (a lost broker registry is re-registered by the next connection's
+ * first-publication sequence), INTERNAL_ERROR is transient by definition, and
+ * AUTH_INVALID keeps the rotate path's deliberately deferred product decision.
+ */
+function isHardAdminChangeReject(code: ControlFrameRejectedError['code']): boolean {
+  return code === 'MALFORMED_MESSAGE' || classifyRejectDisposition(code) === 'hard-stop'
 }
