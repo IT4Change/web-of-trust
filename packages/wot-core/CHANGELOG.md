@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.5.6](https://github.com/real-life-org/web-of-trust/compare/core-v0.5.5...core-v0.5.6) (2026-08-17)
+
+
+### Features
+
+* **sync:** Catch-up-Zustand beobachtbar machen ([1704181](https://github.com/real-life-org/web-of-trust/commit/1704181392ed7adab617a2eda6493c28600123a7))
+* **sync:** Catch-up-Zustand beobachtbar machen ([29ab1ed](https://github.com/real-life-org/web-of-trust/commit/29ab1ed310048797b159a18170c4a4d4478c3b0b))
+
+
+### Bug Fixes
+
+* abgelehnter admin-remove ist korrelierbar und wird nicht als Rotations-Fehler gemeldet ([06c9c70](https://github.com/real-life-org/web-of-trust/commit/06c9c708226b91f676cf409ed7c891ef209bc1b1))
+* abgelehnter admin-remove ist korrelierbar und wird nicht als Rotations-Fehler gemeldet ([3983a89](https://github.com/real-life-org/web-of-trust/commit/3983a89ea69b78bf91fe3b0e94a7f19b405c2f14))
+* admin-remove/admin-add in den controlFrameDocId-Katalog — der Self-Leave-Frame verliess das Geraet nie ([3b35291](https://github.com/real-life-org/web-of-trust/commit/3b3529196ba6dd8a9e30cd445346d353285d4025))
+* Review-Majors — INTERNAL_ERROR mit thid, admin-change-eigene Hard-Reject-Klassifikation ([b6e98bf](https://github.com/real-life-org/web-of-trust/commit/b6e98bfb712bf0ca2fa214055e71a811ba547e5f))
+* **sync:** Abschluss eines Catch-ups auch ohne Konfigurations-Hook melden ([864652c](https://github.com/real-life-org/web-of-trust/commit/864652c1e9c4d43a96eae8a7535e20c2e1e480ae))
+* **sync:** Abschluss eines Catch-ups auch ohne Konfigurations-Hook melden ([c25dd45](https://github.com/real-life-org/web-of-trust/commit/c25dd45ea08c8e7a83d753dd801a5aa1a186c5dd))
+* **sync:** Catch-up-Guard nur vom eigenen Lauf freigeben; Epochentest deterministisch ([4a481f4](https://github.com/real-life-org/web-of-trust/commit/4a481f4c6c34f09750f7781ab8f4a2020962b046))
+* **sync:** Lifecycle-Besitz, Meldereihenfolge und der First-Publication-Pfad ([5a228b0](https://github.com/real-life-org/web-of-trust/commit/5a228b0bed2a0eb3173bb4582afad85929b07ec4))
+* **sync:** Meldequelle über Neustart und Aufbau-Wettläufe hinweg gültig halten ([3bfdc0c](https://github.com/real-life-org/web-of-trust/commit/3bfdc0cea6f25b8410fb6fb544e1e5e09590d5fb))
+* **sync:** Meldezähler an die Verbindungsepoche binden ([5686bd7](https://github.com/real-life-org/web-of-trust/commit/5686bd7a7637ffe98de39fe147fec3124681b888))
+* **sync:** Publikationszustand dem eigenen Lauf zuordnen; Test über Barrieren steuern ([26b17fd](https://github.com/real-life-org/web-of-trust/commit/26b17fd47c4ab79a59d7b908d846ff7317bfa0ce))
+
 ## [0.5.5](https://github.com/real-life-org/web-of-trust/compare/core-v0.5.4...core-v0.5.5) (2026-08-05)
 
 
