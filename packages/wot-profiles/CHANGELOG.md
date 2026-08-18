@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.2.5](https://github.com/IT4Change/web-of-trust/compare/profiles-v0.2.4...profiles-v0.2.5) (2026-08-18)
+
+
+### Features
+
+* **1b3:** discovery-recovery + discovery-attestations — /a+/v Compact-JWS ListResource, Rollback, Server-Monotonie, Recovery-Workflow ([c9fa7d3](https://github.com/IT4Change/web-of-trust/commit/c9fa7d34ba6a375c288f16d439e0ae7642d482b8))
+* **1b3:** OfflineFirst verifications-dirty + wot-profiles server-monotonicity (Step 4) ([72d1f3c](https://github.com/IT4Change/web-of-trust/commit/72d1f3cf86ddc612348cdfc5ea059cb7ff632969))
+
+
+### Bug Fixes
+
+* **1b3:** address CodeRabbit + Copilot review (defensive copies, overflow guards, test hardening) ([edd7955](https://github.com/IT4Change/web-of-trust/commit/edd795581a6aef1a66fd8e81cf3a71851fdb6e31))
+* **1b3:** wot-profiles enforces mandatory integer version + always-on monotonicity (review MAJOR 1) ([7ae10c7](https://github.com/IT4Change/web-of-trust/commit/7ae10c74d6d3e0fc2a6db7bbcb10d9f0d0c9aea4))
+* **docker:** relay+profiles bauen [@web](https://github.com/web)_of_trust/core aus dem Workspace ([76adf02](https://github.com/IT4Change/web-of-trust/commit/76adf0252078e8fcdacb92136e02c99751d05ac1))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * @web_of_trust/core bumped to 0.6.0
+
 ## [0.2.4](https://github.com/real-life-org/web-of-trust/compare/profiles-v0.2.3...profiles-v0.2.4) (2026-08-17)
 
 
