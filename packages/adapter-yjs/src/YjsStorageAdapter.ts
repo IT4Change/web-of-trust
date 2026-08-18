@@ -72,7 +72,7 @@ function contactFromDoc(did: string, doc: ContactDoc): Contact {
 /**
  * Alle Kontakte eines Doc-Schnappschusses, Schlüssel als Identität.
  *
- * Einträge ohne brauchbaren Schlüssel bleiben aussen vor. `Object.keys` liefert
+ * Einträge ohne brauchbaren Schlüssel bleiben aussen vor. `Object.entries` liefert
  * Strings, also auch `"undefined"` — genau das entsteht, wenn irgendwo
  * `contacts[undefined] = …` geschrieben wurde. So ein Eintrag ist kein Kontakt,
  * sondern ein Schaden; er darf nicht als einer nach oben gereicht werden.
@@ -86,10 +86,20 @@ function contactsFromDoc(contacts: Record<string, ContactDoc>): Contact[] {
   return result
 }
 
+/**
+ * Taugt dieser Schlüssel als Kontakt-Identität?
+ *
+ * Ein Schlüssel ist brauchbar, wenn man einen Kontakt darunter wiederfinden
+ * kann. `"   "` kann man nicht — er ist genauso unadressierbar wie der leere
+ * Schlüssel, nur schwerer zu sehen. Und `"undefined"`/`"null"` sind keine
+ * Identitäten, sondern die Spur eines verlorenen Wertes.
+ */
 function isUsableDid(did: string): boolean {
   // `did` ist getypt, kommt hier aber genau dann an, wenn der Typ nicht
   // gehalten hat — die Prüfung darf daran nicht selbst scheitern.
-  return typeof did === 'string' && did.length > 0 && did !== 'undefined' && did !== 'null'
+  if (typeof did !== 'string') return false
+  const trimmed = did.trim()
+  return trimmed.length > 0 && trimmed !== 'undefined' && trimmed !== 'null'
 }
 
 /**
@@ -102,7 +112,7 @@ function isUsableDid(did: string): boolean {
  */
 function assertUsableDid(did: string, operation: string): void {
   if (!isUsableDid(did)) {
-    throw new Error(`${operation}: contact DID is required, got ${JSON.stringify(did)}`)
+    throw new Error(`${operation}: contact DID is required, got ${String(did)}`)
   }
 }
 
@@ -226,6 +236,11 @@ export class YjsStorageAdapter implements StorageAdapter, ReactiveStorageAdapter
   }
 
   async getContact(did: string): Promise<Contact | null> {
+    // Dieselbe Prüfung wie im Sammel- und im reaktiven Lesepfad. Ohne sie
+    // liefert der Einzelabruf genau den beschädigten Eintrag zurück, den die
+    // anderen beiden verschweigen — die Invariante gilt sonst nur dort, wo
+    // niemand gezielt nachfragt.
+    if (!isUsableDid(did)) return null
     const doc = getPersonalDoc()
     const c = doc.contacts[did]
     return c ? contactFromDoc(did, c) : null

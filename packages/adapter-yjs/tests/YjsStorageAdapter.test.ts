@@ -210,6 +210,27 @@ describe('YjsStorageAdapter', () => {
       expect(await adapter.getContacts()).toHaveLength(0)
     })
 
+    it('gibt beim Einzelabruf einen unbrauchbaren Schlüssel nicht heraus', async () => {
+      // Sonst gilt die Invariante nur dort, wo niemand gezielt nachfragt: der
+      // Sammelpfad verschweigt den Schaden, der Einzelabruf reicht ihn weiter.
+      writeRawContact('undefined', { publicKey: 'k', status: 'active', createdAt: '', updatedAt: '' })
+      writeRawContact('   ', { publicKey: 'k', status: 'active', createdAt: '', updatedAt: '' })
+
+      expect(await adapter.getContact('undefined')).toBeNull()
+      expect(await adapter.getContact('   ')).toBeNull()
+      expect(await adapter.getContact('')).toBeNull()
+    })
+
+    it('behandelt einen Schlüssel aus Leerzeichen wie einen leeren', async () => {
+      // `"   "` ist genauso unadressierbar wie `""`, nur schwerer zu sehen.
+      writeRawContact('   ', { publicKey: 'k', status: 'active', createdAt: '', updatedAt: '' })
+      await adapter.addContact(createTestContact())
+
+      expect((await adapter.getContacts()).map(c => c.did)).toEqual([OTHER_DID])
+      expect(adapter.watchContacts().getValue().map(c => c.did)).toEqual([OTHER_DID])
+      await expect(adapter.addContact(createTestContact({ did: '   ' }))).rejects.toThrow(/DID is required/)
+    })
+
     it('gilt genauso für den reaktiven Lesepfad', async () => {
       // watchContacts hatte dieselbe Zeile ein zweites Mal — die Kontaktliste
       // liest über diesen Pfad, nicht über getContacts().
