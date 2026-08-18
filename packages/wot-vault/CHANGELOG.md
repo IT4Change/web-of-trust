@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.1.8](https://github.com/IT4Change/web-of-trust/compare/vault-v0.1.7...vault-v0.1.8) (2026-08-18)
+
+
+### Bug Fixes
+
+* **1b3:** publish empty /v and /a on offline-retry; untrack tsbuildinfo (Codex review [#198](https://github.com/IT4Change/web-of-trust/issues/198)) ([6f33008](https://github.com/IT4Change/web-of-trust/commit/6f3300886bdf9f7225e928810f3278f2b6e29655))
+* **1b3:** re-derive isVerification from stored vcJws on storage read (review BLOCKER) ([6f3420f](https://github.com/IT4Change/web-of-trust/commit/6f3420ff44004ca8c1a57f6825c83ef5cafb8e84))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * @web_of_trust/core bumped to 0.6.0
+
 ## [0.1.7](https://github.com/real-life-org/web-of-trust/compare/vault-v0.1.6...vault-v0.1.7) (2026-08-17)
 
 
