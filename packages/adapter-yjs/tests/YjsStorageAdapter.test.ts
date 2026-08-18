@@ -4,6 +4,7 @@ import {
   initYjsPersonalDoc,
   resetYjsPersonalDoc,
   deleteYjsPersonalDocDB,
+  changeYjsPersonalDoc,
 } from '../src/YjsPersonalDocManager'
 import type { PublicIdentitySession } from '../../wot-core/src/application/identity'
 import { createTestIdentity } from '../../wot-core/tests/helpers/identity-session'
@@ -139,6 +140,110 @@ describe('YjsStorageAdapter', () => {
 
       await adapter.removeContact(OTHER_DID)
       expect(await adapter.getContacts()).toHaveLength(0)
+    })
+  })
+
+  // --- Contacts: der Schlüssel IST die Identität ---
+
+  describe('Kontakt-Identität', () => {
+    /** Schreibt roh in die Kontakt-Map, am Adapter vorbei. */
+    function writeRawContact(key: string, record: Record<string, unknown>): void {
+      changeYjsPersonalDoc(doc => {
+        ;(doc.contacts as Record<string, unknown>)[key] = record
+      })
+    }
+
+    it('liest die DID aus dem Schlüssel, nicht aus dem Feld', async () => {
+      // Zwei Kopien derselben Aussage können auseinanderlaufen. Verbindlich ist
+      // die, unter der der Eintrag liegt — sonst zeigt die Anwendung eine
+      // Identität an, unter der sie den Kontakt nie wiederfindet.
+      writeRawContact(OTHER_DID, {
+        did: 'did:key:z6MkStaleCopy',
+        publicKey: 'k',
+        status: 'active',
+        createdAt: '2026-01-01T00:00:00.000Z',
+        updatedAt: '2026-01-01T00:00:00.000Z',
+      })
+
+      const [contact] = await adapter.getContacts()
+      expect(contact.did).toBe(OTHER_DID)
+    })
+
+    it('liefert eine löschbare DID, auch wenn das Feld fehlt', async () => {
+      writeRawContact(OTHER_DID, {
+        publicKey: 'k',
+        status: 'active',
+        createdAt: '2026-01-01T00:00:00.000Z',
+        updatedAt: '2026-01-01T00:00:00.000Z',
+      })
+
+      const [contact] = await adapter.getContacts()
+      // Das ist die Bedingung, an der die Kontaktliste abgestürzt ist: ein
+      // `undefined` hier trifft jeden Aufrufer, der eine DID erwartet.
+      expect(contact.did).toBe(OTHER_DID)
+
+      await adapter.removeContact(contact.did)
+      expect(await adapter.getContacts()).toHaveLength(0)
+    })
+
+    it('reicht einen Eintrag unter dem Schlüssel „undefined" nicht als Kontakt nach oben', async () => {
+      // So sieht der Schaden aus, den `contacts[undefined] = …` hinterlässt:
+      // ein Eintrag, den niemand adressieren kann. Er darf die Liste nicht
+      // vergiften — der Rest muss weiter angezeigt werden.
+      writeRawContact('undefined', { publicKey: 'k', status: 'active', createdAt: '', updatedAt: '' })
+      await adapter.addContact(createTestContact())
+
+      const contacts = await adapter.getContacts()
+      expect(contacts.map(c => c.did)).toEqual([OTHER_DID])
+    })
+
+    it('weist eine fehlende DID beim Schreiben ab, statt sie abzulegen', async () => {
+      // Ein solcher Eintrag überlebt jeden Reload und ist nicht mehr löschbar.
+      // Der Fehler zeigt auf den Aufrufer, der die DID verloren hat.
+      await expect(
+        adapter.addContact(createTestContact({ did: undefined as unknown as string })),
+      ).rejects.toThrow(/DID is required/)
+      await expect(
+        adapter.updateContact(createTestContact({ did: '' })),
+      ).rejects.toThrow(/DID is required/)
+
+      expect(await adapter.getContacts()).toHaveLength(0)
+    })
+
+    it('gibt beim Einzelabruf einen unbrauchbaren Schlüssel nicht heraus', async () => {
+      // Sonst gilt die Invariante nur dort, wo niemand gezielt nachfragt: der
+      // Sammelpfad verschweigt den Schaden, der Einzelabruf reicht ihn weiter.
+      writeRawContact('undefined', { publicKey: 'k', status: 'active', createdAt: '', updatedAt: '' })
+      writeRawContact('   ', { publicKey: 'k', status: 'active', createdAt: '', updatedAt: '' })
+
+      expect(await adapter.getContact('undefined')).toBeNull()
+      expect(await adapter.getContact('   ')).toBeNull()
+      expect(await adapter.getContact('')).toBeNull()
+    })
+
+    it('behandelt einen Schlüssel aus Leerzeichen wie einen leeren', async () => {
+      // `"   "` ist genauso unadressierbar wie `""`, nur schwerer zu sehen.
+      writeRawContact('   ', { publicKey: 'k', status: 'active', createdAt: '', updatedAt: '' })
+      await adapter.addContact(createTestContact())
+
+      expect((await adapter.getContacts()).map(c => c.did)).toEqual([OTHER_DID])
+      expect(adapter.watchContacts().getValue().map(c => c.did)).toEqual([OTHER_DID])
+      await expect(adapter.addContact(createTestContact({ did: '   ' }))).rejects.toThrow(/DID is required/)
+    })
+
+    it('gilt genauso für den reaktiven Lesepfad', async () => {
+      // watchContacts hatte dieselbe Zeile ein zweites Mal — die Kontaktliste
+      // liest über diesen Pfad, nicht über getContacts().
+      writeRawContact(OTHER_DID, {
+        did: undefined,
+        publicKey: 'k',
+        status: 'active',
+        createdAt: '',
+        updatedAt: '',
+      })
+
+      const watched = adapter.watchContacts().getValue()
+      expect(watched.map(c => c.did)).toEqual([OTHER_DID])
     })
   })
 

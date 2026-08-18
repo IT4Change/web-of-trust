@@ -41,9 +41,23 @@ export const DISMISSED_NOTIFICATION_TTL_MS = 60 * 24 * 60 * 60 * 1000
 
 // --- Helper: convert between doc format and domain types ---
 
-function contactFromDoc(doc: ContactDoc): Contact {
+/**
+ * Ein Kontakt aus einem Map-Eintrag — **die Identität ist der Schlüssel**.
+ *
+ * Die Kontakt-Map ist nach DID geschlüsselt und trägt die DID zusätzlich im
+ * Datensatz. Zwei Kopien derselben Aussage können auseinanderlaufen, und nur
+ * eine davon ist verbindlich: unter dem Schlüssel liegt der Eintrag, unter dem
+ * Schlüssel wird er gelesen (`getContact`), geschrieben und gelöscht
+ * (`removeContact`). Läse man die DID aus dem Feld, könnte die Anwendung einen
+ * Kontakt anzeigen, den sie anschliessend nicht mehr löschen kann — oder gar
+ * keine (`undefined`), was jeden Aufrufer trifft, der sie für vorhanden hält.
+ *
+ * Das Feld bleibt geschrieben (Datensätze sind für sich lesbar und der
+ * Automerge-Pfad kennt es), wird beim Lesen aber nicht mehr geglaubt.
+ */
+function contactFromDoc(did: string, doc: ContactDoc): Contact {
   return {
-    did: doc.did,
+    did,
     publicKey: doc.publicKey,
     ...(doc.name != null ? { name: doc.name } : {}),
     ...(doc.avatar != null ? { avatar: doc.avatar } : {}),
@@ -52,6 +66,53 @@ function contactFromDoc(doc: ContactDoc): Contact {
     ...(doc.verifiedAt != null ? { verifiedAt: doc.verifiedAt } : {}),
     createdAt: doc.createdAt,
     updatedAt: doc.updatedAt,
+  }
+}
+
+/**
+ * Alle Kontakte eines Doc-Schnappschusses, Schlüssel als Identität.
+ *
+ * Einträge ohne brauchbaren Schlüssel bleiben aussen vor. `Object.entries` liefert
+ * Strings, also auch `"undefined"` — genau das entsteht, wenn irgendwo
+ * `contacts[undefined] = …` geschrieben wurde. So ein Eintrag ist kein Kontakt,
+ * sondern ein Schaden; er darf nicht als einer nach oben gereicht werden.
+ */
+function contactsFromDoc(contacts: Record<string, ContactDoc>): Contact[] {
+  const result: Contact[] = []
+  for (const [did, doc] of Object.entries(contacts)) {
+    if (!isUsableDid(did)) continue
+    result.push(contactFromDoc(did, doc))
+  }
+  return result
+}
+
+/**
+ * Taugt dieser Schlüssel als Kontakt-Identität?
+ *
+ * Ein Schlüssel ist brauchbar, wenn man einen Kontakt darunter wiederfinden
+ * kann. `"   "` kann man nicht — er ist genauso unadressierbar wie der leere
+ * Schlüssel, nur schwerer zu sehen. Und `"undefined"`/`"null"` sind keine
+ * Identitäten, sondern die Spur eines verlorenen Wertes.
+ */
+function isUsableDid(did: string): boolean {
+  // `did` ist getypt, kommt hier aber genau dann an, wenn der Typ nicht
+  // gehalten hat — die Prüfung darf daran nicht selbst scheitern.
+  if (typeof did !== 'string') return false
+  const trimmed = did.trim()
+  return trimmed.length > 0 && trimmed !== 'undefined' && trimmed !== 'null'
+}
+
+/**
+ * Schreibseite: eine unbrauchbare DID wird abgewiesen, nicht abgelegt.
+ *
+ * `doc.contacts[undefined] = …` legt einen Eintrag unter dem Schlüssel
+ * `"undefined"` an. Der ist nicht auffindbar, nicht löschbar und überlebt jeden
+ * Reload — der Lesepfad kann ihn danach nur noch verschweigen. Ein Fehler hier
+ * zeigt stattdessen auf den Aufrufer, der die DID verloren hat.
+ */
+function assertUsableDid(did: string, operation: string): void {
+  if (!isUsableDid(did)) {
+    throw new Error(`${operation}: contact DID is required, got ${String(did)}`)
   }
 }
 
@@ -153,6 +214,7 @@ export class YjsStorageAdapter implements StorageAdapter, ReactiveStorageAdapter
   // --- Contacts ---
 
   async addContact(contact: Contact): Promise<void> {
+    assertUsableDid(contact.did, 'addContact')
     changePersonalDoc(doc => {
       doc.contacts[contact.did] = {
         did: contact.did,
@@ -170,16 +232,22 @@ export class YjsStorageAdapter implements StorageAdapter, ReactiveStorageAdapter
 
   async getContacts(): Promise<Contact[]> {
     const doc = getPersonalDoc()
-    return (Object.values(doc.contacts) as ContactDoc[]).map(contactFromDoc)
+    return contactsFromDoc(doc.contacts as Record<string, ContactDoc>)
   }
 
   async getContact(did: string): Promise<Contact | null> {
+    // Dieselbe Prüfung wie im Sammel- und im reaktiven Lesepfad. Ohne sie
+    // liefert der Einzelabruf genau den beschädigten Eintrag zurück, den die
+    // anderen beiden verschweigen — die Invariante gilt sonst nur dort, wo
+    // niemand gezielt nachfragt.
+    if (!isUsableDid(did)) return null
     const doc = getPersonalDoc()
     const c = doc.contacts[did]
-    return c ? contactFromDoc(c) : null
+    return c ? contactFromDoc(did, c) : null
   }
 
   async updateContact(contact: Contact): Promise<void> {
+    assertUsableDid(contact.did, 'updateContact')
     changePersonalDoc(doc => {
       doc.contacts[contact.did] = {
         did: contact.did,
@@ -423,7 +491,7 @@ export class YjsStorageAdapter implements StorageAdapter, ReactiveStorageAdapter
   watchContacts(): Subscribable<Contact[]> {
     const getSnapshot = (): Contact[] => {
       const doc = getPersonalDoc()
-      return (Object.values(doc.contacts) as ContactDoc[]).map(contactFromDoc)
+      return contactsFromDoc(doc.contacts as Record<string, ContactDoc>)
     }
 
     let snapshot = getSnapshot()
