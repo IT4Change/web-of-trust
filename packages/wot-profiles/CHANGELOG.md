@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.2.6](https://github.com/real-life-org/web-of-trust/compare/profiles-v0.2.5...profiles-v0.2.6) (2026-09-11)
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * @web_of_trust/core bumped to 0.5.8
+
 ## [0.2.5](https://github.com/real-life-org/web-of-trust/compare/profiles-v0.2.4...profiles-v0.2.5) (2026-09-11)
 
 

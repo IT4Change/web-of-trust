@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.2.8](https://github.com/real-life-org/web-of-trust/compare/adapter-automerge-v0.2.7...adapter-automerge-v0.2.8) (2026-09-11)
+
+
+### Bug Fixes
+
+* **core:** Secure Removal — atomares Staging und materialgebundene Bestätigung ([#366](https://github.com/real-life-org/web-of-trust/issues/366)) ([566ba41](https://github.com/real-life-org/web-of-trust/commit/566ba410a3c674f72ce1a92f84264f409864f702))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * devDependencies
+    * @web_of_trust/core bumped to 0.5.8
+  * peerDependencies
+    * @web_of_trust/core bumped to 0.5.8
+
 ## [0.2.7](https://github.com/real-life-org/web-of-trust/compare/adapter-automerge-v0.2.6...adapter-automerge-v0.2.7) (2026-09-11)
 
 
