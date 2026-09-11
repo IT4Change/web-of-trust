@@ -90,8 +90,9 @@ export interface ReplicationAdapter {
    * `admission` identifiziert die Aufnahme, auf die diese Mitgliedschaft
    * zurueckgeht (RLS-Spec 12 Regel 4), und ist identisch mit
    * `SpaceInfo.admission` nach dem Apply: eine Wiederaufnahme nach Entfernung
-   * traegt eine andere Kennung als die vorherige Aufnahme, eine blosse
-   * Schluesselrotation aendert sie nicht.
+   * traegt eine hoehere Generation als die vorherige Aufnahme (die Entfernung
+   * rotiert), eine blosse Schluesselrotation aendert sie nicht, und eine zweite
+   * Einladung an ein bestehendes Mitglied traegt dieselbe Generation.
    */
   onSpaceInvite?(callback: (invite: IncomingSpaceInvite) => void): () => void
 

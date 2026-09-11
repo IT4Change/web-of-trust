@@ -10,7 +10,7 @@ import {
   buildSpaceInviteBody, applySpaceInviteBody, buildKeyRotationBody, applyKeyRotationBody,
   deliverInboxMessage, receiveInboxMessage,
   runTwoPhaseRemoval, recoverPendingRemovals,
-  openLifecycleLease, deriveAdmission,
+  openLifecycleLease, compareAdmission,
 } from '@web_of_trust/core/application'
 import type { LocalImpact, SecureRemovalDeps, LifecycleLease } from '@web_of_trust/core/application'
 import type {
@@ -551,8 +551,19 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
     const persisted = await this.metadataStorage.loadAllSpaceMetadata()
     let changed = false
     for (const meta of persisted) {
-      // Skip spaces we already know about
-      if (this.spaces.has(meta.info.id)) continue
+      // Skip spaces we already know about — bis auf die Aufnahme-Kennung:
+      // RLS-Spec 12 Regel 4 laesst sie ueber den Metadata-Sync auf Geraete
+      // wandern, die die Wiederaufnahme-Einladung nie gesehen haben. MONOTON:
+      // nur eine hoehere Generation wird uebernommen, ein per LWW
+      // zurueckgeschriebener alter Stand dreht nichts zurueck.
+      const loadedState = this.spaces.get(meta.info.id)
+      if (loadedState) {
+        if (meta.info.admission && compareAdmission(meta.info.admission, loadedState.info.admission ?? { keyGeneration: -1 }) > 0) {
+          loadedState.info = { ...loadedState.info, admission: meta.info.admission }
+          changed = true
+        }
+        continue
+      }
 
       // Skip spaces that don't match the filter (cross-app isolation)
       if (this.spaceFilter && !this.spaceFilter(meta.info as SpaceInfo)) continue
@@ -1161,9 +1172,9 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
       admins: [myDid],
       createdAt: new Date().toISOString(),
     }
-    // RLS-Spec 12 Regel 4: Aufnahme-Kennung des Creators = eigene Capability der
-    // Genesis-Generation 0 (gerade von createSpaceKey gespeichert).
-    if (!info.admission) info.admission = await lease.step(deriveAdmission({ crypto: this.crypto, keyPort: this.keyManagement, spaceId, generation: 0 }))
+    // RLS-Spec 12 Regel 4: der Creator wird mit der Genesis-Generation 0
+    // aufgenommen — deterministisch auf jedem Geraet.
+    if (!info.admission) info.admission = { keyGeneration: 0 }
 
     let spaceState: SpaceState
     if (resumed) {
@@ -3436,7 +3447,7 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
         // via _persistSpaceMetadata below; mirror it here.
         // RLS-Spec 12 Regel 4: dieser Zweig IST die Wiederaufnahme — neue
         // Einladung, neue Aufnahme-Kennung (vor dem Metadata-Save gesetzt).
-        existing.info.admission = await deriveAdmission({ crypto: this.crypto, keyPort: this.keyManagement, spaceId, generation: body.currentKeyGeneration })
+        existing.info.admission = { keyGeneration: body.currentKeyGeneration }
         await this._persistSpaceMetadata(existing)
         this.emitSpaceInvite({ spaceId, spaceName: existing.info.name, fromDid: decoded.senderDid, inviteMessageId: decoded.outerId, admission: existing.info.admission })
         return { kind: 'applied', durable: true }
@@ -3498,7 +3509,7 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
         createdAt: new Date().toISOString(),
         // RLS-Spec 12 Regel 4: Kennung dieser Aufnahme = eigene Capability der
         // Invite-Generation (von applySpaceInviteBody gespeichert).
-        admission: await deriveAdmission({ crypto: this.crypto, keyPort: this.keyManagement, spaceId, generation: body.currentKeyGeneration }),
+        admission: { keyGeneration: body.currentKeyGeneration },
       }
 
       const spaceState: SpaceState = {

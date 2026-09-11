@@ -1,35 +1,67 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import * as Y from 'yjs'
 import type { PublicIdentitySession } from '../../wot-core/src/application/identity'
 import { createTestIdentity } from '../../wot-core/tests/helpers/identity-session'
-import { InMemoryMessagingAdapter, InMemoryKeyManagementAdapter, InMemorySpaceMetadataStorage, InMemoryCompactStore } from '@web_of_trust/core/adapters'
-import { isSameAdmission, compareAdmission } from '@web_of_trust/core/application'
-import type { IncomingSpaceInvite, SpaceAdmission } from '@web_of_trust/core/types'
+import {
+  InMemoryMessagingAdapter, InMemoryKeyManagementAdapter, InMemoryCompactStore,
+  PersonalDocSpaceMetadataStorage,
+} from '@web_of_trust/core/adapters'
+import { isSameAdmission, compareAdmission, buildSpaceInviteBody, deliverInboxMessage } from '@web_of_trust/core/application'
+import { WebCryptoProtocolCryptoAdapter } from '@web_of_trust/core/protocol-adapters'
+import { SPACE_INVITE_MESSAGE_TYPE } from '@web_of_trust/core/protocol'
+import type { IncomingSpaceInvite, SpaceInfo } from '@web_of_trust/core/types'
 import { YjsReplicationAdapter } from '../src/YjsReplicationAdapter'
 
 // RLS-Spec 12 Regel 4: jede Aufnahme in einen Space ist durch ihre Einladung
-// identifiziert. Die Kennung wandert als SpaceInfo.admission /
-// IncomingSpaceInvite.admission durch Adapter und Persistenz — eine
-// Wiederaufnahme ist damit auch fuer ein Geraet erkennbar, das Entfernung und
-// Wiederaufnahme offline verpasst hat.
+// identifiziert — hier durch die Schluesselgeneration, mit der aufgenommen
+// wurde. Eine Entfernung rotiert (Sync 005), eine Wiederaufnahme traegt also
+// zwingend eine hoehere Generation; eine blosse Rotation aendert nichts.
 
 const wait = (ms = 300) => new Promise((r) => setTimeout(r, ms))
+const BROKER_URLS = ['wss://broker.example.com']
+const protocolCrypto = new WebCryptoProtocolCryptoAdapter()
 interface TestDoc { items: Record<string, { title: string }> }
+
+/**
+ * Metadata im PersonalDoc — der ECHTE Serializer. Zwei Storages ueber demselben
+ * Y.Doc modellieren zwei Geraete derselben Identitaet: was Geraet A schreibt,
+ * liest Geraet B als KOPIE (keine geteilten Objektreferenzen wie beim
+ * InMemory-Store).
+ */
+function metadataInPersonalDoc(doc: Y.Doc): PersonalDocSpaceMetadataStorage {
+  const roots = ['spaces', 'groupKeys', 'capabilitySigningSeeds']
+  const read = () => Object.fromEntries(roots.map((root) => [root, doc.getMap(root).toJSON()]))
+  const write = (state: Record<string, Record<string, unknown>>) => {
+    doc.transact(() => {
+      for (const root of roots) {
+        const map = doc.getMap(root)
+        map.clear()
+        for (const [key, value] of Object.entries(state[root] ?? {})) map.set(key, value)
+      }
+    }, 'local')
+  }
+  return new PersonalDocSpaceMetadataStorage({
+    getPersonalDoc: read,
+    changePersonalDoc: (change) => { const s = read(); change(s); write(s) },
+  })
+}
 
 describe('Yjs Space-Admission (Aufnahme-Kennung)', () => {
   let alice: PublicIdentitySession, bob: PublicIdentitySession, carol: PublicIdentitySession
-  let aliceMsg: InMemoryMessagingAdapter, bobMsg: InMemoryMessagingAdapter, carolMsg: InMemoryMessagingAdapter
+  let aliceMsg: InMemoryMessagingAdapter
+  let aliceKeys: InMemoryKeyManagementAdapter
   let aliceAdapter: YjsReplicationAdapter
   const started: YjsReplicationAdapter[] = []
 
   function makeAdapter(identity: PublicIdentitySession, messaging: InMemoryMessagingAdapter, opts?: {
     keyManagement?: InMemoryKeyManagementAdapter
-    metadataStorage?: InMemorySpaceMetadataStorage
+    metadataStorage?: PersonalDocSpaceMetadataStorage
     compactStore?: InMemoryCompactStore
   }): YjsReplicationAdapter {
     const adapter = new YjsReplicationAdapter({
       identity,
       messaging,
-      brokerUrls: ['wss://broker.example.com'],
+      brokerUrls: BROKER_URLS,
       keyManagement: opts?.keyManagement ?? new InMemoryKeyManagementAdapter(),
       metadataStorage: opts?.metadataStorage,
       compactStore: opts?.compactStore,
@@ -38,18 +70,38 @@ describe('Yjs Space-Admission (Aufnahme-Kennung)', () => {
     return adapter
   }
 
+  /** Eine spec-konforme Einladung an bob, gebaut aus Alices aktuellem Key-Material. */
+  async function sendInviteToBob(spaceId: string): Promise<void> {
+    const body = await buildSpaceInviteBody({
+      keyPort: aliceKeys, spaceId, recipientDid: bob.getDid(),
+      brokerUrls: BROKER_URLS, adminDids: [alice.getDid()],
+    })
+    const envelope = await deliverInboxMessage({
+      type: SPACE_INVITE_MESSAGE_TYPE,
+      body: body as unknown as Record<string, unknown>,
+      from: alice.getDid(),
+      to: bob.getDid(),
+      recipientEncryptionPublicKey: await bob.getEncryptionPublicKeyBytes(),
+      sign: (input) => alice.signEd25519(input),
+      crypto: protocolCrypto,
+    })
+    await aliceMsg.send(envelope)
+  }
+
+  /** Der geladene (In-RAM) Stand eines Space im Adapter. */
+  function loadedInfo(adapter: YjsReplicationAdapter, spaceId: string): SpaceInfo {
+    return (adapter as unknown as { spaces: Map<string, { info: SpaceInfo }> }).spaces.get(spaceId)!.info
+  }
+
   beforeEach(async () => {
     InMemoryMessagingAdapter.resetAll()
     alice = (await createTestIdentity('alice-pass')).identity
     bob = (await createTestIdentity('bob-pass')).identity
     carol = (await createTestIdentity('carol-pass')).identity
     aliceMsg = new InMemoryMessagingAdapter()
-    bobMsg = new InMemoryMessagingAdapter()
-    carolMsg = new InMemoryMessagingAdapter()
     await aliceMsg.connect(alice.getDid())
-    await bobMsg.connect(bob.getDid())
-    await carolMsg.connect(carol.getDid())
-    aliceAdapter = makeAdapter(alice, aliceMsg)
+    aliceKeys = new InMemoryKeyManagementAdapter()
+    aliceAdapter = makeAdapter(alice, aliceMsg, { keyManagement: aliceKeys })
     await aliceAdapter.start()
   })
 
@@ -59,15 +111,27 @@ describe('Yjs Space-Admission (Aufnahme-Kennung)', () => {
     for (const id of [alice, bob, carol]) { try { await id.deleteStoredIdentity() } catch {} }
   })
 
-  it('e) Creator: admission trägt Generation 0 und die eigene Capability', async () => {
+  it('Creator: Aufnahme mit der Genesis-Generation 0', async () => {
     const space = await aliceAdapter.createSpace<TestDoc>('shared', { items: {} }, { name: 'S', members: [alice.getDid()] })
-    expect(space.admission).toBeDefined()
-    expect(space.admission!.keyGeneration).toBe(0)
-    expect(space.admission!.capabilityId).toMatch(/^[0-9a-f]{64}$/)
-    expect((await aliceAdapter.getSpace(space.id))!.admission).toEqual(space.admission)
+    expect(space.admission).toEqual({ keyGeneration: 0 })
+    expect((await aliceAdapter.getSpace(space.id))!.admission).toEqual({ keyGeneration: 0 })
   })
 
-  it('a) Einladung annehmen: IncomingSpaceInvite.admission == SpaceInfo.admission, Generation = Invite-Generation', async () => {
+  it('Creator auf zwei Geräten (deterministischer privater Space): beide { keyGeneration: 0 }', async () => {
+    // Zweites Geraet derselben Identitaet, eigene durable Stores — der Wert
+    // haengt an der Generation, nicht an lokalem Schluessel- oder Zeitzustand.
+    const deviceB = makeAdapter(alice, new InMemoryMessagingAdapter(), { keyManagement: new InMemoryKeyManagementAdapter() })
+    await deviceB.start()
+    const spaceA = await aliceAdapter.openOrCreateDeterministicPrivateSpace<TestDoc>({ items: {} }, { name: 'Privat', appTag: 'rls-private' })
+    const spaceB = await deviceB.openOrCreateDeterministicPrivateSpace<TestDoc>({ items: {} }, { name: 'Privat', appTag: 'rls-private' })
+    expect(spaceA.id).toBe(spaceB.id)
+    expect(spaceA.admission).toEqual({ keyGeneration: 0 })
+    expect(spaceB.admission).toEqual(spaceA.admission)
+  })
+
+  it('Einladung annehmen: IncomingSpaceInvite.admission == SpaceInfo.admission == Invite-Generation', async () => {
+    const bobMsg = new InMemoryMessagingAdapter()
+    await bobMsg.connect(bob.getDid())
     const receiver = makeAdapter(bob, bobMsg)
     await receiver.start()
     const events: IncomingSpaceInvite[] = []
@@ -78,15 +142,13 @@ describe('Yjs Space-Admission (Aufnahme-Kennung)', () => {
     await wait()
 
     expect(events).toHaveLength(1)
-    expect(events[0].admission.keyGeneration).toBe(0)
-    expect(events[0].admission.capabilityId).toMatch(/^[0-9a-f]{64}$/)
-    const bobSpace = await receiver.getSpace(space.id)
-    expect(bobSpace!.admission).toEqual(events[0].admission)
-    // Die Kennung ist per Mitglied ausgestellt — Bob erbt NICHT Alices Kennung.
-    expect(bobSpace!.admission!.capabilityId).not.toBe(space.admission!.capabilityId)
+    expect(events[0].admission).toEqual({ keyGeneration: 0 })
+    expect((await receiver.getSpace(space.id))!.admission).toEqual(events[0].admission)
   })
 
-  it('b) Entfernung + erneute Einladung: neue admission, echt größer als die alte', async () => {
+  it('Entfernung + erneute Einladung: neue Kennung, echt größer als die alte', async () => {
+    const bobMsg = new InMemoryMessagingAdapter()
+    await bobMsg.connect(bob.getDid())
     const receiver = makeAdapter(bob, bobMsg)
     await receiver.start()
     const events: IncomingSpaceInvite[] = []
@@ -96,20 +158,42 @@ describe('Yjs Space-Admission (Aufnahme-Kennung)', () => {
     await aliceAdapter.addMember(space.id, bob.getDid(), await bob.getEncryptionPublicKeyBytes())
     await wait()
     const first = events[0].admission
+    expect(first).toEqual({ keyGeneration: 0 })
 
     await aliceAdapter.removeMember(space.id, bob.getDid())
     await wait()
     await aliceAdapter.addMember(space.id, bob.getDid(), await bob.getEncryptionPublicKeyBytes())
     await wait()
 
-    expect(events.length).toBeGreaterThanOrEqual(2)
     const second = events[events.length - 1].admission
     expect(isSameAdmission(first, second)).toBe(false)
     expect(compareAdmission(second, first)).toBeGreaterThan(0)
     expect((await receiver.getSpace(space.id))!.admission).toEqual(second)
   })
 
-  it('c) Rotation ohne Wiederaufnahme (anderes Mitglied entfernt) lässt admission unverändert', async () => {
+  it('Doppel-Einladung an ein bestehendes Mitglied (gleiche Generation) ist KEINE Wiederaufnahme', async () => {
+    const bobMsg = new InMemoryMessagingAdapter()
+    await bobMsg.connect(bob.getDid())
+    const receiver = makeAdapter(bob, bobMsg)
+    await receiver.start()
+
+    const space = await aliceAdapter.createSpace<TestDoc>('shared', { items: {} }, { name: 'S', members: [alice.getDid()] })
+    await aliceAdapter.addMember(space.id, bob.getDid(), await bob.getEncryptionPublicKeyBytes())
+    await wait()
+    const before = (await receiver.getSpace(space.id))!.admission!
+
+    // Zweite Einladung ohne vorherige Entfernung: gleiche Generation.
+    await sendInviteToBob(space.id)
+    await wait()
+
+    const after = (await receiver.getSpace(space.id))!.admission!
+    expect(isSameAdmission(before, after)).toBe(true)
+    expect(after).toEqual({ keyGeneration: 0 })
+  })
+
+  it('Rotation ohne Wiederaufnahme (anderes Mitglied entfernt) lässt die Kennung unverändert', async () => {
+    const bobMsg = new InMemoryMessagingAdapter()
+    await bobMsg.connect(bob.getDid())
     const receiver = makeAdapter(bob, bobMsg)
     await receiver.start()
     const bobKeys = (receiver as unknown as { keyManagement: InMemoryKeyManagementAdapter }).keyManagement
@@ -131,42 +215,86 @@ describe('Yjs Space-Admission (Aufnahme-Kennung)', () => {
     expect((await aliceAdapter.getSpace(space.id))!.admission).toEqual(aliceBefore)
   })
 
-  it('d) Reload: persistierte admission bleibt erhalten', async () => {
-    const metadataStorage = new InMemorySpaceMetadataStorage()
-    const compactStore = new InMemoryCompactStore()
-    const keyManagement = new InMemoryKeyManagementAdapter()
+  it('Metadata-Sync: ein Gerät, das die Wiederaufnahme-Einladung nie sah, übernimmt die neue Kennung ohne Neustart', async () => {
+    // Zwei Geraete derselben DID ueber EINEM PersonalDoc (echter Serializer).
+    const bobMetaDoc = new Y.Doc()
+    const bobMsgA = new InMemoryMessagingAdapter()
+    const bobMsgB = new InMemoryMessagingAdapter()
+    await bobMsgA.connect(bob.getDid())
+    await bobMsgB.connect(bob.getDid())
+    const deviceA = makeAdapter(bob, bobMsgA, { metadataStorage: metadataInPersonalDoc(bobMetaDoc), compactStore: new InMemoryCompactStore() })
+    const deviceB = makeAdapter(bob, bobMsgB, { metadataStorage: metadataInPersonalDoc(bobMetaDoc), compactStore: new InMemoryCompactStore() })
+    await deviceA.start()
+    await deviceB.start()
 
-    const first = makeAdapter(alice, aliceMsg, { keyManagement, metadataStorage, compactStore })
-    await first.start()
-    const space = await first.createSpace<TestDoc>('shared', { items: {} }, { name: 'Persistent' })
-    await wait(100)
-    await first.stop()
+    const space = await aliceAdapter.createSpace<TestDoc>('shared', { items: {} }, { name: 'S', members: [alice.getDid()] })
+    await aliceAdapter.addMember(space.id, bob.getDid(), await bob.getEncryptionPublicKeyBytes())
+    await wait()
+    expect(loadedInfo(deviceB, space.id).admission).toEqual({ keyGeneration: 0 })
 
-    const second = makeAdapter(alice, aliceMsg, { keyManagement, metadataStorage, compactStore })
-    await second.start()
-    expect((await second.getSpace(space.id))!.admission).toEqual(space.admission)
+    // Gerät B geht offline und verpasst Entfernung UND Wiederaufnahme.
+    await bobMsgB.disconnect()
+    await aliceAdapter.removeMember(space.id, bob.getDid())
+    await wait()
+    await aliceAdapter.addMember(space.id, bob.getDid(), await bob.getEncryptionPublicKeyBytes())
+    await wait()
+    const newAdmission = loadedInfo(deviceA, space.id).admission!
+    expect(compareAdmission(newAdmission, { keyGeneration: 0 })).toBeGreaterThan(0)
+    expect(loadedInfo(deviceB, space.id).admission).toEqual({ keyGeneration: 0 }) // noch der alte Stand
+
+    // Der Metadata-Sync (kein Neustart) traegt die Kennung zu B.
+    await deviceB.restoreSpacesFromMetadata()
+    expect(loadedInfo(deviceB, space.id).admission).toEqual(newAdmission)
   })
 
-  it('d) Alt-Space ohne gespeicherte admission wird beim Restore lazy abgeleitet und persistiert', async () => {
-    const metadataStorage = new InMemorySpaceMetadataStorage()
-    const compactStore = new InMemoryCompactStore()
-    const keyManagement = new InMemoryKeyManagementAdapter()
-
-    const first = makeAdapter(alice, aliceMsg, { keyManagement, metadataStorage, compactStore })
-    await first.start()
-    const space = await first.createSpace<TestDoc>('shared', { items: {} }, { name: 'Legacy' })
+  it('Monotonie: eine niedrigere Kennung aus der Metadata wird NICHT übernommen', async () => {
+    const metaDoc = new Y.Doc()
+    const storage = metadataInPersonalDoc(metaDoc)
+    const adapter = makeAdapter(alice, aliceMsg, { keyManagement: aliceKeys, metadataStorage: storage, compactStore: new InMemoryCompactStore() })
+    await adapter.start()
+    const space = await adapter.createSpace<TestDoc>('shared', { items: {} }, { name: 'S' })
     await wait(100)
-    await first.stop()
 
-    // Bestand simulieren: Metadata aus der Zeit vor dieser Kennung.
-    const stored = (await metadataStorage.loadSpaceMetadata(space.id))!
-    delete (stored.info as { admission?: SpaceAdmission }).admission
-    await metadataStorage.saveSpaceMetadata(stored)
+    // Der geladene Stand ist bereits eine Wiederaufnahme (Generation 2) …
+    loadedInfo(adapter, space.id).admission = { keyGeneration: 2 }
+    // … waehrend ein nachzuegelndes Geraet per LWW den alten Stand zurueckschreibt.
+    const stale = (await storage.loadSpaceMetadata(space.id))!
+    stale.info.admission = { keyGeneration: 0 }
+    await storage.saveSpaceMetadata(stale)
 
-    const second = makeAdapter(alice, aliceMsg, { keyManagement, metadataStorage, compactStore })
-    await second.start()
-    const restored = (await second.getSpace(space.id))!
-    expect(restored.admission).toEqual(space.admission)
-    expect((await metadataStorage.loadSpaceMetadata(space.id))!.info.admission).toEqual(space.admission)
+    await adapter.restoreSpacesFromMetadata()
+    expect(loadedInfo(adapter, space.id).admission).toEqual({ keyGeneration: 2 })
+  })
+
+  it('Bestand: Alt-Metadata ohne Kennung bleibt ohne Kennung; erst die Wiederaufnahme setzt sie', async () => {
+    const bobMetaDoc = new Y.Doc()
+    const bobMsg = new InMemoryMessagingAdapter()
+    await bobMsg.connect(bob.getDid())
+    const bobKeys = new InMemoryKeyManagementAdapter()
+    const bobCompact = new InMemoryCompactStore()
+    const bobStorage = metadataInPersonalDoc(bobMetaDoc)
+    const receiver = makeAdapter(bob, bobMsg, { keyManagement: bobKeys, metadataStorage: bobStorage, compactStore: bobCompact })
+    await receiver.start()
+
+    const space = await aliceAdapter.createSpace<TestDoc>('shared', { items: {} }, { name: 'S', members: [alice.getDid()] })
+    await aliceAdapter.addMember(space.id, bob.getDid(), await bob.getEncryptionPublicKeyBytes())
+    await wait()
+    await receiver.stop()
+
+    // Bestand simulieren: Metadata aus der Zeit vor der Aufnahme-Kennung.
+    const stored = (await bobStorage.loadSpaceMetadata(space.id))!
+    delete stored.info.admission
+    await bobStorage.saveSpaceMetadata(stored)
+    expect((await bobStorage.loadSpaceMetadata(space.id))!.info.admission).toBeUndefined()
+
+    const restarted = makeAdapter(bob, bobMsg, { keyManagement: bobKeys, metadataStorage: bobStorage, compactStore: bobCompact })
+    await restarted.start()
+    // Nichts leitet nachtraeglich ab — der Bestand gilt als freigegeben.
+    expect((await restarted.getSpace(space.id))!.admission).toBeUndefined()
+
+    // Erst eine neu angewandte Einladung erzeugt die Kennung.
+    await sendInviteToBob(space.id)
+    await wait()
+    expect((await restarted.getSpace(space.id))!.admission).toEqual({ keyGeneration: 0 })
   })
 })

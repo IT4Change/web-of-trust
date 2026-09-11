@@ -191,7 +191,7 @@ describe('Automerge inbox wire form (C5/C6/S2 + Inner-JWS + ack/1.0)', () => {
       fromDid: alice.getDid(),
       inviteMessageId: inviteEnvelope.id,
       // admission = Aufnahme-Kennung dieser Einladung (RLS-Spec 12 Regel 4).
-      admission: { keyGeneration: 0, capabilityId: expect.stringMatching(/^[0-9a-f]{64}$/) },
+      admission: { keyGeneration: 0 },
     })
     const bobSpace = await receiver.getSpace(space.id)
     expect(bobSpace?.name).toBe('Garten') // S1: name survives without plaintext spaceInfo

@@ -26,7 +26,7 @@ import type {
   DocLogStore,
   PendingRemoval,
 } from '@web_of_trust/core/ports'
-import type { IdentitySession, MessageEnvelope, SpaceInfo, SpaceAdmission, SpaceDocMeta, SpaceMemberChange, IncomingSpaceInvite, ReplicationState } from '@web_of_trust/core/types'
+import type { IdentitySession, MessageEnvelope, SpaceInfo, SpaceDocMeta, SpaceMemberChange, IncomingSpaceInvite, ReplicationState } from '@web_of_trust/core/types'
 import { SPACE_SYNC_REQUEST_MESSAGE_TYPE } from '@web_of_trust/core/types'
 import {
   createSpaceKey, createDeterministicSpaceKey, rotateSpaceKey, importKey, processMemberUpdate,
@@ -34,7 +34,7 @@ import {
   buildSpaceInviteBody, applySpaceInviteBody, buildKeyRotationBody, applyKeyRotationBody,
   deliverInboxMessage, receiveInboxMessage,
   runTwoPhaseRemoval, recoverPendingRemovals,
-  openLifecycleLease, deriveAdmission,
+  openLifecycleLease, compareAdmission,
 } from '@web_of_trust/core/application'
 import type { LocalImpact, SecureRemovalDeps, LifecycleLease } from '@web_of_trust/core/application'
 import type { MembershipActivityCapable, SecureSelfLeaveCapable } from '@web_of_trust/core/ports'
@@ -1077,11 +1077,10 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
       await lease.step(createSpaceKey({ crypto: this.crypto, keyPort: this.keyManagement, spaceId, ownerDid: this.identity.getDid(), validityDurationMs: this.capabilityValidityMs }))
     }
 
-    // RLS-Spec 12 Regel 4: die Aufnahme-Kennung des Creators ist seine eigene
-    // Capability der Genesis-Generation 0 (createSpaceKey/createDeterministicSpaceKey
-    // haben sie gerade gespeichert). Ein Resume behaelt die bereits ermittelte
-    // Kennung — sie ist an die Aufnahme gebunden, nicht an den Versuch.
-    if (!info.admission) info.admission = await lease.step(deriveAdmission({ crypto: this.crypto, keyPort: this.keyManagement, spaceId, generation: 0 }))
+    // RLS-Spec 12 Regel 4: der Creator wird mit der Genesis-Generation 0
+    // aufgenommen. Deterministisch auf jedem Geraet — der deterministische
+    // private Space kommt auf beiden Geraeten auf denselben Wert.
+    if (!info.admission) info.admission = { keyGeneration: 0 }
 
     // Store state (include own encryption key for multi-device key rotation)
     let state: YjsSpaceState
@@ -3272,6 +3271,19 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
       console.debug(`[YjsReplication]   space: ${meta.info.id} name=${meta.info.name} type=${meta.info.type}`)
 
       if (this.spaces.has(meta.info.id)) {
+        // RLS-Spec 12 Regel 4: die Aufnahme-Kennung eines BEREITS GELADENEN
+        // Space kommt ueber den Metadata-Sync — ein Geraet, das die
+        // Wiederaufnahme-Einladung nie gesehen hat (offline, der Invite ging an
+        // ein anderes Geraet), erfaehrt sie hier ohne Neustart.
+        // MONOTON: nur eine HOEHERE Generation wird uebernommen. Schreibt ein
+        // Geraet per LWW einen alten Metadata-Stand zurueck, dreht das hier
+        // niemandem die Kennung zurueck; die naechste Speicherung des Geraets
+        // mit der hoeheren Kennung konvergiert.
+        const loadedState = this.spaces.get(meta.info.id)!
+        if (meta.info.admission && compareAdmission(meta.info.admission, loadedState.info.admission ?? { keyGeneration: -1 }) > 0) {
+          loadedState.info = { ...loadedState.info, admission: meta.info.admission }
+          this.notifySpaceListeners()
+        }
         // A loaded but still keyless space stays under ghost observation:
         // once the LOCAL grace elapses without a key ever arriving, it is a
         // real ghost and gets cleaned up like an unloaded one.
@@ -3425,17 +3437,6 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
       this.pruneRemovedMemberEncryptionKeys(state, membershipEvents)
       this.spaces.set(meta.info.id, state)
       this.setupSpaceSync(state)
-
-      // RLS-Spec 12 Regel 4 (Bestand): Metadata aus der Zeit vor der
-      // Aufnahme-Kennung traegt keine — einmalig lazy ableiten und persistieren.
-      // Ein noch keyloser Space bekommt sie erst, wenn seine Keys ankommen.
-      if (!state.info.admission) {
-        const lazy = await this.deriveLegacyAdmission(meta.info.id)
-        if (lazy) {
-          state.info.admission = lazy
-          await this.saveSpaceMetadata(state)
-        }
-      }
 
       // VE-7 (Sync 005 Z.253): Pending-Flags aus dem konfigurierten
       // MemberUpdatePendingStore re-derivieren — fuer Spaces mit offenem
@@ -4013,7 +4014,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
         // RLS-Spec 12 Regel 4: dieser Zweig IST die Wiederaufnahme — die neue
         // Einladung ersetzt die bisherige Aufnahme-Kennung (applySpaceInviteBody
         // hat die eigene Capability dieser Generation gerade gespeichert).
-        existing.info.admission = await deriveAdmission({ crypto: this.crypto, keyPort: this.keyManagement, spaceId, generation: body.currentKeyGeneration })
+        existing.info.admission = { keyGeneration: body.currentKeyGeneration }
         await this.saveSpaceMetadata(existing)
         this.notifySpaceListeners()
         this.emitSpaceInvite({ spaceId, spaceName: existing.info.name, fromDid: decoded.senderDid, inviteMessageId: decoded.outerId, admission: existing.info.admission })
@@ -4064,7 +4065,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
         createdAt: new Date().toISOString(),
         // RLS-Spec 12 Regel 4: Kennung dieser Aufnahme = eigene Capability der
         // Invite-Generation (von applySpaceInviteBody gespeichert).
-        admission: await deriveAdmission({ crypto: this.crypto, keyPort: this.keyManagement, spaceId, generation: body.currentKeyGeneration }),
+        admission: { keyGeneration: body.currentKeyGeneration },
       }
 
       const state: YjsSpaceState = {
@@ -4839,27 +4840,6 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
 
   /** Cache of last-written metadata JSON per space — skip writes if unchanged */
   private lastSavedMetadata = new Map<string, string>()
-
-  /**
-   * RLS-Spec 12 Regel 4 — Bestands-Ableitung der Aufnahme-Kennung fuer Spaces,
-   * die vor deren Einfuehrung persistiert wurden. Die Generation der Aufnahme
-   * ist die NIEDRIGSTE, fuer die eine eigene Capability vorliegt: eine
-   * Einladung stellt genau eine Capability ihrer Generation aus, jede spaetere
-   * Rotation legt eine weitere darueber. Die aktuelle Generation zu nehmen waere
-   * falsch — sie wuerde sich bei jeder Rotation aendern und so eine
-   * Wiederaufnahme vortaeuschen. Ohne Keys: null (offen bis zum Key-Eingang).
-   */
-  private async deriveLegacyAdmission(spaceId: string): Promise<SpaceAdmission | null> {
-    const current = await this.keyManagement.getCurrentGeneration(spaceId)
-    if (current < 0) return null
-    for (let generation = 0; generation <= current; generation++) {
-      if (await this.keyManagement.getOwnCapability(spaceId, generation)) {
-        return deriveAdmission({ crypto: this.crypto, keyPort: this.keyManagement, spaceId, generation })
-      }
-    }
-    // Keine eigene Capability (Alt-Space / Nur-Lese-Geraet): Generation allein.
-    return { keyGeneration: current, capabilityId: null }
-  }
 
   private async saveSpaceMetadata(state: YjsSpaceState): Promise<void> {
     if (!this.metadataStorage) return

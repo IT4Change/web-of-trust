@@ -187,7 +187,7 @@ describe('Yjs inbox wire form (C5/C6/S2 + Inner-JWS + ack/1.0)', () => {
       spaceName: 'Garten',
       fromDid: alice.getDid(),
       inviteMessageId: inviteEnvelope.id,
-      admission: { keyGeneration: 0, capabilityId: expect.stringMatching(/^[0-9a-f]{64}$/) },
+      admission: { keyGeneration: 0 },
     })
     const bobSpace = await receiver.getSpace(space.id)
     expect(bobSpace?.name).toBe('Garten')

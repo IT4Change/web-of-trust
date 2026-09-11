@@ -167,7 +167,7 @@ export class PersonalDocSpaceMetadataStorage implements SpaceMetadataStorage {
   }
 
   private deserialize(stored: {
-    info: { id: string; type: string; name: string | null; description: string | null; appTag?: string; members: string[]; createdBy?: string; admins?: string[]; appData?: Record<string, unknown>; admission?: { keyGeneration: number; capabilityId: string | null }; createdAt: string }
+    info: { id: string; type: string; name: string | null; description: string | null; appTag?: string; members: string[]; createdBy?: string; admins?: string[]; appData?: Record<string, unknown>; admission?: { keyGeneration: number }; createdAt: string }
     documentId: string
     documentUrl: string
     memberEncryptionKeys: Record<string, number[]>
@@ -182,7 +182,7 @@ export class PersonalDocSpaceMetadataStorage implements SpaceMetadataStorage {
         ...(stored.info.createdBy != null ? { createdBy: stored.info.createdBy } : {}),
         ...(stored.info.admins != null ? { admins: [...stored.info.admins] } : {}),
         ...(stored.info.appData != null ? { appData: { ...stored.info.appData } } : {}),
-        ...(stored.info.admission != null ? { admission: { keyGeneration: stored.info.admission.keyGeneration, capabilityId: stored.info.admission.capabilityId ?? null } } : {}),
+        ...(stored.info.admission != null ? { admission: { keyGeneration: stored.info.admission.keyGeneration } } : {}),
         members: [...(stored.info.members ?? [])],
         createdAt: stored.info.createdAt,
       },

@@ -1,60 +1,75 @@
 import { describe, it, expect } from 'vitest'
-import { InMemoryKeyManagementAdapter } from '../src/adapters/key-management/InMemoryKeyManagementAdapter'
-import { WebCryptoProtocolCryptoAdapter } from '../src/adapters/protocol-crypto/web-crypto'
-import { deriveAdmission, isSameAdmission, compareAdmission } from '../src/application/spaces/admission'
-
-const crypto = new WebCryptoProtocolCryptoAdapter()
+import { isSameAdmission, compareAdmission } from '../src/application/spaces/admission'
+import { PersonalDocSpaceMetadataStorage } from '../src/adapters/storage/AutomergeSpaceMetadataStorage'
+import type { SpaceInfo } from '../src/types/space'
 
 describe('SpaceAdmission (RLS-Spec 12 Regel 4: Aufnahme-Kennung je Space)', () => {
-  it('deriveAdmission hasht die eigene Capability deterministisch (sha256 lowercase hex)', async () => {
-    const keyPort = new InMemoryKeyManagementAdapter()
-    await keyPort.saveOwnCapability('space-a', 3, 'jws-aaa')
-
-    const first = await deriveAdmission({ crypto, keyPort, spaceId: 'space-a', generation: 3 })
-    const second = await deriveAdmission({ crypto, keyPort, spaceId: 'space-a', generation: 3 })
-
-    expect(first).toEqual(second)
-    expect(first.keyGeneration).toBe(3)
-    expect(first.capabilityId).toMatch(/^[0-9a-f]{64}$/)
-  })
-
-  it('deriveAdmission: andere Capability-JWS → andere capabilityId', async () => {
-    const keyPort = new InMemoryKeyManagementAdapter()
-    await keyPort.saveOwnCapability('space-a', 0, 'jws-aaa')
-    await keyPort.saveOwnCapability('space-b', 0, 'jws-bbb')
-
-    const a = await deriveAdmission({ crypto, keyPort, spaceId: 'space-a', generation: 0 })
-    const b = await deriveAdmission({ crypto, keyPort, spaceId: 'space-b', generation: 0 })
-
-    expect(a.capabilityId).not.toBe(b.capabilityId)
-  })
-
-  it('deriveAdmission: ohne eigene Capability (Alt-Space) → capabilityId null', async () => {
-    const keyPort = new InMemoryKeyManagementAdapter()
-    const admission = await deriveAdmission({ crypto, keyPort, spaceId: 'space-a', generation: 2 })
-    expect(admission).toEqual({ keyGeneration: 2, capabilityId: null })
-  })
-
-  it('isSameAdmission vergleicht beide Felder und toleriert undefined', () => {
-    expect(isSameAdmission({ keyGeneration: 1, capabilityId: 'aa' }, { keyGeneration: 1, capabilityId: 'aa' })).toBe(true)
-    expect(isSameAdmission({ keyGeneration: 1, capabilityId: 'aa' }, { keyGeneration: 2, capabilityId: 'aa' })).toBe(false)
-    expect(isSameAdmission({ keyGeneration: 1, capabilityId: 'aa' }, { keyGeneration: 1, capabilityId: 'bb' })).toBe(false)
-    expect(isSameAdmission({ keyGeneration: 1, capabilityId: null }, { keyGeneration: 1, capabilityId: null })).toBe(true)
+  it('isSameAdmission vergleicht die Generation und toleriert undefined', () => {
+    expect(isSameAdmission({ keyGeneration: 1 }, { keyGeneration: 1 })).toBe(true)
+    expect(isSameAdmission({ keyGeneration: 1 }, { keyGeneration: 2 })).toBe(false)
     expect(isSameAdmission(undefined, undefined)).toBe(true)
-    expect(isSameAdmission(undefined, { keyGeneration: 0, capabilityId: null })).toBe(false)
+    expect(isSameAdmission(undefined, { keyGeneration: 0 })).toBe(false)
+    expect(isSameAdmission({ keyGeneration: 0 }, null)).toBe(false)
   })
 
-  it('compareAdmission ordnet erst nach keyGeneration, dann nach capabilityId (null < String)', () => {
-    const gen0 = { keyGeneration: 0, capabilityId: 'zz' }
-    const gen1 = { keyGeneration: 1, capabilityId: 'aa' }
-    expect(compareAdmission(gen1, gen0)).toBeGreaterThan(0)
-    expect(compareAdmission(gen0, gen1)).toBeLessThan(0)
-    expect(compareAdmission(gen0, { ...gen0 })).toBe(0)
+  it('compareAdmission ordnet aufsteigend nach Generation', () => {
+    expect(compareAdmission({ keyGeneration: 1 }, { keyGeneration: 0 })).toBeGreaterThan(0)
+    expect(compareAdmission({ keyGeneration: 0 }, { keyGeneration: 1 })).toBeLessThan(0)
+    expect(compareAdmission({ keyGeneration: 2 }, { keyGeneration: 2 })).toBe(0)
+    // Monotonie-Kriterium des Metadata-Sync: eine noch fehlende Kennung ist
+    // kleiner als jede vorhandene.
+    expect(compareAdmission({ keyGeneration: 0 }, { keyGeneration: -1 })).toBeGreaterThan(0)
+  })
+})
 
-    const nullCap = { keyGeneration: 0, capabilityId: null }
-    expect(compareAdmission(nullCap, gen0)).toBeLessThan(0)
-    expect(compareAdmission(gen0, nullCap)).toBeGreaterThan(0)
-    expect(compareAdmission(nullCap, { keyGeneration: 0, capabilityId: null })).toBe(0)
-    expect(compareAdmission({ keyGeneration: 0, capabilityId: 'ab' }, { keyGeneration: 0, capabilityId: 'ac' })).toBeLessThan(0)
+describe('PersonalDocSpaceMetadataStorage — Roundtrip der Aufnahme-Kennung', () => {
+  /**
+   * PersonalDoc-Backing wie im Adapter-Betrieb: Lesen liefert eine KOPIE des
+   * Dokumentstands (JSON-Roundtrip, wie ihn Y.Doc/Automerge erzeugen), Schreiben
+   * ersetzt ihn. Damit laeuft der echte Serializer, nicht eine Referenz.
+   */
+  function storageOverDoc(): PersonalDocSpaceMetadataStorage {
+    let doc: Record<string, Record<string, unknown>> = { spaces: {}, groupKeys: {}, capabilitySigningSeeds: {} }
+    const read = () => JSON.parse(JSON.stringify(doc)) as Record<string, Record<string, unknown>>
+    return new PersonalDocSpaceMetadataStorage({
+      getPersonalDoc: read,
+      changePersonalDoc: (change) => { const s = read(); change(s); doc = JSON.parse(JSON.stringify(s)) },
+    })
+  }
+
+  const baseInfo: SpaceInfo = {
+    id: 'space-1',
+    type: 'shared',
+    members: ['did:key:zAlice'],
+    createdAt: '2026-01-01T00:00:00.000Z',
+  }
+
+  it('speichert und liest die Kennung durch den echten Serializer', async () => {
+    const storage = storageOverDoc()
+    await storage.saveSpaceMetadata({
+      info: { ...baseInfo, admission: { keyGeneration: 3 } },
+      documentId: 'space-1',
+      documentUrl: 'yjs:space-1',
+      memberEncryptionKeys: {},
+    })
+    const loaded = await storage.loadSpaceMetadata('space-1')
+    expect(loaded!.info.admission).toEqual({ keyGeneration: 3 })
+    // Der Serializer liefert eine KOPIE — ein Aufrufer kann den gespeicherten
+    // Stand nicht per Referenz mitmutieren (das ist die Grundlage der
+    // Monotonie-Pruefung im Metadata-Sync).
+    loaded!.info.admission!.keyGeneration = 99
+    expect((await storage.loadSpaceMetadata('space-1'))!.info.admission).toEqual({ keyGeneration: 3 })
+  })
+
+  it('Bestand ohne Kennung bleibt ohne Kennung (kein Default, kein Fehler)', async () => {
+    const storage = storageOverDoc()
+    await storage.saveSpaceMetadata({
+      info: { ...baseInfo },
+      documentId: 'space-1',
+      documentUrl: 'yjs:space-1',
+      memberEncryptionKeys: {},
+    })
+    const loaded = await storage.loadSpaceMetadata('space-1')
+    expect(loaded!.info.admission).toBeUndefined()
   })
 })

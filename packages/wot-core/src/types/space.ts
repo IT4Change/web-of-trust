@@ -1,17 +1,24 @@
 export type ReplicationState = 'idle' | 'syncing' | 'error'
 
 /**
- * Kennung der Aufnahme in einen Space: die Einladung (bzw. das Erstellen), auf
- * die die aktuelle Mitgliedschaft zurueckgeht (RLS-Spec 12 Regel 4). Aendert
- * sich NICHT bei Schluesselrotation, sondern nur durch eine neu angewandte
- * Einladung (Wiederaufnahme) — so erkennt ein Geraet, das Entfernung und
- * Wiederaufnahme offline verpasst hat, die neue Aufnahme trotzdem.
+ * Kennung der Aufnahme in einen Space: die Generation des Space-Schluessels,
+ * mit der die aktuelle Mitgliedschaft aufgenommen wurde (RLS-Spec 12 Regel 4).
+ *
+ * Die Generation traegt die Aussage allein: eine Entfernung rotiert den
+ * Space-Schluessel (Sync 005), eine Wiederaufnahme laeuft also zwingend ueber
+ * eine hoehere Generation als die vorherige Aufnahme. Eine Doppel-Einladung an
+ * ein bestehendes Mitglied traegt dagegen dieselbe Generation und ist damit
+ * korrekt KEINE Wiederaufnahme. Eine blosse Rotation (ein Dritter wird
+ * entfernt) aendert die Kennung nicht — sie wird nur beim Erstellen und beim
+ * Anwenden einer Einladung gesetzt.
+ *
+ * Bewusst geraeteunabhaengig: der Wert ist auf allen Geraeten derselben
+ * Identitaet identisch und wandert ueber den Metadata-Sync — kein lokaler
+ * Schluesselzustand, kein Hash ueber zeitabhaengige Capability-Felder.
  */
 export interface SpaceAdmission {
   /** currentKeyGeneration der Einladung; beim Erstellen 0 */
   keyGeneration: number
-  /** sha256 (lowercase hex) ueber die eigene Capability-JWS (UTF-8) dieser Generation; null, wenn keine eigene Capability vorliegt (Alt-Space) */
-  capabilityId: string | null
 }
 
 export interface SpaceInfo {
@@ -52,8 +59,10 @@ export interface SpaceInfo {
   appData?: Record<string, unknown>
   /**
    * Aufnahme-Kennung dieser Mitgliedschaft (RLS-Spec 12 Regel 4). Optional:
-   * Alt-Spaces ohne persistierte Kennung leiten sie beim Restore lazy aus der
-   * eigenen Capability der aktuellen Generation ab.
+   * Bestands-Spaces, die vor ihrer Einfuehrung angelegt wurden, tragen keine —
+   * sie gelten als freigegeben und bekommen erst durch eine neu angewandte
+   * Einladung (Wiederaufnahme) eine Kennung. Nichts leitet sie nachtraeglich
+   * aus lokalem Schluesselzustand ab.
    */
   admission?: SpaceAdmission
 }
