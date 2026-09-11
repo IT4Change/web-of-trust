@@ -6,6 +6,7 @@ import { InMemoryRepoStorageAdapter } from '../src/InMemoryRepoStorageAdapter'
 import { compareAdmission } from '@web_of_trust/core/application'
 import type { SpaceInfo } from '@web_of_trust/core/types'
 import type { MembershipEvent } from '@web_of_trust/core/protocol'
+import { SPACE_ROTATE_MESSAGE_TYPE, MEMBER_UPDATE_MESSAGE_TYPE } from '@web_of_trust/core/protocol'
 import { AutomergeReplicationAdapter } from '../src/AutomergeReplicationAdapter'
 
 // RLS-Spec 12 Regel 4 (Automerge-Spiegel): die Aufnahme-Kennung ist eine
@@ -19,6 +20,23 @@ const cleanups: Array<() => Promise<void>> = []
 
 function adapterGeneration(adapter: AutomergeReplicationAdapter, spaceId: string): Promise<number> {
   return (adapter as unknown as { keyManagement: InMemoryKeyManagementAdapter }).keyManagement.getCurrentGeneration(spaceId)
+}
+
+function membershipEventsOf(adapter: AutomergeReplicationAdapter, spaceId: string): MembershipEvent[] {
+  const internals = adapter as unknown as {
+    spaces: Map<string, { documentId: string }>
+    repo: { handles: Record<string, { doc(): unknown }> }
+    readMembershipEvents(doc: unknown): MembershipEvent[]
+  }
+  const documentId = internals.spaces.get(spaceId)?.documentId
+  if (!documentId) return []
+  return internals.readMembershipEvents(internals.repo.handles[documentId]?.doc())
+}
+
+/** Simuliert das Crash-Fenster: die Beobachtung wird persistiert, das Enforcement lief nie. */
+function suppressEnforcement(adapter: AutomergeReplicationAdapter): void {
+  ;(adapter as unknown as { enforceCanonicalSelfRemovalRotation: () => Promise<void> })
+    .enforceCanonicalSelfRemovalRotation = async () => {}
 }
 
 function loadedInfo(adapter: AutomergeReplicationAdapter, spaceId: string): SpaceInfo {
@@ -51,30 +69,59 @@ async function createPeer(passphrase: string): Promise<{ identity: PublicIdentit
  * send). Der Austritt muss die verbleibenden Mitglieder auf diesem Weg
  * erreichen, BEVOR das austretende Geraet lokal aufraeumt.
  */
-async function createLogSyncPeer(passphrase: string, broker: InProcessLogBroker, socketId: string, deviceId: string): Promise<{ identity: PublicIdentitySession; adapter: AutomergeReplicationAdapter; docLogStore: InMemoryDocLogStore }> {
-  const identity = (await createTestIdentity(passphrase)).identity
+interface DurableStores {
+  keyManagement: InMemoryKeyManagementAdapter
+  metadataStorage: InMemorySpaceMetadataStorage
+  repoStorage: InMemoryRepoStorageAdapter
+  docLogStore: InMemoryDocLogStore
+}
+
+interface LogSyncPeer {
+  identity: PublicIdentitySession
+  adapter: AutomergeReplicationAdapter
+  messaging: InMemoryMessagingAdapter
+  docLogStore: InMemoryDocLogStore
+  stores: DurableStores
+}
+
+async function createLogSyncPeer(
+  passphrase: string,
+  broker: InProcessLogBroker,
+  socketId: string,
+  deviceId: string,
+  opts?: { identity?: PublicIdentitySession; stores?: DurableStores },
+): Promise<LogSyncPeer> {
+  const identity = opts?.identity ?? (await createTestIdentity(passphrase)).identity
   const messaging = new InMemoryMessagingAdapter({ broker, socketId })
   await messaging.connect(identity.getDid())
-  const docLogStore = new InMemoryDocLogStore()
-  await docLogStore.init()
-  await docLogStore.setDeviceId(deviceId)
-  const adapter = new AutomergeReplicationAdapter({
-    identity,
-    messaging,
-    brokerUrls: ['wss://broker.example.com'],
+  const docLogStore = opts?.stores?.docLogStore ?? new InMemoryDocLogStore()
+  if (!opts?.stores) {
+    await docLogStore.init()
+    await docLogStore.setDeviceId(deviceId)
+  }
+  const stores: DurableStores = opts?.stores ?? {
     keyManagement: new InMemoryKeyManagementAdapter(),
     metadataStorage: new InMemorySpaceMetadataStorage(),
     repoStorage: new InMemoryRepoStorageAdapter(),
     docLogStore,
+  }
+  const adapter = new AutomergeReplicationAdapter({
+    identity,
+    messaging,
+    brokerUrls: ['wss://broker.example.com'],
+    keyManagement: stores.keyManagement,
+    metadataStorage: stores.metadataStorage,
+    repoStorage: stores.repoStorage,
+    docLogStore: stores.docLogStore,
     enableLogSync: true,
     deviceId,
   })
   await adapter.start()
   cleanups.push(async () => {
     try { await adapter.stop() } catch {}
-    try { await identity.deleteStoredIdentity() } catch {}
+    if (!opts?.identity) { try { await identity.deleteStoredIdentity() } catch {} }
   })
-  return { identity, adapter, docLogStore }
+  return { identity, adapter, messaging, docLogStore: stores.docLogStore, stores }
 }
 
 /** Generation, auf der der Broker ein Doc fuehrt (Enforcement-Beweis). */
@@ -236,31 +283,57 @@ describe('Automerge Space-Admission (Aufnahme-Kennung)', () => {
     expect(again.keyGeneration).toBeGreaterThan(0)
   })
 
-  it('Zwei Admin-Geräte derselben DID beobachten dasselbe removed: genau EINE Rotation', async () => {
+  it('Zwei Admin-Instanzen, dasselbe removed: genau EINE wirksame Rotation, erneute Beobachtung löst keine weitere aus', async () => {
     const broker = new InProcessLogBroker()
+    // Space-rotate-Frames am Broker zählen: der Dedup muss den ZWEITEN Rotate
+    // verhindern, nicht erst der Broker ihn ablehnen.
+    const rotateFrames: unknown[] = []
+    const realHandleControlFrame = broker.handleControlFrame.bind(broker)
+    ;(broker as unknown as { handleControlFrame: unknown }).handleControlFrame = async (socketId: string, frame: { type?: string }) => {
+      if (frame.type === SPACE_ROTATE_MESSAGE_TYPE) rotateFrames.push(frame)
+      return realHandleControlFrame(socketId, frame as never)
+    }
+
     const alice = await createLogSyncPeer('am-dedup-alice', broker, 'alice-socket-a', '11111111-1111-4111-8111-111111111111')
     const bob = await createLogSyncPeer('am-dedup-bob', broker, 'bob-socket', '22222222-2222-4222-8222-222222222222')
     const space = await alice.adapter.createSpace<TestDoc>('shared', { items: {} }, { name: 'S' })
     await wait()
     await alice.adapter.addMember(space.id, bob.identity.getDid(), await bob.identity.getEncryptionPublicKeyBytes())
     await wait()
+    const generationBefore = brokerGeneration(broker, space.id)!
+
+    // Zweite LIVE-Instanz desselben Admin-Geräts (gleiche DID, dieselben durablen
+    // Stores — das Staging im gemeinsamen docLogStore IST der Dedup-Schlüssel).
+    // Beide beobachten dasselbe kanonische removed.
+    const aliceSecond = await createLogSyncPeer('', broker, 'alice-socket-b', '11111111-1111-4111-8111-111111111111', {
+      identity: alice.identity, stores: alice.stores,
+    })
+    await wait()
 
     await bob.adapter.leaveSpace(space.id)
     await wait(600)
-    const generationAfterFirst = brokerGeneration(broker, space.id)!
-    expect(generationAfterFirst).toBeGreaterThan(0)
+    // Beide Live-Instanzen beobachten dasselbe removed. Wirksam wird GENAU EINE
+    // Rotation: der Broker installiert die erste und weist jede weitere ab
+    // (Generations-Gate). Das Staging deduppt den sequentiellen Re-Trigger, nicht
+    // zwei exakt gleichzeitig laufende Observer — dort ist der Broker die Grenze.
+    expect(brokerGeneration(broker, space.id)).toBe(generationBefore + 1)
+    const framesAfterRace = rotateFrames.length
 
-    // Zweites Admin-Gerät derselben DID sieht dasselbe kanonische removed. Das
-    // Staging im docLogStore ist der Dedup-Schlüssel: keine zweite Rotation.
-    const aliceState = (alice.adapter as unknown as { spaces: Map<string, unknown> }).spaces.get(space.id)
-    const events = (alice.adapter as unknown as { readMembershipEvents(doc: unknown): MembershipEvent[] })
-      .readMembershipEvents((alice.adapter as unknown as { repo: { handles: Record<string, { doc(): unknown }> } })
-        .repo.handles[(aliceState as { documentId: string }).documentId].doc())
-    await (alice.adapter as unknown as { enforceCanonicalSelfRemovalRotation(space: unknown, events: MembershipEvent[]): Promise<void> })
-      .enforceCanonicalSelfRemovalRotation(aliceState, events)
-    await wait(300)
-    expect(brokerGeneration(broker, space.id)).toBe(generationAfterFirst)
+    // Die zweite Instanz sieht DASSELBE kanonische removed. Weder ein weiteres
+    // Staging noch ein weiterer Rotate darf daraus entstehen: die erneute
+    // Generationsprüfung und das Staging im gemeinsamen docLogStore greifen.
+    const events = membershipEventsOf(alice.adapter, space.id)
+    const second = aliceSecond.adapter as unknown as {
+      enforceCanonicalSelfRemovalRotation(space: unknown, events: MembershipEvent[]): Promise<void>
+      spaces: Map<string, unknown>
+    }
+    await second.enforceCanonicalSelfRemovalRotation(second.spaces.get(space.id), events)
+    await wait(400)
+
+    expect(rotateFrames).toHaveLength(framesAfterRace)
+    expect(brokerGeneration(broker, space.id)).toBe(generationBefore + 1)
   })
+
   it('Wiederaufnahme im existing-Zweig benachrichtigt die watchSpaces-Subscriber', async () => {
     const broker = new InProcessLogBroker()
     const alice = await createLogSyncPeer('am-notify-alice', broker, 'alice-socket', '11111111-1111-4111-8111-111111111111')
@@ -287,4 +360,161 @@ describe('Automerge Space-Admission (Aufnahme-Kennung)', () => {
     const lastSeen = notified[notified.length - 1].find((entry) => entry.id === space.id)
     expect(lastSeen!.admission).toEqual(admission)
   })
+  it('Admin-Self-Leave wird fail-closed abgelehnt: kein removed-Ereignis, Space unverändert', async () => {
+    const broker = new InProcessLogBroker()
+    const alice = await createLogSyncPeer('am-adminleave-alice', broker, 'alice-socket', '11111111-1111-4111-8111-111111111111')
+    const bob = await createLogSyncPeer('am-adminleave-bob', broker, 'bob-socket', '22222222-2222-4222-8222-222222222222')
+    const space = await alice.adapter.createSpace<TestDoc>('shared', { items: {} }, { name: 'S' })
+    await wait()
+    await alice.adapter.addMember(space.id, bob.identity.getDid(), await bob.identity.getEncryptionPublicKeyBytes())
+    await wait()
+
+    // Der Admin-Self-Leave-Ablauf (eigene Rotation + Broker-admin-remove) ist in
+    // diesem Adapter nicht implementiert — er muss abgelehnt werden, BEVOR
+    // irgendetwas geschrieben wird (sonst bliebe die Admin-Berechtigung am
+    // Broker bestehen, während die DID kanonisch entfernt ist).
+    await expect(alice.adapter.leaveSpace(space.id)).rejects.toThrow(/secure self-leave is not supported/)
+    expect(await alice.adapter.getSpace(space.id)).not.toBeNull()
+    expect(membershipEventsOf(alice.adapter, space.id).filter((event) => event.did === alice.identity.getDid() && event.status === 'removed')).toHaveLength(0)
+    expect(loadedInfo(alice.adapter, space.id).members).toContain(alice.identity.getDid())
+
+    // Nicht-Admin bleibt unverändert möglich.
+    await bob.adapter.leaveSpace(space.id)
+    await wait(600)
+    expect(await bob.adapter.getSpace(space.id)).toBeNull()
+  })
+
+  it('Nach der Enforcement-Rotation hat der Ausgetretene den neuen Schlüssel NICHT', async () => {
+    const broker = new InProcessLogBroker()
+    const alice = await createLogSyncPeer('am-nokey-alice', broker, 'alice-socket', '11111111-1111-4111-8111-111111111111')
+    const bob = await createLogSyncPeer('am-nokey-bob', broker, 'bob-socket', '22222222-2222-4222-8222-222222222222')
+    const space = await alice.adapter.createSpace<TestDoc>('shared', { items: {} }, { name: 'S' })
+    await wait()
+    await alice.adapter.addMember(space.id, bob.identity.getDid(), await bob.identity.getEncryptionPublicKeyBytes())
+    await wait()
+    const bobGenerationBefore = await adapterGeneration(bob.adapter, space.id)
+
+    await bob.adapter.leaveSpace(space.id)
+    await wait(600)
+
+    // Alice ist rotiert, Bob bekommt KEINE key-rotation — sonst wäre der
+    // Austritt sicherheitlich wertlos.
+    expect(await adapterGeneration(alice.adapter, space.id)).toBeGreaterThan(bobGenerationBefore)
+    expect(brokerGeneration(broker, space.id)!).toBeGreaterThan(bobGenerationBefore)
+    // Bob hat KEINE key-rotation bekommen: sein lokaler Schlüsselstand ist nicht
+    // über die alte Generation hinausgewachsen (nach dem Austritt hat er gar
+    // keine Schlüssel mehr — cleanupSpaceLocally löscht sie).
+    expect(await adapterGeneration(bob.adapter, space.id)).toBeLessThanOrEqual(bobGenerationBefore)
+  })
+
+  it('Crash vor dem Staging: der Restore stößt das Enforcement nach', async () => {
+    const broker = new InProcessLogBroker()
+    const alice = await createLogSyncPeer('am-crash-alice', broker, 'alice-socket', '11111111-1111-4111-8111-111111111111')
+    const bob = await createLogSyncPeer('am-crash-bob', broker, 'bob-socket', '22222222-2222-4222-8222-222222222222')
+    const space = await alice.adapter.createSpace<TestDoc>('shared', { items: {} }, { name: 'S' })
+    await wait()
+    await alice.adapter.addMember(space.id, bob.identity.getDid(), await bob.identity.getEncryptionPublicKeyBytes())
+    await wait()
+
+    // Crash-Fenster: Alice beobachtet das removed (Doc + Digest + Metadata
+    // persistiert), das Enforcement läuft aber nie und stagt nichts.
+    suppressEnforcement(alice.adapter)
+    await bob.adapter.leaveSpace(space.id)
+    await wait(600)
+    expect(loadedInfo(alice.adapter, space.id).members).not.toContain(bob.identity.getDid())
+    expect(brokerGeneration(broker, space.id)).toBe(0)
+    expect(await alice.docLogStore.getPendingRemoval(space.id, bob.identity.getDid())).toBeNull()
+    await alice.adapter.stop()
+
+    // Neustart auf DENSELBEN Stores: das Event-Set ändert sich nicht mehr, der
+    // Observer triggert also nie wieder — nur der Restore-Hook kann die
+    // angekündigte Rotation noch nachziehen.
+    const restarted = await createLogSyncPeer('', broker, 'alice-socket-2', '11111111-1111-4111-8111-111111111111', {
+      identity: alice.identity, stores: alice.stores,
+    })
+    await wait(800)
+    expect(brokerGeneration(broker, space.id)!).toBeGreaterThan(0)
+    expect(await adapterGeneration(restarted.adapter, space.id)).toBeGreaterThan(0)
+  })
+
+  it('Recovery eines gestagten canonical-self-removal-rotation: rotiert, ohne zweites Membership-Event', async () => {
+    const broker = new InProcessLogBroker()
+    const alice = await createLogSyncPeer('am-recover-alice', broker, 'alice-socket', '11111111-1111-4111-8111-111111111111')
+    const bob = await createLogSyncPeer('am-recover-bob', broker, 'bob-socket', '22222222-2222-4222-8222-222222222222')
+    const space = await alice.adapter.createSpace<TestDoc>('shared', { items: {} }, { name: 'S' })
+    await wait()
+    await alice.adapter.addMember(space.id, bob.identity.getDid(), await bob.identity.getEncryptionPublicKeyBytes())
+    await wait()
+
+    // NUR der space-rotate erreicht den Broker nicht → das Removal bleibt
+    // gestagt. Die übrigen Control-Frames müssen laufen, sonst erreicht Alice
+    // das kanonische removed gar nicht erst. Injektion am Broker, weil der
+    // Coordinator seine sendControlFrame-Referenz bereits gebunden hat.
+    const realHandleControlFrame = broker.handleControlFrame.bind(broker)
+    ;(broker as unknown as { handleControlFrame: unknown }).handleControlFrame = async (socketId: string, frame: { type?: string }) => {
+      if (frame.type === SPACE_ROTATE_MESSAGE_TYPE) throw new Error('injected: space-rotate never reached the broker')
+      return realHandleControlFrame(socketId, frame as never)
+    }
+    await bob.adapter.leaveSpace(space.id)
+    await wait(600)
+    const staged = await alice.docLogStore.getPendingRemoval(space.id, bob.identity.getDid())
+    expect(staged?.kind).toBe('canonical-self-removal-rotation')
+    expect(brokerGeneration(broker, space.id)).toBe(0)
+    const removedEventsBefore = membershipEventsOf(alice.adapter, space.id)
+      .filter((event) => event.did === bob.identity.getDid() && event.status === 'removed').length
+    expect(removedEventsBefore).toBe(1)
+    await alice.adapter.stop()
+    ;(broker as unknown as { handleControlFrame: unknown }).handleControlFrame = realHandleControlFrame
+    // Ab hier zählen: die Recovery dieser Art darf KEIN member-update senden
+    // (die Entfernung ist bereits kanonisch, Bob hat sie selbst geschrieben).
+    const memberUpdatesToBob: unknown[] = []
+    bob.messaging.onMessage((message: unknown) => {
+      if ((message as { type?: string }).type === MEMBER_UPDATE_MESSAGE_TYPE) memberUpdatesToBob.push(message)
+    })
+
+    // Neustart: die VE-C3-Recovery nimmt das gestagte Removal wieder auf.
+    const restarted = await createLogSyncPeer('', broker, 'alice-socket-2', '11111111-1111-4111-8111-111111111111', {
+      identity: alice.identity, stores: alice.stores,
+    })
+    await wait(800)
+    expect(brokerGeneration(broker, space.id)!).toBeGreaterThan(0)
+    expect(await alice.docLogStore.getPendingRemoval(space.id, bob.identity.getDid())).toBeNull()
+    // Kein zweites Membership-Event für dieselbe Entfernung …
+    expect(membershipEventsOf(restarted.adapter, space.id)
+      .filter((event) => event.did === bob.identity.getDid() && event.status === 'removed')).toHaveLength(1)
+    // … kein member-update an den bereits kanonisch Entfernten …
+    expect(memberUpdatesToBob).toHaveLength(0)
+    // … und Bob hat den neuen Schlüssel weiterhin nicht.
+    expect(await adapterGeneration(bob.adapter, space.id)).toBeLessThanOrEqual(0)
+  })
+  it('Reconnect nimmt ein gestagtes Removal wieder auf und schließt die Rotation ab', async () => {
+    const broker = new InProcessLogBroker()
+    const alice = await createLogSyncPeer('am-reconnect-alice', broker, 'alice-socket', '11111111-1111-4111-8111-111111111111')
+    const bob = await createLogSyncPeer('am-reconnect-bob', broker, 'bob-socket', '22222222-2222-4222-8222-222222222222')
+    const space = await alice.adapter.createSpace<TestDoc>('shared', { items: {} }, { name: 'S' })
+    await wait()
+    await alice.adapter.addMember(space.id, bob.identity.getDid(), await bob.identity.getEncryptionPublicKeyBytes())
+    await wait()
+
+    // Home-Broker unerreichbar: die Rotation bleibt gestagt.
+    const realHandleControlFrame = broker.handleControlFrame.bind(broker)
+    ;(broker as unknown as { handleControlFrame: unknown }).handleControlFrame = async (socketId: string, frame: { type?: string }) => {
+      if (frame.type === SPACE_ROTATE_MESSAGE_TYPE) throw new Error('injected: broker unreachable')
+      return realHandleControlFrame(socketId, frame as never)
+    }
+    await bob.adapter.leaveSpace(space.id)
+    await wait(600)
+    expect((await alice.docLogStore.getPendingRemoval(space.id, bob.identity.getDid()))?.kind).toBe('canonical-self-removal-rotation')
+    expect(brokerGeneration(broker, space.id)).toBe(0)
+
+    // Broker wieder erreichbar + echter Reconnect (disconnect → connect).
+    ;(broker as unknown as { handleControlFrame: unknown }).handleControlFrame = realHandleControlFrame
+    await alice.messaging.disconnect()
+    await alice.messaging.connect(alice.identity.getDid())
+    // Der Reconnect-Pfad ist um 2s entprellt.
+    await wait(3000)
+
+    expect(brokerGeneration(broker, space.id)!).toBeGreaterThan(0)
+    expect(await alice.docLogStore.getPendingRemoval(space.id, bob.identity.getDid())).toBeNull()
+  }, 20_000)
 })

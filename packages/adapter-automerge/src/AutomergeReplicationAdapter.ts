@@ -530,6 +530,11 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
           for (const spaceId of this.spaces.keys()) {
             void this.requestSync(spaceId).catch(() => {})
           }
+          // VE-C3 (Yjs-Paritaet): bei einem Reconnect kann ein zuvor
+          // unerreichbarer Home-Broker jetzt antworten — gestagte Removals
+          // erneut durchtreiben, sonst bliebe eine angekuendigte Rotation
+          // bis zum naechsten Start liegen.
+          void this.recoverPendingRemovalsOnce().catch(() => {})
         }, 2000)
       })
     }
@@ -716,6 +721,23 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
           // anchored to the key-import, NOT the vault DOC import (which carries no keys).
           await this.replayBlockedByKeyForSpace(meta.info.id)
         }
+      }
+
+      // Sync 005 §Self-Leave (#298): ein Crash NACH der persistierten
+      // Membership-Beobachtung, aber VOR dem Staging hinterlaesst ein
+      // kanonisches removed ohne Rotation und ohne Pending. Der Observer
+      // triggert danach nie wieder (seedMembershipProjection setzt den Digest,
+      // das Event-Set aendert sich nicht mehr), und die Recovery findet nichts.
+      // Deshalb das Enforcement beim Restore EINMAL pro geladenem Space
+      // anstossen — auf derselben Chain wie im Observer, sequenziell, Fehler
+      // geloggt statt den Restore abzubrechen.
+      const restoredDoc = this.repo.handles[spaceState.documentId]?.doc()
+      if (restoredDoc) {
+        const restoredEvents = this.readMembershipEvents(restoredDoc)
+        spaceState.membershipResolutionChain = (spaceState.membershipResolutionChain ?? Promise.resolve())
+          .catch(() => {})
+          .then(() => this.enforceCanonicalSelfRemovalRotation(spaceState, restoredEvents))
+          .catch((err) => console.warn('[ReplicationAdapter] restore self-removal enforcement failed:', err))
       }
     }
 
@@ -2512,6 +2534,16 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
     if (space) {
       const selfDid = this.identity.getDid()
       const doc = this.repo.handles[space.documentId]?.doc()
+      // Fail-closed: der Admin-Self-Leave-Ablauf (eigene Rotation + am Broker
+      // bestaetigtes admin-remove) ist in diesem Adapter NICHT implementiert —
+      // Yjs hat ihn. Wuerde ein Admin hier wie ein Nicht-Admin behandelt, bliebe
+      // seine Admin-Berechtigung am Broker bestehen, waehrend er kanonisch
+      // entfernt ist. Derselbe Fehler wie in removeMember(self) unter log-sync,
+      // und VOR jeder Doc-Mutation.
+      if (this.logSyncEnabled && this.spaceAdminDids(space).includes(selfDid)
+        && resolveMembershipWinner(this.readMembershipEvents(doc), selfDid)?.status !== 'removed') {
+        throw new Error('secure self-leave is not supported by the Automerge adapter: durable admin-remove capability is unavailable')
+      }
       const existingSelf = resolveMembershipWinner(this.readMembershipEvents(doc), selfDid)
       // RETRY (B3-Retry-Hole, Yjs-Spiegel): ein lokal bereits angewandtes
       // removed beweist NICHT, dass es durabel geloggt ist — ein erster Versuch,
