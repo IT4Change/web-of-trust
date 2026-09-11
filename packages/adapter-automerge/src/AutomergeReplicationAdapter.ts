@@ -2,7 +2,7 @@ import { Repo, parseAutomergeUrl, type DocumentId, type AutomergeUrl, type PeerI
 import type { StorageAdapterInterface } from '@automerge/automerge-repo'
 import type { DocHandle } from '@automerge/automerge-repo'
 import * as Automerge from '@automerge/automerge'
-import type { ReplicationAdapter, SpaceHandle, TransactOptions, Subscribable, MessagingAdapter, MessageIdHistoryPort, SpaceMetadataStorage, KeyManagementPort, MemberUpdatePendingStore, WireMessage, DocLogStore } from '@web_of_trust/core/ports'
+import type { ReplicationAdapter, SpaceHandle, TransactOptions, Subscribable, MessagingAdapter, MessageIdHistoryPort, SpaceMetadataStorage, KeyManagementPort, MemberUpdatePendingStore, WireMessage, DocLogStore, PendingRemoval } from '@web_of_trust/core/ports'
 import type { IdentitySession, SpaceInfo, SpaceAdmission, SpaceMemberChange, IncomingSpaceInvite, ReplicationState, MessageEnvelope } from '@web_of_trust/core/types'
 import {
   createSpaceKey, createDeterministicSpaceKey, rotateSpaceKey, importKey, processMemberUpdate,
@@ -1625,6 +1625,7 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
   private buildSecureRemovalDeps(
     space: SpaceState,
     removedEncKey: Uint8Array | undefined,
+    kind?: PendingRemoval['kind'],
   ): SecureRemovalDeps {
     const spaceId = space.info.id
     const myDid = this.identity.getDid()
@@ -1681,15 +1682,66 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
         // commitRemoval → driveRemovalToCompletion does NOT delete the PendingRemoval,
         // so a removal can never be broker-enforced + distributed without a durable
         // membership-removal record.
-        await this.commitMembershipEventDurable(space, { did: removedDid, status: 'removed', sinceGeneration: newGeneration })
+        // Bei 'canonical-self-removal-rotation' ist die Entfernung bereits
+        // kanonisch (der Austretende hat sein removed selbst geschrieben) — nur
+        // die fehlende Rotation wird nachgezogen, kein zweites Event und kein
+        // member-update-Broadcast (Yjs-Vorbild).
+        if (kind !== 'canonical-self-removal-rotation') {
+          await this.commitMembershipEventDurable(space, { did: removedDid, status: 'removed', sinceGeneration: newGeneration })
+        }
         await this.distributeKeyRotation(space, newGeneration)
-        await this.distributeMemberRemovedUpdate(space, removedDid, newGeneration, removedEncKey)
+        if (kind !== 'canonical-self-removal-rotation') {
+          await this.distributeMemberRemovedUpdate(space, removedDid, newGeneration, removedEncKey)
+        }
         await this._persistSpaceMetadata(space)
         this._pushSnapshotToVault(space).catch(() => {})
         for (const cb of this.memberChangeCallbacks) {
           cb({ spaceId, did: removedDid, action: 'removed' })
         }
       },
+    }
+  }
+
+  /**
+   * Sync 005 §Self-Leave (Issue #298, Yjs-Paritaet): nur ein aktiv verbliebener
+   * ADMIN reagiert auf ein kanonisches removed-Ereignis, dem die angekuendigte
+   * Rotation noch fehlt. Ein Austretender schreibt sein removed selbst, darf aber
+   * kein Key-Material minten — ohne diesen Pfad bliebe der Broker auf der alten
+   * Generation und die alten Schluessel/Capabilities des Ausgetretenen gueltig.
+   *
+   * Ein member-update erreicht diesen Pfad NIE: Trigger ist ausschliesslich die
+   * kanonische _members-Projektion. Die regulaere Zwei-Phasen-Maschinerie wird
+   * wiederverwendet; ihr Commit laesst bei dieser Art die bereits kanonische
+   * Entfernung und den member-update-Broadcast aus.
+   */
+  private async enforceCanonicalSelfRemovalRotation(
+    space: SpaceState,
+    events: readonly MembershipEvent[],
+  ): Promise<void> {
+    if (!this.logSyncEnabled) return
+    const myDid = this.identity.getDid()
+    const active = new Set(resolveActiveMembers(events))
+    if (!active.has(myDid) || !this.spaceAdminDids(space).includes(myDid)) return
+
+    const currentGeneration = await this.keyManagement.getCurrentGeneration(space.info.id)
+    const candidates = events.filter((event) =>
+      event.status === 'removed' &&
+      resolveMembershipWinner(events, event.did)?.status === 'removed' &&
+      event.did !== myDid &&
+      currentGeneration < event.sinceGeneration,
+    )
+    for (const event of candidates) {
+      // Das Staging ist der Dedup-Schluessel ueber Observer UND Geraete hinweg.
+      // Eine Generation auf/ueber der Ankuendigung ist bereits durchgesetzt.
+      const store = await this.ensureDocLogStore()
+      if (!store || (await this.keyManagement.getCurrentGeneration(space.info.id)) >= event.sinceGeneration) continue
+      const existing = await store.getPendingRemoval(space.info.id, event.did)
+      if (existing && existing.kind !== 'canonical-self-removal-rotation') continue
+      await runTwoPhaseRemoval(
+        this.buildSecureRemovalDeps(space, undefined, 'canonical-self-removal-rotation'),
+        event.did,
+        { kind: 'canonical-self-removal-rotation', targetGeneration: event.sinceGeneration },
+      )
     }
   }
 
@@ -1706,7 +1758,10 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
       const space = this.spaces.get(removal.spaceId)
       if (!space) return null
       const removedEncKey = space.memberEncryptionKeys.get(removal.removedDid)
-      return this.buildSecureRemovalDeps(space, removedEncKey)
+      // Die Art muss die Wiederaufnahme ueberleben: ein gestagtes
+      // 'canonical-self-removal-rotation' darf im Commit weder ein zweites
+      // Membership-Event noch ein member-update erzeugen.
+      return this.buildSecureRemovalDeps(space, removedEncKey, removal.kind)
     }).catch((err) => {
       console.debug('[ReplicationAdapter] pending-removal recovery pass failed (retry later):', err)
     })
@@ -2120,7 +2175,9 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
     // RLS-Spec 12 Regel 4: die Aufnahme-Kennung ist eine Projektion DESSELBEN
     // Event-Sets (`resolveAdmission`) — kein eigener Pfad, keine Persistenz.
     // Auch der Austritt (`leaveSpace`) schreibt sein removed-Ereignis in dieses
-    // Set (Yjs-Paritaet), eine Wiederaufnahme danach ist also erkennbar.
+    // Set (Yjs-Paritaet), eine Wiederaufnahme danach ist also erkennbar; die
+    // fehlende Rotation zieht ein beobachtender Admin nach
+    // (enforceCanonicalSelfRemovalRotation, Sync 005 §Self-Leave).
     const admission = events.length > 0 ? resolveAdmission(events, this.identity.getDid()) : undefined
     return { digest, createdBy, members, admins, events, admission }
   }
@@ -2226,6 +2283,10 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
       .catch(() => {})
       .then(() => this._persistSpaceMetadata(space))
       .then(() => this.resolvePendingMemberUpdates(space))
+      // Nur die kanonische _members-Projektion ist Enforcement-Trigger. Sitzt
+      // NACH der Projektion, damit der Aktiv-Admin-Test auf `_admins ∩ _members`
+      // laeuft; member-update-Pendings erreichen diesen Observer nie.
+      .then(() => this.enforceCanonicalSelfRemovalRotation(space, projection.events))
       .catch((err) => console.warn('[ReplicationAdapter] member-update resolution failed:', err))
   }
 
@@ -2443,9 +2504,10 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
     // geschrieben und verteilt, damit die verbleibenden Mitglieder den Austritt
     // sehen — und damit eine spaetere Wiederaufnahme als solche erkennbar ist
     // (RLS-Spec 12 Regel 4: erst ein removed schneidet den Mitgliedschafts-Lauf).
-    // KEINE Rotation und kein Broker-Enforcement: ein Austretender darf sein
+    // KEINE Rotation und kein Broker-Enforcement hier: ein Austretender darf sein
     // eigenes removed-Event schreiben, aber kein neues Key-Material minten
-    // (dieselbe Autoritaetsregel wie im Yjs-Non-Admin-Self-Leave).
+    // (dieselbe Autoritaetsregel wie im Yjs-Non-Admin-Self-Leave). Die Rotation
+    // zieht ein beobachtender Admin nach (enforceCanonicalSelfRemovalRotation).
     const space = this.spaces.get(spaceId)
     if (space) {
       const selfDid = this.identity.getDid()
@@ -3498,8 +3560,12 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
         // zugestellte Einladung an ein weiterhin aktives Mitglied bleibt
         // dadurch folgenlos, auch wenn inzwischen rotiert wurde.
         const mergedAdmission = resolveAdmission(this.readMembershipEvents(this.repo.handles[existing.documentId]?.doc()), this.identity.getDid())
-        if (!isSameAdmission(mergedAdmission, existing.info.admission)) existing.info = { ...existing.info, admission: mergedAdmission }
+        const admissionChanged = !isSameAdmission(mergedAdmission, existing.info.admission)
+        if (admissionChanged) existing.info = { ...existing.info, admission: mergedAdmission }
         await this._persistSpaceMetadata(existing)
+        // Wiederaufnahme im existing-Zweig ist eine sichtbare Aenderung der
+        // SpaceInfo — watchSpaces-Subscriber muessen sie erfahren (Yjs-Paritaet).
+        if (admissionChanged) this._notifySpacesSubscribers()
         this.emitSpaceInvite({ spaceId, spaceName: existing.info.name, fromDid: decoded.senderDid, inviteMessageId: decoded.outerId, admission: existing.info.admission })
         return { kind: 'applied', durable: true }
       }

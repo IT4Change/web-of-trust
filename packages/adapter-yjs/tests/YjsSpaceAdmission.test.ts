@@ -107,14 +107,14 @@ describe('Yjs Space-Admission (Aufnahme-Kennung)', () => {
   })
 
   it('Creator: Aufnahme mit der Genesis-Generation 0 (eigenes active@0 im Doc-Seed)', async () => {
-    const space = await aliceAdapter.createSpace<TestDoc>('shared', { items: {} }, { name: 'S', members: [alice.getDid()] })
+    const space = await aliceAdapter.createSpace<TestDoc>('shared', { items: {} }, { name: 'S' })
     expect(space.admission).toEqual({ keyGeneration: 0 })
     expect((await aliceAdapter.getSpace(space.id))!.admission).toEqual({ keyGeneration: 0 })
   })
 
   it('Einladung annehmen: IncomingSpaceInvite.admission == SpaceInfo.admission', async () => {
     const { adapter: receiver, events } = await startBob()
-    const space = await aliceAdapter.createSpace<TestDoc>('shared', { items: {} }, { name: 'Garten', members: [alice.getDid()] })
+    const space = await aliceAdapter.createSpace<TestDoc>('shared', { items: {} }, { name: 'Garten' })
     await aliceAdapter.addMember(space.id, bob.getDid(), await bob.getEncryptionPublicKeyBytes())
     await wait()
 
@@ -125,7 +125,7 @@ describe('Yjs Space-Admission (Aufnahme-Kennung)', () => {
 
   it('Entfernung + Wiederaufnahme: höhere Kennung', async () => {
     const { adapter: receiver, events } = await startBob()
-    const space = await aliceAdapter.createSpace<TestDoc>('shared', { items: {} }, { name: 'S', members: [alice.getDid()] })
+    const space = await aliceAdapter.createSpace<TestDoc>('shared', { items: {} }, { name: 'S' })
     await aliceAdapter.addMember(space.id, bob.getDid(), await bob.getEncryptionPublicKeyBytes())
     await wait()
     const first = events[0].admission!
@@ -145,7 +145,7 @@ describe('Yjs Space-Admission (Aufnahme-Kennung)', () => {
 
   it('Rotation durch Entfernung eines Dritten + erneute Einladung an ein bestehendes Mitglied: Kennung unverändert', async () => {
     const { adapter: receiver } = await startBob()
-    const space = await aliceAdapter.createSpace<TestDoc>('shared', { items: {} }, { name: 'S', members: [alice.getDid()] })
+    const space = await aliceAdapter.createSpace<TestDoc>('shared', { items: {} }, { name: 'S' })
     await aliceAdapter.addMember(space.id, bob.getDid(), await bob.getEncryptionPublicKeyBytes())
     await aliceAdapter.addMember(space.id, carol.getDid(), await carol.getEncryptionPublicKeyBytes())
     await wait()
@@ -172,7 +172,7 @@ describe('Yjs Space-Admission (Aufnahme-Kennung)', () => {
 
   it('Rotation ohne erneute Einladung: Kennung unverändert', async () => {
     const { adapter: receiver } = await startBob()
-    const space = await aliceAdapter.createSpace<TestDoc>('shared', { items: {} }, { name: 'S', members: [alice.getDid()] })
+    const space = await aliceAdapter.createSpace<TestDoc>('shared', { items: {} }, { name: 'S' })
     await aliceAdapter.addMember(space.id, bob.getDid(), await bob.getEncryptionPublicKeyBytes())
     await aliceAdapter.addMember(space.id, carol.getDid(), await carol.getEncryptionPublicKeyBytes())
     await wait()
@@ -188,7 +188,7 @@ describe('Yjs Space-Admission (Aufnahme-Kennung)', () => {
 
   it('Zweitgerät derselben DID, das nur den Doc-Sync sieht, bekommt dieselbe Kennung (Observer, ohne Neustart)', async () => {
     const { adapter: deviceA } = await startBob()
-    const space = await aliceAdapter.createSpace<TestDoc>('shared', { items: {} }, { name: 'S', members: [alice.getDid()] })
+    const space = await aliceAdapter.createSpace<TestDoc>('shared', { items: {} }, { name: 'S' })
     await aliceAdapter.addMember(space.id, bob.getDid(), await bob.getEncryptionPublicKeyBytes())
     await wait()
     // Stand, den ein Zweitgerät der ersten Aufnahme kennt.
@@ -268,7 +268,7 @@ describe('Yjs Space-Admission (Aufnahme-Kennung)', () => {
 
   it('Selbst-Verlassen (leaveSpace) + erneute Einladung: neue Kennung', async () => {
     const { adapter: receiver } = await startBob({ flushPersonalDoc: async () => {} })
-    const space = await aliceAdapter.createSpace<TestDoc>('shared', { items: {} }, { name: 'S', members: [alice.getDid()] })
+    const space = await aliceAdapter.createSpace<TestDoc>('shared', { items: {} }, { name: 'S' })
     await aliceAdapter.addMember(space.id, bob.getDid(), await bob.getEncryptionPublicKeyBytes())
     await wait()
     expect((await receiver.getSpace(space.id))!.admission).toEqual({ keyGeneration: 0 })
