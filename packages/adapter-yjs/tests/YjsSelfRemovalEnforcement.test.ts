@@ -14,6 +14,7 @@ import {
 } from '@web_of_trust/core/adapters'
 import { YjsReplicationAdapter } from '../src/YjsReplicationAdapter'
 import { initYjsPersonalDoc, resetYjsPersonalDoc } from '../src/YjsPersonalDocManager'
+import { encodeBase64Url } from '@web_of_trust/core/protocol'
 
 // Sync 005 §Self-Leave (#298): der austretende Member schreibt sein removed, die
 // angekuendigte Rotation zieht ein beobachtender Admin nach. Faellt der Admin im
@@ -69,6 +70,27 @@ function membershipEventsOf(adapter: YjsReplicationAdapter, spaceId: string): { 
 
 function loadedMembers(adapter: YjsReplicationAdapter, spaceId: string): string[] {
   return (adapter as unknown as { spaces: Map<string, { info: { members: string[] } }> }).spaces.get(spaceId)!.info.members
+}
+
+/** Der vom Broker durable gehaltene Space-Capability-Key (base64url). */
+function brokerVerificationKey(broker: InProcessLogBroker, docId: string): string | null | undefined {
+  return (broker as unknown as { docs: Map<string, { verificationKey: string | null }> }).docs.get(docId)?.verificationKey
+}
+
+/**
+ * Friert einen Tab MITTEN im Enforcement ein: das Staging ist durable, der
+ * space-rotate erreicht den Broker nie. Das Promise loest nie auf — genau das
+ * tut ein eingefrorener/geschlossener Tab auch.
+ */
+function stallRotateSend(adapter: YjsReplicationAdapter): void {
+  const internals = adapter as unknown as {
+    buildSecureRemovalDeps: (...args: unknown[]) => { sendSpaceRotate: unknown }
+  }
+  const real = internals.buildSecureRemovalDeps.bind(adapter)
+  internals.buildSecureRemovalDeps = (...args: unknown[]) => ({
+    ...real(...args),
+    sendSpaceRotate: () => new Promise<void>(() => {}),
+  })
 }
 
 /** Simuliert das Crash-Fenster: die Beobachtung wird persistiert, das Enforcement lief nie. */
@@ -179,5 +201,53 @@ describe('Yjs Self-Removal-Enforcement (#298) — Restore zieht eine ausgefallen
     expect(brokerGeneration(broker, space.id)!).toBeGreaterThan(0)
     expect(await adapterGeneration(restarted, space.id)).toBeGreaterThan(0)
     expect(await aliceStores.docLogStore.getPendingRemoval(space.id, bob.getDid())).toBeNull()
+  }, 30_000)
+
+  // #366: zwei Live-Instanzen DERSELBEN Identitaet teilen sich die durable
+  // Stores. Nimmt die zweite auf, WAEHREND das Staging der ersten noch offen
+  // ist, darf am Ende nur genau ein Material aktiv sein — das, welches der
+  // Broker haelt. Das Praxis-Symptom aus #365 war der Gegenbeweis:
+  // "generation 1 is active with a DIVERGENT content key".
+  it('Wiederaufnahme waehrend des laufenden Enforcement-Stagings: lokaler Schluessel == Broker-Schluessel', async () => {
+    const aliceAdapter = makeAdapter(alice, aliceMessaging, DEVICE_ALICE, aliceStores)
+    const bobAdapter = makeAdapter(bob, bobMessaging, DEVICE_BOB, await makeStores(DEVICE_BOB))
+    await aliceAdapter.start()
+    await bobAdapter.start()
+    await initYjsPersonalDoc(bob)
+
+    const space = await aliceAdapter.createSpace<TestDoc>('shared', { items: {} }, { name: 'S' })
+    await waitUntil(() => brokerGeneration(broker, space.id) !== undefined, 'die Space-Registrierung am Broker')
+    await aliceAdapter.addMember(space.id, bob.getDid(), await bob.getEncryptionPublicKeyBytes())
+    await waitUntil(async () => (await bobAdapter.getSpace(space.id)) !== null, 'Bob hat den Space')
+
+    // Tab 1 stagt durable und friert vor dem space-rotate ein.
+    stallRotateSend(aliceAdapter)
+    await bobAdapter.leaveSpace(space.id)
+    await waitUntil(
+      async () => (await aliceStores.docLogStore.getPendingRemoval(space.id, bob.getDid())) !== null,
+      'das durable Staging von Tab 1',
+    )
+    const staged = (await aliceStores.docLogStore.getPendingRemoval(space.id, bob.getDid()))!
+    expect(brokerGeneration(broker, space.id)).toBe(0)
+
+    // Tab 2 nimmt auf DENSELBEN durable Stores wieder auf, waehrend Tab 1 noch
+    // in seinem Enforcement haengt.
+    const resumed = makeAdapter(alice, new InMemoryMessagingAdapter({ broker, socketId: 'alice-socket-2' }), DEVICE_ALICE, aliceStores)
+    await (resumed as unknown as { messaging: InMemoryMessagingAdapter }).messaging.connect(alice.getDid())
+    await resumed.start()
+    await waitUntil(
+      async () => (brokerGeneration(broker, space.id) ?? 0) > 0
+        && (await aliceStores.docLogStore.getPendingRemoval(space.id, bob.getDid())) === null,
+      'die abgeschlossene Rotation samt aufgeloestem Staging',
+    )
+
+    const generation = brokerGeneration(broker, space.id)!
+    expect(await adapterGeneration(resumed, space.id)).toBe(generation)
+    // Lokal aktiv ist GENAU das Material, das der Broker installiert hat ...
+    expect(encodeBase64Url((await aliceStores.keyManagement.getCapabilityVerificationKey(space.id, generation))!))
+      .toBe(brokerVerificationKey(broker, space.id))
+    // ... und es ist das Material aus dem EINEN Staging, kein zweites.
+    expect(Array.from((await aliceStores.keyManagement.getKeyByGeneration(space.id, generation))!))
+      .toEqual(Array.from(staged.stagedKeyMaterial.contentKey))
   }, 30_000)
 })

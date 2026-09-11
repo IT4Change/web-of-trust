@@ -7,11 +7,16 @@ import type {
   GapRepair,
   LocalLogEntry,
   PendingRemoval,
+  PendingRemovalWriteExpectation,
+  BrokerConfirmationBinding,
+  BrokerConfirmationOutcome,
   RecordRemoteAppliedEntry,
   StagedRemovalKeyMaterial,
 } from '../../ports/DocLogStore'
 import { OrphanedLogRepairError } from '../../ports/DocLogStore'
+import { PendingRemovalStagingConflictError } from '../../ports/DocLogStore'
 import { pendingRemovalKey } from './pending-removal-key'
+import { matchesConfirmationBinding, matchesStagingExpectation } from './pending-removal-binding'
 import { contiguousHeadAbove, strictContiguousHead } from './InMemoryDocLogStore'
 import { createSeqLock, type SeqLock } from './SeqLock'
 
@@ -465,15 +470,26 @@ export class IndexedDBDocLogStore implements DocLogStore {
   // base64url-encoded at rest (toStoredRemoval) and decoded on read
   // (fromStoredRemoval), so a crash + restart recovers byte-identical material.
 
-  async putPendingRemoval(removal: PendingRemoval): Promise<void> {
+  async putPendingRemoval(removal: PendingRemoval, expect?: PendingRemovalWriteExpectation): Promise<void> {
     const db = await this.db()
-    // Idempotent on (spaceId, removedDid): put() OVERWRITES any prior record for
-    // the same removal wholesale — the retry / re-stage path.
-    await db.put(
-      PENDING_REMOVALS_STORE,
-      toStoredRemoval(removal),
-      pendingRemovalKey(removal.spaceId, removal.removedDid),
-    )
+    const key = pendingRemovalKey(removal.spaceId, removal.removedDid)
+    // #366: Lesen, Pruefen und Schreiben in EINER readwrite-Transaktion. Die
+    // IndexedDB-Sperre auf diesem Object Store gilt verbindungs- und damit
+    // TAB-uebergreifend (gleiche Origin), also gewinnt genau ein Staging je
+    // (spaceId, removedDid) — der Verlierer bekommt den Konflikt, nie ein
+    // stilles Ueberschreiben. Ohne `expect` bleibt es beim alten put().
+    const tx = db.transaction(PENDING_REMOVALS_STORE, 'readwrite')
+    const stored = (await tx.store.get(key)) as StoredPendingRemoval | undefined
+    if (!matchesStagingExpectation(stored, expect)) {
+      // Die Transaktion hat nichts geschrieben; sie laeuft mit dem Lesen aus.
+      // tx.done wird bewusst nur entsorgt — sonst bliebe ein unbehandeltes Promise.
+      void tx.done.catch(() => {})
+      throw new PendingRemovalStagingConflictError(
+        removal.spaceId, removal.removedDid, stored ? fromStoredRemoval(stored) : null,
+      )
+    }
+    await tx.store.put(toStoredRemoval(removal), key)
+    await tx.done
   }
 
   async getPendingRemoval(spaceId: string, removedDid: string): Promise<PendingRemoval | null> {
@@ -489,7 +505,8 @@ export class IndexedDBDocLogStore implements DocLogStore {
     spaceId: string,
     removedDid: string,
     brokerUrl: string,
-  ): Promise<void> {
+    binding?: BrokerConfirmationBinding,
+  ): Promise<BrokerConfirmationOutcome> {
     const db = await this.db()
     // One readwrite txn: read-modify-write so a confirmation is atomic against
     // the durable record. No-op if the record is gone, the URL is not part of the
@@ -499,17 +516,15 @@ export class IndexedDBDocLogStore implements DocLogStore {
     const tx = db.transaction(PENDING_REMOVALS_STORE, 'readwrite')
     const key = pendingRemovalKey(spaceId, removedDid)
     const stored = (await tx.store.get(key)) as StoredPendingRemoval | undefined
-    if (
-      stored &&
-      stored.homeBrokerSet.includes(brokerUrl) &&
-      !stored.confirmedBrokerUrls.includes(brokerUrl)
-    ) {
+    const outcome = confirmationOutcome(stored, brokerUrl, binding)
+    if (outcome === 'recorded') {
       await tx.store.put(
-        { ...stored, confirmedBrokerUrls: [...stored.confirmedBrokerUrls, brokerUrl] },
+        { ...stored!, confirmedBrokerUrls: [...stored!.confirmedBrokerUrls, brokerUrl] },
         key,
       )
     }
     await tx.done
+    return outcome
   }
 
   async deletePendingRemoval(spaceId: string, removedDid: string): Promise<void> {
@@ -714,6 +729,10 @@ interface StoredPendingRemoval {
   homeBrokerSet: string[]
   confirmedBrokerUrls: string[]
   newGeneration: number
+  /** #366 — Staging-Identitaet; fehlt in v3/v4-Records (Legacy = unbestaetigt). */
+  stagingId?: string
+  /** #366 — sha256-hex ueber Generation + Material; fehlt in v3/v4-Records. */
+  materialFingerprint?: string
   stagedKeyMaterial: {
     contentKey: string
     capSigningSeed: string
@@ -736,6 +755,8 @@ function toStoredRemoval(removal: PendingRemoval): StoredPendingRemoval {
     homeBrokerSet: [...removal.homeBrokerSet],
     confirmedBrokerUrls: [...removal.confirmedBrokerUrls],
     newGeneration: removal.newGeneration,
+    stagingId: removal.stagingId,
+    materialFingerprint: removal.materialFingerprint,
     stagedKeyMaterial: {
       contentKey: encodeBase64Url(removal.stagedKeyMaterial.contentKey),
       capSigningSeed: encodeBase64Url(removal.stagedKeyMaterial.capSigningSeed),
@@ -764,6 +785,8 @@ function fromStoredRemoval(stored: StoredPendingRemoval): PendingRemoval {
     homeBrokerSet: [...stored.homeBrokerSet],
     confirmedBrokerUrls: [...stored.confirmedBrokerUrls],
     newGeneration: stored.newGeneration,
+    stagingId: stored.stagingId,
+    materialFingerprint: stored.materialFingerprint,
     stagedKeyMaterial,
     createdAt: stored.createdAt,
     activityEntry: stored.activityEntry === undefined ? undefined : JSON.parse(JSON.stringify(stored.activityEntry)),
@@ -771,6 +794,24 @@ function fromStoredRemoval(stored: StoredPendingRemoval): PendingRemoval {
     committed: stored.committed,
     adminRemoveConfirmedBrokerUrls: stored.adminRemoveConfirmedBrokerUrls === undefined ? undefined : [...stored.adminRemoveConfirmedBrokerUrls],
   }
+}
+
+/**
+ * #366 — Ausgang einer Bestaetigung gegen den GESPEICHERTEN Record, damit die
+ * Entscheidung und der Schreibzugriff in derselben Transaktion liegen.
+ * confirmedBrokerUrls bleibt dadurch Teilmenge des (fixen) homeBrokerSet, waechst
+ * monoton und deckt ausschliesslich das aktuell gestagte Material.
+ */
+function confirmationOutcome(
+  stored: StoredPendingRemoval | undefined,
+  brokerUrl: string,
+  binding?: BrokerConfirmationBinding,
+): BrokerConfirmationOutcome {
+  if (!stored) return 'absent'
+  if (!stored.homeBrokerSet.includes(brokerUrl)) return 'foreign-broker'
+  if (!matchesConfirmationBinding(stored, binding)) return 'superseded'
+  if (stored.confirmedBrokerUrls.includes(brokerUrl)) return 'already-confirmed'
+  return 'recorded'
 }
 
 /** Stable pending order: by deviceId, then seq, then createdAt. */

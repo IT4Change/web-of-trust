@@ -5,9 +5,13 @@ import type {
   GapRepair,
   LocalLogEntry,
   PendingRemoval,
+  PendingRemovalWriteExpectation,
+  BrokerConfirmationBinding,
+  BrokerConfirmationOutcome,
   RecordRemoteAppliedEntry,
 } from '../../ports/DocLogStore'
-import { OrphanedLogRepairError } from '../../ports/DocLogStore'
+import { OrphanedLogRepairError, PendingRemovalStagingConflictError } from '../../ports/DocLogStore'
+import { matchesConfirmationBinding, matchesStagingExpectation } from './pending-removal-binding'
 import { pendingRemovalKey } from './pending-removal-key'
 import { InProcessSeqLock, type SeqLock } from './SeqLock'
 
@@ -289,14 +293,21 @@ export class InMemoryDocLogStore implements DocLogStore {
 
   // ── Pending member-removal staging (Slice SR / VE-S0) ──────────────────────
 
-  async putPendingRemoval(removal: PendingRemoval): Promise<void> {
+  async putPendingRemoval(removal: PendingRemoval, expect?: PendingRemovalWriteExpectation): Promise<void> {
     // Idempotent on (spaceId, removedDid): a re-stage OVERWRITES the prior
     // record wholesale. Deep-clone so the stored copy is decoupled from the
     // caller's arrays/Uint8Arrays (mirrors the durable adapter's serialization).
-    this.pendingRemovals.set(
-      this.removalKey(removal.spaceId, removal.removedDid),
-      cloneRemoval(removal),
-    )
+    const key = this.removalKey(removal.spaceId, removal.removedDid)
+    // #366: bedingtes Schreiben. Lesen + Pruefen + Schreiben liegen hier in
+    // einem synchronen Block, also atomar gegen jeden anderen Aufrufer dieses
+    // Prozesses — der Vertrag, den der durable Store per Transaktion nachbildet.
+    const stored = this.pendingRemovals.get(key) ?? null
+    if (!matchesStagingExpectation(stored, expect)) {
+      throw new PendingRemovalStagingConflictError(
+        removal.spaceId, removal.removedDid, stored ? cloneRemoval(stored) : null,
+      )
+    }
+    this.pendingRemovals.set(key, cloneRemoval(removal))
   }
 
   async getPendingRemoval(spaceId: string, removedDid: string): Promise<PendingRemoval | null> {
@@ -308,16 +319,21 @@ export class InMemoryDocLogStore implements DocLogStore {
     spaceId: string,
     removedDid: string,
     brokerUrl: string,
-  ): Promise<void> {
+    binding?: BrokerConfirmationBinding,
+  ): Promise<BrokerConfirmationOutcome> {
     const key = this.removalKey(spaceId, removedDid)
     const removal = this.pendingRemovals.get(key)
     // No-op if no staging record exists, the URL is not part of the (fixed)
     // home-broker set, or it is already confirmed. confirmedBrokerUrls is thus
     // always a subset of homeBrokerSet and grows monotonically — a stray confirm
     // for a non-home broker can never spoof enforcement completion.
-    if (!removal || !removal.homeBrokerSet.includes(brokerUrl)) return
-    if (removal.confirmedBrokerUrls.includes(brokerUrl)) return
+    if (!removal) return 'absent'
+    if (!removal.homeBrokerSet.includes(brokerUrl)) return 'foreign-broker'
+    // #366: eine Bestaetigung deckt nur das Material, das gesendet wurde.
+    if (!matchesConfirmationBinding(removal, binding)) return 'superseded'
+    if (removal.confirmedBrokerUrls.includes(brokerUrl)) return 'already-confirmed'
     removal.confirmedBrokerUrls.push(brokerUrl)
+    return 'recorded'
   }
 
   async deletePendingRemoval(spaceId: string, removedDid: string): Promise<void> {
@@ -463,6 +479,9 @@ function cloneRemoval(removal: PendingRemoval): PendingRemoval {
     homeBrokerSet: [...removal.homeBrokerSet],
     confirmedBrokerUrls: [...removal.confirmedBrokerUrls],
     newGeneration: removal.newGeneration,
+    // #366: Staging-Identitaet + Materialbindung reisen mit dem Record.
+    stagingId: removal.stagingId,
+    materialFingerprint: removal.materialFingerprint,
     stagedKeyMaterial: {
       contentKey: Uint8Array.from(removal.stagedKeyMaterial.contentKey),
       capSigningSeed: Uint8Array.from(removal.stagedKeyMaterial.capSigningSeed),

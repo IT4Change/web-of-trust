@@ -1,6 +1,8 @@
 import type { ProtocolCryptoAdapter } from '../../protocol/crypto/ports'
 import type { KeyManagementPort } from '../../ports/key-management'
-import type { DocLogStore, PendingRemoval, StagedRemovalKeyMaterial } from '../../ports/DocLogStore'
+import type { BrokerConfirmationBinding, DocLogStore, PendingRemoval, StagedRemovalKeyMaterial } from '../../ports/DocLogStore'
+import { PendingRemovalStagingConflictError } from '../../ports/DocLogStore'
+import { encodeBase64Url } from '../../protocol/crypto/encoding'
 import type { ControlFrame } from '../../protocol/sync/control-frame-transport'
 import { ControlFrameRejectedError } from '../../protocol/sync/control-frame-transport'
 import { classifyRejectDisposition } from '../../protocol/sync/log-sync-coordinator'
@@ -293,46 +295,85 @@ export async function recoverPendingRemovals(
 // Internals
 // ───────────────────────────────────────────────────────────────────────────
 
-/** STAGE: generate next-gen material (NOT persisted to the key store) + durably stage the intent. */
+/**
+ * #366 — Fingerprint des gestagten Materials: sha256 (hex) ueber die Generation
+ * und die drei Schluesselteile, kanonisch (feste Feldreihenfolge, base64url)
+ * serialisiert. Er bindet jede Broker-Bestaetigung an GENAU dieses Material und
+ * bleibt dabei rein lokal — das Wire-Format (space-rotate ack) bleibt unberuehrt.
+ */
+export async function computeStagedMaterialFingerprint(
+  crypto: ProtocolCryptoAdapter,
+  newGeneration: number,
+  material: StagedRemovalKeyMaterial,
+): Promise<string> {
+  const canonical = JSON.stringify({
+    newGeneration,
+    contentKey: encodeBase64Url(material.contentKey),
+    capSigningSeed: encodeBase64Url(material.capSigningSeed),
+    capVerificationKey: encodeBase64Url(material.capVerificationKey),
+  })
+  const digest = await crypto.sha256(new TextEncoder().encode(canonical))
+  return Array.from(digest, (b) => b.toString(16).padStart(2, '0')).join('')
+}
+
+/** #366 — zufaellige Identitaet eines Stagings (hex, 16 Byte). */
+async function mintStagingId(crypto: ProtocolCryptoAdapter): Promise<string> {
+  const bytes = await crypto.randomBytes(16)
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')
+}
+
+/**
+ * STAGE: generate next-gen material (NOT persisted to the key store) + durably
+ * stage the intent.
+ *
+ * #366 — Das Anlegen ist ein BEDINGTER Schreibzugriff: je (spaceId, removedDid)
+ * gewinnt genau ein Staging. Haelt ein anderer Beobachter auf demselben Store
+ * bereits einen Record, wird dessen Material UEBERNOMMEN (das frisch erzeugte
+ * wird verworfen — es war nie in einem Key-Store) statt ihn zu ueberschreiben.
+ * `replaces` ist der einzige Pfad, der ein eigenes Staging bewusst ersetzt
+ * (GENERATION_TAKEN / GENERATION_GAP) und erwartet dafuer dessen stagingId.
+ */
 async function stageRemoval(
   deps: SecureRemovalDeps,
   removedDid: string,
   activityEntry?: Record<string, unknown>,
   kind?: 'canonical-self-removal-rotation',
   targetGeneration?: number,
+  replaces?: PendingRemoval,
 ): Promise<PendingRemoval> {
-  const staged: StagedRotationMaterial = await stageRotateSpaceKey({
-    crypto: deps.crypto,
-    keyPort: deps.keyPort,
-    spaceId: deps.spaceId,
-    ownerDid: deps.ownerDid,
-    validityDurationMs: deps.validityDurationMs,
-    now: deps.now,
-  })
-  const stagedKeyMaterial: StagedRemovalKeyMaterial = {
-    contentKey: staged.contentKey,
-    capSigningSeed: staged.capabilitySigningSeed,
-    capVerificationKey: staged.capabilityVerificationKey,
-  }
-  if (targetGeneration !== undefined && staged.newGeneration < targetGeneration) {
-    throw new Error(`cannot enforce canonical self-removal at generation ${targetGeneration} while local generation is behind (${staged.newGeneration - 1})`)
-  }
-  const removal: PendingRemoval = {
-    phase: 'staged',
-    spaceId: deps.spaceId,
-    removedDid,
-    homeBrokerSet: [...deps.homeBrokerSet],
-    confirmedBrokerUrls: [],
-    newGeneration: staged.newGeneration,
-    stagedKeyMaterial,
-    createdAt: (deps.now ?? (() => new Date()))().getTime(),
-    activityEntry,
-    kind,
+  const removal = await stageRemovalCandidate(deps, removedDid, activityEntry, kind)
+  if (targetGeneration !== undefined && removal.newGeneration < targetGeneration) {
+    throw new Error(`cannot enforce canonical self-removal at generation ${targetGeneration} while local generation is behind (${removal.newGeneration - 1})`)
   }
   // Durable BEFORE any space-rotate send: a crash after this point recovers the
   // intent + key material and retries (VE-C3); a crash before it leaves no trace
   // (and no generation was advanced, so a re-run re-stages cleanly).
-  await deps.docLogStore.putPendingRemoval(removal)
+  try {
+    await deps.docLogStore.putPendingRemoval(removal, {
+      expectedStagingId: replaces ? (replaces.stagingId ?? undefined) : null,
+    })
+  } catch (err) {
+    if (!(err instanceof PendingRemovalStagingConflictError) || replaces) throw err
+    const winner = err.existing
+    if (!winner) throw err
+    // Uebernahme: derselbe Removal, aber das Material des Gewinners. Passt die
+    // Art nicht, ist es NICHT dasselbe Vorhaben — dann lieber hart abbrechen als
+    // einen fremden Rotationsauftrag weiterzutreiben.
+    if (winner.kind !== kind) {
+      throw new Error(
+        `pending removal of ${removedDid} in space ${deps.spaceId} is already staged as ` +
+          `${winner.kind ?? 'regular removal'}; cannot restage it as ${kind ?? 'regular removal'}`,
+      )
+    }
+    if (targetGeneration !== undefined && winner.newGeneration < targetGeneration) {
+      throw new Error(`cannot enforce canonical self-removal at generation ${targetGeneration} while local generation is behind (${winner.newGeneration - 1})`)
+    }
+    console.warn(
+      `[secure-removal] staging of ${removedDid} in space ${deps.spaceId} lost the race; ` +
+        `adopting the concurrently staged material (generation ${winner.newGeneration})`,
+    )
+    return winner
+  }
   return removal
 }
 
@@ -356,11 +397,11 @@ async function driveRemovalToCompletion(
   if (removal.phase === 'admin-removed') {
     await requireTerminalFinalizer(deps, removal)(removal.newGeneration)
     removal = { ...removal, phase: 'local-cleanup' }
-    await deps.docLogStore.putPendingRemoval(removal)
+    await persistPhase(deps, removal)
   }
   if (removal.phase === 'local-cleanup') {
     removal = { ...removal, phase: 'complete' }
-    await deps.docLogStore.putPendingRemoval(removal)
+    await persistPhase(deps, removal)
     await deps.docLogStore.deletePendingRemoval(removal.spaceId, removal.removedDid)
     return true
   }
@@ -375,6 +416,18 @@ async function driveRemovalToCompletion(
   // Every branch below is driven exclusively by `removal.phase` and durable
   // fields. Effects precede the single successor write; replaying an old phase
   // is therefore required to be idempotent.
+  // ── #366 MATERIALBINDUNG (vor JEDEM Senden) ────────────────────────────────
+  // Ab hier steht fest, welches Staging dieser Lauf treibt: seine Identitaet ist
+  // durable, sein Fingerprint deckt genau das Material im Record. Haelt ein
+  // anderer Beobachter den Record, bricht das hier ab statt sein Material zu
+  // ueberschreiben oder dessen Bestaetigung zu erben.
+  removal = await bindStagingMaterial(deps, removal)
+  const binding: BrokerConfirmationBinding = {
+    stagingId: removal.stagingId!,
+    newGeneration: removal.newGeneration,
+    materialFingerprint: removal.materialFingerprint!,
+  }
+
   const frame = await deps.createRotateFrame(
     removal.newGeneration,
     removal.stagedKeyMaterial.capVerificationKey,
@@ -385,9 +438,23 @@ async function driveRemovalToCompletion(
     if (confirmed.has(brokerUrl)) continue
     try {
       await deps.sendSpaceRotate(brokerUrl, frame)
-      await deps.docLogStore.markBrokerConfirmed(deps.spaceId, removal.removedDid, brokerUrl)
-      confirmed.add(brokerUrl)
+      // Die Bestaetigung wird NUR eingetragen, wenn der durable Record noch
+      // genau dieses Material traegt (#366) — sonst gehoert sie einem fremden
+      // Staging und darf dessen Commit nicht decken.
+      const outcome = await deps.docLogStore.markBrokerConfirmed(deps.spaceId, removal.removedDid, brokerUrl, binding)
+      if (outcome === 'recorded' || outcome === 'already-confirmed') {
+        confirmed.add(brokerUrl)
+        continue
+      }
+      console.warn(
+        `[secure-removal] broker confirmation from ${brokerUrl} for ${removal.removedDid} in space ` +
+          `${deps.spaceId} was discarded (${outcome}): the durable staging no longer carries the ` +
+          'material this run sent. Leaving the removal pending for the winning staging to re-send.',
+      )
+      throw new RemovalPendingNotEnforcedError(deps.spaceId, removal.removedDid, removal.newGeneration)
     } catch (err) {
+      // Die verworfene Bestaetigung oben ist bereits die Endaussage dieses Laufs.
+      if (err instanceof RemovalPendingNotEnforcedError) throw err
       if (err instanceof ControlFrameRejectedError && err.code === 'GENERATION_GAP') {
         const restaged = await handleGenerationGap(deps, removal, err.currentGeneration)
         if (restaged) return driveRemovalToCompletion(deps, restaged)
@@ -420,11 +487,15 @@ async function driveRemovalToCompletion(
     // crash/fault between the effect and the phase write would overwrite the
     // confirmation with this stale in-memory snapshot and re-send the rotate.
     removal = { ...removal, confirmedBrokerUrls: [...confirmed], phase: 'broker-confirmed' }
-    await deps.docLogStore.putPendingRemoval(removal)
+    await persistPhase(deps, removal)
   }
 
   // ── COMMIT (only now): activate the staged generation, then run the
   //    engine-specific membership-event + distribution, then drop the record. ──
+  // #366: unmittelbar davor wird gegen den DURABLE Record geprueft, dass jede
+  // Bestaetigung zu genau diesem Material gehoert. Nur bestaetigtes Material
+  // darf aktiviert werden.
+  if (removal.phase === 'broker-confirmed') await assertMaterialConfirmed(deps, removal, binding, homeBrokerSet)
   if (removal.phase === 'broker-confirmed') await commitStagedRotation({
     crypto: deps.crypto,
     keyPort: deps.keyPort,
@@ -443,7 +514,7 @@ async function driveRemovalToCompletion(
     if (removal.activityEntry === undefined) await deps.commitRemoval(removal.removedDid, removal.newGeneration)
     else await deps.commitRemoval(removal.removedDid, removal.newGeneration, removal.activityEntry)
     removal = { ...removal, committed: true, phase: removal.removedDid === deps.ownerDid ? 'committed' : 'local-cleanup' }
-    await deps.docLogStore.putPendingRemoval(removal)
+    await persistPhase(deps, removal)
   }
   // Sync 005 Self-Leave: the departing admin remains durably staged after
   // commit/distribution until its own broker authority is removed everywhere.
@@ -469,10 +540,10 @@ async function driveRemovalToCompletion(
       }
       adminConfirmed.add(brokerUrl)
       removal = { ...removal, adminRemoveConfirmedBrokerUrls: [...adminConfirmed] }
-      await deps.docLogStore.putPendingRemoval(removal)
+      await persistPhase(deps, removal)
     }
     removal = { ...removal, phase: 'admin-removed' }
-    await deps.docLogStore.putPendingRemoval(removal)
+    await persistPhase(deps, removal)
   }
   if (removal.removedDid === deps.ownerDid && removal.phase === 'admin-removed') {
     // `finalizeSelfLeave` is independently idempotent (stable PersonalDoc event
@@ -480,14 +551,90 @@ async function driveRemovalToCompletion(
     // exact durable phase for recovery, even when the Yjs space was unloaded.
     await requireAdminRemoveDeps(deps, removal).finalizeSelfLeave(removal.newGeneration)
     removal = { ...removal, phase: 'local-cleanup' }
-    await deps.docLogStore.putPendingRemoval(removal)
+    await persistPhase(deps, removal)
   }
   if (removal.phase === 'local-cleanup') {
     removal = { ...removal, phase: 'complete' }
-    await deps.docLogStore.putPendingRemoval(removal)
+    await persistPhase(deps, removal)
   }
   await deps.docLogStore.deletePendingRemoval(deps.spaceId, removal.removedDid)
   return true
+}
+
+/**
+ * #366 — Phasen-Write, der an das EIGENE Staging gebunden ist. Haelt ein anderer
+ * Beobachter den Record, wird nichts ueberschrieben; der Lauf endet als
+ * (durable, retrybar) pending statt fremdes Material fortzuschreiben.
+ */
+async function persistPhase(
+  deps: { docLogStore: DocLogStore },
+  removal: PendingRemoval,
+): Promise<void> {
+  try {
+    await deps.docLogStore.putPendingRemoval(removal, { expectedStagingId: removal.stagingId ?? undefined })
+  } catch (err) {
+    if (!(err instanceof PendingRemovalStagingConflictError)) throw err
+    throw new RemovalPendingNotEnforcedError(removal.spaceId, removal.removedDid, removal.newGeneration, { cause: err })
+  }
+}
+
+/**
+ * #366 — Staging-Identitaet herstellen und gegen den durable Record pruefen.
+ *
+ * Traegt der Record schon eine Identitaet, die zu seinem Material passt, wird nur
+ * geprueft, dass er noch uns gehoert. Fehlt sie (vor #366 persistiert) oder passt
+ * der Fingerprint nicht zum Material, gilt der Record als UNBESTAETIGT: er
+ * bekommt eine frische Identitaet, und solange er noch nicht committet ist,
+ * werden seine nicht materialgebundenen Bestaetigungen verworfen — der
+ * space-rotate wird neu gesendet, nie blind committet.
+ */
+async function bindStagingMaterial(deps: SecureRemovalDeps, removal: PendingRemoval): Promise<PendingRemoval> {
+  const fingerprint = await computeStagedMaterialFingerprint(deps.crypto, removal.newGeneration, removal.stagedKeyMaterial)
+  if (removal.stagingId !== undefined && removal.materialFingerprint === fingerprint) {
+    const stored = await deps.docLogStore.getPendingRemoval(removal.spaceId, removal.removedDid)
+    if (stored && stored.stagingId !== undefined && stored.stagingId !== removal.stagingId) {
+      throw new RemovalPendingNotEnforcedError(removal.spaceId, removal.removedDid, removal.newGeneration)
+    }
+    return removal
+  }
+  const preCommit = removal.phase === 'staged' || removal.phase === 'broker-confirmed'
+  const adopted: PendingRemoval = {
+    ...removal,
+    stagingId: await mintStagingId(deps.crypto),
+    materialFingerprint: fingerprint,
+    // Nach dem Commit ist die Rotation durch den Commit selbst belegt; davor
+    // zaehlt nur eine materialgebundene Bestaetigung.
+    confirmedBrokerUrls: preCommit ? [] : [...removal.confirmedBrokerUrls],
+    phase: preCommit ? 'staged' : removal.phase,
+  }
+  await deps.docLogStore.putPendingRemoval(adopted, { expectedStagingId: removal.stagingId ?? undefined })
+  return adopted
+}
+
+/**
+ * #366 — Commit-Gate: der durable Record muss noch GENAU dieses Staging und
+ * dieses Material tragen, und jeder Home-Broker muss dafuer bestaetigt haben.
+ * Sonst kein Commit — der Record bleibt stehen und wird neu gesendet.
+ */
+async function assertMaterialConfirmed(
+  deps: SecureRemovalDeps,
+  removal: PendingRemoval,
+  binding: BrokerConfirmationBinding,
+  homeBrokerSet: readonly string[],
+): Promise<void> {
+  const stored = await deps.docLogStore.getPendingRemoval(removal.spaceId, removal.removedDid)
+  const bound =
+    stored !== null &&
+    stored.stagingId === binding.stagingId &&
+    stored.materialFingerprint === binding.materialFingerprint &&
+    stored.newGeneration === binding.newGeneration &&
+    homeBrokerSet.every((url) => stored.confirmedBrokerUrls.includes(url))
+  if (bound) return
+  console.warn(
+    `[secure-removal] refusing to commit ${removal.removedDid} in space ${removal.spaceId}: the durable ` +
+      'staging no longer proves that every home broker confirmed THIS material.',
+  )
+  throw new RemovalPendingNotEnforcedError(removal.spaceId, removal.removedDid, removal.newGeneration)
 }
 
 /** Keeps the durable phase vocabulary closed when PendingRemoval evolves. */
@@ -548,8 +695,9 @@ async function handleGenerationGap(
     throw new Error(`GENERATION_GAP catch-up did not converge to broker generation ${brokerGeneration}`)
   }
   // `putPendingRemoval` overwrites the old record, including confirmations, so the
-  // rejected frame can never be retried after successful convergence.
-  await deps.docLogStore.putPendingRemoval(restaged)
+  // rejected frame can never be retried after successful convergence. #366: nur
+  // das EIGENE Staging darf so ersetzt werden (Erwartung auf dessen stagingId).
+  await deps.docLogStore.putPendingRemoval(restaged, { expectedStagingId: removal.stagingId ?? undefined })
   return restaged
 }
 
@@ -557,10 +705,17 @@ async function handleGenerationGap(
 async function stageRemovalCandidate(
   deps: SecureRemovalDeps, removedDid: string, activityEntry?: Record<string, unknown>, kind?: 'canonical-self-removal-rotation',
 ): Promise<PendingRemoval> {
-  const staged = await stageRotateSpaceKey({ crypto: deps.crypto, keyPort: deps.keyPort, spaceId: deps.spaceId, ownerDid: deps.ownerDid, validityDurationMs: deps.validityDurationMs, now: deps.now })
+  const staged: StagedRotationMaterial = await stageRotateSpaceKey({ crypto: deps.crypto, keyPort: deps.keyPort, spaceId: deps.spaceId, ownerDid: deps.ownerDid, validityDurationMs: deps.validityDurationMs, now: deps.now })
+  const stagedKeyMaterial: StagedRemovalKeyMaterial = {
+    contentKey: staged.contentKey, capSigningSeed: staged.capabilitySigningSeed, capVerificationKey: staged.capabilityVerificationKey,
+  }
   return {
     phase: 'staged', spaceId: deps.spaceId, removedDid, homeBrokerSet: [...deps.homeBrokerSet], confirmedBrokerUrls: [], newGeneration: staged.newGeneration,
-    stagedKeyMaterial: { contentKey: staged.contentKey, capSigningSeed: staged.capabilitySigningSeed, capVerificationKey: staged.capabilityVerificationKey },
+    stagedKeyMaterial,
+    // #366: jedes Staging traegt eine eigene Identitaet und den Fingerprint
+    // seines Materials — beides ab hier unveraenderlich fuer diesen Record.
+    stagingId: await mintStagingId(deps.crypto),
+    materialFingerprint: await computeStagedMaterialFingerprint(deps.crypto, staged.newGeneration, stagedKeyMaterial),
     createdAt: (deps.now ?? (() => new Date()))().getTime(), activityEntry, kind,
   }
 }
@@ -583,7 +738,9 @@ async function handleGenerationTaken(deps: SecureRemovalDeps, removal: PendingRe
     // A different rotation has arrived locally. Continue this still-uncommitted
     // removal at the actual next generation with new material, never by reusing
     // the foreign winner's slot.
-    await stageRemoval(deps, removal.removedDid, removal.activityEntry, removal.kind)
+    // `replaces` nennt das eigene, bewiesen verlorene Staging: nur so darf ein
+    // Record ersetzt werden — nie ueber das Staging eines anderen Beobachters.
+    await stageRemoval(deps, removal.removedDid, removal.activityEntry, removal.kind, undefined, removal)
   }
   return false
 }

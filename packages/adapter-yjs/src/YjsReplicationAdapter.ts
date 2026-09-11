@@ -1581,11 +1581,11 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
     for (const event of candidates) {
       // Existing staging is the cross-observer/recovery dedup key.  A current
       // generation at or past the declaration is already enforced (or superseded).
-      // GRENZE (gemessen): zwei EXAKT gleichzeitig laufende Beobachter lesen beide
-      // ein leeres Staging, stagen beide und senden beide einen space-rotate.
-      // Wirksam wird trotzdem genau EINER — das Generations-Gate des Brokers weist
-      // jeden weiteren ab. Diese Pruefung deduppt den SEQUENTIELLEN Re-Trigger
-      // (erneute Beobachtung, Restore, Recovery), nicht das Rennen.
+      // Diese Pruefung deduppt den SEQUENTIELLEN Re-Trigger (erneute Beobachtung,
+      // Restore, Recovery). Das Rennen zweier EXAKT gleichzeitiger Beobachter
+      // entscheidet seit #366 der Store: das Anlegen des Stagings ist ein
+      // bedingter Schreibzugriff, der Verlierer uebernimmt das Material des
+      // Gewinners, und eine Broker-Bestaetigung deckt nur genau dieses Material.
       const store = await this.ensureDocLogStore()
       if (!store || (await this.keyManagement.getCurrentGeneration(state.info.id)) >= event.sinceGeneration) continue
       const existing = await store.getPendingRemoval(state.info.id, event.did)

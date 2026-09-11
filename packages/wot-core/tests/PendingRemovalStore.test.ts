@@ -4,6 +4,7 @@ import { IndexedDBDocLogStore } from '../src/adapters/storage/IndexedDBDocLogSto
 import { InMemoryDocLogStore } from '../src/adapters/storage/InMemoryDocLogStore'
 import type { SeqLock } from '../src/adapters/storage/SeqLock'
 import type { DocLogStore, PendingRemoval } from '../src/ports/DocLogStore'
+import { PendingRemovalStagingConflictError } from '../src/ports/DocLogStore'
 
 // ── VE-S0: durable PendingRemoval staging store (Slice SR Phase 2) ───────────
 // Contract tests for the two-phase member-removal staging area, exercised
@@ -33,6 +34,10 @@ function makeRemoval(overrides: Partial<PendingRemoval> = {}): PendingRemoval {
       capVerificationKey: new Uint8Array(32).fill(0xc3),
     },
     createdAt: overrides.createdAt ?? 1_700_000_000_000,
+    // #366: Staging-Identitaet + Materialbindung; per Default abwesend, damit die
+    // Bestandstests weiter den Legacy-Record beschreiben.
+    stagingId: overrides.stagingId,
+    materialFingerprint: overrides.materialFingerprint,
   }
 }
 
@@ -232,7 +237,7 @@ describe.each(implementations)('PendingRemoval store contract — $name', ({ cre
       await store.init()
       await expect(
         store.markBrokerConfirmed(uuid(), uuid(), 'wss://nobody.example'),
-      ).resolves.toBeUndefined()
+      ).resolves.toBe('absent')
       // And it did not conjure a record into existence.
       expect(await store.listPendingRemovals()).toEqual([])
     })
@@ -258,6 +263,145 @@ describe.each(implementations)('PendingRemoval store contract — $name', ({ cre
       expect(
         (await store.getPendingRemoval(removal.spaceId, removal.removedDid))?.confirmedBrokerUrls,
       ).toEqual(['wss://home.example'])
+    })
+  })
+
+  // ── Group 8 (#366): atomare Staging-Uebernahme + materialgebundene Bestaetigung ──
+  describe('staging identity + material binding (Group 8, #366)', () => {
+    const BINDING = {
+      stagingId: 'staging-a',
+      newGeneration: 4,
+      materialFingerprint: 'fp-a',
+    } as const
+
+    function bound(overrides: Partial<PendingRemoval> = {}): PendingRemoval {
+      return makeRemoval({
+        homeBrokerSet: ['wss://home.example'],
+        confirmedBrokerUrls: [],
+        stagingId: BINDING.stagingId,
+        materialFingerprint: BINDING.materialFingerprint,
+        newGeneration: BINDING.newGeneration,
+        ...overrides,
+      })
+    }
+
+    it('ein zweiter Beobachter kann ein vorhandenes Staging NICHT ueberschreiben — er bekommt das des Gewinners', async () => {
+      const store = create(freshDbName())
+      await store.init()
+      const winner = bound()
+      await store.putPendingRemoval(winner, { expectedStagingId: null })
+
+      const loser: PendingRemoval = {
+        ...winner,
+        stagingId: 'staging-b',
+        materialFingerprint: 'fp-b',
+        stagedKeyMaterial: {
+          contentKey: new Uint8Array(32).fill(0x11),
+          capSigningSeed: new Uint8Array(32).fill(0x22),
+          capVerificationKey: new Uint8Array(32).fill(0x33),
+        },
+      }
+      const err = await store.putPendingRemoval(loser, { expectedStagingId: null }).catch((e: unknown) => e)
+
+      expect(err).toBeInstanceOf(PendingRemovalStagingConflictError)
+      // Der Verlierer bekommt das Material des Gewinners in die Hand — damit kann
+      // er weiterarbeiten, statt eine zweite Rotation zu erzeugen.
+      expectRemovalEquals((err as PendingRemovalStagingConflictError).existing, winner)
+      expectRemovalEquals(await store.getPendingRemoval(winner.spaceId, winner.removedDid), winner)
+    })
+
+    it('ein Fortschreiben mit fremder stagingId schreibt nichts', async () => {
+      const store = create(freshDbName())
+      await store.init()
+      const winner = bound()
+      await store.putPendingRemoval(winner, { expectedStagingId: null })
+
+      await expect(
+        store.putPendingRemoval({ ...winner, phase: 'broker-confirmed' }, { expectedStagingId: 'staging-b' }),
+      ).rejects.toBeInstanceOf(PendingRemovalStagingConflictError)
+      expect((await store.getPendingRemoval(winner.spaceId, winner.removedDid))?.phase).toBe('staged')
+
+      // Mit der eigenen stagingId geht derselbe Schreibzugriff durch.
+      await store.putPendingRemoval({ ...winner, phase: 'broker-confirmed' }, { expectedStagingId: BINDING.stagingId })
+      expect((await store.getPendingRemoval(winner.spaceId, winner.removedDid))?.phase).toBe('broker-confirmed')
+    })
+
+    it('ein Legacy-Record ohne stagingId traegt keine Identitaet und wird uebernommen', async () => {
+      const store = create(freshDbName())
+      await store.init()
+      const legacy = makeRemoval({ homeBrokerSet: ['wss://home.example'], confirmedBrokerUrls: [] })
+      await store.putPendingRemoval(legacy)
+
+      await store.putPendingRemoval({ ...legacy, stagingId: 'staging-a', materialFingerprint: 'fp-a' }, { expectedStagingId: null })
+      expect((await store.getPendingRemoval(legacy.spaceId, legacy.removedDid))?.stagingId).toBe('staging-a')
+    })
+
+    it.each([
+      ['fremder Fingerprint', { ...BINDING, materialFingerprint: 'fp-b' }],
+      ['fremde stagingId', { ...BINDING, stagingId: 'staging-b' }],
+      ['fremde Generation', { ...BINDING, newGeneration: 5 }],
+    ])('verwirft eine Bestaetigung mit %s (superseded, kein Eintrag)', async (_case, binding) => {
+      const store = create(freshDbName())
+      await store.init()
+      const removal = bound()
+      await store.putPendingRemoval(removal, { expectedStagingId: null })
+
+      expect(
+        await store.markBrokerConfirmed(removal.spaceId, removal.removedDid, 'wss://home.example', binding),
+      ).toBe('superseded')
+      expect(
+        (await store.getPendingRemoval(removal.spaceId, removal.removedDid))?.confirmedBrokerUrls,
+      ).toEqual([])
+    })
+
+    it('traegt eine passende Bestaetigung ein und meldet den Retry als already-confirmed', async () => {
+      const store = create(freshDbName())
+      await store.init()
+      const removal = bound()
+      await store.putPendingRemoval(removal, { expectedStagingId: null })
+
+      expect(
+        await store.markBrokerConfirmed(removal.spaceId, removal.removedDid, 'wss://home.example', BINDING),
+      ).toBe('recorded')
+      expect(
+        await store.markBrokerConfirmed(removal.spaceId, removal.removedDid, 'wss://home.example', BINDING),
+      ).toBe('already-confirmed')
+      expect(
+        (await store.getPendingRemoval(removal.spaceId, removal.removedDid))?.confirmedBrokerUrls,
+      ).toEqual(['wss://home.example'])
+    })
+
+    it('ein Legacy-Record kann eine gebundene Bestaetigung nicht decken', async () => {
+      const store = create(freshDbName())
+      await store.init()
+      const legacy = makeRemoval({ homeBrokerSet: ['wss://home.example'], confirmedBrokerUrls: [] })
+      await store.putPendingRemoval(legacy)
+
+      expect(
+        await store.markBrokerConfirmed(legacy.spaceId, legacy.removedDid, 'wss://home.example', BINDING),
+      ).toBe('superseded')
+    })
+
+    it('meldet einen Broker ausserhalb des fixen homeBrokerSet als foreign-broker', async () => {
+      const store = create(freshDbName())
+      await store.init()
+      const removal = bound()
+      await store.putPendingRemoval(removal, { expectedStagingId: null })
+
+      expect(
+        await store.markBrokerConfirmed(removal.spaceId, removal.removedDid, 'wss://stray.example', BINDING),
+      ).toBe('foreign-broker')
+    })
+
+    it('stagingId + materialFingerprint ueberleben den Roundtrip durch den Store', async () => {
+      const store = create(freshDbName())
+      await store.init()
+      const removal = bound()
+      await store.putPendingRemoval(removal, { expectedStagingId: null })
+
+      const got = await store.getPendingRemoval(removal.spaceId, removal.removedDid)
+      expect(got?.stagingId).toBe(BINDING.stagingId)
+      expect(got?.materialFingerprint).toBe(BINDING.materialFingerprint)
     })
   })
 

@@ -9,7 +9,7 @@ import {
 import { createSpaceKey } from '../src/application/sync/group-key-workflow'
 import { InMemoryKeyManagementAdapter } from '../src/adapters/key-management/InMemoryKeyManagementAdapter'
 import { InMemoryDocLogStore } from '../src/adapters/storage/InMemoryDocLogStore'
-import type { PendingRemoval } from '../src/ports/DocLogStore'
+import type { DocLogStore, PendingRemoval } from '../src/ports/DocLogStore'
 import { WebCryptoProtocolCryptoAdapter } from '../src/adapters/protocol-crypto'
 import { ControlFrameRejectedError, type ControlFrame } from '../src/protocol'
 
@@ -111,7 +111,12 @@ describe('runTwoPhaseRemoval — VE-C1 two-phase secure removal', () => {
     // exactly one space-rotate to the one home broker; the broker was confirmed
     expect(h.sendSpaceRotate).toHaveBeenCalledTimes(1)
     expect(h.sendSpaceRotate.mock.calls[0][0]).toBe(BROKER)
-    expect(markSpy).toHaveBeenCalledWith(SPACE, REMOVED, BROKER)
+    // #366: die Bestaetigung traegt die Bindung an genau das gestagte Material.
+    expect(markSpy).toHaveBeenCalledWith(SPACE, REMOVED, BROKER, expect.objectContaining({
+      newGeneration: 1,
+      stagingId: expect.any(String),
+      materialFingerprint: expect.any(String),
+    }))
     // the rotate frame was built for generation 1 with the capability key that the
     // commit then ACTIVATED at generation 1 (broker key == admin-activated key)
     expect(h.createRotateFrame).toHaveBeenCalledTimes(1)
@@ -567,7 +572,13 @@ describe('recoverPendingRemovals — VE-C3 crash-recovery (single home broker)',
 
     // This is deliberately a full record snapshot, including every staged-key byte:
     // failed gap convergence must not silently replace durable recovery material.
-    expect(await h.docLogStore.getPendingRemoval(SPACE, REMOVED)).toEqual(before)
+    // #366: der Legacy-Record bekommt beim Laden eine Staging-Identitaet +
+    // Materialbindung — das ist der EINZIGE erlaubte Unterschied; jedes Byte des
+    // Materials bleibt unangetastet.
+    const after = await h.docLogStore.getPendingRemoval(SPACE, REMOVED)
+    expect(after!.stagingId).toEqual(expect.any(String))
+    expect(after!.materialFingerprint).toEqual(expect.any(String))
+    expect(after).toEqual({ ...before, stagingId: after!.stagingId, materialFingerprint: after!.materialFingerprint })
     expect(h.commitRemoval).not.toHaveBeenCalled()
   })
 
@@ -665,5 +676,200 @@ describe('recoverPendingRemovals — VE-C3 crash-recovery (single home broker)',
     expect((await h.docLogStore.getPendingRemoval(SPACE, REMOVED))!.phase).toBe(expectedPhase)
     await recoverPendingRemovals(h.docLogStore, async () => h.deps)
     expect(await h.docLogStore.getPendingRemoval(SPACE, REMOVED)).toBeNull()
+  })
+})
+
+// ── #366: Staging-Rennen zweier Beobachter auf EINEM Store ───────────────────
+// Zwei Live-Instanzen DERSELBEN Identitaet (im Browser: zwei Tabs) teilen sich
+// Doc-Log-Store und Key-Port. Vor #366 konnte der zweite das Staging des ersten
+// ueberschreiben, waehrend der erste anschliessend die Broker-Bestaetigung auf
+// den fremden Record schrieb — die Recovery aktivierte dann Material, das der
+// Broker nie gesehen hat ("stale staged generation drift").
+describe('#366 — zwei Beobachter auf einem gemeinsamen Store', () => {
+  function deferred<T = void>(): { promise: Promise<T>; resolve: (value: T) => void } {
+    let resolve!: (value: T) => void
+    const promise = new Promise<T>((r) => { resolve = r })
+    return { promise, resolve }
+  }
+
+  /** Home-Broker mit durable Zustand: der erste space-rotate installiert seinen Capability-Key. */
+  function statefulBroker(): { rotate: (frame: ControlFrame) => void; installed: () => Uint8Array | null } {
+    let installedKey: Uint8Array | null = null
+    return {
+      rotate: (frame) => {
+        const key = (frame as unknown as { __capKey: Uint8Array }).__capKey
+        if (installedKey === null) { installedKey = key.slice(); return }
+        if (hex(key) !== hex(installedKey)) throw reject('GENERATION_TAKEN')
+      },
+      installed: () => installedKey,
+    }
+  }
+
+  /** Zweiter Beobachter: eigener Transport, aber DERSELBE Store und Key-Port. */
+  function secondObserver(
+    base: SecureRemovalDeps,
+    sendSpaceRotate: (brokerUrl: string, frame: ControlFrame) => Promise<void>,
+  ): SecureRemovalDeps & { commitRemoval: ReturnType<typeof vi.fn> } {
+    const commitRemoval = vi.fn(async () => {})
+    return {
+      ...base,
+      createRotateFrame: vi.fn(async (newGeneration: number, capKey: Uint8Array): Promise<ControlFrame> => ({
+        type: 'space-rotate',
+        ...({ __newGeneration: newGeneration, __capKey: capKey } as object),
+      })),
+      sendSpaceRotate: vi.fn(sendSpaceRotate),
+      commitRemoval,
+    }
+  }
+
+  it('REPRO: B stagt gegen As laufendes Staging, der Broker nimmt As Material — die Recovery committet nur bestaetigtes Material', async () => {
+    const broker = statefulBroker()
+    const aConfirmable = deferred()
+    const releaseA = deferred()
+    // A parkt NACH dem Broker-Einbau und VOR dem Eintragen der Bestaetigung —
+    // genau das Fenster, in dem B frueher das Staging ersetzen konnte.
+    const h = await makeHarness({
+      sendSpaceRotate: async (_brokerUrl, frame) => {
+        broker.rotate(frame)
+        aConfirmable.resolve()
+        await releaseA.promise
+      },
+    })
+    const b = secondObserver(h.deps, async (_brokerUrl, frame) => { broker.rotate(frame) })
+
+    // B parkt vor seinem eigenen Staging-Write; danach staged A und sendet.
+    // Fehler-Injektion: der Phasen-Write nach der Bestaetigung schlaegt bei BEIDEN
+    // fehl, sodass allein die Recovery ueber den Commit entscheidet.
+    const realPut = h.docLogStore.putPendingRemoval.bind(h.docLogStore)
+    const bAtPut = deferred()
+    const releaseB = deferred()
+    let putGateArmed = true
+    let faultArmed = true
+    const acceptedFingerprints = new Set<string | undefined>()
+    ;(h.docLogStore as unknown as { putPendingRemoval: DocLogStore['putPendingRemoval'] }).putPendingRemoval = (async (removal, expect_) => {
+      if (putGateArmed && removal.phase === 'staged') {
+        putGateArmed = false
+        bAtPut.resolve()
+        await releaseB.promise
+      }
+      if (faultArmed && removal.phase === 'broker-confirmed') {
+        throw new Error('injected before broker-confirmed persistence')
+      }
+      await realPut(removal, expect_)
+      acceptedFingerprints.add(removal.materialFingerprint)
+    }) as DocLogStore['putPendingRemoval']
+
+    const bRun = runTwoPhaseRemoval(b, REMOVED)
+    await bAtPut.promise
+    const aRun = runTwoPhaseRemoval(h.deps, REMOVED)
+    await aConfirmable.promise
+
+    releaseB.resolve()
+    await bRun.catch(() => {})
+    releaseA.resolve()
+    await aRun.catch(() => {})
+
+    // Vor der Recovery ist nichts committet, und der durable Record hat nie
+    // zwei verschiedene Materialien getragen.
+    expect(h.commitRemoval).not.toHaveBeenCalled()
+    expect(b.commitRemoval).not.toHaveBeenCalled()
+    expect(await h.keyPort.getCurrentGeneration(SPACE)).toBe(0)
+    expect(acceptedFingerprints.size).toBe(1)
+
+    faultArmed = false
+    expect(await recoverPendingRemovals(h.docLogStore, async () => h.deps)).toBe(1)
+
+    // Das Praxis-Symptom aus #365: lokal aktivierter Schluessel == Broker-Schluessel.
+    expect(await h.keyPort.getCurrentGeneration(SPACE)).toBe(1)
+    expect(hex((await h.keyPort.getCapabilityVerificationKey(SPACE, 1))!)).toBe(hex(broker.installed()!))
+    expect(await h.docLogStore.getPendingRemoval(SPACE, REMOVED)).toBeNull()
+  })
+
+  it('atomare Uebernahme: der Verlierer arbeitet mit dem Material des Gewinners weiter, statt es zu ueberschreiben', async () => {
+    const broker = statefulBroker()
+    const h = await makeHarness({ sendSpaceRotate: async (_brokerUrl, frame) => { broker.rotate(frame) } })
+    // B gewinnt das Staging, bleibt aber beim Broker haengen (Record bleibt stehen).
+    const b = secondObserver(h.deps, async () => { throw new Error('broker offline') })
+
+    const realPut = h.docLogStore.putPendingRemoval.bind(h.docLogStore)
+    const aAtPut = deferred()
+    const releaseA = deferred()
+    let gateArmed = true
+    ;(h.docLogStore as unknown as { putPendingRemoval: DocLogStore['putPendingRemoval'] }).putPendingRemoval = (async (removal, expect_) => {
+      if (gateArmed && removal.phase === 'staged') {
+        gateArmed = false
+        aAtPut.resolve()
+        await releaseA.promise
+      }
+      await realPut(removal, expect_)
+    }) as DocLogStore['putPendingRemoval']
+
+    const aRun = runTwoPhaseRemoval(h.deps, REMOVED)
+    await aAtPut.promise // A hat Material erzeugt, aber noch nichts geschrieben
+    await expect(runTwoPhaseRemoval(b, REMOVED)).rejects.toBeInstanceOf(RemovalPendingNotEnforcedError)
+    const winner = (await h.docLogStore.getPendingRemoval(SPACE, REMOVED))!
+    releaseA.resolve()
+    await aRun
+
+    // A hat das Staging von B uebernommen: dieselbe Identitaet, dasselbe Material,
+    // und der gesendete Frame traegt genau dessen Capability-Key.
+    expect(hex(h.createRotateFrame.mock.calls.at(-1)![1])).toBe(hex(winner.stagedKeyMaterial.capVerificationKey))
+    expect(hex((await h.keyPort.getKeyByGeneration(SPACE, 1))!)).toBe(hex(winner.stagedKeyMaterial.contentKey))
+    expect(hex((await h.keyPort.getCapabilityVerificationKey(SPACE, 1))!)).toBe(hex(broker.installed()!))
+    expect(h.commitRemoval).toHaveBeenCalledTimes(1)
+    expect(await h.docLogStore.getPendingRemoval(SPACE, REMOVED)).toBeNull()
+  })
+
+  it('eine Bestaetigung, die nicht zum gestagten Material gehoert, wird verworfen und fuehrt nie zum Commit', async () => {
+    const h = await makeHarness()
+    // Der Store meldet die Bestaetigung als "zu fremdem Material" — genau das,
+    // was passiert, wenn ein anderer Beobachter den Record ersetzt hat.
+    vi.spyOn(h.docLogStore, 'markBrokerConfirmed').mockResolvedValue('superseded')
+
+    await expect(runTwoPhaseRemoval(h.deps, REMOVED)).rejects.toBeInstanceOf(RemovalPendingNotEnforcedError)
+
+    expect(h.commitRemoval).not.toHaveBeenCalled()
+    expect(await h.keyPort.getCurrentGeneration(SPACE)).toBe(0)
+    const staged = await h.docLogStore.getPendingRemoval(SPACE, REMOVED)
+    expect(staged!.confirmedBrokerUrls).toEqual([])
+  })
+
+  it('ein Legacy-Pending ohne Materialbindung gilt als unbestaetigt: es wird neu gesendet, nie blind committet', async () => {
+    const h = await makeHarness()
+    // Vor #366 persistiert: Bestaetigung vorhanden, aber an nichts gebunden.
+    const legacy: PendingRemoval = {
+      phase: 'broker-confirmed',
+      spaceId: SPACE,
+      removedDid: REMOVED,
+      homeBrokerSet: [BROKER],
+      confirmedBrokerUrls: [BROKER],
+      newGeneration: 1,
+      stagedKeyMaterial: {
+        contentKey: new Uint8Array(32).fill(9),
+        capSigningSeed: new Uint8Array(32).fill(8),
+        capVerificationKey: new Uint8Array(32).fill(7),
+      },
+      createdAt: Date.now(),
+    }
+    await h.docLogStore.putPendingRemoval(legacy)
+
+    // Broker offline: die Recovery darf NICHT committen, sondern muss senden wollen.
+    h.deps.sendSpaceRotate = h.sendSpaceRotate.mockImplementation(async () => { throw new Error('broker offline') })
+    expect(await recoverPendingRemovals(h.docLogStore, async () => h.deps)).toBe(0)
+    expect(h.sendSpaceRotate).toHaveBeenCalledTimes(1)
+    expect(h.commitRemoval).not.toHaveBeenCalled()
+    expect(await h.keyPort.getCurrentGeneration(SPACE)).toBe(0)
+    const rebound = (await h.docLogStore.getPendingRemoval(SPACE, REMOVED))!
+    expect(rebound.stagingId).toEqual(expect.any(String))
+    expect(rebound.materialFingerprint).toEqual(expect.any(String))
+    expect(rebound.confirmedBrokerUrls).toEqual([]) // die ungebundene Bestaetigung ist verworfen
+    // Material unangetastet — nur die Bindung kam hinzu.
+    expect(hex(rebound.stagedKeyMaterial.contentKey)).toBe(hex(legacy.stagedKeyMaterial.contentKey))
+
+    // Erst der erfolgreiche erneute space-rotate fuehrt zum Commit.
+    h.sendSpaceRotate.mockImplementation(async () => {})
+    expect(await recoverPendingRemovals(h.docLogStore, async () => h.deps)).toBe(1)
+    expect(h.commitRemoval).toHaveBeenCalledTimes(1)
+    expect(hex((await h.keyPort.getKeyByGeneration(SPACE, 1))!)).toBe(hex(legacy.stagedKeyMaterial.contentKey))
   })
 })
