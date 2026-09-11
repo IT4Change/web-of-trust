@@ -16,6 +16,28 @@ import { AutomergeReplicationAdapter } from '../src/AutomergeReplicationAdapter'
 
 interface TestDoc { items: Record<string, { title: string }> }
 const wait = (ms = 400) => new Promise((r) => setTimeout(r, ms))
+
+/** Deterministisch statt fester Sleeps: CI-Runner sind deutlich langsamer als Dev-Maschinen. */
+async function waitUntil(condition: () => boolean | Promise<boolean>, what: string, timeoutMs = 15_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (await condition()) return
+    await new Promise((r) => setTimeout(r, 10))
+  }
+  throw new Error(`Timed out waiting for ${what}`)
+}
+
+/** Der Austritt ist beim beobachtenden Admin angekommen UND die Rotation durchgesetzt. */
+async function waitForEnforcedSelfRemoval(
+  broker: InProcessLogBroker, admin: LogSyncPeer, spaceId: string, removedDid: string,
+): Promise<void> {
+  await waitUntil(
+    async () => !loadedInfo(admin.adapter, spaceId).members.includes(removedDid)
+      && (brokerGeneration(broker, spaceId) ?? 0) > 0
+      && (await admin.docLogStore.getPendingRemoval(spaceId, removedDid)) === null,
+    `die durchgesetzte Rotation zum Austritt von ${removedDid.slice(0, 16)}`,
+  )
+}
 const cleanups: Array<() => Promise<void>> = []
 
 function adapterGeneration(adapter: AutomergeReplicationAdapter, spaceId: string): Promise<number> {
@@ -263,7 +285,7 @@ describe('Automerge Space-Admission (Aufnahme-Kennung)', () => {
     expect(brokerGeneration(broker, space.id)).toBe(0)
 
     await bob.adapter.leaveSpace(space.id)
-    await wait(600)
+    await waitForEnforcedSelfRemoval(broker, alice, space.id, bob.identity.getDid())
     expect(loadedInfo(alice.adapter, space.id).members).not.toContain(bob.identity.getDid())
 
     // VOR jeder erneuten Einladung: die angekündigte Rotation MUSS durchgesetzt
@@ -311,7 +333,7 @@ describe('Automerge Space-Admission (Aufnahme-Kennung)', () => {
     await wait()
 
     await bob.adapter.leaveSpace(space.id)
-    await wait(600)
+    await waitForEnforcedSelfRemoval(broker, alice, space.id, bob.identity.getDid())
     // Beide Live-Instanzen beobachten dasselbe removed. Wirksam wird GENAU EINE
     // Rotation: der Broker installiert die erste und weist jede weitere ab
     // (Generations-Gate). Das Staging deduppt den sequentiellen Re-Trigger, nicht
@@ -328,7 +350,8 @@ describe('Automerge Space-Admission (Aufnahme-Kennung)', () => {
       spaces: Map<string, unknown>
     }
     await second.enforceCanonicalSelfRemovalRotation(second.spaces.get(space.id), events)
-    await wait(400)
+    // Kurze Karenz für einen etwaigen (hier unerwünschten) Rotate-Versuch.
+    await wait()
 
     expect(rotateFrames).toHaveLength(framesAfterRace)
     expect(brokerGeneration(broker, space.id)).toBe(generationBefore + 1)
@@ -380,7 +403,7 @@ describe('Automerge Space-Admission (Aufnahme-Kennung)', () => {
 
     // Nicht-Admin bleibt unverändert möglich.
     await bob.adapter.leaveSpace(space.id)
-    await wait(600)
+    await waitUntil(async () => (await bob.adapter.getSpace(space.id)) === null, 'Bobs lokalen Cleanup')
     expect(await bob.adapter.getSpace(space.id)).toBeNull()
   })
 
@@ -395,7 +418,7 @@ describe('Automerge Space-Admission (Aufnahme-Kennung)', () => {
     const bobGenerationBefore = await adapterGeneration(bob.adapter, space.id)
 
     await bob.adapter.leaveSpace(space.id)
-    await wait(600)
+    await waitForEnforcedSelfRemoval(broker, alice, space.id, bob.identity.getDid())
 
     // Alice ist rotiert, Bob bekommt KEINE key-rotation — sonst wäre der
     // Austritt sicherheitlich wertlos.
@@ -420,7 +443,10 @@ describe('Automerge Space-Admission (Aufnahme-Kennung)', () => {
     // persistiert), das Enforcement läuft aber nie und stagt nichts.
     suppressEnforcement(alice.adapter)
     await bob.adapter.leaveSpace(space.id)
-    await wait(600)
+    await waitUntil(
+      () => !loadedInfo(alice.adapter, space.id).members.includes(bob.identity.getDid()),
+      'Bobs removed-Ereignis bei Alice',
+    )
     expect(loadedInfo(alice.adapter, space.id).members).not.toContain(bob.identity.getDid())
     expect(brokerGeneration(broker, space.id)).toBe(0)
     expect(await alice.docLogStore.getPendingRemoval(space.id, bob.identity.getDid())).toBeNull()
@@ -432,7 +458,11 @@ describe('Automerge Space-Admission (Aufnahme-Kennung)', () => {
     const restarted = await createLogSyncPeer('', broker, 'alice-socket-2', '11111111-1111-4111-8111-111111111111', {
       identity: alice.identity, stores: alice.stores,
     })
-    await wait(800)
+    await waitUntil(
+      async () => (brokerGeneration(broker, space.id) ?? 0) > 0
+        && (await alice.docLogStore.getPendingRemoval(space.id, bob.identity.getDid())) === null,
+      'die nachgezogene Rotation samt abgeschlossenem Staging',
+    )
     expect(brokerGeneration(broker, space.id)!).toBeGreaterThan(0)
     expect(await adapterGeneration(restarted.adapter, space.id)).toBeGreaterThan(0)
   })
@@ -456,7 +486,10 @@ describe('Automerge Space-Admission (Aufnahme-Kennung)', () => {
       return realHandleControlFrame(socketId, frame as never)
     }
     await bob.adapter.leaveSpace(space.id)
-    await wait(600)
+    await waitUntil(
+      async () => (await alice.docLogStore.getPendingRemoval(space.id, bob.identity.getDid())) !== null,
+      'das gestagte Removal bei Alice',
+    )
     const staged = await alice.docLogStore.getPendingRemoval(space.id, bob.identity.getDid())
     expect(staged?.kind).toBe('canonical-self-removal-rotation')
     expect(brokerGeneration(broker, space.id)).toBe(0)
@@ -476,7 +509,11 @@ describe('Automerge Space-Admission (Aufnahme-Kennung)', () => {
     const restarted = await createLogSyncPeer('', broker, 'alice-socket-2', '11111111-1111-4111-8111-111111111111', {
       identity: alice.identity, stores: alice.stores,
     })
-    await wait(800)
+    await waitUntil(
+      async () => (brokerGeneration(broker, space.id) ?? 0) > 0
+        && (await alice.docLogStore.getPendingRemoval(space.id, bob.identity.getDid())) === null,
+      'die abgeschlossene Recovery',
+    )
     expect(brokerGeneration(broker, space.id)!).toBeGreaterThan(0)
     expect(await alice.docLogStore.getPendingRemoval(space.id, bob.identity.getDid())).toBeNull()
     // Kein zweites Membership-Event für dieselbe Entfernung …
@@ -503,7 +540,10 @@ describe('Automerge Space-Admission (Aufnahme-Kennung)', () => {
       return realHandleControlFrame(socketId, frame as never)
     }
     await bob.adapter.leaveSpace(space.id)
-    await wait(600)
+    await waitUntil(
+      async () => (await alice.docLogStore.getPendingRemoval(space.id, bob.identity.getDid())) !== null,
+      'das gestagte Removal bei Alice',
+    )
     expect((await alice.docLogStore.getPendingRemoval(space.id, bob.identity.getDid()))?.kind).toBe('canonical-self-removal-rotation')
     expect(brokerGeneration(broker, space.id)).toBe(0)
 
@@ -511,8 +551,13 @@ describe('Automerge Space-Admission (Aufnahme-Kennung)', () => {
     ;(broker as unknown as { handleControlFrame: unknown }).handleControlFrame = realHandleControlFrame
     await alice.messaging.disconnect()
     await alice.messaging.connect(alice.identity.getDid())
-    // Der Reconnect-Pfad ist um 2s entprellt.
-    await wait(3000)
+    // Der Reconnect-Pfad ist um 2s entprellt — auf das ERGEBNIS warten, nicht
+    // auf die Entprellung.
+    await waitUntil(
+      async () => (brokerGeneration(broker, space.id) ?? 0) > 0
+        && (await alice.docLogStore.getPendingRemoval(space.id, bob.identity.getDid())) === null,
+      'die nach dem Reconnect abgeschlossene Rotation',
+    )
 
     expect(brokerGeneration(broker, space.id)!).toBeGreaterThan(0)
     expect(await alice.docLogStore.getPendingRemoval(space.id, bob.identity.getDid())).toBeNull()

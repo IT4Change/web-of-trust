@@ -1755,6 +1755,11 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
     for (const event of candidates) {
       // Das Staging ist der Dedup-Schluessel ueber Observer UND Geraete hinweg.
       // Eine Generation auf/ueber der Ankuendigung ist bereits durchgesetzt.
+      // GRENZE (gemessen): zwei EXAKT gleichzeitig laufende Beobachter lesen beide
+      // ein leeres Staging, stagen beide und senden beide einen space-rotate.
+      // Wirksam wird trotzdem genau EINER — das Generations-Gate des Brokers weist
+      // jeden weiteren ab. Diese Pruefung deduppt den SEQUENTIELLEN Re-Trigger
+      // (erneute Beobachtung, Restore, Recovery), nicht das Rennen.
       const store = await this.ensureDocLogStore()
       if (!store || (await this.keyManagement.getCurrentGeneration(space.info.id)) >= event.sinceGeneration) continue
       const existing = await store.getPendingRemoval(space.info.id, event.did)

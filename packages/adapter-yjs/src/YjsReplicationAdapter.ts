@@ -1581,6 +1581,11 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
     for (const event of candidates) {
       // Existing staging is the cross-observer/recovery dedup key.  A current
       // generation at or past the declaration is already enforced (or superseded).
+      // GRENZE (gemessen): zwei EXAKT gleichzeitig laufende Beobachter lesen beide
+      // ein leeres Staging, stagen beide und senden beide einen space-rotate.
+      // Wirksam wird trotzdem genau EINER — das Generations-Gate des Brokers weist
+      // jeden weiteren ab. Diese Pruefung deduppt den SEQUENTIELLEN Re-Trigger
+      // (erneute Beobachtung, Restore, Recovery), nicht das Rennen.
       const store = await this.ensureDocLogStore()
       if (!store || (await this.keyManagement.getCurrentGeneration(state.info.id)) >= event.sinceGeneration) continue
       const existing = await store.getPendingRemoval(state.info.id, event.did)
@@ -3462,6 +3467,20 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
       // restore). Doppelt zugleich als Z.253-Wiederholung des
       // Bestaetigungs-Syncs bei App-Start (SPEC-APPROX Old-World-Mechanik).
       void this.sendSpaceSyncRequest(meta.info.id).catch(() => {})
+
+      // Sync 005 §Self-Leave (#298): ein Crash NACH der persistierten
+      // Membership-Beobachtung, aber VOR dem Staging hinterlaesst ein
+      // kanonisches removed ohne Rotation und ohne Pending. Der _members-
+      // Observer feuert danach nie wieder (das Event-Set aendert sich nicht
+      // mehr), und recoverPendingRemovalsOnce findet nichts. Deshalb das
+      // Enforcement beim Restore EINMAL pro geladenem Space anstossen — auf
+      // DERSELBEN Chain wie im Observer, sequenziell, Fehler geloggt statt den
+      // Restore abzubrechen.
+      const restoredEvents = this.readMembershipEvents(state.doc)
+      state.membershipResolutionChain = (state.membershipResolutionChain ?? Promise.resolve())
+        .catch(() => {})
+        .then(() => this.enforceCanonicalSelfRemovalRotation(state, restoredEvents))
+        .catch((err) => console.warn('[YjsReplication] restore self-removal enforcement failed:', err))
 
       // Vault pull happens later in _pullAllFromVault() with concurrency limit
       } catch (err) {

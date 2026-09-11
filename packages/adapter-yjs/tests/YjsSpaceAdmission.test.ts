@@ -234,7 +234,9 @@ describe('Yjs Space-Admission (Aufnahme-Kennung)', () => {
     const first = makeAdapter(alice, aliceMsg, { keyManagement, metadataStorage, compactStore })
     await first.start()
     const space = await first.createSpace<TestDoc>('shared', { items: {} }, { name: 'Persistent' })
-    await wait(100)
+    // Persistenz ERZWINGEN statt auf die Entprellung zu warten.
+    await (first as unknown as { _saveToCompactStore(state: unknown): Promise<void> })
+      ._saveToCompactStore(spaceState(first, space.id))
     await first.stop()
 
     const second = makeAdapter(alice, aliceMsg, { keyManagement, metadataStorage, compactStore })
@@ -250,7 +252,8 @@ describe('Yjs Space-Admission (Aufnahme-Kennung)', () => {
     const first = makeAdapter(alice, aliceMsg, { keyManagement, metadataStorage, compactStore })
     await first.start()
     const space = await first.createSpace<TestDoc>('shared', { items: {} }, { name: 'Legacy' })
-    await wait(100)
+    await (first as unknown as { _saveToCompactStore(state: unknown): Promise<void> })
+      ._saveToCompactStore(spaceState(first, space.id))
     await first.stop()
 
     // Bestand simulieren: das Doc eines Alt-Space trägt kein Event-Set.
