@@ -872,4 +872,95 @@ describe('#366 — zwei Beobachter auf einem gemeinsamen Store', () => {
     expect(h.commitRemoval).toHaveBeenCalledTimes(1)
     expect(hex((await h.keyPort.getKeyByGeneration(SPACE, 1))!)).toBe(hex(legacy.stagedKeyMaterial.contentKey))
   })
+
+  // #366 Runde 2: die MIGRATION eines Legacy-Records ist selbst ein Rennen. A
+  // liest den alten Record und schreibt seine Bindung erst spaeter; dazwischen
+  // migriert B denselben Record, restagt nach GENERATION_GAP und laesst sich
+  // bestaetigen. As Migrations-Write darf dieses bestaetigte Material nicht mit
+  // seinem alten Snapshot ueberschreiben.
+  it('REPRO: A darf mit seinem Legacy-Snapshot nicht ueber Bs inzwischen bestaetigtes Staging schreiben', async () => {
+    // Broker mit durable Generation: gen > current+1 ist GENERATION_GAP.
+    let brokerGeneration = 0
+    let installedKey: Uint8Array | null = null
+    const rotate = (frame: ControlFrame): void => {
+      const generation = (frame as unknown as { __newGeneration: number }).__newGeneration
+      const key = (frame as unknown as { __capKey: Uint8Array }).__capKey
+      if (generation > brokerGeneration + 1) throw reject('GENERATION_GAP', brokerGeneration)
+      if (generation <= brokerGeneration) throw reject('GENERATION_TAKEN')
+      brokerGeneration = generation
+      installedKey = key.slice()
+    }
+
+    const h = await makeHarness({ sendSpaceRotate: async (_brokerUrl, frame) => { rotate(frame) } })
+    h.deps.catchUpGeneration = async () => ({ complete: true })
+    const b = secondObserver(h.deps, async (_brokerUrl, frame) => { rotate(frame) })
+    b.catchUpGeneration = async () => ({ complete: true })
+
+    // Vor #366 persistiert: Generation 2, keine Bindung, keine Bestaetigung.
+    const legacy: PendingRemoval = {
+      phase: 'staged',
+      spaceId: SPACE,
+      removedDid: REMOVED,
+      homeBrokerSet: [BROKER],
+      confirmedBrokerUrls: [],
+      newGeneration: 2,
+      stagedKeyMaterial: {
+        contentKey: new Uint8Array(32).fill(9),
+        capSigningSeed: new Uint8Array(32).fill(8),
+        capVerificationKey: new Uint8Array(32).fill(7),
+      },
+      createdAt: 1_700_000_000_001,
+    }
+    await h.docLogStore.putPendingRemoval(legacy)
+
+    const realPut = h.docLogStore.putPendingRemoval.bind(h.docLogStore)
+    const aAtMigration = deferred()
+    const releaseA = deferred()
+    let migrationGateArmed = true
+    let faultArmed = true
+    ;(h.docLogStore as unknown as { putPendingRemoval: DocLogStore['putPendingRemoval'] }).putPendingRemoval = (async (removal, expect_) => {
+      // A pausiert VOR seinem Migrations-Write (Legacy-Record, Generation 2).
+      if (migrationGateArmed && removal.stagingId !== undefined && removal.newGeneration === 2) {
+        migrationGateArmed = false
+        aAtMigration.resolve()
+        await releaseA.promise
+      }
+      if (faultArmed && removal.phase === 'broker-confirmed') {
+        throw new Error('injected before broker-confirmed persistence')
+      }
+      await realPut(removal, expect_)
+    }) as DocLogStore['putPendingRemoval']
+
+    const aRun = runTwoPhaseRemoval(h.deps, REMOVED)
+    await aAtMigration.promise
+
+    // B migriert denselben Record, faellt in den GENERATION_GAP, restagt auf
+    // Generation 1 und wird bestaetigt — dann unterbrochen.
+    await expect(runTwoPhaseRemoval(b, REMOVED)).rejects.toThrow('injected before broker-confirmed persistence')
+    const confirmed = (await h.docLogStore.getPendingRemoval(SPACE, REMOVED))!
+    expect(confirmed.newGeneration).toBe(1)
+    expect(confirmed.confirmedBrokerUrls).toEqual([BROKER])
+    expect(brokerGeneration).toBe(1)
+
+    releaseA.resolve()
+    await aRun.catch(() => {})
+
+    // A hat NICHTS ueberschrieben: der bestaetigte Record von B steht unveraendert.
+    const afterA = (await h.docLogStore.getPendingRemoval(SPACE, REMOVED))!
+    expect(afterA.stagingId).toBe(confirmed.stagingId)
+    expect(afterA.newGeneration).toBe(1)
+    expect(afterA.confirmedBrokerUrls).toEqual([BROKER])
+    expect(brokerGeneration).toBe(1) // A hat keine Generation 2 nachgeschoben
+    expect(h.commitRemoval).not.toHaveBeenCalled()
+    expect(b.commitRemoval).not.toHaveBeenCalled()
+
+    faultArmed = false
+    expect(await recoverPendingRemovals(h.docLogStore, async () => h.deps)).toBe(1)
+
+    // Lokal aktiv ist genau das Material, das der Broker bestaetigt hat.
+    expect(await h.keyPort.getCurrentGeneration(SPACE)).toBe(brokerGeneration)
+    expect(hex((await h.keyPort.getCapabilityVerificationKey(SPACE, 1))!)).toBe(hex(installedKey!))
+    expect(hex((await h.keyPort.getKeyByGeneration(SPACE, 1))!)).toBe(hex(afterA.stagedKeyMaterial.contentKey))
+    expect(await h.docLogStore.getPendingRemoval(SPACE, REMOVED)).toBeNull()
+  })
 })

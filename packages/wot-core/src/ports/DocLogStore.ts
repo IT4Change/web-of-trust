@@ -75,6 +75,8 @@
  */
 
 /** A persisted local or applied-remote log entry. */
+import { encodeBase64Url } from '../protocol/crypto/encoding'
+
 export interface LocalLogEntry {
   /** The document this entry belongs to. */
   docId: string
@@ -226,12 +228,60 @@ export interface PendingRemoval {
 
 /**
  * #366 — Erwartung an den gespeicherten Zustand beim bedingten Schreiben eines
- * {@link PendingRemoval}. `null` heisst "es darf noch keinen Record geben"
- * (Anlegen), ein String heisst "der gespeicherte Record muss genau diese
- * stagingId tragen" (Fortschreiben/Ersetzen), `undefined` heisst unbedingt.
+ * {@link PendingRemoval}. Drei Formen, alle EXPLIZIT — es gibt bewusst keinen
+ * Joker, der "passt schon" bedeutet:
+ *
+ *  - `absent` — es darf noch KEIN Record existieren (Anlegen).
+ *  - `legacy` — der gespeicherte Record muss noch der UNVERAENDERTE Record ohne
+ *    Staging-Identitaet sein, den der Aufrufer gelesen hat (gleiche Generation,
+ *    gleiche Materialbindung, gleiches Material). Das ist die Migration eines
+ *    vor #366 persistierten Records: sie ist der einzige Schreibzugriff, der
+ *    einem Record erstmals eine Identitaet gibt, und darf deshalb nicht zwischen
+ *    Lesen und Schreiben einen fremden, laengst migrierten Record ueberfahren.
+ *  - `staging` — der gespeicherte Record muss genau diese stagingId tragen
+ *    (Fortschreiben oder bewusstes Ersetzen des EIGENEN Stagings).
+ *
+ * Wird `expect` ganz weggelassen, ist der Schreibzugriff unbedingt — das ist der
+ * Test-/Seed-Pfad; der Workflow gibt IMMER eine Erwartung mit.
  */
-export interface PendingRemovalWriteExpectation {
-  expectedStagingId: string | null | undefined
+export type PendingRemovalWriteExpectation =
+  | { kind: 'absent' }
+  | {
+      kind: 'legacy'
+      /** Generation des gelesenen Legacy-Records. */
+      newGeneration: number
+      /** Materialbindung des gelesenen Records — bei echtem Legacy `undefined`. */
+      materialFingerprint?: string
+      /** Kanonische Form des gelesenen Materials, siehe {@link stagedMaterialKey}. */
+      material: string
+    }
+  | { kind: 'staging'; stagingId: string }
+
+/**
+ * #366 — Kanonische, vergleichbare Form des gestagten Materials. Beide Stores und
+ * der Workflow leiten ihre Erwartung hierueber ab, damit "dasselbe Material"
+ * ueberall dieselbe Frage ist — unabhaengig davon, ob der Store Bytes oder
+ * base64url haelt.
+ */
+export function stagedMaterialKey(material: StagedRemovalKeyMaterial): string {
+  return [
+    encodeBase64Url(material.contentKey),
+    encodeBase64Url(material.capSigningSeed),
+    encodeBase64Url(material.capVerificationKey),
+  ].join('.')
+}
+
+/**
+ * #366 — Die `legacy`-Erwartung zu einem GELESENEN Record ohne Staging-Identitaet:
+ * "schreibe nur, solange genau dieser Record unveraendert dort liegt".
+ */
+export function legacyWriteExpectation(removal: PendingRemoval): PendingRemovalWriteExpectation {
+  return {
+    kind: 'legacy',
+    newGeneration: removal.newGeneration,
+    materialFingerprint: removal.materialFingerprint,
+    material: stagedMaterialKey(removal.stagedKeyMaterial),
+  }
 }
 
 /**
@@ -539,18 +589,13 @@ export interface DocLogStore {
    *
    * #366 — BEDINGTES SCHREIBEN: `expect` macht den Schreibzugriff atomar gegen
    * einen zweiten Beobachter auf demselben Store (zwei Tabs derselben Identitaet).
-   * Das Lesen, Pruefen und Schreiben laeuft in EINER Transaktion:
-   *   - `{ expectedStagingId: null }` — Anlegen: es darf noch KEIN Record
-   *     existieren. Existiert einer, wird nichts geschrieben und ein
-   *     {@link PendingRemovalStagingConflictError} mit dem vorhandenen Record
-   *     geworfen; der Aufrufer uebernimmt dessen Material (oder bricht ab).
-   *   - `{ expectedStagingId: '<id>' }` — Fortschreiben/Ersetzen: der gespeicherte
-   *     Record MUSS genau diese {@link PendingRemoval.stagingId} tragen.
-   *   - `expect` weggelassen oder `expectedStagingId: undefined` — unbedingtes
-   *     Ueberschreiben (Test-/Migrationspfad; der Workflow gibt immer eine
-   *     Erwartung mit).
-   * Ein gespeicherter Legacy-Record OHNE stagingId traegt keine Identitaet und
-   * erfuellt daher jede Erwartung — er wird beim ersten Lauf uebernommen.
+   * Das Lesen, Pruefen und Schreiben laeuft in EINER Transaktion; passt der
+   * gespeicherte Zustand nicht zur Erwartung, wird NICHTS geschrieben und ein
+   * {@link PendingRemovalStagingConflictError} mit dem vorhandenen Record
+   * geworfen. Die drei Erwartungsformen stehen an
+   * {@link PendingRemovalWriteExpectation} — auch die Migration eines
+   * Legacy-Records ist eine davon (`legacy`), nicht etwa ein unbedingter Write.
+   * Ohne `expect` ist der Schreibzugriff unbedingt (Test-/Seed-Pfad).
    */
   putPendingRemoval(removal: PendingRemoval, expect?: PendingRemovalWriteExpectation): Promise<void>
 

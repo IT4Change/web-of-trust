@@ -1,12 +1,14 @@
 import type {
   BrokerConfirmationBinding,
+  PendingRemoval,
   PendingRemovalWriteExpectation,
 } from '../../ports/DocLogStore'
+import { stagedMaterialKey } from '../../ports/DocLogStore'
 
 /**
- * #366 — Die Materialbindung eines gestagten Removals, reduziert auf die Felder,
- * die BEIDE Store-Formen tragen (die In-Memory-Form und die base64-kodierte
- * IndexedDB-Form). So teilen sich beide Stores exakt eine Vergleichsregel.
+ * #366 — Die Staging-Identitaet eines Records, reduziert auf die Felder, die
+ * BEIDE Store-Formen ohne Dekodierung tragen (die In-Memory-Form und die
+ * base64-kodierte IndexedDB-Form). Genug fuer die Bestaetigungsbindung.
  */
 export interface StagingIdentity {
   stagingId?: string
@@ -17,32 +19,47 @@ export interface StagingIdentity {
 /**
  * Darf `removal` ueber `stored` geschrieben werden?
  *
- * `expect` weggelassen / `expectedStagingId: undefined` → unbedingt.
- * `null` → es darf noch kein Record existieren (Anlegen).
- * String → der gespeicherte Record MUSS genau diese stagingId tragen.
+ * Ohne `expect` unbedingt (Test-/Seed-Pfad). Sonst entscheidet ausschliesslich
+ * die explizit genannte Form — es gibt keinen Zustand mehr, der jede Erwartung
+ * erfuellt:
  *
- * Ein gespeicherter Record OHNE stagingId stammt aus der Zeit vor #366, traegt
- * also keine Identitaet, gegen die man pruefen koennte. Er erfuellt jede
- * Erwartung und wird vom ersten Lauf uebernommen (der ihm eine stagingId gibt);
- * ab da greift der Schutz. Das ist die ehrliche Grenze der Garantie.
+ *  - `absent`  — nur wenn gar kein Record da ist.
+ *  - `legacy`  — nur ueber GENAU den unveraenderten Record ohne Staging-Identitaet,
+ *    den der Aufrufer gelesen hat. Hat ihn inzwischen jemand migriert (dann
+ *    traegt er eine stagingId) oder ersetzt (andere Generation / anderes
+ *    Material), ist das ein Konflikt. Ohne diese Pruefung koennte ein Aufrufer,
+ *    der lange vor seinem Migrations-Write gelesen hat, ein inzwischen
+ *    bestaetigtes Staging mit seinem alten Snapshot ueberschreiben.
+ *  - `staging` — nur ueber den Record mit genau dieser stagingId.
  */
 export function matchesStagingExpectation(
-  stored: StagingIdentity | null | undefined,
+  stored: PendingRemoval | null | undefined,
   expect?: PendingRemovalWriteExpectation,
 ): boolean {
-  if (!expect || expect.expectedStagingId === undefined) return true
-  if (!stored) return expect.expectedStagingId === null
-  if (stored.stagingId === undefined) return true
-  return stored.stagingId === expect.expectedStagingId
+  if (!expect) return true
+  if (!stored) return expect.kind === 'absent'
+  switch (expect.kind) {
+    case 'absent':
+      return false
+    case 'staging':
+      return stored.stagingId === expect.stagingId
+    case 'legacy':
+      return (
+        stored.stagingId === undefined &&
+        stored.newGeneration === expect.newGeneration &&
+        stored.materialFingerprint === expect.materialFingerprint &&
+        stagedMaterialKey(stored.stagedKeyMaterial) === expect.material
+      )
+  }
 }
 
 /**
  * Gehoert eine Broker-Bestaetigung zum AKTUELL gespeicherten Material?
  *
- * Ohne `binding` (Test-/Migrationspfad) bleibt es beim alten, ungebundenen
- * Verhalten. Mit `binding` muessen stagingId, Generation UND Fingerprint
- * uebereinstimmen; ein Legacy-Record ohne diese Felder kann eine Bestaetigung
- * nicht decken und wird damit als ueberschrieben behandelt.
+ * Ohne `binding` (Test-/Seed-Pfad) bleibt es beim alten, ungebundenen Verhalten.
+ * Mit `binding` muessen stagingId, Generation UND Fingerprint uebereinstimmen;
+ * ein Legacy-Record ohne diese Felder kann eine Bestaetigung nicht decken und
+ * wird damit als ueberschrieben behandelt.
  */
 export function matchesConfirmationBinding(
   stored: StagingIdentity,

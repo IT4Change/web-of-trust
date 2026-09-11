@@ -302,10 +302,9 @@ export class InMemoryDocLogStore implements DocLogStore {
     // einem synchronen Block, also atomar gegen jeden anderen Aufrufer dieses
     // Prozesses — der Vertrag, den der durable Store per Transaktion nachbildet.
     const stored = this.pendingRemovals.get(key) ?? null
-    if (!matchesStagingExpectation(stored, expect)) {
-      throw new PendingRemovalStagingConflictError(
-        removal.spaceId, removal.removedDid, stored ? cloneRemoval(stored) : null,
-      )
+    const current = stored ? cloneRemoval(stored) : null
+    if (!matchesStagingExpectation(current, expect)) {
+      throw new PendingRemovalStagingConflictError(removal.spaceId, removal.removedDid, current)
     }
     this.pendingRemovals.set(key, cloneRemoval(removal))
   }

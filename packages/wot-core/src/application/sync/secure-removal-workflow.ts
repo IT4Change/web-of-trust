@@ -1,7 +1,7 @@
 import type { ProtocolCryptoAdapter } from '../../protocol/crypto/ports'
 import type { KeyManagementPort } from '../../ports/key-management'
-import type { BrokerConfirmationBinding, DocLogStore, PendingRemoval, StagedRemovalKeyMaterial } from '../../ports/DocLogStore'
-import { PendingRemovalStagingConflictError } from '../../ports/DocLogStore'
+import type { BrokerConfirmationBinding, DocLogStore, PendingRemoval, PendingRemovalWriteExpectation, StagedRemovalKeyMaterial } from '../../ports/DocLogStore'
+import { legacyWriteExpectation, PendingRemovalStagingConflictError } from '../../ports/DocLogStore'
 import { encodeBase64Url } from '../../protocol/crypto/encoding'
 import type { ControlFrame } from '../../protocol/sync/control-frame-transport'
 import { ControlFrameRejectedError } from '../../protocol/sync/control-frame-transport'
@@ -349,9 +349,7 @@ async function stageRemoval(
   // intent + key material and retries (VE-C3); a crash before it leaves no trace
   // (and no generation was advanced, so a re-run re-stages cleanly).
   try {
-    await deps.docLogStore.putPendingRemoval(removal, {
-      expectedStagingId: replaces ? (replaces.stagingId ?? undefined) : null,
-    })
+    await deps.docLogStore.putPendingRemoval(removal, writeExpectation(replaces))
   } catch (err) {
     if (!(err instanceof PendingRemovalStagingConflictError) || replaces) throw err
     const winner = err.existing
@@ -571,7 +569,7 @@ async function persistPhase(
   removal: PendingRemoval,
 ): Promise<void> {
   try {
-    await deps.docLogStore.putPendingRemoval(removal, { expectedStagingId: removal.stagingId ?? undefined })
+    await deps.docLogStore.putPendingRemoval(removal, writeExpectation(removal))
   } catch (err) {
     if (!(err instanceof PendingRemovalStagingConflictError)) throw err
     throw new RemovalPendingNotEnforcedError(removal.spaceId, removal.removedDid, removal.newGeneration, { cause: err })
@@ -607,8 +605,47 @@ async function bindStagingMaterial(deps: SecureRemovalDeps, removal: PendingRemo
     confirmedBrokerUrls: preCommit ? [] : [...removal.confirmedBrokerUrls],
     phase: preCommit ? 'staged' : removal.phase,
   }
-  await deps.docLogStore.putPendingRemoval(adopted, { expectedStagingId: removal.stagingId ?? undefined })
+  try {
+    // Die Migration ist der EINZIGE Write, der einem Record erstmals eine
+    // Identitaet gibt. Sie erwartet deshalb GENAU den Legacy-Record, den wir
+    // gelesen haben: hat ihn ein zweiter Beobachter zwischen Lesen und
+    // Schreiben migriert (und womoeglich schon neu gestagt und bestaetigt),
+    // darf unser alter Snapshot ihn nicht ueberfahren.
+    await deps.docLogStore.putPendingRemoval(adopted, writeExpectation(removal))
+  } catch (err) {
+    if (!(err instanceof PendingRemovalStagingConflictError)) throw err
+    const winner = err.existing
+    const fingerprintOfWinner = winner
+      ? await computeStagedMaterialFingerprint(deps.crypto, winner.newGeneration, winner.stagedKeyMaterial)
+      : null
+    if (winner && winner.stagingId !== undefined && winner.materialFingerprint === fingerprintOfWinner) {
+      // Der Gewinner ist bereits sauber gebunden — mit SEINEM Material weiter,
+      // wie im regulaeren Uebernahme-Pfad.
+      console.warn(
+        `[secure-removal] migration of the legacy staging for ${removal.removedDid} in space ` +
+          `${removal.spaceId} lost the race; continuing with the concurrently bound staging ` +
+          `(generation ${winner.newGeneration})`,
+      )
+      return winner
+    }
+    // Noch ungebunden oder in sich widerspruechlich: nichts anfassen, der
+    // naechste Recovery-Durchlauf bindet sauber.
+    throw new RemovalPendingNotEnforcedError(removal.spaceId, removal.removedDid, removal.newGeneration, { cause: err })
+  }
   return adopted
+}
+
+/**
+ * #366 — Die Erwartung, unter der ein bereits GELESENER Record fortgeschrieben
+ * (oder bewusst ersetzt) wird. Ein Record mit Identitaet wird ueber genau diese
+ * Identitaet geschrieben; ein Legacy-Record ueber seinen unveraenderten Zustand.
+ * `undefined` heisst hier nie "unbedingt" — ohne gelesenen Record ist es das
+ * Anlegen.
+ */
+function writeExpectation(read: PendingRemoval | undefined): PendingRemovalWriteExpectation {
+  if (!read) return { kind: 'absent' }
+  if (read.stagingId !== undefined) return { kind: 'staging', stagingId: read.stagingId }
+  return legacyWriteExpectation(read)
 }
 
 /**
@@ -697,7 +734,7 @@ async function handleGenerationGap(
   // `putPendingRemoval` overwrites the old record, including confirmations, so the
   // rejected frame can never be retried after successful convergence. #366: nur
   // das EIGENE Staging darf so ersetzt werden (Erwartung auf dessen stagingId).
-  await deps.docLogStore.putPendingRemoval(restaged, { expectedStagingId: removal.stagingId ?? undefined })
+  await deps.docLogStore.putPendingRemoval(restaged, writeExpectation(removal))
   return restaged
 }
 

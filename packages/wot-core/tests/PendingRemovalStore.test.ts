@@ -4,7 +4,7 @@ import { IndexedDBDocLogStore } from '../src/adapters/storage/IndexedDBDocLogSto
 import { InMemoryDocLogStore } from '../src/adapters/storage/InMemoryDocLogStore'
 import type { SeqLock } from '../src/adapters/storage/SeqLock'
 import type { DocLogStore, PendingRemoval } from '../src/ports/DocLogStore'
-import { PendingRemovalStagingConflictError } from '../src/ports/DocLogStore'
+import { legacyWriteExpectation, PendingRemovalStagingConflictError } from '../src/ports/DocLogStore'
 
 // ── VE-S0: durable PendingRemoval staging store (Slice SR Phase 2) ───────────
 // Contract tests for the two-phase member-removal staging area, exercised
@@ -289,7 +289,7 @@ describe.each(implementations)('PendingRemoval store contract — $name', ({ cre
       const store = create(freshDbName())
       await store.init()
       const winner = bound()
-      await store.putPendingRemoval(winner, { expectedStagingId: null })
+      await store.putPendingRemoval(winner, { kind: 'absent' })
 
       const loser: PendingRemoval = {
         ...winner,
@@ -301,7 +301,7 @@ describe.each(implementations)('PendingRemoval store contract — $name', ({ cre
           capVerificationKey: new Uint8Array(32).fill(0x33),
         },
       }
-      const err = await store.putPendingRemoval(loser, { expectedStagingId: null }).catch((e: unknown) => e)
+      const err = await store.putPendingRemoval(loser, { kind: 'absent' }).catch((e: unknown) => e)
 
       expect(err).toBeInstanceOf(PendingRemovalStagingConflictError)
       // Der Verlierer bekommt das Material des Gewinners in die Hand — damit kann
@@ -314,26 +314,91 @@ describe.each(implementations)('PendingRemoval store contract — $name', ({ cre
       const store = create(freshDbName())
       await store.init()
       const winner = bound()
-      await store.putPendingRemoval(winner, { expectedStagingId: null })
+      await store.putPendingRemoval(winner, { kind: 'absent' })
 
       await expect(
-        store.putPendingRemoval({ ...winner, phase: 'broker-confirmed' }, { expectedStagingId: 'staging-b' }),
+        store.putPendingRemoval({ ...winner, phase: 'broker-confirmed' }, { kind: 'staging', stagingId: 'staging-b' }),
       ).rejects.toBeInstanceOf(PendingRemovalStagingConflictError)
       expect((await store.getPendingRemoval(winner.spaceId, winner.removedDid))?.phase).toBe('staged')
 
       // Mit der eigenen stagingId geht derselbe Schreibzugriff durch.
-      await store.putPendingRemoval({ ...winner, phase: 'broker-confirmed' }, { expectedStagingId: BINDING.stagingId })
+      await store.putPendingRemoval({ ...winner, phase: 'broker-confirmed' }, { kind: 'staging', stagingId: BINDING.stagingId })
       expect((await store.getPendingRemoval(winner.spaceId, winner.removedDid))?.phase).toBe('broker-confirmed')
     })
 
-    it('ein Legacy-Record ohne stagingId traegt keine Identitaet und wird uebernommen', async () => {
+    it('die Migration schreibt ueber den UNVERAENDERTEN Legacy-Record', async () => {
       const store = create(freshDbName())
       await store.init()
       const legacy = makeRemoval({ homeBrokerSet: ['wss://home.example'], confirmedBrokerUrls: [] })
       await store.putPendingRemoval(legacy)
 
-      await store.putPendingRemoval({ ...legacy, stagingId: 'staging-a', materialFingerprint: 'fp-a' }, { expectedStagingId: null })
+      await store.putPendingRemoval(
+        { ...legacy, stagingId: 'staging-a', materialFingerprint: 'fp-a' },
+        legacyWriteExpectation(legacy),
+      )
       expect((await store.getPendingRemoval(legacy.spaceId, legacy.removedDid))?.stagingId).toBe('staging-a')
+    })
+
+    it('die Migration prallt an einem inzwischen MIGRIERTEN Record ab', async () => {
+      const store = create(freshDbName())
+      await store.init()
+      const legacy = makeRemoval({ homeBrokerSet: ['wss://home.example'], confirmedBrokerUrls: [] })
+      await store.putPendingRemoval(legacy)
+      const expectation = legacyWriteExpectation(legacy) // gelesen, bevor jemand anderes migriert
+
+      // Ein zweiter Beobachter migriert und stagt neu — der Record traegt jetzt
+      // eine Identitaet (und hier auch eine andere Generation).
+      const migrated: PendingRemoval = {
+        ...legacy,
+        stagingId: 'staging-b',
+        materialFingerprint: 'fp-b',
+        newGeneration: legacy.newGeneration - 1,
+        confirmedBrokerUrls: ['wss://home.example'],
+      }
+      await store.putPendingRemoval(migrated, legacyWriteExpectation(legacy))
+
+      const err = await store
+        .putPendingRemoval({ ...legacy, stagingId: 'staging-a', materialFingerprint: 'fp-a' }, expectation)
+        .catch((e: unknown) => e)
+
+      expect(err).toBeInstanceOf(PendingRemovalStagingConflictError)
+      // Das bestaetigte Material des Gewinners steht unangetastet.
+      const got = await store.getPendingRemoval(legacy.spaceId, legacy.removedDid)
+      expect(got?.stagingId).toBe('staging-b')
+      expect(got?.newGeneration).toBe(migrated.newGeneration)
+      expect(got?.confirmedBrokerUrls).toEqual(['wss://home.example'])
+    })
+
+    it.each([
+      ['andere Generation', (r: PendingRemoval): PendingRemoval => ({ ...r, newGeneration: r.newGeneration + 1 })],
+      ['anderes Material', (r: PendingRemoval): PendingRemoval => ({
+        ...r,
+        stagedKeyMaterial: { ...r.stagedKeyMaterial, contentKey: new Uint8Array(32).fill(0x5e) },
+      })],
+    ])('die Migration prallt an einem ANDEREN Legacy-Record ab (%s)', async (_case, replace) => {
+      const store = create(freshDbName())
+      await store.init()
+      const legacy = makeRemoval({ homeBrokerSet: ['wss://home.example'], confirmedBrokerUrls: [] })
+      await store.putPendingRemoval(legacy)
+      const expectation = legacyWriteExpectation(legacy)
+
+      await store.putPendingRemoval(replace(legacy))
+
+      await expect(
+        store.putPendingRemoval({ ...legacy, stagingId: 'staging-a', materialFingerprint: 'fp-a' }, expectation),
+      ).rejects.toBeInstanceOf(PendingRemovalStagingConflictError)
+      expect((await store.getPendingRemoval(legacy.spaceId, legacy.removedDid))?.stagingId).toBeUndefined()
+    })
+
+    it('eine staging-Erwartung greift NICHT mehr auf einen Legacy-Record durch', async () => {
+      const store = create(freshDbName())
+      await store.init()
+      const legacy = makeRemoval({ homeBrokerSet: ['wss://home.example'], confirmedBrokerUrls: [] })
+      await store.putPendingRemoval(legacy)
+
+      await expect(
+        store.putPendingRemoval({ ...legacy, stagingId: 'staging-a' }, { kind: 'staging', stagingId: 'staging-a' }),
+      ).rejects.toBeInstanceOf(PendingRemovalStagingConflictError)
     })
 
     it.each([
@@ -344,7 +409,7 @@ describe.each(implementations)('PendingRemoval store contract — $name', ({ cre
       const store = create(freshDbName())
       await store.init()
       const removal = bound()
-      await store.putPendingRemoval(removal, { expectedStagingId: null })
+      await store.putPendingRemoval(removal, { kind: 'absent' })
 
       expect(
         await store.markBrokerConfirmed(removal.spaceId, removal.removedDid, 'wss://home.example', binding),
@@ -358,7 +423,7 @@ describe.each(implementations)('PendingRemoval store contract — $name', ({ cre
       const store = create(freshDbName())
       await store.init()
       const removal = bound()
-      await store.putPendingRemoval(removal, { expectedStagingId: null })
+      await store.putPendingRemoval(removal, { kind: 'absent' })
 
       expect(
         await store.markBrokerConfirmed(removal.spaceId, removal.removedDid, 'wss://home.example', BINDING),
@@ -386,7 +451,7 @@ describe.each(implementations)('PendingRemoval store contract — $name', ({ cre
       const store = create(freshDbName())
       await store.init()
       const removal = bound()
-      await store.putPendingRemoval(removal, { expectedStagingId: null })
+      await store.putPendingRemoval(removal, { kind: 'absent' })
 
       expect(
         await store.markBrokerConfirmed(removal.spaceId, removal.removedDid, 'wss://stray.example', BINDING),
@@ -397,7 +462,7 @@ describe.each(implementations)('PendingRemoval store contract — $name', ({ cre
       const store = create(freshDbName())
       await store.init()
       const removal = bound()
-      await store.putPendingRemoval(removal, { expectedStagingId: null })
+      await store.putPendingRemoval(removal, { kind: 'absent' })
 
       const got = await store.getPendingRemoval(removal.spaceId, removal.removedDid)
       expect(got?.stagingId).toBe(BINDING.stagingId)

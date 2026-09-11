@@ -480,13 +480,14 @@ export class IndexedDBDocLogStore implements DocLogStore {
     // stilles Ueberschreiben. Ohne `expect` bleibt es beim alten put().
     const tx = db.transaction(PENDING_REMOVALS_STORE, 'readwrite')
     const stored = (await tx.store.get(key)) as StoredPendingRemoval | undefined
-    if (!matchesStagingExpectation(stored, expect)) {
+    // Dekodiert vergleichen: die Erwartung spricht ueber Material, nicht ueber
+    // dessen Kodierung am Datenhalter.
+    const current = stored ? fromStoredRemoval(stored) : null
+    if (!matchesStagingExpectation(current, expect)) {
       // Die Transaktion hat nichts geschrieben; sie laeuft mit dem Lesen aus.
       // tx.done wird bewusst nur entsorgt — sonst bliebe ein unbehandeltes Promise.
       void tx.done.catch(() => {})
-      throw new PendingRemovalStagingConflictError(
-        removal.spaceId, removal.removedDid, stored ? fromStoredRemoval(stored) : null,
-      )
+      throw new PendingRemovalStagingConflictError(removal.spaceId, removal.removedDid, current)
     }
     await tx.store.put(toStoredRemoval(removal), key)
     await tx.done
