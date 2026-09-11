@@ -2607,7 +2607,7 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
         if (outcome === 'mismatch') {
           console.warn(
             `[AutomergeReplication] keeping the pending removal of ${removal.removedDid} in space ${removal.spaceId}: ` +
-              'it belongs to a newer staging, not to the abandoned one.',
+              'its staging identity changed meanwhile (new staging or migration), not to the abandoned one.',
           )
         }
       }))
