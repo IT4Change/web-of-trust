@@ -138,7 +138,7 @@ describe('Yjs Self-Removal-Enforcement (#298) — Restore zieht eine ausgefallen
     await initYjsPersonalDoc(bob)
 
     const space = await aliceAdapter.createSpace<TestDoc>('shared', { items: {} }, { name: 'S' })
-    await wait()
+    await waitUntil(() => brokerGeneration(broker, space.id) !== undefined, 'die Space-Registrierung am Broker')
     await aliceAdapter.addMember(space.id, bob.getDid(), await bob.getEncryptionPublicKeyBytes())
     await waitUntil(async () => (await bobAdapter.getSpace(space.id)) !== null, 'Bob hat den Space')
     expect(brokerGeneration(broker, space.id)).toBe(0)

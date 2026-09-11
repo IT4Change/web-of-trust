@@ -20,6 +20,16 @@ import { initYjsPersonalDoc, resetYjsPersonalDoc } from '../src/YjsPersonalDocMa
 // wenn nach einem removed erneut aufgenommen wird.
 
 const wait = (ms = 300) => new Promise((r) => setTimeout(r, ms))
+
+/** Deterministisch statt fester Sleeps: CI-Runner sind deutlich langsamer als Dev-Maschinen. */
+async function waitUntil(condition: () => boolean | Promise<boolean>, what: string, timeoutMs = 15_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (await condition()) return
+    await new Promise((r) => setTimeout(r, 10))
+  }
+  throw new Error(`Timed out waiting for ${what}`)
+}
 const BROKER_URLS = ['wss://broker.example.com']
 const protocolCrypto = new WebCryptoProtocolCryptoAdapter()
 interface TestDoc { items: Record<string, { title: string }> }
@@ -82,6 +92,24 @@ describe('Yjs Space-Admission (Aufnahme-Kennung)', () => {
     return (adapter as unknown as { spaces: Map<string, { info: SpaceInfo; doc: Y.Doc }> }).spaces.get(spaceId)!
   }
   const loadedInfo = (adapter: YjsReplicationAdapter, spaceId: string): SpaceInfo => spaceState(adapter, spaceId).info
+  /** Der Empfänger hat den Space lokal. */
+  async function waitForSpace(adapter: YjsReplicationAdapter, spaceId: string): Promise<void> {
+    await waitUntil(async () => (await adapter.getSpace(spaceId)) !== null, 'den Space beim Empfänger')
+  }
+
+  /** Die Aufnahme-Kennung des Empfängers liegt über `generation`. */
+  async function waitForAdmissionAbove(adapter: YjsReplicationAdapter, spaceId: string, generation: number): Promise<void> {
+    await waitUntil(
+      async () => ((await adapter.getSpace(spaceId))?.admission?.keyGeneration ?? -1) > generation,
+      `eine Aufnahme-Kennung über Generation ${generation}`,
+    )
+  }
+
+  /** Die DID ist aus Alices Mitgliederprojektion verschwunden. */
+  async function waitForMemberGone(spaceId: string, did: string): Promise<void> {
+    await waitUntil(() => !loadedInfo(aliceAdapter, spaceId).members.includes(did), `den Wegfall von ${did.slice(0, 16)}`)
+  }
+
   function ownEvents(adapter: YjsReplicationAdapter, spaceId: string, did: string): MembershipEvent[] {
     const map = spaceState(adapter, spaceId).doc.getMap<MembershipEvent>('_members')
     return Array.from(map.values()).filter((event) => event.did === did)
@@ -116,7 +144,7 @@ describe('Yjs Space-Admission (Aufnahme-Kennung)', () => {
     const { adapter: receiver, events } = await startBob()
     const space = await aliceAdapter.createSpace<TestDoc>('shared', { items: {} }, { name: 'Garten' })
     await aliceAdapter.addMember(space.id, bob.getDid(), await bob.getEncryptionPublicKeyBytes())
-    await wait()
+    await waitForSpace(receiver, space.id)
 
     expect(events).toHaveLength(1)
     expect(events[0].admission).toEqual({ keyGeneration: 0 })
@@ -127,14 +155,14 @@ describe('Yjs Space-Admission (Aufnahme-Kennung)', () => {
     const { adapter: receiver, events } = await startBob()
     const space = await aliceAdapter.createSpace<TestDoc>('shared', { items: {} }, { name: 'S' })
     await aliceAdapter.addMember(space.id, bob.getDid(), await bob.getEncryptionPublicKeyBytes())
-    await wait()
+    await waitForSpace(receiver, space.id)
     const first = events[0].admission!
     expect(first).toEqual({ keyGeneration: 0 })
 
     await aliceAdapter.removeMember(space.id, bob.getDid())
-    await wait()
+    await waitForMemberGone(space.id, bob.getDid())
     await aliceAdapter.addMember(space.id, bob.getDid(), await bob.getEncryptionPublicKeyBytes())
-    await wait()
+    await waitForAdmissionAbove(receiver, space.id, first.keyGeneration)
 
     const second = (await receiver.getSpace(space.id))!.admission!
     expect(isSameAdmission(first, second)).toBe(false)
@@ -148,20 +176,22 @@ describe('Yjs Space-Admission (Aufnahme-Kennung)', () => {
     const space = await aliceAdapter.createSpace<TestDoc>('shared', { items: {} }, { name: 'S' })
     await aliceAdapter.addMember(space.id, bob.getDid(), await bob.getEncryptionPublicKeyBytes())
     await aliceAdapter.addMember(space.id, carol.getDid(), await carol.getEncryptionPublicKeyBytes())
-    await wait()
+    await waitForSpace(receiver, space.id)
     const before = (await receiver.getSpace(space.id))!.admission!
 
     // Carol raus → Rotation auf eine höhere Generation.
     await aliceAdapter.removeMember(space.id, carol.getDid())
-    await wait()
+    await waitForMemberGone(space.id, carol.getDid())
     // Bob wird erneut eingeladen, ohne je entfernt worden zu sein.
     await aliceAdapter.addMember(space.id, bob.getDid(), await bob.getEncryptionPublicKeyBytes())
-    await wait()
     await sendInviteToBob(space.id)
-    await wait()
+    const bobKeys = (receiver as unknown as { keyManagement: InMemoryKeyManagementAdapter }).keyManagement
+    await waitUntil(
+      async () => (await bobKeys.getCurrentGeneration(space.id)) > before.keyGeneration,
+      'Bobs Schlüssel der rotierten Generation',
+    )
 
     // Die aktuelle Generation IST gestiegen …
-    const bobKeys = (receiver as unknown as { keyManagement: InMemoryKeyManagementAdapter }).keyManagement
     expect(await bobKeys.getCurrentGeneration(space.id)).toBeGreaterThan(before.keyGeneration)
     // … und Bobs Mitgliedschaft endete nie: die Kennung bleibt stehen, auch
     // wenn addMember ein zweites active auf der neuen Generation geschrieben hat.
@@ -175,12 +205,12 @@ describe('Yjs Space-Admission (Aufnahme-Kennung)', () => {
     const space = await aliceAdapter.createSpace<TestDoc>('shared', { items: {} }, { name: 'S' })
     await aliceAdapter.addMember(space.id, bob.getDid(), await bob.getEncryptionPublicKeyBytes())
     await aliceAdapter.addMember(space.id, carol.getDid(), await carol.getEncryptionPublicKeyBytes())
-    await wait()
+    await waitForSpace(receiver, space.id)
     const bobBefore = (await receiver.getSpace(space.id))!.admission!
     const aliceBefore = (await aliceAdapter.getSpace(space.id))!.admission!
 
     await aliceAdapter.removeMember(space.id, carol.getDid())
-    await wait()
+    await waitForMemberGone(space.id, carol.getDid())
 
     expect((await receiver.getSpace(space.id))!.admission).toEqual(bobBefore)
     expect((await aliceAdapter.getSpace(space.id))!.admission).toEqual(aliceBefore)
@@ -190,14 +220,14 @@ describe('Yjs Space-Admission (Aufnahme-Kennung)', () => {
     const { adapter: deviceA } = await startBob()
     const space = await aliceAdapter.createSpace<TestDoc>('shared', { items: {} }, { name: 'S' })
     await aliceAdapter.addMember(space.id, bob.getDid(), await bob.getEncryptionPublicKeyBytes())
-    await wait()
+    await waitForSpace(deviceA, space.id)
     // Stand, den ein Zweitgerät der ersten Aufnahme kennt.
     const snapshotFirstAdmission = Y.encodeStateAsUpdate(spaceState(deviceA, space.id).doc)
 
     await aliceAdapter.removeMember(space.id, bob.getDid())
-    await wait()
+    await waitForMemberGone(space.id, bob.getDid())
     await aliceAdapter.addMember(space.id, bob.getDid(), await bob.getEncryptionPublicKeyBytes())
-    await wait()
+    await waitForAdmissionAbove(deviceA, space.id, 0)
     const admissionA = (await deviceA.getSpace(space.id))!.admission!
     expect(compareAdmission(admissionA, { keyGeneration: 0 })).toBeGreaterThan(0)
 
@@ -222,7 +252,10 @@ describe('Yjs Space-Admission (Aufnahme-Kennung)', () => {
 
     // Doc-Sync: der Merge bringt das removed + das neue active.
     Y.applyUpdate(docB, Y.encodeStateAsUpdate(spaceState(deviceA, space.id).doc), 'remote')
-    await wait(50)
+    await waitUntil(
+      () => loadedInfo(deviceB, space.id).admission?.keyGeneration === admissionA.keyGeneration,
+      'die vom Observer nachgeführte Kennung auf Gerät B',
+    )
     expect(loadedInfo(deviceB, space.id).admission).toEqual(admissionA)
   })
 
@@ -273,7 +306,7 @@ describe('Yjs Space-Admission (Aufnahme-Kennung)', () => {
     const { adapter: receiver } = await startBob({ flushPersonalDoc: async () => {} })
     const space = await aliceAdapter.createSpace<TestDoc>('shared', { items: {} }, { name: 'S' })
     await aliceAdapter.addMember(space.id, bob.getDid(), await bob.getEncryptionPublicKeyBytes())
-    await wait()
+    await waitForSpace(receiver, space.id)
     expect((await receiver.getSpace(space.id))!.admission).toEqual({ keyGeneration: 0 })
 
     // leaveSpace macht die eigene Entfernung im PersonalDoc durabel.
@@ -281,13 +314,13 @@ describe('Yjs Space-Admission (Aufnahme-Kennung)', () => {
     // Echter Austritt über die öffentliche Methode: leaveSpace schreibt das
     // kanonische removed-Ereignis, bevor es lokal aufräumt.
     await receiver.leaveSpace(space.id)
-    await wait()
+    await waitForMemberGone(space.id, bob.getDid())
     expect(await receiver.getSpace(space.id)).toBeNull()
     expect(loadedInfo(aliceAdapter, space.id).members).not.toContain(bob.getDid())
 
     // Erneute Einladung → Re-Invite-Guard rotiert, neues active auf höherer Generation.
     await aliceAdapter.addMember(space.id, bob.getDid(), await bob.getEncryptionPublicKeyBytes())
-    await wait()
+    await waitForAdmissionAbove(receiver, space.id, 0)
     const again = (await receiver.getSpace(space.id))!.admission!
     expect(compareAdmission(again, { keyGeneration: 0 })).toBeGreaterThan(0)
   })
@@ -315,7 +348,7 @@ describe('Yjs Space-Admission (Aufnahme-Kennung)', () => {
       sign: (input) => alice.signEd25519(input),
       crypto: protocolCrypto,
     }))
-    await wait()
+    await waitUntil(() => events.length === 1, 'das Invite-Event ohne Snapshot')
 
     expect(events).toHaveLength(1)
     expect(events[0].admission).toBeUndefined()
@@ -337,7 +370,10 @@ describe('Yjs Space-Admission (Aufnahme-Kennung)', () => {
       { did: bob.getDid(), status: 'active' as const, sinceGeneration: 0 },
     ]) inviterMembers.set(formatMembershipEventKey(event), event)
     Y.applyUpdate(spaceState(receiver, spaceId).doc, Y.encodeStateAsUpdate(inviterDoc), 'remote')
-    await wait(50)
+    await waitUntil(
+      async () => (await receiver.getSpace(spaceId))?.admission !== undefined,
+      'die vom Observer nachgeführte Kennung',
+    )
 
     expect((await receiver.getSpace(spaceId))!.admission).toEqual({ keyGeneration: 0 })
     // Der Übergang undefined → Wert ist eine sichtbare Änderung: die
