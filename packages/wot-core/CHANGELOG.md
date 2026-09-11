@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.8](https://github.com/real-life-org/web-of-trust/compare/core-v0.5.7...core-v0.5.8) (2026-09-11)
+
+
+### Bug Fixes
+
+* **core:** Secure Removal — atomares Staging und materialgebundene Bestätigung ([#366](https://github.com/real-life-org/web-of-trust/issues/366)) ([566ba41](https://github.com/real-life-org/web-of-trust/commit/566ba410a3c674f72ce1a92f84264f409864f702))
+
 ## [0.5.7](https://github.com/real-life-org/web-of-trust/compare/core-v0.5.6...core-v0.5.7) (2026-09-11)
 
 
