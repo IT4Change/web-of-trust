@@ -1,4 +1,7 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+// Wartebudget (waitUntil 15 s) und Testlimit angleichen: die Suiten warten auf
+// echte Broker-/Sync-Bedingungen, unter Parallel-Last dauert das laenger als 5 s.
+vi.setConfig({ testTimeout: 20_000 })
 import * as Y from 'yjs'
 import type { PublicIdentitySession } from '../../wot-core/src/application/identity'
 import { createTestIdentity } from '../../wot-core/tests/helpers/identity-session'

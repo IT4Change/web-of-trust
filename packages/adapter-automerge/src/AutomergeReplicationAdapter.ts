@@ -3661,8 +3661,6 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
         createdBy: typeof doc?._createdBy === 'string' ? doc._createdBy : undefined,
         members,
         createdAt: new Date().toISOString(),
-        // RLS-Spec 12 Regel 4: Kennung dieser Aufnahme = eigene Capability der
-        // Invite-Generation (von applySpaceInviteBody gespeichert).
         // RLS-Spec 12 Regel 4: Kennung aus dem _members-Set des Invite-
         // Snapshots; ohne Snapshot offen bis zum Doc-Sync (Projektion-Pfad).
         admission: resolveAdmission(membershipEvents, this.identity.getDid()),
