@@ -285,28 +285,6 @@ export function legacyWriteExpectation(removal: PendingRemoval): PendingRemovalW
 }
 
 /**
- * #366 — Die Erwartung an das gespeicherte Staging wurde verletzt: ein anderer
- * Beobachter auf demselben Store haelt den Record. `existing` ist der Record, der
- * gewonnen hat (null, wenn er zwischenzeitlich geloescht wurde) — der Verlierer
- * arbeitet mit dessen Material weiter statt es zu ueberschreiben.
- */
-export class PendingRemovalStagingConflictError extends Error {
-  readonly spaceId: string
-  readonly removedDid: string
-  readonly existing: PendingRemoval | null
-  constructor(spaceId: string, removedDid: string, existing: PendingRemoval | null) {
-    super(
-      `pending removal staging conflict for ${removedDid} in space ${spaceId}: ` +
-        `another staging (${existing?.stagingId ?? 'none'}) holds the durable record`,
-    )
-    this.name = 'PendingRemovalStagingConflictError'
-    this.spaceId = spaceId
-    this.removedDid = removedDid
-    this.existing = existing
-  }
-}
-
-/**
  * #366 — Was eine Broker-Bestaetigung deckt. Alle drei Felder MUESSEN zum
  * gespeicherten Record passen, sonst gehoert die Bestaetigung zu einem
  * ueberschriebenen Staging.
@@ -319,6 +297,15 @@ export interface BrokerConfirmationBinding {
   /** {@link PendingRemoval.materialFingerprint} des gesendeten Materials. */
   materialFingerprint: string
 }
+
+/** Ausgang von {@link DocLogStore.deletePendingRemoval} (#366). */
+export type PendingRemovalDeleteOutcome =
+  /** Der erwartete Record wurde geloescht. */
+  | 'deleted'
+  /** Kein Record vorhanden (schon abgeraeumt) — nichts zu tun. */
+  | 'absent'
+  /** Der gespeicherte Record gehoert einem anderen Staging; nichts geloescht. */
+  | 'mismatch'
 
 /** Ausgang von {@link DocLogStore.markBrokerConfirmed} (#366). */
 export type BrokerConfirmationOutcome =
@@ -626,8 +613,22 @@ export interface DocLogStore {
    * Selectively drop the staging record for (spaceId, removedDid) (a targeted
    * delete, NOT a clear) — e.g. after the removal is fully enforced or aborted.
    * Other removals, the log, and the deviceId binding are untouched.
+   *
+   * #366 — COMPARE-AND-DELETE: `expect` bindet den Loeschbefehl an die Identitaet
+   * des Records, den der Aufrufer abgeraeumt hat. Der Schluessel
+   * (spaceId, removedDid) allein reicht NICHT: ein zweiter Beobachter kann den
+   * fertigen Record laengst geloescht und unter demselben Schluessel ein NEUES
+   * Removal gestagt haben — ein unbedingter Delete wuerde dessen Staging
+   * mitnehmen und die Rotation ohne durables Material zuruecklassen. Lesen,
+   * Pruefen und Loeschen liegen in EINER Transaktion; passt die Identitaet nicht,
+   * wird nichts geloescht (`'mismatch'`). `{ kind: 'absent' }` ist hier sinnlos
+   * und passt nie. Ohne `expect` ist der Delete unbedingt (Test-/Seed-Pfad).
    */
-  deletePendingRemoval(spaceId: string, removedDid: string): Promise<void>
+  deletePendingRemoval(
+    spaceId: string,
+    removedDid: string,
+    expect?: PendingRemovalWriteExpectation,
+  ): Promise<PendingRemovalDeleteOutcome>
 
   /**
    * All open pending removals — the crash-recovery view at startup, from which

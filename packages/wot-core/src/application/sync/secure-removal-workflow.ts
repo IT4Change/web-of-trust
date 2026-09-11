@@ -1,7 +1,7 @@
 import type { ProtocolCryptoAdapter } from '../../protocol/crypto/ports'
 import type { KeyManagementPort } from '../../ports/key-management'
 import type { BrokerConfirmationBinding, DocLogStore, PendingRemoval, PendingRemovalWriteExpectation, StagedRemovalKeyMaterial } from '../../ports/DocLogStore'
-import { legacyWriteExpectation, PendingRemovalStagingConflictError } from '../../ports/DocLogStore'
+import { legacyWriteExpectation } from '../../ports/DocLogStore'
 import { encodeBase64Url } from '../../protocol/crypto/encoding'
 import type { ControlFrame } from '../../protocol/sync/control-frame-transport'
 import { ControlFrameRejectedError } from '../../protocol/sync/control-frame-transport'
@@ -89,6 +89,28 @@ export class RemovalPendingNotEnforcedError extends Error {
     // Keep the transport/broker error that caused the wait: without it the only
     // signal a caller ever sees is "pending", which is unactionable.
     if (options?.cause !== undefined) this.cause = options.cause
+  }
+}
+
+/**
+ * #366 — Die Erwartung an das gespeicherte Staging wurde verletzt: ein anderer
+ * Beobachter auf demselben Store haelt den Record. `existing` ist der Record, der
+ * gewonnen hat (null, wenn er zwischenzeitlich geloescht wurde) — der Verlierer
+ * arbeitet mit dessen Material weiter statt es zu ueberschreiben.
+ */
+export class PendingRemovalStagingConflictError extends Error {
+  readonly spaceId: string
+  readonly removedDid: string
+  readonly existing: PendingRemoval | null
+  constructor(spaceId: string, removedDid: string, existing: PendingRemoval | null) {
+    super(
+      `pending removal staging conflict for ${removedDid} in space ${spaceId}: ` +
+        `another staging (${existing?.stagingId ?? 'none'}) holds the durable record`,
+    )
+    this.name = 'PendingRemovalStagingConflictError'
+    this.spaceId = spaceId
+    this.removedDid = removedDid
+    this.existing = existing
   }
 }
 
@@ -260,7 +282,7 @@ export async function recoverPendingRemovals(
     // crash window after persisting complete and before deleting the record.
     if (removal.phase === 'complete') {
       try {
-        await docLogStore.deletePendingRemoval(removal.spaceId, removal.removedDid)
+        await deleteOwnStaging({ docLogStore }, removal)
         committed += 1
       } catch { /* retry on the next pass */ }
       continue
@@ -389,7 +411,7 @@ async function driveRemovalToCompletion(
   // admin-remove is durable, only the stable PersonalDoc event and idempotent
   // local artifact cleanup remain.
   if (removal.phase === 'complete') {
-    await deps.docLogStore.deletePendingRemoval(removal.spaceId, removal.removedDid)
+    await deleteOwnStaging(deps, removal)
     return true
   }
   if (removal.phase === 'admin-removed') {
@@ -400,7 +422,7 @@ async function driveRemovalToCompletion(
   if (removal.phase === 'local-cleanup') {
     removal = { ...removal, phase: 'complete' }
     await persistPhase(deps, removal)
-    await deps.docLogStore.deletePendingRemoval(removal.spaceId, removal.removedDid)
+    await deleteOwnStaging(deps, removal)
     return true
   }
   if (!hasRotationDeps(deps)) {
@@ -555,7 +577,7 @@ async function driveRemovalToCompletion(
     removal = { ...removal, phase: 'complete' }
     await persistPhase(deps, removal)
   }
-  await deps.docLogStore.deletePendingRemoval(deps.spaceId, removal.removedDid)
+  await deleteOwnStaging(deps, removal)
   return true
 }
 
@@ -574,6 +596,31 @@ async function persistPhase(
     if (!(err instanceof PendingRemovalStagingConflictError)) throw err
     throw new RemovalPendingNotEnforcedError(removal.spaceId, removal.removedDid, removal.newGeneration, { cause: err })
   }
+}
+
+/**
+ * #366 — Terminaler Delete, gebunden an die Identitaet des Records, den DIESER
+ * Lauf abgeraeumt hat. Der Schluessel (spaceId, removedDid) allein reicht nicht:
+ * ein zweiter Beobachter kann den fertigen Record laengst geloescht und unter
+ * demselben Schluessel ein NEUES Removal gestagt haben. Ein unbedingter Delete
+ * nimmt dessen Staging mit — die Rotation liefe dann ohne durables Material
+ * weiter, und keine Recovery koennte sie beenden.
+ *
+ * @returns true, wenn wirklich unser Record verschwunden ist (oder schon weg war).
+ */
+async function deleteOwnStaging(
+  deps: { docLogStore: DocLogStore },
+  removal: PendingRemoval,
+): Promise<boolean> {
+  const outcome = await deps.docLogStore.deletePendingRemoval(
+    removal.spaceId, removal.removedDid, writeExpectation(removal),
+  )
+  if (outcome !== 'mismatch') return true
+  console.warn(
+    `[secure-removal] leaving the durable staging of ${removal.removedDid} in space ${removal.spaceId} ` +
+      'in place: it belongs to a newer removal, not to the one this run completed.',
+  )
+  return false
 }
 
 /**
@@ -768,7 +815,7 @@ async function stageRemovalCandidate(
 async function handleGenerationTaken(deps: SecureRemovalDeps, removal: PendingRemoval): Promise<boolean> {
   const current = await deps.keyPort.getCurrentGeneration(deps.spaceId)
   if (removal.kind === 'canonical-self-removal-rotation' && current >= removal.newGeneration) {
-    await deps.docLogStore.deletePendingRemoval(deps.spaceId, removal.removedDid)
+    await deleteOwnStaging(deps, removal)
     return true
   }
   if (removal.kind !== 'canonical-self-removal-rotation' && current >= removal.newGeneration) {

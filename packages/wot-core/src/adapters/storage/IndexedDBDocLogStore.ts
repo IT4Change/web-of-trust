@@ -8,13 +8,14 @@ import type {
   LocalLogEntry,
   PendingRemoval,
   PendingRemovalWriteExpectation,
+  PendingRemovalDeleteOutcome,
   BrokerConfirmationBinding,
   BrokerConfirmationOutcome,
   RecordRemoteAppliedEntry,
   StagedRemovalKeyMaterial,
 } from '../../ports/DocLogStore'
 import { OrphanedLogRepairError } from '../../ports/DocLogStore'
-import { PendingRemovalStagingConflictError } from '../../ports/DocLogStore'
+import { PendingRemovalStagingConflictError } from '../../application/sync/secure-removal-workflow'
 import { pendingRemovalKey } from './pending-removal-key'
 import { matchesConfirmationBinding, matchesStagingExpectation } from './pending-removal-binding'
 import { contiguousHeadAbove, strictContiguousHead } from './InMemoryDocLogStore'
@@ -528,11 +529,31 @@ export class IndexedDBDocLogStore implements DocLogStore {
     return outcome
   }
 
-  async deletePendingRemoval(spaceId: string, removedDid: string): Promise<void> {
+  async deletePendingRemoval(
+    spaceId: string,
+    removedDid: string,
+    expect?: PendingRemovalWriteExpectation,
+  ): Promise<PendingRemovalDeleteOutcome> {
     const db = await this.db()
-    // Selective db.delete (NOT a clear): only this (spaceId, removedDid) record;
+    // Selective delete (NOT a clear): only this (spaceId, removedDid) record;
     // other removals, the log, and the deviceId binding are untouched.
-    await db.delete(PENDING_REMOVALS_STORE, pendingRemovalKey(spaceId, removedDid))
+    // #366: Compare-and-Delete in EINER readwrite-Transaktion — nach dem get
+    // steht nur synchroner Code, die Transaktion kann also nicht zwischen
+    // Pruefung und Loeschen auslaufen.
+    const tx = db.transaction(PENDING_REMOVALS_STORE, 'readwrite')
+    const key = pendingRemovalKey(spaceId, removedDid)
+    const stored = (await tx.store.get(key)) as StoredPendingRemoval | undefined
+    if (!stored) {
+      void tx.done.catch(() => {})
+      return 'absent'
+    }
+    if (expect && !matchesStagingExpectation(fromStoredRemoval(stored), expect)) {
+      void tx.done.catch(() => {})
+      return 'mismatch'
+    }
+    await tx.store.delete(key)
+    await tx.done
+    return 'deleted'
   }
 
   async listPendingRemovals(): Promise<PendingRemoval[]> {

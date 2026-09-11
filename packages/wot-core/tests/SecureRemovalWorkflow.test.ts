@@ -963,4 +963,71 @@ describe('#366 — zwei Beobachter auf einem gemeinsamen Store', () => {
     expect(hex((await h.keyPort.getKeyByGeneration(SPACE, 1))!)).toBe(hex(afterA.stagedKeyMaterial.contentKey))
     expect(await h.docLogStore.getPendingRemoval(SPACE, REMOVED)).toBeNull()
   })
+
+  // #366 Runde 3: der terminale Delete lief nur ueber (spaceId, removedDid). A
+  // pausiert vor seinem Abschluss-Delete, waehrenddessen raeumt eine zweite
+  // Instanz den fertigen Record ab und stagt unter DEMSELBEN Schluessel ein
+  // neues Removal. As alter Delete darf dieses Staging nicht mitnehmen — sonst
+  // liefe die Broker-Rotation ohne durables Material weiter.
+  it('REPRO: der Abschluss-Delete von A raeumt nicht das inzwischen neu gestagte Removal von B ab', async () => {
+    let brokerGeneration = 0
+    let online = true
+    const rotate = (frame: ControlFrame): void => {
+      const generation = (frame as unknown as { __newGeneration: number }).__newGeneration
+      if (!online) throw new Error('broker offline')
+      if (generation !== brokerGeneration + 1) throw reject('GENERATION_TAKEN')
+      brokerGeneration = generation
+    }
+    const h = await makeHarness({ sendSpaceRotate: async (_brokerUrl, frame) => { rotate(frame) } })
+
+    const realDelete = h.docLogStore.deletePendingRemoval.bind(h.docLogStore)
+    const aAtDelete = deferred()
+    const releaseA = deferred()
+    let gateArmed = true
+    const outcomes: string[] = []
+    ;(h.docLogStore as unknown as { deletePendingRemoval: DocLogStore['deletePendingRemoval'] }).deletePendingRemoval = (async (spaceId, removedDid, expect_) => {
+      if (gateArmed) {
+        gateArmed = false
+        aAtDelete.resolve()
+        await releaseA.promise
+      }
+      const outcome = await realDelete(spaceId, removedDid, expect_)
+      outcomes.push(outcome)
+      return outcome
+    }) as DocLogStore['deletePendingRemoval']
+
+    // A rotiert, committet, persistiert `complete` — und pausiert vor dem Delete.
+    const aRun = runTwoPhaseRemoval(h.deps, REMOVED)
+    await aAtDelete.promise
+    expect((await h.docLogStore.getPendingRemoval(SPACE, REMOVED))!.phase).toBe('complete')
+
+    // Zweite Instanz auf demselben Store: ihre Recovery raeumt den fertigen
+    // Datensatz ab ...
+    const b = secondObserver(h.deps, async (_brokerUrl, frame) => { rotate(frame) })
+    expect(await recoverPendingRemovals(h.docLogStore, async () => b)).toBe(1)
+    expect(await h.docLogStore.getPendingRemoval(SPACE, REMOVED)).toBeNull()
+
+    // ... und startet unter demselben Schluessel ein NEUES Removal, dessen Send
+    // haengen bleibt: Generation 2 bleibt durable gestaged.
+    online = false
+    await expect(runTwoPhaseRemoval(b, REMOVED)).rejects.toBeInstanceOf(RemovalPendingNotEnforcedError)
+    const fresh = (await h.docLogStore.getPendingRemoval(SPACE, REMOVED))!
+    expect(fresh.newGeneration).toBe(2)
+    expect(fresh.phase).toBe('staged')
+
+    releaseA.resolve()
+    await aRun
+
+    // As Delete meldet mismatch und laesst Bs Auftrag stehen.
+    expect(outcomes).toEqual(['deleted', 'mismatch'])
+    const afterA = (await h.docLogStore.getPendingRemoval(SPACE, REMOVED))!
+    expect(afterA.stagingId).toBe(fresh.stagingId)
+    expect(afterA.newGeneration).toBe(2)
+
+    // Und die Recovery findet Bs Auftrag noch — er ist nicht verwaist.
+    online = true
+    expect(await recoverPendingRemovals(h.docLogStore, async () => b)).toBe(1)
+    expect(await h.keyPort.getCurrentGeneration(SPACE)).toBe(brokerGeneration)
+    expect(await h.docLogStore.getPendingRemoval(SPACE, REMOVED)).toBeNull()
+  })
 })

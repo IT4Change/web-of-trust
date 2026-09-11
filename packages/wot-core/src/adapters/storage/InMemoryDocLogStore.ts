@@ -6,11 +6,13 @@ import type {
   LocalLogEntry,
   PendingRemoval,
   PendingRemovalWriteExpectation,
+  PendingRemovalDeleteOutcome,
   BrokerConfirmationBinding,
   BrokerConfirmationOutcome,
   RecordRemoteAppliedEntry,
 } from '../../ports/DocLogStore'
-import { OrphanedLogRepairError, PendingRemovalStagingConflictError } from '../../ports/DocLogStore'
+import { OrphanedLogRepairError } from '../../ports/DocLogStore'
+import { PendingRemovalStagingConflictError } from '../../application/sync/secure-removal-workflow'
 import { matchesConfirmationBinding, matchesStagingExpectation } from './pending-removal-binding'
 import { pendingRemovalKey } from './pending-removal-key'
 import { InProcessSeqLock, type SeqLock } from './SeqLock'
@@ -335,9 +337,21 @@ export class InMemoryDocLogStore implements DocLogStore {
     return 'recorded'
   }
 
-  async deletePendingRemoval(spaceId: string, removedDid: string): Promise<void> {
+  async deletePendingRemoval(
+    spaceId: string,
+    removedDid: string,
+    expect?: PendingRemovalWriteExpectation,
+  ): Promise<PendingRemovalDeleteOutcome> {
     // Selective delete (NOT a clear): only this (spaceId, removedDid) record.
-    this.pendingRemovals.delete(this.removalKey(spaceId, removedDid))
+    // #366: Compare-and-Delete — Lesen, Pruefen und Loeschen liegen in einem
+    // synchronen Block, ein fremdes Staging unter demselben Schluessel bleibt
+    // stehen.
+    const key = this.removalKey(spaceId, removedDid)
+    const stored = this.pendingRemovals.get(key) ?? null
+    if (!stored) return 'absent'
+    if (expect && !matchesStagingExpectation(cloneRemoval(stored), expect)) return 'mismatch'
+    this.pendingRemovals.delete(key)
+    return 'deleted'
   }
 
   async listPendingRemovals(): Promise<PendingRemoval[]> {
