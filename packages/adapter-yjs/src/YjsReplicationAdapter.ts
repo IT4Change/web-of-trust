@@ -34,7 +34,7 @@ import {
   buildSpaceInviteBody, applySpaceInviteBody, buildKeyRotationBody, applyKeyRotationBody,
   deliverInboxMessage, receiveInboxMessage,
   runTwoPhaseRemoval, recoverPendingRemovals,
-  openLifecycleLease, compareAdmission,
+  openLifecycleLease, isSameAdmission,
 } from '@web_of_trust/core/application'
 import type { LocalImpact, SecureRemovalDeps, LifecycleLease } from '@web_of_trust/core/application'
 import type { MembershipActivityCapable, SecureSelfLeaveCapable } from '@web_of_trust/core/ports'
@@ -49,7 +49,7 @@ import {
   isDidcommMessage, isEncryptedInboxMessageType, INBOX_MESSAGE_TYPE,
   createAckMessage, evaluateInboxAckDisposition, createDidKeyResolver,
   encryptionKeyMultibaseFromDidDocument, x25519MultibaseToPublicKeyBytes,
-  formatMembershipEventKey, parseMembershipEventKey, resolveActiveMembers, resolveMembershipWinner, assertMembershipEvent,
+  formatMembershipEventKey, parseMembershipEventKey, resolveActiveMembers, resolveMembershipWinner, resolveAdmission, assertMembershipEvent,
   resolveActiveAdmins, assertAdminEntry,
   LogSyncCoordinator, AuthorMismatchError, LocalAppendFailedError, CapabilityKeysUnavailableError, createSpaceCapabilityJws,
   createSpaceRegisterMessageWithSigner, createSpaceRotateMessageWithSigner, createAdminRemoveMessageWithSigner,
@@ -1068,6 +1068,12 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
       doc.getMap<AdminEntry>('_admins').set(myDid, selfAdmin)
     }, 'local')
 
+    // RLS-Spec 12 Regel 4: die Aufnahme-Kennung ist eine Projektion des
+    // _members-Event-Sets — beim Creator sein eigenes active@0 aus dem Seed
+    // oben. Ein Resume liest sie aus dem bereits geseedeten Doc, vergibt also
+    // keine 0 an einen Bestands-Space, der nie eingeladen wurde.
+    info.admission = resolveAdmission(this.readMembershipEvents(doc), myDid)
+
     // Create group key + capability key pair + owner self-capability. The
     // deterministic path (private space) uses the derived genesis material and is
     // idempotent at generation 0 (multi-device / recovery / crash-safe).
@@ -1077,10 +1083,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
       await lease.step(createSpaceKey({ crypto: this.crypto, keyPort: this.keyManagement, spaceId, ownerDid: this.identity.getDid(), validityDurationMs: this.capabilityValidityMs }))
     }
 
-    // RLS-Spec 12 Regel 4: der Creator wird mit der Genesis-Generation 0
-    // aufgenommen. Deterministisch auf jedem Geraet — der deterministische
-    // private Space kommt auf beiden Geraeten auf denselben Wert.
-    if (!info.admission) info.admission = { keyGeneration: 0 }
+
 
     // Store state (include own encryption key for multi-device key rotation)
     let state: YjsSpaceState
@@ -3271,19 +3274,6 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
       console.debug(`[YjsReplication]   space: ${meta.info.id} name=${meta.info.name} type=${meta.info.type}`)
 
       if (this.spaces.has(meta.info.id)) {
-        // RLS-Spec 12 Regel 4: die Aufnahme-Kennung eines BEREITS GELADENEN
-        // Space kommt ueber den Metadata-Sync — ein Geraet, das die
-        // Wiederaufnahme-Einladung nie gesehen hat (offline, der Invite ging an
-        // ein anderes Geraet), erfaehrt sie hier ohne Neustart.
-        // MONOTON: nur eine HOEHERE Generation wird uebernommen. Schreibt ein
-        // Geraet per LWW einen alten Metadata-Stand zurueck, dreht das hier
-        // niemandem die Kennung zurueck; die naechste Speicherung des Geraets
-        // mit der hoeheren Kennung konvergiert.
-        const loadedState = this.spaces.get(meta.info.id)!
-        if (meta.info.admission && compareAdmission(meta.info.admission, loadedState.info.admission ?? { keyGeneration: -1 }) > 0) {
-          loadedState.info = { ...loadedState.info, admission: meta.info.admission }
-          this.notifySpaceListeners()
-        }
         // A loaded but still keyless space stays under ghost observation:
         // once the LOCAL grace elapses without a key ever arriving, it is a
         // real ghost and gets cleaned up like an unloaded one.
@@ -3403,6 +3393,12 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
       if (membershipEvents.length > 0) {
         meta.info.members = resolveActiveMembers(membershipEvents)
       }
+      // RLS-Spec 12 Regel 4: die Aufnahme-Kennung wird NICHT persistiert,
+      // sondern aus dem restaurierten Doc abgeleitet (CompactStore/Vault). Ohne
+      // Ereignisse (Alt-Space, Doc noch nicht geladen) bleibt sie offen, bis der
+      // Sync sie liefert — der _members-Observer traegt sie dann nach.
+      meta.info.admission = resolveAdmission(membershipEvents, this.identity.getDid())
+      if (meta.info.admission === undefined) delete meta.info.admission
       // VE-6: info.admins identisch zu members AUS dem Doc re-projizieren — die
       // persistierte info.admins ist nur ein Pre-Load-Cache, das _admins-Set im
       // Doc ist die durable Quelle. Ein zwischen Save und Restore als Member
@@ -3580,11 +3576,19 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
       this.pruneRemovedMemberEncryptionKeys(state, events)
       const membersChanged = JSON.stringify(members) !== JSON.stringify(state.info.members)
       if (membersChanged) state.info = { ...state.info, members }
+      // RLS-Spec 12 Regel 4: die Aufnahme-Kennung ist eine Projektion DESSELBEN
+      // Event-Sets — hier nachgefuehrt, damit ein Geraet, das die Einladung nie
+      // gesehen hat (Zweitgeraet, Offline-Phase), sie allein aus dem Doc-Sync
+      // bekommt. Sie faellt nie weg: ein removed-Gewinner liefert undefined,
+      // und wer entfernt ist, hat keine Aufnahme mehr.
+      const admission = resolveAdmission(events, this.identity.getDid())
+      const admissionChanged = !isSameAdmission(admission, state.info.admission)
+      if (admissionChanged) state.info = { ...state.info, admission }
       // Risk 1/Risk 5: eine Member-Aenderung kann einem Admin die Eigenschaft
       // entziehen (resolveActiveAdmins ∩ aktive Members) — info.admins auf
       // DEMSELBEN Update-Pfad re-projizieren (kein paralleler Pfad).
       const adminsChanged = this.projectActiveAdmins(state)
-      if (membersChanged || adminsChanged) this.notifySpaceListeners()
+      if (membersChanged || adminsChanged || admissionChanged) this.notifySpaceListeners()
       // Lektion #181b: der Metadata-Fingerprint traegt den _members-Digest —
       // auch reine Event-Aenderungen ohne Projektion-Aenderung persistieren.
       // Danach die VE-4-Resolution (Sync 005 Z.194-198) — sequenziell, damit
@@ -4011,12 +4015,15 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
         // sync) must ALSO persist the signing seed — else a recovery device of this
         // member stays read-only. The new-space branch persists below; do it here too.
         await this.persistGroupKeyWithSeed(spaceId, body.currentKeyGeneration, groupKey)
-        // RLS-Spec 12 Regel 4: dieser Zweig IST die Wiederaufnahme — die neue
-        // Einladung ersetzt die bisherige Aufnahme-Kennung (applySpaceInviteBody
-        // hat die eigene Capability dieser Generation gerade gespeichert).
-        existing.info.admission = { keyGeneration: body.currentKeyGeneration }
-        await this.saveSpaceMetadata(existing)
-        this.notifySpaceListeners()
+        // RLS-Spec 12 Regel 4: die Aufnahme-Kennung kommt aus dem _members-Set
+        // des (ggf. gerade gemergten) Docs, NICHT aus body.currentKeyGeneration.
+        // Nur so bleibt eine erneut zugestellte Einladung an ein weiterhin
+        // aktives Mitglied folgenlos, auch wenn inzwischen rotiert wurde.
+        const mergedAdmission = resolveAdmission(this.readMembershipEvents(existing.doc), this.identity.getDid())
+        if (!isSameAdmission(mergedAdmission, existing.info.admission)) {
+          existing.info = { ...existing.info, admission: mergedAdmission }
+          this.notifySpaceListeners()
+        }
         this.emitSpaceInvite({ spaceId, spaceName: existing.info.name, fromDid: decoded.senderDid, inviteMessageId: decoded.outerId, admission: existing.info.admission })
         return { kind: 'applied', durable: true }
       }
@@ -4063,9 +4070,11 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
         members,
         admins,
         createdAt: new Date().toISOString(),
-        // RLS-Spec 12 Regel 4: Kennung dieser Aufnahme = eigene Capability der
-        // Invite-Generation (von applySpaceInviteBody gespeichert).
-        admission: { keyGeneration: body.currentKeyGeneration },
+        // RLS-Spec 12 Regel 4: Kennung aus dem _members-Set des Invite-
+        // Snapshots. Ohne Snapshot (spec-konformer Invite ohne Extension) bleibt
+        // sie offen, bis der Doc-Sync die Ereignisse liefert — der
+        // _members-Observer traegt sie dann nach.
+        admission: resolveAdmission(membershipEvents, this.identity.getDid()),
       }
 
       const state: YjsSpaceState = {
@@ -4091,7 +4100,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
       await this.replayBlockedByKeyForSpace(spaceId)
 
       this.notifySpaceListeners()
-      this.emitSpaceInvite({ spaceId, spaceName: info.name, fromDid: decoded.senderDid, inviteMessageId: decoded.outerId, admission: info.admission! })
+      this.emitSpaceInvite({ spaceId, spaceName: info.name, fromDid: decoded.senderDid, inviteMessageId: decoded.outerId, admission: info.admission })
       return { kind: 'applied', durable: true }
     } catch (err) {
       console.debug('[YjsReplication] Failed to handle space invite:', err)
@@ -4870,10 +4879,6 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
       modules: state.info.modules,
       appData: state.info.appData,
       appTag: state.info.appTag,
-      // RLS-Spec 12 Regel 4: eine Wiederaufnahme aendert NUR die Aufnahme-Kennung —
-      // ohne sie im Fingerprint bliebe der Dirty-Check blind und die neue Kennung
-      // ungespeichert.
-      admission: state.info.admission,
       // #181 (b): include the actual key bytes, not just the DIDs — a rotated ECIES
       // pubkey for a known DID must change the fingerprint, else stale recipient keys persist.
       encKeys: Array.from(state.memberEncryptionKeys.entries())

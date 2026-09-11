@@ -2,10 +2,9 @@ import type { SpaceAdmission } from '../../types/space'
 
 /**
  * Vergleichs- und Ordnungsfunktionen ueber die Aufnahme-Kennung
- * (RLS-Spec 12 Regel 4). Die Kennung selbst ist die Schluesselgeneration, mit
- * der aufgenommen wurde — sie wird an ihren zwei Entstehungsorten direkt
- * gesetzt (Erstellen: 0, Einladung: `body.currentKeyGeneration`) und nie aus
- * lokalem Zustand abgeleitet.
+ * (RLS-Spec 12 Regel 4). Die Kennung selbst wird nirgends gespeichert: sie ist
+ * eine Projektion des synchronisierten `_members`-Event-Sets und entsteht
+ * ausschliesslich in `resolveAdmission` (protocol/sync/membership-events).
  */
 
 /** True, wenn beide Kennungen dieselbe Aufnahme bezeichnen (beide fehlend gilt als gleich). */
@@ -16,9 +15,8 @@ export function isSameAdmission(a: SpaceAdmission | null | undefined, b: SpaceAd
 
 /**
  * Ordnung ueber Aufnahme-Kennungen (aufsteigend nach Generation). Eine
- * Wiederaufnahme liegt stets hinter der vorherigen Aufnahme, weil die
- * Entfernung rotiert hat; damit ist die Ordnung zugleich das Monotonie-
- * Kriterium fuer die Uebernahme einer Kennung aus dem Metadata-Sync.
+ * Wiederaufnahme liegt stets hinter der vorherigen Aufnahme: die Entfernung
+ * rotiert, das neue `active`-Ereignis traegt deshalb eine hoehere Generation.
  */
 export function compareAdmission(a: SpaceAdmission, b: SpaceAdmission): number {
   if (a.keyGeneration === b.keyGeneration) return 0

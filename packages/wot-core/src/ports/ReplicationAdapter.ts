@@ -88,11 +88,12 @@ export interface ReplicationAdapter {
    * is an ECIES container — UI consumers subscribe here instead of parsing it.
    *
    * `admission` identifiziert die Aufnahme, auf die diese Mitgliedschaft
-   * zurueckgeht (RLS-Spec 12 Regel 4), und ist identisch mit
-   * `SpaceInfo.admission` nach dem Apply: eine Wiederaufnahme nach Entfernung
-   * traegt eine hoehere Generation als die vorherige Aufnahme (die Entfernung
-   * rotiert), eine blosse Schluesselrotation aendert sie nicht, und eine zweite
-   * Einladung an ein bestehendes Mitglied traegt dieselbe Generation.
+   * zurueckgeht (RLS-Spec 12 Regel 4) — dieselbe Projektion des
+   * `_members`-Event-Sets wie `SpaceInfo.admission` nach dem Apply: eine
+   * Wiederaufnahme nach Entfernung traegt eine hoehere Generation, eine blosse
+   * Rotation und eine erneut zugestellte Einladung an ein weiterhin aktives
+   * Mitglied aendern sie nicht. Optional: ein Invite ohne Doc-Snapshot traegt
+   * noch keine Ereignisse, die Kennung kommt dann mit dem Doc-Sync nach.
    */
   onSpaceInvite?(callback: (invite: IncomingSpaceInvite) => void): () => void
 

@@ -1,23 +1,22 @@
 export type ReplicationState = 'idle' | 'syncing' | 'error'
 
 /**
- * Kennung der Aufnahme in einen Space: die Generation des Space-Schluessels,
- * mit der die aktuelle Mitgliedschaft aufgenommen wurde (RLS-Spec 12 Regel 4).
+ * Kennung der Aufnahme in einen Space (RLS-Spec 12 Regel 4): die Generation, ab
+ * der die aktuelle, ununterbrochene Mitgliedschaft der eigenen DID im
+ * synchronisierten `_members`-Event-Set laeuft (Sync 005) — das erste `active`
+ * nach dem letzten `removed`.
  *
- * Die Generation traegt die Aussage allein: eine Entfernung rotiert den
- * Space-Schluessel (Sync 005), eine Wiederaufnahme laeuft also zwingend ueber
- * eine hoehere Generation als die vorherige Aufnahme. Eine Doppel-Einladung an
- * ein bestehendes Mitglied traegt dagegen dieselbe Generation und ist damit
- * korrekt KEINE Wiederaufnahme. Eine blosse Rotation (ein Dritter wird
- * entfernt) aendert die Kennung nicht — sie wird nur beim Erstellen und beim
- * Anwenden einer Einladung gesetzt.
- *
- * Bewusst geraeteunabhaengig: der Wert ist auf allen Geraeten derselben
- * Identitaet identisch und wandert ueber den Metadata-Sync — kein lokaler
- * Schluesselzustand, kein Hash ueber zeitabhaengige Capability-Felder.
+ * ABGELEITET, nie gespeichert (`resolveAdmission`, protocol/sync/
+ * membership-events). Damit ist sie auf jedem Geraet derselben Identitaet
+ * gleich, sobald das Doc gesynct ist, und kann nicht per Last-Writer-Wins in
+ * einer Metadata veralten. Sie aendert sich NUR durch ein neues
+ * `active`-Ereignis, also durch eine Wiederaufnahme nach `removed`. Eine
+ * Schluesselrotation (ein Dritter wird entfernt), eine erneut zugestellte
+ * Einladung an ein bereits aktives Mitglied und jeder Metadata-Schreibvorgang
+ * beruehren sie nicht. Alt-Spaces ohne Event-Set haben keine Kennung.
  */
 export interface SpaceAdmission {
-  /** currentKeyGeneration der Einladung; beim Erstellen 0 */
+  /** `sinceGeneration` des ersten active-Ereignisses des laufenden Mitgliedschafts-Laufs; beim Creator 0 */
   keyGeneration: number
 }
 
@@ -58,11 +57,10 @@ export interface SpaceInfo {
    */
   appData?: Record<string, unknown>
   /**
-   * Aufnahme-Kennung dieser Mitgliedschaft (RLS-Spec 12 Regel 4). Optional:
-   * Bestands-Spaces, die vor ihrer Einfuehrung angelegt wurden, tragen keine —
-   * sie gelten als freigegeben und bekommen erst durch eine neu angewandte
-   * Einladung (Wiederaufnahme) eine Kennung. Nichts leitet sie nachtraeglich
-   * aus lokalem Schluesselzustand ab.
+   * Aufnahme-Kennung dieser Mitgliedschaft (RLS-Spec 12 Regel 4) — read-only
+   * Projektion des `_members`-Event-Sets, wie `members` und `admins`. Optional:
+   * ohne Ereignisse fuer die eigene DID (Alt-Space, Doc noch nicht gesynct)
+   * gibt es keine Kennung.
    */
   admission?: SpaceAdmission
 }
@@ -107,8 +105,9 @@ export interface IncomingSpaceInvite {
   inviteMessageId: string
   /**
    * Aufnahme-Kennung dieser Einladung (RLS-Spec 12 Regel 4) — identisch zu
-   * `SpaceInfo.admission` nach dem Apply. Pflicht, damit tsc jede Emit-Stelle
-   * zwingt, sie mitzugeben.
+   * `SpaceInfo.admission` nach dem Apply, abgeleitet aus dem `_members`-Set des
+   * Invite-Snapshots. Optional: ein spec-konformer Invite ohne Snapshot traegt
+   * noch keine Ereignisse; die Kennung kommt dann mit dem Doc-Sync nach.
    */
-  admission: SpaceAdmission
+  admission?: SpaceAdmission
 }

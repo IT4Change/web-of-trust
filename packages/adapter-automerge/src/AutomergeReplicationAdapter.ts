@@ -3,14 +3,14 @@ import type { StorageAdapterInterface } from '@automerge/automerge-repo'
 import type { DocHandle } from '@automerge/automerge-repo'
 import * as Automerge from '@automerge/automerge'
 import type { ReplicationAdapter, SpaceHandle, TransactOptions, Subscribable, MessagingAdapter, MessageIdHistoryPort, SpaceMetadataStorage, KeyManagementPort, MemberUpdatePendingStore, WireMessage, DocLogStore } from '@web_of_trust/core/ports'
-import type { IdentitySession, SpaceInfo, SpaceMemberChange, IncomingSpaceInvite, ReplicationState, MessageEnvelope } from '@web_of_trust/core/types'
+import type { IdentitySession, SpaceInfo, SpaceAdmission, SpaceMemberChange, IncomingSpaceInvite, ReplicationState, MessageEnvelope } from '@web_of_trust/core/types'
 import {
   createSpaceKey, createDeterministicSpaceKey, rotateSpaceKey, importKey, processMemberUpdate,
   resolveMemberUpdatesAgainstCanonical, canonicalEventSetAnswersPending,
   buildSpaceInviteBody, applySpaceInviteBody, buildKeyRotationBody, applyKeyRotationBody,
   deliverInboxMessage, receiveInboxMessage,
   runTwoPhaseRemoval, recoverPendingRemovals,
-  openLifecycleLease, compareAdmission,
+  openLifecycleLease, isSameAdmission,
 } from '@web_of_trust/core/application'
 import type { LocalImpact, SecureRemovalDeps, LifecycleLease } from '@web_of_trust/core/application'
 import type {
@@ -24,7 +24,7 @@ import {
   SPACE_INVITE_MESSAGE_TYPE, MEMBER_UPDATE_MESSAGE_TYPE, KEY_ROTATION_MESSAGE_TYPE,
   isDidcommMessage, isEncryptedInboxMessageType, INBOX_MESSAGE_TYPE,
   createAckMessage, evaluateInboxAckDisposition, createDidKeyResolver,
-  formatMembershipEventKey, parseMembershipEventKey, resolveActiveMembers, resolveMembershipWinner, assertMembershipEvent,
+  formatMembershipEventKey, parseMembershipEventKey, resolveActiveMembers, resolveMembershipWinner, resolveAdmission, assertMembershipEvent,
   resolveActiveAdmins, assertAdminEntry,
   LogSyncCoordinator, AuthorMismatchError, LocalAppendFailedError, CapabilityKeysUnavailableError, createSpaceCapabilityJws,
   createSpaceRegisterMessageWithSigner, createSpaceRotateMessageWithSigner,
@@ -551,19 +551,8 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
     const persisted = await this.metadataStorage.loadAllSpaceMetadata()
     let changed = false
     for (const meta of persisted) {
-      // Skip spaces we already know about — bis auf die Aufnahme-Kennung:
-      // RLS-Spec 12 Regel 4 laesst sie ueber den Metadata-Sync auf Geraete
-      // wandern, die die Wiederaufnahme-Einladung nie gesehen haben. MONOTON:
-      // nur eine hoehere Generation wird uebernommen, ein per LWW
-      // zurueckgeschriebener alter Stand dreht nichts zurueck.
-      const loadedState = this.spaces.get(meta.info.id)
-      if (loadedState) {
-        if (meta.info.admission && compareAdmission(meta.info.admission, loadedState.info.admission ?? { keyGeneration: -1 }) > 0) {
-          loadedState.info = { ...loadedState.info, admission: meta.info.admission }
-          changed = true
-        }
-        continue
-      }
+      // Skip spaces we already know about
+      if (this.spaces.has(meta.info.id)) continue
 
       // Skip spaces that don't match the filter (cross-app isolation)
       if (this.spaceFilter && !this.spaceFilter(meta.info as SpaceInfo)) continue
@@ -1172,9 +1161,11 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
       admins: [myDid],
       createdAt: new Date().toISOString(),
     }
-    // RLS-Spec 12 Regel 4: der Creator wird mit der Genesis-Generation 0
-    // aufgenommen — deterministisch auf jedem Geraet.
-    if (!info.admission) info.admission = { keyGeneration: 0 }
+    // RLS-Spec 12 Regel 4: die Aufnahme-Kennung ist eine Projektion des
+    // _members-Event-Sets (Creator = eigenes active@0 aus dem Doc-Seed). Auch im
+    // Resume abgeleitet, damit ein Bestands-Space ohne Einladung keine 0 erbt.
+    // (Resume: docHandle ist null, das Doc haengt dann am resumed documentId.)
+    info.admission = resolveAdmission(this.readMembershipEvents(docHandle?.doc() ?? this.repo.handles[documentId]?.doc()), myDid)
 
     let spaceState: SpaceState
     if (resumed) {
@@ -2103,7 +2094,7 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
     this.seedMembershipProjection(space)
   }
 
-  private computeMembershipProjection(doc: unknown): { digest: string; createdBy?: string; members: string[] | null; admins: string[] | null; events: MembershipEvent[] } {
+  private computeMembershipProjection(doc: unknown): { digest: string; createdBy?: string; members: string[] | null; admins: string[] | null; events: MembershipEvent[]; admission?: SpaceAdmission } {
     // F-6: das kanonische Creator-Feld liegt unter dem reservierten Root-Key
     // `_createdBy` — App-Daten unter `createdBy` kippen die Projektion nicht.
     const createdByRaw = (doc as { _createdBy?: unknown } | undefined)?._createdBy
@@ -2126,12 +2117,29 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
     // Events ist die aktive Basis unbekannt → Projektion offen lassen (wie
     // members), der Doc-Sync liefert sie nach.
     const admins = members !== null ? resolveActiveAdmins(adminEntries, members) : null
-    return { digest, createdBy, members, admins, events }
+    // RLS-Spec 12 Regel 4: die Aufnahme-Kennung ist eine Projektion DESSELBEN
+    // Event-Sets (`resolveAdmission`) — kein eigener Pfad, keine Persistenz.
+    //
+    // BEKANNTE GRENZE (Automerge-Adapter, in diesem PR NICHT behoben): dieser
+    // Adapter schreibt beim SELBST-Verlassen kein `removed`-Ereignis ins
+    // _members-Set. Eine erneute Aufnahme nach einem Selbst-Verlassen ist hier
+    // deshalb nicht als Wiederaufnahme erkennbar — die Kennung bleibt auf der
+    // Generation der urspruenglichen Aufnahme stehen. Der Yjs-Adapter (Slice SR)
+    // schreibt das removed-Ereignis und ist davon nicht betroffen.
+    const admission = events.length > 0 ? resolveAdmission(events, this.identity.getDid()) : undefined
+    return { digest, createdBy, members, admins, events, admission }
   }
 
   /** Uebernimmt createdBy + members + admins-Projektion in info und reconciliert die Sync-Peers. */
-  private applyMembershipProjection(space: SpaceState, projection: { createdBy?: string; members: string[] | null; admins: string[] | null }): boolean {
+  private applyMembershipProjection(space: SpaceState, projection: { createdBy?: string; members: string[] | null; admins: string[] | null; admission?: SpaceAdmission }): boolean {
     let changed = false
+    // Aufnahme-Kennung auf DEMSELBEN Update-Pfad wie members/admins. Nur bei
+    // vorhandenen Events (admission !== undefined trotz leerem Set gibt es
+    // nicht): ohne Events bleibt die bestehende Projektion stehen.
+    if (projection.members !== null && !isSameAdmission(projection.admission, space.info.admission)) {
+      space.info = { ...space.info, admission: projection.admission }
+      changed = true
+    }
     if (projection.createdBy !== undefined && projection.createdBy !== space.info.createdBy) {
       space.info = { ...space.info, createdBy: projection.createdBy }
       changed = true
@@ -3447,7 +3455,12 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
         // via _persistSpaceMetadata below; mirror it here.
         // RLS-Spec 12 Regel 4: dieser Zweig IST die Wiederaufnahme — neue
         // Einladung, neue Aufnahme-Kennung (vor dem Metadata-Save gesetzt).
-        existing.info.admission = { keyGeneration: body.currentKeyGeneration }
+        // RLS-Spec 12 Regel 4: Kennung aus dem _members-Set des (ggf. gerade
+        // gemergten) Docs, nicht aus body.currentKeyGeneration — eine erneut
+        // zugestellte Einladung an ein weiterhin aktives Mitglied bleibt
+        // dadurch folgenlos, auch wenn inzwischen rotiert wurde.
+        const mergedAdmission = resolveAdmission(this.readMembershipEvents(this.repo.handles[existing.documentId]?.doc()), this.identity.getDid())
+        if (!isSameAdmission(mergedAdmission, existing.info.admission)) existing.info = { ...existing.info, admission: mergedAdmission }
         await this._persistSpaceMetadata(existing)
         this.emitSpaceInvite({ spaceId, spaceName: existing.info.name, fromDid: decoded.senderDid, inviteMessageId: decoded.outerId, admission: existing.info.admission })
         return { kind: 'applied', durable: true }
@@ -3509,7 +3522,9 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
         createdAt: new Date().toISOString(),
         // RLS-Spec 12 Regel 4: Kennung dieser Aufnahme = eigene Capability der
         // Invite-Generation (von applySpaceInviteBody gespeichert).
-        admission: { keyGeneration: body.currentKeyGeneration },
+        // RLS-Spec 12 Regel 4: Kennung aus dem _members-Set des Invite-
+        // Snapshots; ohne Snapshot offen bis zum Doc-Sync (Projektion-Pfad).
+        admission: resolveAdmission(membershipEvents, this.identity.getDid()),
       }
 
       const spaceState: SpaceState = {
@@ -3578,7 +3593,7 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
       for (const cb of this.memberChangeCallbacks) {
         cb({ spaceId, did: this.identity.getDid(), action: 'added' })
       }
-      this.emitSpaceInvite({ spaceId, spaceName: info.name, fromDid: decoded.senderDid, inviteMessageId: decoded.outerId, admission: info.admission! })
+      this.emitSpaceInvite({ spaceId, spaceName: info.name, fromDid: decoded.senderDid, inviteMessageId: decoded.outerId, admission: info.admission })
       return { kind: 'applied', durable: true }
     } catch (err) {
       console.debug('[ReplicationAdapter] Failed to handle space invite:', err)
