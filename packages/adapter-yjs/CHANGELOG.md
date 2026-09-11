@@ -1,5 +1,40 @@
 # Changelog
 
+## [0.2.7](https://github.com/real-life-org/web-of-trust/compare/adapter-yjs-v0.2.6...adapter-yjs-v0.2.7) (2026-09-11)
+
+
+### Features
+
+* **adapter-automerge:** Admin-Rotation bei beobachtetem Self-Removal (Parität zu Yjs, [#298](https://github.com/real-life-org/web-of-trust/issues/298)) ([cfe6bf1](https://github.com/real-life-org/web-of-trust/commit/cfe6bf1a78fbe53602909d8aa0345fdba16c316e))
+* **adapter-automerge:** Selbst-Verlassen schreibt removed-Ereignis (Parität zu Yjs) ([f108e03](https://github.com/real-life-org/web-of-trust/commit/f108e03a903f8b173800de0f56214c0efa86cb9a))
+* **core:** Aufnahme-Kennung (admission) je Space in SpaceInfo und IncomingSpaceInvite ([24fac2a](https://github.com/real-life-org/web-of-trust/commit/24fac2af3d424153a1d16fe74b6e7bfebd60f1c2))
+* **core:** Aufnahme-Kennung (admission) je Space in SpaceInfo und IncomingSpaceInvite ([fb27214](https://github.com/real-life-org/web-of-trust/commit/fb27214d2771ab4f7db29dca0210cdc3f7f3142a))
+* **core:** Aufnahme-Kennung = Schlüsselgeneration der Einladung, Sync-Übernahme für geladene Spaces ([898adf1](https://github.com/real-life-org/web-of-trust/commit/898adf1512fdac5c515f5a9892c4aacac0a857b8))
+* **core:** Aufnahme-Kennung aus _members-Ereignissen abgeleitet, nicht gespeichert ([8e02e06](https://github.com/real-life-org/web-of-trust/commit/8e02e06f4e784dedc6643fcd961b3e1ce6356ae3))
+
+
+### Bug Fixes
+
+* **adapter-yjs:** Enforcement nach Restore; Tests deterministisch statt fester Wartezeiten ([bb9e742](https://github.com/real-life-org/web-of-trust/commit/bb9e742e9b750afa6e933a4e08194ea47d87b619))
+* **storage:** Kontakt-Identität kommt aus dem Map-Schlüssel ([13f6f9d](https://github.com/real-life-org/web-of-trust/commit/13f6f9da87ded2e2b4fc53ebe961bb2f0dee6e01))
+* **storage:** Kontakt-Identität kommt aus dem Map-Schlüssel ([444a50e](https://github.com/real-life-org/web-of-trust/commit/444a50e1395c3bf47628259a8413566a81c4101a))
+* **storage:** Lesepfad-Invariante auch beim Einzelabruf und für Leerzeichen ([a851eec](https://github.com/real-life-org/web-of-trust/commit/a851eecea7406773f36c515ffd1fa87e41ffe349))
+
+
+### Performance Improvements
+
+* **sync:** Key-Lookup-Hotpath + Key-Material-Cache (Cold-Start PR1, [#353](https://github.com/real-life-org/web-of-trust/issues/353)) ([d938294](https://github.com/real-life-org/web-of-trust/commit/d9382946638557dec7080e1354ec9687dec3ae54))
+* **sync:** Key-Lookup-Hotpath entfernen + Key-Material-Cache (Cold-Start PR1, [#353](https://github.com/real-life-org/web-of-trust/issues/353)) ([572bd77](https://github.com/real-life-org/web-of-trust/commit/572bd7701783d69b856eeb0710affe4e9d74e82f))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * devDependencies
+    * @web_of_trust/core bumped to 0.5.7
+  * peerDependencies
+    * @web_of_trust/core bumped to 0.5.7
+
 ## [0.2.6](https://github.com/real-life-org/web-of-trust/compare/adapter-yjs-v0.2.5...adapter-yjs-v0.2.6) (2026-08-17)
 
 
