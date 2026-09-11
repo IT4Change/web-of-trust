@@ -241,8 +241,10 @@ export interface PendingRemoval {
  *  - `staging` — der gespeicherte Record muss genau diese stagingId tragen
  *    (Fortschreiben oder bewusstes Ersetzen des EIGENEN Stagings).
  *
- * Wird `expect` ganz weggelassen, ist der Schreibzugriff unbedingt — das ist der
- * Test-/Seed-Pfad; der Workflow gibt IMMER eine Erwartung mit.
+ * Wird `expect` ganz weggelassen, ist der Zugriff unbedingt. Das ist
+ * AUSSCHLIESSLICH der Test-/Seed-Pfad (einen Ausgangszustand herstellen); jeder
+ * produktive Schreib- und Loeschpfad in Workflow UND Adaptern gibt eine
+ * Erwartung mit.
  */
 export type PendingRemovalWriteExpectation =
   | { kind: 'absent' }
@@ -582,7 +584,7 @@ export interface DocLogStore {
    * geworfen. Die drei Erwartungsformen stehen an
    * {@link PendingRemovalWriteExpectation} — auch die Migration eines
    * Legacy-Records ist eine davon (`legacy`), nicht etwa ein unbedingter Write.
-   * Ohne `expect` ist der Schreibzugriff unbedingt (Test-/Seed-Pfad).
+   * Ohne `expect` ist der Schreibzugriff unbedingt — nur fuer Test-/Seed-Code.
    */
   putPendingRemoval(removal: PendingRemoval, expect?: PendingRemovalWriteExpectation): Promise<void>
 
@@ -622,7 +624,7 @@ export interface DocLogStore {
    * mitnehmen und die Rotation ohne durables Material zuruecklassen. Lesen,
    * Pruefen und Loeschen liegen in EINER Transaktion; passt die Identitaet nicht,
    * wird nichts geloescht (`'mismatch'`). `{ kind: 'absent' }` ist hier sinnlos
-   * und passt nie. Ohne `expect` ist der Delete unbedingt (Test-/Seed-Pfad).
+   * und passt nie. Ohne `expect` ist der Delete unbedingt — nur fuer Test-/Seed-Code.
    */
   deletePendingRemoval(
     spaceId: string,

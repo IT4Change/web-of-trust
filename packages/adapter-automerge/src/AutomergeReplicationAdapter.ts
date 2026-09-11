@@ -9,7 +9,7 @@ import {
   resolveMemberUpdatesAgainstCanonical, canonicalEventSetAnswersPending,
   buildSpaceInviteBody, applySpaceInviteBody, buildKeyRotationBody, applyKeyRotationBody,
   deliverInboxMessage, receiveInboxMessage,
-  runTwoPhaseRemoval, recoverPendingRemovals,
+  runTwoPhaseRemoval, recoverPendingRemovals, pendingRemovalWriteExpectation,
   openLifecycleLease, isSameAdmission,
 } from '@web_of_trust/core/application'
 import type { LocalImpact, SecureRemovalDeps, LifecycleLease } from '@web_of_trust/core/application'
@@ -2597,7 +2597,20 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
     const removals = await store.listPendingRemovals()
     await Promise.all(removals
       .filter((removal) => removal.spaceId === spaceId)
-      .map((removal) => store.deletePendingRemoval(removal.spaceId, removal.removedDid)))
+      // #366: an den GELISTETEN Record gebunden loeschen. Zwischen listPendingRemovals
+      // und diesem Delete kann ein zweiter Beobachter denselben Schluessel neu
+      // gestagt haben — dessen Auftrag darf der Abbruch nicht mitnehmen.
+      .map(async (removal) => {
+        const outcome = await store.deletePendingRemoval(
+          removal.spaceId, removal.removedDid, pendingRemovalWriteExpectation(removal),
+        )
+        if (outcome === 'mismatch') {
+          console.warn(
+            `[AutomergeReplication] keeping the pending removal of ${removal.removedDid} in space ${removal.spaceId}: ` +
+              'it belongs to a newer staging, not to the abandoned one.',
+          )
+        }
+      }))
   }
 
   /**
