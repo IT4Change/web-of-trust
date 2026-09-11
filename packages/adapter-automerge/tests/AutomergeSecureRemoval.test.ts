@@ -454,6 +454,48 @@ describe('AutomergeReplicationAdapter — Slice SR secure removal (VE-C1 wiring)
     }
   })
 
+  // #366: der Abbruch-Delete lief nur ueber (spaceId, removedDid). Zwischen
+  // listPendingRemovals und dem Delete kann ein zweiter Beobachter denselben
+  // Schluessel neu stagen — dessen Auftrag darf der Abbruch nicht mitnehmen.
+  it('forgetSpaceLocally laesst ein waehrenddessen NEU gestagtes Removal stehen (#366)', async () => {
+    const spaceId = await createSharedSpace()
+    const keyPort = (aliceAdapter as unknown as { keyManagement: InMemoryKeyManagementAdapter }).keyManagement
+    const crypto = (aliceAdapter as unknown as { crypto: any }).crypto
+    const store = (aliceAdapter as unknown as { docLogStore: InMemoryDocLogStore }).docLogStore
+
+    const makeRecord = async (stagingId: string): Promise<PendingRemoval> => {
+      const staged = await stageRotateSpaceKey({ crypto, keyPort, spaceId, ownerDid: alice.getDid() })
+      return {
+        phase: 'staged', spaceId, removedDid: bob.getDid(), homeBrokerSet: BROKER_URLS, confirmedBrokerUrls: [],
+        newGeneration: staged.newGeneration,
+        stagedKeyMaterial: { contentKey: staged.contentKey, capSigningSeed: staged.capabilitySigningSeed, capVerificationKey: staged.capabilityVerificationKey },
+        createdAt: Date.now(), stagingId, materialFingerprint: `fp-${stagingId}`,
+      }
+    }
+    await store.putPendingRemoval(await makeRecord('staging-abandoned'))
+    const fresh = await makeRecord('staging-new')
+
+    // Das Rennen: direkt nach dem Auflisten stagt ein zweiter Beobachter neu.
+    const realList = store.listPendingRemovals.bind(store)
+    let armed = true
+    ;(store as unknown as { listPendingRemovals: typeof store.listPendingRemovals }).listPendingRemovals = async () => {
+      const listed = await realList()
+      if (armed) {
+        armed = false
+        await store.putPendingRemoval(fresh)
+      }
+      return listed
+    }
+
+    await aliceAdapter.forgetSpaceLocally(spaceId)
+
+    // Der neue Auftrag steht unveraendert — der Abbruch galt nur dem alten.
+    const kept = await store.getPendingRemoval(spaceId, bob.getDid())
+    expect(kept).not.toBeNull()
+    expect(kept!.stagingId).toBe('staging-new')
+    expect(kept!.newGeneration).toBe(fresh.newGeneration)
+  })
+
   it('forgetSpaceLocally deletes key material and aborts this space\'s staged removal intent', async () => {
     const spaceId = await createSharedSpace()
     const keyPort = (aliceAdapter as unknown as { keyManagement: InMemoryKeyManagementAdapter }).keyManagement

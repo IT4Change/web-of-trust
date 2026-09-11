@@ -75,6 +75,8 @@
  */
 
 /** A persisted local or applied-remote log entry. */
+import { encodeBase64Url } from '../protocol/crypto/encoding'
+
 export interface LocalLogEntry {
   /** The document this entry belongs to. */
   docId: string
@@ -190,6 +192,23 @@ export interface PendingRemoval {
   newGeneration: number
   /** The new key material the commit phase (VE-C1) needs once all brokers confirm. */
   stagedKeyMaterial: StagedRemovalKeyMaterial
+  /**
+   * #366 — Identitaet GENAU DIESES Stagings (zufaellig beim Anlegen). Zwei
+   * Beobachter auf demselben Store (zwei Tabs derselben Identitaet) koennen
+   * unterschiedliches Material erzeugen; nur der Gewinner haelt den Record, und
+   * jeder spaetere Schreibzugriff MUSS seine stagingId mitfuehren, damit der
+   * Verlierer den Gewinner nicht ueberschreibt. Optional, weil vor #366
+   * persistierte Records sie nicht haben (Legacy: unbestaetigt, siehe unten).
+   */
+  stagingId?: string
+  /**
+   * #366 — Fingerprint (sha256, hex) ueber newGeneration + das kanonisch
+   * serialisierte {@link stagedKeyMaterial}. Eine Broker-Bestaetigung wird nur
+   * eingetragen, wenn sie zu GENAU diesem Fingerprint gehoert; damit kann eine
+   * Bestaetigung niemals fremdes Material decken. Fehlt er (Legacy-Record), gilt
+   * die Bestaetigungsliste als nicht materialgebunden und damit als unbestaetigt.
+   */
+  materialFingerprint?: string
   /** Staging-record creation time (ms since epoch). */
   createdAt: number
   /** Plain JSON activity committed atomically with the membership event, if requested. */
@@ -206,6 +225,102 @@ export interface PendingRemoval {
   /** Home brokers that acknowledged the durable self admin-remove. */
   adminRemoveConfirmedBrokerUrls?: string[]
 }
+
+/**
+ * #366 — Erwartung an den gespeicherten Zustand beim bedingten Schreiben eines
+ * {@link PendingRemoval}. Drei Formen, alle EXPLIZIT — es gibt bewusst keinen
+ * Joker, der "passt schon" bedeutet:
+ *
+ *  - `absent` — es darf noch KEIN Record existieren (Anlegen).
+ *  - `legacy` — der gespeicherte Record muss noch der UNVERAENDERTE Record ohne
+ *    Staging-Identitaet sein, den der Aufrufer gelesen hat (gleiche Generation,
+ *    gleiche Materialbindung, gleiches Material). Das ist die Migration eines
+ *    vor #366 persistierten Records: sie ist der einzige Schreibzugriff, der
+ *    einem Record erstmals eine Identitaet gibt, und darf deshalb nicht zwischen
+ *    Lesen und Schreiben einen fremden, laengst migrierten Record ueberfahren.
+ *  - `staging` — der gespeicherte Record muss genau diese stagingId tragen
+ *    (Fortschreiben oder bewusstes Ersetzen des EIGENEN Stagings).
+ *
+ * Wird `expect` ganz weggelassen, ist der Zugriff unbedingt. Das ist
+ * AUSSCHLIESSLICH der Test-/Seed-Pfad (einen Ausgangszustand herstellen); jeder
+ * produktive Schreib- und Loeschpfad in Workflow UND Adaptern gibt eine
+ * Erwartung mit.
+ */
+export type PendingRemovalWriteExpectation =
+  | { kind: 'absent' }
+  | {
+      kind: 'legacy'
+      /** Generation des gelesenen Legacy-Records. */
+      newGeneration: number
+      /** Materialbindung des gelesenen Records — bei echtem Legacy `undefined`. */
+      materialFingerprint?: string
+      /** Kanonische Form des gelesenen Materials, siehe {@link stagedMaterialKey}. */
+      material: string
+    }
+  | { kind: 'staging'; stagingId: string }
+
+/**
+ * #366 — Kanonische, vergleichbare Form des gestagten Materials. Beide Stores und
+ * der Workflow leiten ihre Erwartung hierueber ab, damit "dasselbe Material"
+ * ueberall dieselbe Frage ist — unabhaengig davon, ob der Store Bytes oder
+ * base64url haelt.
+ */
+export function stagedMaterialKey(material: StagedRemovalKeyMaterial): string {
+  return [
+    encodeBase64Url(material.contentKey),
+    encodeBase64Url(material.capSigningSeed),
+    encodeBase64Url(material.capVerificationKey),
+  ].join('.')
+}
+
+/**
+ * #366 — Die `legacy`-Erwartung zu einem GELESENEN Record ohne Staging-Identitaet:
+ * "schreibe nur, solange genau dieser Record unveraendert dort liegt".
+ */
+export function legacyWriteExpectation(removal: PendingRemoval): PendingRemovalWriteExpectation {
+  return {
+    kind: 'legacy',
+    newGeneration: removal.newGeneration,
+    materialFingerprint: removal.materialFingerprint,
+    material: stagedMaterialKey(removal.stagedKeyMaterial),
+  }
+}
+
+/**
+ * #366 — Was eine Broker-Bestaetigung deckt. Alle drei Felder MUESSEN zum
+ * gespeicherten Record passen, sonst gehoert die Bestaetigung zu einem
+ * ueberschriebenen Staging.
+ */
+export interface BrokerConfirmationBinding {
+  /** {@link PendingRemoval.stagingId} des Stagings, das gesendet wurde. */
+  stagingId: string
+  /** Generation, fuer die der Broker bestaetigt hat. */
+  newGeneration: number
+  /** {@link PendingRemoval.materialFingerprint} des gesendeten Materials. */
+  materialFingerprint: string
+}
+
+/** Ausgang von {@link DocLogStore.deletePendingRemoval} (#366). */
+export type PendingRemovalDeleteOutcome =
+  /** Der erwartete Record wurde geloescht. */
+  | 'deleted'
+  /** Kein Record vorhanden (schon abgeraeumt) — nichts zu tun. */
+  | 'absent'
+  /** Der gespeicherte Record gehoert einem anderen Staging; nichts geloescht. */
+  | 'mismatch'
+
+/** Ausgang von {@link DocLogStore.markBrokerConfirmed} (#366). */
+export type BrokerConfirmationOutcome =
+  /** Eingetragen. */
+  | 'recorded'
+  /** War schon eingetragen (idempotenter Retry). */
+  | 'already-confirmed'
+  /** Kein Staging-Record (mehr) vorhanden. */
+  | 'absent'
+  /** Broker gehoert nicht zum (fixen) homeBrokerSet des Records. */
+  | 'foreign-broker'
+  /** Der gespeicherte Record traegt anderes Material — Bestaetigung verworfen. */
+  | 'superseded'
 
 /**
  * Slice B / VE-B2: a reference to a single open seq-gap, returned by the
@@ -459,12 +574,19 @@ export interface DocLogStore {
   // log entry. They are independent of the (deviceId, docId) log above.
 
   /**
-   * Durably stage (or re-stage) a pending removal. Idempotent on
-   * (spaceId, removedDid): an existing record for the same removal is
-   * OVERWRITTEN — this is the retry / re-stage path, so a fresh start with new
-   * key material replaces a stale staging record wholesale.
+   * Durably stage (or re-stage) a pending removal, keyed by (spaceId, removedDid).
+   *
+   * #366 — BEDINGTES SCHREIBEN: `expect` macht den Schreibzugriff atomar gegen
+   * einen zweiten Beobachter auf demselben Store (zwei Tabs derselben Identitaet).
+   * Das Lesen, Pruefen und Schreiben laeuft in EINER Transaktion; passt der
+   * gespeicherte Zustand nicht zur Erwartung, wird NICHTS geschrieben und ein
+   * {@link PendingRemovalStagingConflictError} mit dem vorhandenen Record
+   * geworfen. Die drei Erwartungsformen stehen an
+   * {@link PendingRemovalWriteExpectation} — auch die Migration eines
+   * Legacy-Records ist eine davon (`legacy`), nicht etwa ein unbedingter Write.
+   * Ohne `expect` ist der Schreibzugriff unbedingt — nur fuer Test-/Seed-Code.
    */
-  putPendingRemoval(removal: PendingRemoval): Promise<void>
+  putPendingRemoval(removal: PendingRemoval, expect?: PendingRemovalWriteExpectation): Promise<void>
 
   /** Fetch the pending removal for (spaceId, removedDid), or null if none. */
   getPendingRemoval(spaceId: string, removedDid: string): Promise<PendingRemoval | null>
@@ -474,15 +596,41 @@ export interface DocLogStore {
    * confirmedBrokerUrls idempotently (no duplicate if already present) and
    * monotonically (never removes). No-op if the URL is already confirmed or no
    * staging record exists.
+   *
+   * #366 — MATERIALGEBUNDEN: `binding` nennt das Material, das der Broker
+   * tatsaechlich bestaetigt hat. Die Bestaetigung wird NUR eingetragen, wenn der
+   * gespeicherte Record dieselbe stagingId, dieselbe newGeneration UND denselben
+   * materialFingerprint traegt — sonst gehoert sie zu einem ueberschriebenen
+   * Staging und wird verworfen (`'superseded'`). Ohne `binding` bleibt das alte,
+   * ungebundene Verhalten (Test-/Migrationspfad).
    */
-  markBrokerConfirmed(spaceId: string, removedDid: string, brokerUrl: string): Promise<void>
+  markBrokerConfirmed(
+    spaceId: string,
+    removedDid: string,
+    brokerUrl: string,
+    binding?: BrokerConfirmationBinding,
+  ): Promise<BrokerConfirmationOutcome>
 
   /**
    * Selectively drop the staging record for (spaceId, removedDid) (a targeted
    * delete, NOT a clear) — e.g. after the removal is fully enforced or aborted.
    * Other removals, the log, and the deviceId binding are untouched.
+   *
+   * #366 — COMPARE-AND-DELETE: `expect` bindet den Loeschbefehl an die Identitaet
+   * des Records, den der Aufrufer abgeraeumt hat. Der Schluessel
+   * (spaceId, removedDid) allein reicht NICHT: ein zweiter Beobachter kann den
+   * fertigen Record laengst geloescht und unter demselben Schluessel ein NEUES
+   * Removal gestagt haben — ein unbedingter Delete wuerde dessen Staging
+   * mitnehmen und die Rotation ohne durables Material zuruecklassen. Lesen,
+   * Pruefen und Loeschen liegen in EINER Transaktion; passt die Identitaet nicht,
+   * wird nichts geloescht (`'mismatch'`). `{ kind: 'absent' }` ist hier sinnlos
+   * und passt nie. Ohne `expect` ist der Delete unbedingt — nur fuer Test-/Seed-Code.
    */
-  deletePendingRemoval(spaceId: string, removedDid: string): Promise<void>
+  deletePendingRemoval(
+    spaceId: string,
+    removedDid: string,
+    expect?: PendingRemovalWriteExpectation,
+  ): Promise<PendingRemovalDeleteOutcome>
 
   /**
    * All open pending removals — the crash-recovery view at startup, from which

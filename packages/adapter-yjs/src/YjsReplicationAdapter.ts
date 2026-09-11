@@ -33,7 +33,7 @@ import {
   resolveMemberUpdatesAgainstCanonical, canonicalEventSetAnswersPending,
   buildSpaceInviteBody, applySpaceInviteBody, buildKeyRotationBody, applyKeyRotationBody,
   deliverInboxMessage, receiveInboxMessage,
-  runTwoPhaseRemoval, recoverPendingRemovals,
+  runTwoPhaseRemoval, recoverPendingRemovals, pendingRemovalWriteExpectation,
   openLifecycleLease, isSameAdmission,
 } from '@web_of_trust/core/application'
 import type { LocalImpact, SecureRemovalDeps, LifecycleLease } from '@web_of_trust/core/application'
@@ -1581,11 +1581,11 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
     for (const event of candidates) {
       // Existing staging is the cross-observer/recovery dedup key.  A current
       // generation at or past the declaration is already enforced (or superseded).
-      // GRENZE (gemessen): zwei EXAKT gleichzeitig laufende Beobachter lesen beide
-      // ein leeres Staging, stagen beide und senden beide einen space-rotate.
-      // Wirksam wird trotzdem genau EINER — das Generations-Gate des Brokers weist
-      // jeden weiteren ab. Diese Pruefung deduppt den SEQUENTIELLEN Re-Trigger
-      // (erneute Beobachtung, Restore, Recovery), nicht das Rennen.
+      // Diese Pruefung deduppt den SEQUENTIELLEN Re-Trigger (erneute Beobachtung,
+      // Restore, Recovery). Das Rennen zweier EXAKT gleichzeitiger Beobachter
+      // entscheidet seit #366 der Store: das Anlegen des Stagings ist ein
+      // bedingter Schreibzugriff, der Verlierer uebernimmt das Material des
+      // Gewinners, und eine Broker-Bestaetigung deckt nur genau dieses Material.
       const store = await this.ensureDocLogStore()
       if (!store || (await this.keyManagement.getCurrentGeneration(state.info.id)) >= event.sinceGeneration) continue
       const existing = await store.getPendingRemoval(state.info.id, event.did)
@@ -2659,7 +2659,20 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
     const removals = await store.listPendingRemovals()
     await Promise.all(removals
       .filter((removal) => removal.spaceId === spaceId)
-      .map((removal) => store.deletePendingRemoval(removal.spaceId, removal.removedDid)))
+      // #366: an den GELISTETEN Record gebunden loeschen. Zwischen listPendingRemovals
+      // und diesem Delete kann ein zweiter Beobachter denselben Schluessel neu
+      // gestagt haben — dessen Auftrag darf der Abbruch nicht mitnehmen.
+      .map(async (removal) => {
+        const outcome = await store.deletePendingRemoval(
+          removal.spaceId, removal.removedDid, pendingRemovalWriteExpectation(removal),
+        )
+        if (outcome === 'mismatch') {
+          console.warn(
+            `[YjsReplication] keeping the pending removal of ${removal.removedDid} in space ${removal.spaceId}: ` +
+              'its staging identity changed meanwhile (new staging or migration), not to the abandoned one.',
+          )
+        }
+      }))
   }
 
   /**
