@@ -2451,20 +2451,34 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
       const selfDid = this.identity.getDid()
       const doc = this.repo.handles[space.documentId]?.doc()
       const existingSelf = resolveMembershipWinner(this.readMembershipEvents(doc), selfDid)
-      if (existingSelf?.status !== 'removed') {
-        const generation = (await this.keyManagement.getCurrentGeneration(spaceId)) + 1
-        const event: MembershipEvent = { did: selfDid, status: 'removed', sinceGeneration: generation }
-        // Unter log-sync muss der Eintrag durabel im Log stehen, bevor der
-        // Cleanup die lokalen Spuren loescht — derselbe Schreibpfad wie im
-        // secure-removal COMMIT. Ohne log-sync der regulaere Doc-Write.
-        if (this.logSyncEnabled) await this.commitMembershipEventDurable(space, event)
-        else this.writeMembershipEvent(space, event)
-        const selfEncryptionKey = await this.identity.getEncryptionPublicKeyBytes()
-        await this.distributeMemberRemovedUpdate(space, selfDid, generation, selfEncryptionKey)
-        await this._persistSpaceMetadata(space)
-        for (const cb of this.memberChangeCallbacks) {
-          cb({ spaceId, did: selfDid, action: 'removed' })
-        }
+      // RETRY (B3-Retry-Hole, Yjs-Spiegel): ein lokal bereits angewandtes
+      // removed beweist NICHT, dass es durabel geloggt ist — ein erster Versuch,
+      // dessen Log-Append warf, hinterlaesst genau diesen Zustand. Deshalb NIE
+      // auf lokale Praesenz kurzschliessen: der durable Commit laeuft auch im
+      // Retry, wo commitMembershipEventDurable seinen Reparaturpfad nimmt (voller
+      // Stand statt Delta). Die Generation ist dann die des bereits angewandten
+      // Ereignisses — ein zweites Ereignis auf einer neuen Generation waere eine
+      // zweite Entfernung.
+      const alreadyRemoved = existingSelf?.status === 'removed'
+      const generation = alreadyRemoved
+        ? existingSelf!.sinceGeneration
+        : (await this.keyManagement.getCurrentGeneration(spaceId)) + 1
+      const event: MembershipEvent = { did: selfDid, status: 'removed', sinceGeneration: generation }
+      // Unter log-sync muss der Eintrag durabel im Log stehen, BEVOR der Cleanup
+      // die lokalen Spuren loescht — derselbe Schreibpfad wie im secure-removal
+      // COMMIT, fehlerpropagierend: wirft er, bricht leaveSpace ab und der Space
+      // bleibt lokal bestehen (der naechste Aufruf wiederholt die Reparatur).
+      // Ohne log-sync gibt es keinen durablen Log-Pfad; dort bleibt der einmalige
+      // Doc-Write.
+      if (this.logSyncEnabled) await this.commitMembershipEventDurable(space, event)
+      else if (!alreadyRemoved) this.writeMembershipEvent(space, event)
+      // Auch im Retry erneut verteilen/persistieren: der erste Versuch kann vor
+      // diesen Schritten gescheitert sein, und beide sind idempotent.
+      const selfEncryptionKey = await this.identity.getEncryptionPublicKeyBytes()
+      await this.distributeMemberRemovedUpdate(space, selfDid, generation, selfEncryptionKey)
+      await this._persistSpaceMetadata(space)
+      for (const cb of this.memberChangeCallbacks) {
+        cb({ spaceId, did: selfDid, action: 'removed' })
       }
     }
     await this.cleanupSpaceLocally(spaceId)

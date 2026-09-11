@@ -46,7 +46,7 @@ async function createPeer(passphrase: string): Promise<{ identity: PublicIdentit
  * send). Der Austritt muss die verbleibenden Mitglieder auf diesem Weg
  * erreichen, BEVOR das austretende Geraet lokal aufraeumt.
  */
-async function createLogSyncPeer(passphrase: string, broker: InProcessLogBroker, socketId: string, deviceId: string): Promise<{ identity: PublicIdentitySession; adapter: AutomergeReplicationAdapter }> {
+async function createLogSyncPeer(passphrase: string, broker: InProcessLogBroker, socketId: string, deviceId: string): Promise<{ identity: PublicIdentitySession; adapter: AutomergeReplicationAdapter; docLogStore: InMemoryDocLogStore }> {
   const identity = (await createTestIdentity(passphrase)).identity
   const messaging = new InMemoryMessagingAdapter({ broker, socketId })
   await messaging.connect(identity.getDid())
@@ -69,7 +69,25 @@ async function createLogSyncPeer(passphrase: string, broker: InProcessLogBroker,
     try { await adapter.stop() } catch {}
     try { await identity.deleteStoredIdentity() } catch {}
   })
-  return { identity, adapter }
+  return { identity, adapter, docLogStore }
+}
+
+/** Anzahl durabler Log-Eintraege, die der Broker fuer ein Doc haelt (Durabilitaets-Beweis). */
+function brokerEntryCount(broker: InProcessLogBroker, docId: string): number {
+  return (broker as unknown as { docs: Map<string, { entries: Map<string, unknown> }> }).docs.get(docId)?.entries.size ?? 0
+}
+
+/** Laesst den naechsten durablen Append EINMAL werfen. */
+function armAppendFailure(store: InMemoryDocLogStore): void {
+  const realAppend = store.appendLocalEntry.bind(store)
+  let armed = true
+  ;(store as unknown as { appendLocalEntry: typeof store.appendLocalEntry }).appendLocalEntry = (async (params: any) => {
+    if (armed) {
+      armed = false
+      throw new Error('simulated durable append failure (leaveSpace)')
+    }
+    return realAppend(params)
+  }) as typeof store.appendLocalEntry
 }
 
 afterEach(async () => {
@@ -146,5 +164,35 @@ describe('Automerge Space-Admission (Aufnahme-Kennung)', () => {
     expect(loadedInfo(alice.adapter, space.id).members).not.toContain(bob.identity.getDid())
     expect((await carol.adapter.getSpace(space.id))!.admission).toEqual(carolBefore)
     expect(loadedInfo(alice.adapter, space.id).admission).toEqual(aliceBefore)
+  })
+  it('Austritt mit fehlgeschlagenem Log-Append: kein Cleanup — der Retry repariert die Durabilität, erst dann wird aufgeräumt', async () => {
+    const broker = new InProcessLogBroker()
+    const alice = await createLogSyncPeer('am-retry-alice', broker, 'alice-socket', '11111111-1111-4111-8111-111111111111')
+    const bob = await createLogSyncPeer('am-retry-bob', broker, 'bob-socket', '22222222-2222-4222-8222-222222222222')
+    const space = await alice.adapter.createSpace<TestDoc>('shared', { items: {} }, { name: 'S' })
+    await wait()
+    await alice.adapter.addMember(space.id, bob.identity.getDid(), await bob.identity.getEncryptionPublicKeyBytes())
+    await wait()
+
+    // Erster Austritt: der durable Append wirft NACH der lokalen Doc-Mutation.
+    armAppendFailure(bob.docLogStore)
+    await expect(bob.adapter.leaveSpace(space.id)).rejects.toThrow(/simulated durable append failure/)
+    await wait()
+    // Kein Cleanup: der Space ist lokal noch da …
+    expect(await bob.adapter.getSpace(space.id)).not.toBeNull()
+    // … das removed-Ereignis lokal bereits angewandt …
+    expect(loadedInfo(bob.adapter, space.id).members).not.toContain(bob.identity.getDid())
+    // … aber Alice weiß nichts davon (nichts wurde durabel geloggt).
+    expect(loadedInfo(alice.adapter, space.id).members).toContain(bob.identity.getDid())
+    const entriesAfterFailure = brokerEntryCount(broker, space.id)
+
+    // Zweiter Austritt: der Retry darf NICHT auf die lokale Präsenz des
+    // Ereignisses kurzschließen, sondern muss den Reparaturpfad von
+    // commitMembershipEventDurable laufen lassen — der Broker-Log MUSS wachsen.
+    await bob.adapter.leaveSpace(space.id)
+    await wait()
+    expect(brokerEntryCount(broker, space.id)).toBeGreaterThan(entriesAfterFailure)
+    expect(await bob.adapter.getSpace(space.id)).toBeNull()
+    expect(loadedInfo(alice.adapter, space.id).members).not.toContain(bob.identity.getDid())
   })
 })
