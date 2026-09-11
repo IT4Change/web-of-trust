@@ -2119,13 +2119,8 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
     const admins = members !== null ? resolveActiveAdmins(adminEntries, members) : null
     // RLS-Spec 12 Regel 4: die Aufnahme-Kennung ist eine Projektion DESSELBEN
     // Event-Sets (`resolveAdmission`) — kein eigener Pfad, keine Persistenz.
-    //
-    // BEKANNTE GRENZE (Automerge-Adapter, in diesem PR NICHT behoben): dieser
-    // Adapter schreibt beim SELBST-Verlassen kein `removed`-Ereignis ins
-    // _members-Set. Eine erneute Aufnahme nach einem Selbst-Verlassen ist hier
-    // deshalb nicht als Wiederaufnahme erkennbar — die Kennung bleibt auf der
-    // Generation der urspruenglichen Aufnahme stehen. Der Yjs-Adapter (Slice SR)
-    // schreibt das removed-Ereignis und ist davon nicht betroffen.
+    // Auch der Austritt (`leaveSpace`) schreibt sein removed-Ereignis in dieses
+    // Set (Yjs-Paritaet), eine Wiederaufnahme danach ist also erkennbar.
     const admission = events.length > 0 ? resolveAdmission(events, this.identity.getDid()) : undefined
     return { digest, createdBy, members, admins, events, admission }
   }
@@ -2442,6 +2437,35 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
     if (await this.keyManagement.getCurrentGeneration(spaceId) < 0) {
       await this.forgetSpaceLocally(spaceId)
       return
+    }
+    // Yjs-Paritaet: der Austritt ist eine KANONISCHE Membership-Aenderung, kein
+    // rein lokales Aufraeumen. Das eigene removed@gen+1 wird VOR dem Cleanup
+    // geschrieben und verteilt, damit die verbleibenden Mitglieder den Austritt
+    // sehen — und damit eine spaetere Wiederaufnahme als solche erkennbar ist
+    // (RLS-Spec 12 Regel 4: erst ein removed schneidet den Mitgliedschafts-Lauf).
+    // KEINE Rotation und kein Broker-Enforcement: ein Austretender darf sein
+    // eigenes removed-Event schreiben, aber kein neues Key-Material minten
+    // (dieselbe Autoritaetsregel wie im Yjs-Non-Admin-Self-Leave).
+    const space = this.spaces.get(spaceId)
+    if (space) {
+      const selfDid = this.identity.getDid()
+      const doc = this.repo.handles[space.documentId]?.doc()
+      const existingSelf = resolveMembershipWinner(this.readMembershipEvents(doc), selfDid)
+      if (existingSelf?.status !== 'removed') {
+        const generation = (await this.keyManagement.getCurrentGeneration(spaceId)) + 1
+        const event: MembershipEvent = { did: selfDid, status: 'removed', sinceGeneration: generation }
+        // Unter log-sync muss der Eintrag durabel im Log stehen, bevor der
+        // Cleanup die lokalen Spuren loescht — derselbe Schreibpfad wie im
+        // secure-removal COMMIT. Ohne log-sync der regulaere Doc-Write.
+        if (this.logSyncEnabled) await this.commitMembershipEventDurable(space, event)
+        else this.writeMembershipEvent(space, event)
+        const selfEncryptionKey = await this.identity.getEncryptionPublicKeyBytes()
+        await this.distributeMemberRemovedUpdate(space, selfDid, generation, selfEncryptionKey)
+        await this._persistSpaceMetadata(space)
+        for (const cb of this.memberChangeCallbacks) {
+          cb({ spaceId, did: selfDid, action: 'removed' })
+        }
+      }
     }
     await this.cleanupSpaceLocally(spaceId)
   }

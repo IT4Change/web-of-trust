@@ -6,12 +6,13 @@ import {
   InMemoryMessagingAdapter, InMemoryKeyManagementAdapter, InMemoryCompactStore,
   InMemorySpaceMetadataStorage,
 } from '@web_of_trust/core/adapters'
-import { isSameAdmission, compareAdmission, buildSpaceInviteBody, deliverInboxMessage } from '@web_of_trust/core/application'
+import { isSameAdmission, compareAdmission, buildSpaceInviteBody, deliverInboxMessage, createSpaceKey } from '@web_of_trust/core/application'
 import { WebCryptoProtocolCryptoAdapter } from '@web_of_trust/core/protocol-adapters'
 import { SPACE_INVITE_MESSAGE_TYPE, formatMembershipEventKey } from '@web_of_trust/core/protocol'
 import type { MembershipEvent } from '@web_of_trust/core/protocol'
 import type { IncomingSpaceInvite, SpaceInfo } from '@web_of_trust/core/types'
 import { YjsReplicationAdapter } from '../src/YjsReplicationAdapter'
+import { initYjsPersonalDoc, resetYjsPersonalDoc } from '../src/YjsPersonalDocManager'
 
 // RLS-Spec 12 Regel 4: die Aufnahme-Kennung ist eine PROJEKTION des
 // synchronisierten _members-Event-Sets (erstes active des laufenden
@@ -34,6 +35,7 @@ describe('Yjs Space-Admission (Aufnahme-Kennung)', () => {
     keyManagement?: InMemoryKeyManagementAdapter
     metadataStorage?: InMemorySpaceMetadataStorage
     compactStore?: InMemoryCompactStore
+    flushPersonalDoc?: () => Promise<void>
   }): YjsReplicationAdapter {
     const adapter = new YjsReplicationAdapter({
       identity,
@@ -42,6 +44,7 @@ describe('Yjs Space-Admission (Aufnahme-Kennung)', () => {
       keyManagement: opts?.keyManagement ?? new InMemoryKeyManagementAdapter(),
       metadataStorage: opts?.metadataStorage,
       compactStore: opts?.compactStore,
+      flushPersonalDoc: opts?.flushPersonalDoc,
     })
     started.push(adapter)
     return adapter
@@ -98,6 +101,7 @@ describe('Yjs Space-Admission (Aufnahme-Kennung)', () => {
 
   afterEach(async () => {
     for (const adapter of started.splice(0)) { try { await adapter.stop() } catch {} }
+    await resetYjsPersonalDoc()
     InMemoryMessagingAdapter.resetAll()
     for (const id of [alice, bob, carol]) { try { await id.deleteStoredIdentity() } catch {} }
   })
@@ -262,19 +266,20 @@ describe('Yjs Space-Admission (Aufnahme-Kennung)', () => {
     expect((await second.getSpace(space.id))!.admission).toBeUndefined()
   })
 
-  it('Selbst-Verlassen (Yjs schreibt removed) + erneute Einladung: neue Kennung', async () => {
-    const { adapter: receiver } = await startBob()
+  it('Selbst-Verlassen (leaveSpace) + erneute Einladung: neue Kennung', async () => {
+    const { adapter: receiver } = await startBob({ flushPersonalDoc: async () => {} })
     const space = await aliceAdapter.createSpace<TestDoc>('shared', { items: {} }, { name: 'S', members: [alice.getDid()] })
     await aliceAdapter.addMember(space.id, bob.getDid(), await bob.getEncryptionPublicKeyBytes())
     await wait()
     expect((await receiver.getSpace(space.id))!.admission).toEqual({ keyGeneration: 0 })
 
-    // Selbst-Verlassen: das kanonische removed-Ereignis für die eigene DID.
-    // Alice erfährt es über den Doc-Sync — hier als CRDT-Merge eingespielt.
-    const aliceState = spaceState(aliceAdapter, space.id)
-    const selfRemoval: MembershipEvent = { did: bob.getDid(), status: 'removed', sinceGeneration: 1 }
-    aliceState.doc.getMap<MembershipEvent>('_members').set(formatMembershipEventKey(selfRemoval), selfRemoval)
-    await wait(50)
+    // leaveSpace macht die eigene Entfernung im PersonalDoc durabel.
+    await initYjsPersonalDoc(bob)
+    // Echter Austritt über die öffentliche Methode: leaveSpace schreibt das
+    // kanonische removed-Ereignis, bevor es lokal aufräumt.
+    await receiver.leaveSpace(space.id)
+    await wait()
+    expect(await receiver.getSpace(space.id)).toBeNull()
     expect(loadedInfo(aliceAdapter, space.id).members).not.toContain(bob.getDid())
 
     // Erneute Einladung → Re-Invite-Guard rotiert, neues active auf höherer Generation.
@@ -282,5 +287,60 @@ describe('Yjs Space-Admission (Aufnahme-Kennung)', () => {
     await wait()
     const again = (await receiver.getSpace(space.id))!.admission!
     expect(compareAdmission(again, { keyGeneration: 0 })).toBeGreaterThan(0)
+  })
+  it('Invite ohne Doc-Snapshot: Kennung erst undefined, nach dem Doc-Sync gesetzt — und der Space-Listener wurde benachrichtigt', async () => {
+    const { adapter: receiver, events } = await startBob()
+    const notified: SpaceInfo[][] = []
+    receiver.watchSpaces().subscribe((spaces) => { notified.push(spaces.map((space) => ({ ...space }))) })
+
+    // Spec-konformer Invite OHNE die Snapshot-Extension (wie buildSpaceInviteBody
+    // ihn erzeugt): Bob bekommt Schlüssel + Capability, aber noch kein
+    // _members-Event-Set — der Inhalt kommt über den Sync.
+    const spaceId = crypto.randomUUID()
+    const senderPort = new InMemoryKeyManagementAdapter()
+    await createSpaceKey({ crypto: protocolCrypto, keyPort: senderPort, spaceId, ownerDid: alice.getDid() })
+    const body = await buildSpaceInviteBody({
+      keyPort: senderPort, spaceId, recipientDid: bob.getDid(),
+      brokerUrls: BROKER_URLS, adminDids: [alice.getDid()],
+    })
+    await aliceMsg.send(await deliverInboxMessage({
+      type: SPACE_INVITE_MESSAGE_TYPE,
+      body: body as unknown as Record<string, unknown>,
+      from: alice.getDid(),
+      to: bob.getDid(),
+      recipientEncryptionPublicKey: await bob.getEncryptionPublicKeyBytes(),
+      sign: (input) => alice.signEd25519(input),
+      crypto: protocolCrypto,
+    }))
+    await wait()
+
+    expect(events).toHaveLength(1)
+    expect(events[0].admission).toBeUndefined()
+    expect((await receiver.getSpace(spaceId))!.admission).toBeUndefined()
+    const notificationsBefore = notified.length
+
+    // Die nicht-autoritative Members-Saat des Invite-Zweigs ([sender, self])
+    // auf den Endstand setzen: dadurch ist die Aufnahme-Kennung die EINZIGE
+    // Änderung, die der Sync unten auslöst — die Benachrichtigung kann nicht
+    // von der members-Projektion kommen.
+    const seeded = spaceState(receiver, spaceId)
+    seeded.info = { ...seeded.info, members: [alice.getDid(), bob.getDid()].sort() }
+
+    // Doc-Sync: jetzt kommen die _members-Ereignisse des Inviters an.
+    const inviterDoc = new Y.Doc()
+    const inviterMembers = inviterDoc.getMap<MembershipEvent>('_members')
+    for (const event of [
+      { did: alice.getDid(), status: 'active' as const, sinceGeneration: 0 },
+      { did: bob.getDid(), status: 'active' as const, sinceGeneration: 0 },
+    ]) inviterMembers.set(formatMembershipEventKey(event), event)
+    Y.applyUpdate(spaceState(receiver, spaceId).doc, Y.encodeStateAsUpdate(inviterDoc), 'remote')
+    await wait(50)
+
+    expect((await receiver.getSpace(spaceId))!.admission).toEqual({ keyGeneration: 0 })
+    // Der Übergang undefined → Wert ist eine sichtbare Änderung: die
+    // watchSpaces-Subscriber müssen ihn erfahren haben.
+    expect(notified.length).toBeGreaterThan(notificationsBefore)
+    const lastSeen = notified[notified.length - 1].find((entry) => entry.id === spaceId)
+    expect(lastSeen!.admission).toEqual({ keyGeneration: 0 })
   })
 })

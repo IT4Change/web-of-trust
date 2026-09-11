@@ -1,16 +1,16 @@
 import { describe, it, expect, afterEach } from 'vitest'
 import type { PublicIdentitySession } from '../../wot-core/src/application/identity'
 import { createTestIdentity } from '../../wot-core/tests/helpers/identity-session'
-import { InMemoryMessagingAdapter, InMemoryKeyManagementAdapter, InMemoryCompactStore, InMemorySpaceMetadataStorage } from '@web_of_trust/core/adapters'
+import { InMemoryMessagingAdapter, InMemoryKeyManagementAdapter, InMemoryCompactStore, InMemorySpaceMetadataStorage, InMemoryDocLogStore, InProcessLogBroker } from '@web_of_trust/core/adapters'
+import { InMemoryRepoStorageAdapter } from '../src/InMemoryRepoStorageAdapter'
 import { compareAdmission } from '@web_of_trust/core/application'
 import type { SpaceInfo } from '@web_of_trust/core/types'
 import { AutomergeReplicationAdapter } from '../src/AutomergeReplicationAdapter'
 
 // RLS-Spec 12 Regel 4 (Automerge-Spiegel): die Aufnahme-Kennung ist eine
-// Projektion des _members-Event-Sets, nie ein gespeicherter Wert.
-// BEKANNTE GRENZE dieses Adapters: beim Selbst-Verlassen schreibt er kein
-// removed-Ereignis, eine erneute Aufnahme danach ist hier nicht erkennbar
-// (siehe Kommentar an computeMembershipProjection).
+// Projektion des _members-Event-Sets, nie ein gespeicherter Wert. Auch der
+// Austritt (leaveSpace) schreibt sein removed-Ereignis dorthin (Yjs-Paritaet),
+// eine Wiederaufnahme danach ist also erkennbar.
 
 interface TestDoc { items: Record<string, { title: string }> }
 const wait = (ms = 400) => new Promise((r) => setTimeout(r, ms))
@@ -31,6 +31,38 @@ async function createPeer(passphrase: string): Promise<{ identity: PublicIdentit
     keyManagement: new InMemoryKeyManagementAdapter(),
     metadataStorage: new InMemorySpaceMetadataStorage(),
     compactStore: new InMemoryCompactStore(),
+  })
+  await adapter.start()
+  cleanups.push(async () => {
+    try { await adapter.stop() } catch {}
+    try { await identity.deleteStoredIdentity() } catch {}
+  })
+  return { identity, adapter }
+}
+
+/**
+ * Zwei Geraete am selben In-Process-Broker mit log-sync — die Konfiguration, in
+ * der die Membership-Ereignisse als durable Log-Eintraege reisen (persist before
+ * send). Der Austritt muss die verbleibenden Mitglieder auf diesem Weg
+ * erreichen, BEVOR das austretende Geraet lokal aufraeumt.
+ */
+async function createLogSyncPeer(passphrase: string, broker: InProcessLogBroker, socketId: string, deviceId: string): Promise<{ identity: PublicIdentitySession; adapter: AutomergeReplicationAdapter }> {
+  const identity = (await createTestIdentity(passphrase)).identity
+  const messaging = new InMemoryMessagingAdapter({ broker, socketId })
+  await messaging.connect(identity.getDid())
+  const docLogStore = new InMemoryDocLogStore()
+  await docLogStore.init()
+  await docLogStore.setDeviceId(deviceId)
+  const adapter = new AutomergeReplicationAdapter({
+    identity,
+    messaging,
+    brokerUrls: ['wss://broker.example.com'],
+    keyManagement: new InMemoryKeyManagementAdapter(),
+    metadataStorage: new InMemorySpaceMetadataStorage(),
+    repoStorage: new InMemoryRepoStorageAdapter(),
+    docLogStore,
+    enableLogSync: true,
+    deviceId,
   })
   await adapter.start()
   cleanups.push(async () => {
@@ -69,5 +101,50 @@ describe('Automerge Space-Admission (Aufnahme-Kennung)', () => {
 
     const second = (await bob.adapter.getSpace(space.id))!.admission!
     expect(compareAdmission(second, first)).toBeGreaterThan(0)
+  })
+
+  it('Selbst-Verlassen (leaveSpace) + erneute Einladung: neue, höhere Kennung', async () => {
+    const broker = new InProcessLogBroker()
+    const alice = await createLogSyncPeer('am-leave-alice', broker, 'alice-socket', '11111111-1111-4111-8111-111111111111')
+    const bob = await createLogSyncPeer('am-leave-bob', broker, 'bob-socket', '22222222-2222-4222-8222-222222222222')
+    const space = await alice.adapter.createSpace<TestDoc>('shared', { items: {} }, { name: 'S' })
+    await wait()
+    await alice.adapter.addMember(space.id, bob.identity.getDid(), await bob.identity.getEncryptionPublicKeyBytes())
+    await wait()
+    expect((await bob.adapter.getSpace(space.id))!.admission).toEqual({ keyGeneration: 0 })
+
+    // Austritt über die öffentliche Methode: das kanonische removed-Ereignis
+    // muss Alice erreichen, sonst wäre die Wiederaufnahme nicht erkennbar.
+    await bob.adapter.leaveSpace(space.id)
+    await wait()
+    expect(await bob.adapter.getSpace(space.id)).toBeNull()
+    expect(loadedInfo(alice.adapter, space.id).members).not.toContain(bob.identity.getDid())
+
+    await alice.adapter.addMember(space.id, bob.identity.getDid(), await bob.identity.getEncryptionPublicKeyBytes())
+    await wait()
+    const again = (await bob.adapter.getSpace(space.id))!.admission!
+    expect(compareAdmission(again, { keyGeneration: 0 })).toBeGreaterThan(0)
+  })
+
+  it('Selbst-Verlassen lässt die Kennung eines Dritten unverändert', async () => {
+    const broker = new InProcessLogBroker()
+    const alice = await createLogSyncPeer('am-third-alice', broker, 'alice-socket', '11111111-1111-4111-8111-111111111111')
+    const bob = await createLogSyncPeer('am-third-bob', broker, 'bob-socket', '22222222-2222-4222-8222-222222222222')
+    const carol = await createLogSyncPeer('am-third-carol', broker, 'carol-socket', '33333333-3333-4333-8333-333333333333')
+    const space = await alice.adapter.createSpace<TestDoc>('shared', { items: {} }, { name: 'S' })
+    await wait()
+    await alice.adapter.addMember(space.id, bob.identity.getDid(), await bob.identity.getEncryptionPublicKeyBytes())
+    await wait()
+    await alice.adapter.addMember(space.id, carol.identity.getDid(), await carol.identity.getEncryptionPublicKeyBytes())
+    await wait()
+    const carolBefore = (await carol.adapter.getSpace(space.id))!.admission!
+    const aliceBefore = loadedInfo(alice.adapter, space.id).admission!
+
+    await bob.adapter.leaveSpace(space.id)
+    await wait()
+
+    expect(loadedInfo(alice.adapter, space.id).members).not.toContain(bob.identity.getDid())
+    expect((await carol.adapter.getSpace(space.id))!.admission).toEqual(carolBefore)
+    expect(loadedInfo(alice.adapter, space.id).admission).toEqual(aliceBefore)
   })
 })
