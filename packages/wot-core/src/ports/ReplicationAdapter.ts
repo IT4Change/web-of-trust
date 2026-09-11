@@ -86,6 +86,12 @@ export interface ReplicationAdapter {
   /**
    * Fired after an incoming space-invite was verified and applied. The wire payload
    * is an ECIES container — UI consumers subscribe here instead of parsing it.
+   *
+   * `admission` identifiziert die Aufnahme, auf die diese Mitgliedschaft
+   * zurueckgeht (RLS-Spec 12 Regel 4), und ist identisch mit
+   * `SpaceInfo.admission` nach dem Apply: eine Wiederaufnahme nach Entfernung
+   * traegt eine andere Kennung als die vorherige Aufnahme, eine blosse
+   * Schluesselrotation aendert sie nicht.
    */
   onSpaceInvite?(callback: (invite: IncomingSpaceInvite) => void): () => void
 

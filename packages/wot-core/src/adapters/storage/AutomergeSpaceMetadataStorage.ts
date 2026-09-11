@@ -50,6 +50,10 @@ export class PersonalDocSpaceMetadataStorage implements SpaceMetadataStorage {
       // dem Zweitgeraet — ohne Persistenz hier fehlen App-Felder (z.B. die
       // RLS-Akzentfarbe) bis zum Doc-Sync bzw. gehen im Restore verloren.
       if (meta.info.appData != null) info.appData = { ...meta.info.appData }
+      // RLS-Spec 12 Regel 4: die Aufnahme-Kennung muss den Neustart ueberleben —
+      // sonst waere eine Wiederaufnahme nach Entfernung nicht mehr von der
+      // vorherigen Aufnahme unterscheidbar.
+      if (meta.info.admission != null) info.admission = { ...meta.info.admission }
       doc.spaces[meta.info.id] = {
         info: info as any,
         documentId: meta.documentId,
@@ -163,7 +167,7 @@ export class PersonalDocSpaceMetadataStorage implements SpaceMetadataStorage {
   }
 
   private deserialize(stored: {
-    info: { id: string; type: string; name: string | null; description: string | null; appTag?: string; members: string[]; createdBy?: string; admins?: string[]; appData?: Record<string, unknown>; createdAt: string }
+    info: { id: string; type: string; name: string | null; description: string | null; appTag?: string; members: string[]; createdBy?: string; admins?: string[]; appData?: Record<string, unknown>; admission?: { keyGeneration: number; capabilityId: string | null }; createdAt: string }
     documentId: string
     documentUrl: string
     memberEncryptionKeys: Record<string, number[]>
@@ -178,6 +182,7 @@ export class PersonalDocSpaceMetadataStorage implements SpaceMetadataStorage {
         ...(stored.info.createdBy != null ? { createdBy: stored.info.createdBy } : {}),
         ...(stored.info.admins != null ? { admins: [...stored.info.admins] } : {}),
         ...(stored.info.appData != null ? { appData: { ...stored.info.appData } } : {}),
+        ...(stored.info.admission != null ? { admission: { keyGeneration: stored.info.admission.keyGeneration, capabilityId: stored.info.admission.capabilityId ?? null } } : {}),
         members: [...(stored.info.members ?? [])],
         createdAt: stored.info.createdAt,
       },

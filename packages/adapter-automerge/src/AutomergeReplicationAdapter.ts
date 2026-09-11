@@ -10,7 +10,7 @@ import {
   buildSpaceInviteBody, applySpaceInviteBody, buildKeyRotationBody, applyKeyRotationBody,
   deliverInboxMessage, receiveInboxMessage,
   runTwoPhaseRemoval, recoverPendingRemovals,
-  openLifecycleLease,
+  openLifecycleLease, deriveAdmission,
 } from '@web_of_trust/core/application'
 import type { LocalImpact, SecureRemovalDeps, LifecycleLease } from '@web_of_trust/core/application'
 import type {
@@ -1161,6 +1161,9 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
       admins: [myDid],
       createdAt: new Date().toISOString(),
     }
+    // RLS-Spec 12 Regel 4: Aufnahme-Kennung des Creators = eigene Capability der
+    // Genesis-Generation 0 (gerade von createSpaceKey gespeichert).
+    if (!info.admission) info.admission = await lease.step(deriveAdmission({ crypto: this.crypto, keyPort: this.keyManagement, spaceId, generation: 0 }))
 
     let spaceState: SpaceState
     if (resumed) {
@@ -3431,8 +3434,11 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
         // sync) must ALSO persist the just-imported group key + signing seed — else a
         // recovery device of this member stays read-only. The new-space branch persists
         // via _persistSpaceMetadata below; mirror it here.
+        // RLS-Spec 12 Regel 4: dieser Zweig IST die Wiederaufnahme — neue
+        // Einladung, neue Aufnahme-Kennung (vor dem Metadata-Save gesetzt).
+        existing.info.admission = await deriveAdmission({ crypto: this.crypto, keyPort: this.keyManagement, spaceId, generation: body.currentKeyGeneration })
         await this._persistSpaceMetadata(existing)
-        this.emitSpaceInvite({ spaceId, spaceName: existing.info.name, fromDid: decoded.senderDid, inviteMessageId: decoded.outerId })
+        this.emitSpaceInvite({ spaceId, spaceName: existing.info.name, fromDid: decoded.senderDid, inviteMessageId: decoded.outerId, admission: existing.info.admission })
         return { kind: 'applied', durable: true }
       }
 
@@ -3490,6 +3496,9 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
         createdBy: typeof doc?._createdBy === 'string' ? doc._createdBy : undefined,
         members,
         createdAt: new Date().toISOString(),
+        // RLS-Spec 12 Regel 4: Kennung dieser Aufnahme = eigene Capability der
+        // Invite-Generation (von applySpaceInviteBody gespeichert).
+        admission: await deriveAdmission({ crypto: this.crypto, keyPort: this.keyManagement, spaceId, generation: body.currentKeyGeneration }),
       }
 
       const spaceState: SpaceState = {
@@ -3558,7 +3567,7 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
       for (const cb of this.memberChangeCallbacks) {
         cb({ spaceId, did: this.identity.getDid(), action: 'added' })
       }
-      this.emitSpaceInvite({ spaceId, spaceName: info.name, fromDid: decoded.senderDid, inviteMessageId: decoded.outerId })
+      this.emitSpaceInvite({ spaceId, spaceName: info.name, fromDid: decoded.senderDid, inviteMessageId: decoded.outerId, admission: info.admission! })
       return { kind: 'applied', durable: true }
     } catch (err) {
       console.debug('[ReplicationAdapter] Failed to handle space invite:', err)

@@ -46,8 +46,12 @@ export type {
   SpaceInfo,
   SpaceDocMeta,
   SpaceMemberChange,
+  SpaceAdmission,
+  IncomingSpaceInvite,
   ReplicationState,
 } from './types/space'
+export { deriveAdmission, isSameAdmission, compareAdmission } from './application/spaces/admission'
+export type { DeriveAdmissionOptions } from './application/spaces/admission'
 
 // Adapter Interfaces
 export type { StorageAdapter } from './ports/StorageAdapter'

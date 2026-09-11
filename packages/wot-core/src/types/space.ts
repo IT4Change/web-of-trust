@@ -1,5 +1,19 @@
 export type ReplicationState = 'idle' | 'syncing' | 'error'
 
+/**
+ * Kennung der Aufnahme in einen Space: die Einladung (bzw. das Erstellen), auf
+ * die die aktuelle Mitgliedschaft zurueckgeht (RLS-Spec 12 Regel 4). Aendert
+ * sich NICHT bei Schluesselrotation, sondern nur durch eine neu angewandte
+ * Einladung (Wiederaufnahme) — so erkennt ein Geraet, das Entfernung und
+ * Wiederaufnahme offline verpasst hat, die neue Aufnahme trotzdem.
+ */
+export interface SpaceAdmission {
+  /** currentKeyGeneration der Einladung; beim Erstellen 0 */
+  keyGeneration: number
+  /** sha256 (lowercase hex) ueber die eigene Capability-JWS (UTF-8) dieser Generation; null, wenn keine eigene Capability vorliegt (Alt-Space) */
+  capabilityId: string | null
+}
+
 export interface SpaceInfo {
   id: string
   type: 'personal' | 'shared'
@@ -36,6 +50,12 @@ export interface SpaceInfo {
    * ended up cache-only and vanished on reload (rls#234).
    */
   appData?: Record<string, unknown>
+  /**
+   * Aufnahme-Kennung dieser Mitgliedschaft (RLS-Spec 12 Regel 4). Optional:
+   * Alt-Spaces ohne persistierte Kennung leiten sie beim Restore lazy aus der
+   * eigenen Capability der aktuellen Generation ab.
+   */
+  admission?: SpaceAdmission
 }
 
 export interface SpaceDocMeta {
@@ -76,4 +96,10 @@ export interface IncomingSpaceInvite {
    * one invite was resolved. Required so tsc forces every emit site to pass it.
    */
   inviteMessageId: string
+  /**
+   * Aufnahme-Kennung dieser Einladung (RLS-Spec 12 Regel 4) — identisch zu
+   * `SpaceInfo.admission` nach dem Apply. Pflicht, damit tsc jede Emit-Stelle
+   * zwingt, sie mitzugeben.
+   */
+  admission: SpaceAdmission
 }
