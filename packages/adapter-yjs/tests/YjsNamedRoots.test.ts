@@ -305,9 +305,35 @@ describe('Yjs — benannte Wurzel-Maps je Space-Doc (NamedRootsCapable)', () => 
     // Auch ueber den Deskriptor-Pfad entkommt kein lebender Verweis.
     handle.transactRoot('profiles', (root) => {
       const descriptor = Object.getOwnPropertyDescriptor(root, 'a')!
-      expect(() => { (descriptor.value as Record<string, unknown>).n = 99 }).toThrow()
+      expect(() => { (descriptor.get!() as Record<string, unknown>).n = 99 }).toThrow()
     })
     expect(handle.getRoot('profiles')).toEqual({ a: { n: 1 } })
+
+    // Object.defineProperty taeuscht keinen Schreibvorgang vor.
+    expect(() => handle.transactRoot('profiles', (root) => {
+      Object.defineProperty(root, 'sneaky', { value: 1, configurable: true, enumerable: true })
+    })).toThrow(/defineProperty/)
+    expect(handle.getRoot('profiles')).toEqual({ a: { n: 1 } })
+    handle.close()
+  })
+
+  it('ein unprojizierbarer Fremdwert blockiert weder Aufzaehlung noch Loeschen', async () => {
+    const spaceId = await createSharedSpace()
+    const handle = await aliceAdapter.openSpace<TestDoc>(spaceId) as RootsHandle<TestDoc>
+    handle.transactRoot('profiles', (root) => { (root as Record<string, unknown>).ok = 1 })
+    // Was ein fremdes Geraet schreiben koennte, aber unsere Schreibseite nie
+    // zulaesst: ein CRDT-Typ als Wurzel-Wert.
+    docOf(aliceAdapter, spaceId).transact(() => {
+      docOf(aliceAdapter, spaceId).getMap('profiles').set('foreign', new Y.Map())
+    }, 'local')
+
+    expect(handle.getRoot('profiles')).toEqual({ ok: 1 }) // Projektion ueberspringt ihn
+    handle.transactRoot('profiles', (root) => {
+      const r = root as Record<string, unknown>
+      expect(Object.keys(r).sort()).toEqual(['foreign', 'ok'])
+      for (const key of Object.keys(r)) delete r[key]
+    })
+    expect(handle.getRoot('profiles')).toEqual({})
     handle.close()
   })
 

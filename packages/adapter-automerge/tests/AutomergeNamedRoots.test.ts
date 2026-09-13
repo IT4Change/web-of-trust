@@ -197,6 +197,11 @@ describe('Automerge — benannte Wurzel-Maps je Space-Doc (NamedRootsCapable)', 
     })
     expect(() => { leaked!.n = 2 }).toThrow()
     expect(handle.getRoot('profiles')).toEqual({ a: { n: 1 } })
+
+    expect(() => handle.transactRoot('profiles', (root) => {
+      Object.defineProperty(root, 'sneaky', { value: 1, configurable: true, enumerable: true })
+    })).toThrow(/defineProperty/)
+    expect(handle.getRoot('profiles')).toEqual({ a: { n: 1 } })
     handle.close()
   })
 
@@ -243,6 +248,33 @@ describe('Automerge — benannte Wurzel-Maps je Space-Doc (NamedRootsCapable)', 
     const doc = handle.getDoc() as Record<string, unknown>
     expect(Object.keys(doc).some((k) => k.startsWith('__root:'))).toBe(false)
     expect(doc.items).toEqual({})
+    handle.close()
+  })
+
+  it('ein gewoehnliches transact sieht die Wurzeln nicht und kann sie nicht loeschen', async () => {
+    const spaceId = await createSharedSpace()
+    const handle = await aliceAdapter.openSpace<TestDoc>(spaceId) as RootsHandle<TestDoc>
+    handle.transactRoot('profiles', (root) => { (root as Record<string, unknown>)['alice'] = { n: 'A' } })
+    handle.transact((doc) => { doc.items['task'] = { title: 't' } })
+
+    // Die klassische Abgleich-Schleife: loesche alles, was nicht im Soll steht.
+    const desired = handle.getDoc() as Record<string, unknown>
+    handle.transact((doc) => {
+      const d = doc as unknown as Record<string, unknown>
+      expect(Object.keys(d).some((k) => k.startsWith('__root:'))).toBe(false)
+      expect('__root:profiles:alice' in d).toBe(false)
+      for (const key of Object.keys(d)) if (!(key in desired)) delete d[key]
+    })
+    expect(handle.getRoot('profiles')).toEqual({ alice: { n: 'A' } })
+
+    // Direkte Zugriffe auf einen Wurzelschluessel werden laut abgelehnt.
+    expect(() => handle.transact((doc) => {
+      delete (doc as unknown as Record<string, unknown>)['__root:profiles:alice']
+    })).toThrow(/named root/)
+    expect(() => handle.transact((doc) => {
+      ;(doc as unknown as Record<string, unknown>)['__root:profiles:alice'] = { n: 'X' }
+    })).toThrow(/named root/)
+    expect(handle.getRoot('profiles')).toEqual({ alice: { n: 'A' } })
     handle.close()
   })
 

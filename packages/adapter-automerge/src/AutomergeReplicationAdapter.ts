@@ -309,9 +309,20 @@ function collectRootOps<R extends Record<string, unknown>>(
     ownKeys() {
       return keys()
     },
+    // Accessor statt Daten-Deskriptor: Object.keys() prueft nur `enumerable`
+    // und darf deshalb keinen Wert projizieren — sonst laesst ein einziger
+    // unprojizierbarer Fremdwert schon das blosse Aufzaehlen (und damit ein
+    // `delete` ueber alle Schluessel) werfen.
     getOwnPropertyDescriptor(_t, prop: string | symbol) {
       if (typeof prop !== 'string' || !has(prop)) return undefined
-      return { configurable: true, enumerable: true, writable: true, value: read(prop) }
+      const key = prop
+      return { configurable: true, enumerable: true, get: () => read(key) }
+    },
+    defineProperty() {
+      // Der Wurzel-Vertrag kennt nur Zuweisung und delete. Ein Deskriptor
+      // wuerde nur das Proxy-Ziel treffen und einen Schreibvorgang vortaeuschen,
+      // der nie im CRDT landet — deshalb laut ablehnen.
+      throw new TypeError('named root drafts only support assignment and delete, not Object.defineProperty')
     },
   }) as R
 
@@ -330,6 +341,48 @@ function applyRootOps(doc: Record<string, unknown>, name: string, ops: RootOp[])
     if ('delete' in op) delete doc[prefix + op.key]
     else doc[prefix + op.key] = op.value
   }
+}
+
+/**
+ * Blendet die benannten Wurzeln aus dem oeffentlichen `transact`-Entwurf aus.
+ * `getDoc()` filtert `__root:`-Schluessel heraus; sahe `transact` sie weiterhin,
+ * wuerde eine gewoehnliche Abgleich-Schleife ("loesche alles, was nicht im
+ * Soll-Zustand steht") Wurzeln mitloeschen — und ein Schreibzugriff koennte
+ * ausserdem die Wurzel-Validierung umgehen. Der Entwurf fuer die Wurzeln selbst
+ * (applyRootOps) laeuft bewusst NICHT durch diese Huelle.
+ */
+function hideNamedRoots<T>(doc: T): T {
+  const target = doc as unknown as Record<string, unknown>
+  if (!target || typeof target !== 'object') return doc
+  const isRootKey = (prop: string | symbol) => typeof prop === 'string' && prop.startsWith(NAMED_ROOT_PREFIX)
+  return new Proxy(target, {
+    get(t, prop, receiver) {
+      if (isRootKey(prop)) return undefined
+      return Reflect.get(t, prop, receiver)
+    },
+    set(t, prop, value, receiver) {
+      if (isRootKey(prop)) {
+        throw new TypeError(`"${String(prop)}" is a named root and can only be written through transactRoot`)
+      }
+      return Reflect.set(t, prop, value, receiver)
+    },
+    deleteProperty(t, prop) {
+      if (isRootKey(prop)) {
+        throw new TypeError(`"${String(prop)}" is a named root and can only be removed through transactRoot`)
+      }
+      return Reflect.deleteProperty(t, prop)
+    },
+    has(t, prop) {
+      return isRootKey(prop) ? false : Reflect.has(t, prop)
+    },
+    ownKeys(t) {
+      return Reflect.ownKeys(t).filter((key) => !isRootKey(key))
+    },
+    getOwnPropertyDescriptor(t, prop) {
+      if (isRootKey(prop)) return undefined
+      return Reflect.getOwnPropertyDescriptor(t, prop)
+    },
+  }) as unknown as T
 }
 
 class AutomergeSpaceHandle<T> implements SpaceHandle<T>, NamedRootsCapable {
@@ -422,7 +475,7 @@ class AutomergeSpaceHandle<T> implements SpaceHandle<T>, NamedRootsCapable {
     if (this.closed) throw new Error('Handle is closed')
     const ops = collectRootOps<R>(this.docHandle.doc() as Record<string, unknown> | undefined, name, fn)
     if (ops.length === 0) return
-    this.transact(((doc: Record<string, unknown>) => applyRootOps(doc, name, ops)) as unknown as (doc: T) => void, options)
+    this._transactRaw(((doc: Record<string, unknown>) => applyRootOps(doc, name, ops)) as unknown as (doc: T) => void, options)
   }
 
   /**
@@ -437,7 +490,7 @@ class AutomergeSpaceHandle<T> implements SpaceHandle<T>, NamedRootsCapable {
     assertValidNamedRootName(name)
     if (this.closed) throw new Error('Handle is closed')
     const ops = collectRootOps<R>(this.docHandle.doc() as Record<string, unknown> | undefined, name, fn)
-    return this.transactDurable(((doc: Record<string, unknown>) => applyRootOps(doc, name, ops)) as unknown as (doc: T) => void)
+    return this._transactDurableRaw(((doc: Record<string, unknown>) => applyRootOps(doc, name, ops)) as unknown as (doc: T) => void)
   }
 
   getMeta(): import('@web_of_trust/core').SpaceDocMeta {
@@ -451,7 +504,12 @@ class AutomergeSpaceHandle<T> implements SpaceHandle<T>, NamedRootsCapable {
    * secure-removal commit (suppressed observer + explicit awaited coordinator
    * write). A no-op transaction resolves immediately.
    */
-  async transactDurable(fn: (doc: T) => void): Promise<void> {
+  transactDurable(fn: (doc: T) => void): Promise<void> {
+    return this._transactDurableRaw(((doc: T) => fn(hideNamedRoots(doc))) as (doc: T) => void)
+  }
+
+  /** Interner durabler Schreibpfad OHNE die Wurzel-Huelle — nur fuer applyRootOps. */
+  private async _transactDurableRaw(fn: (doc: T) => void): Promise<void> {
     if (this.closed) throw new Error('Handle is closed')
     if (!this.durableWriter) throw new Error('transactDurable requires the log-sync configuration (no durable log path)')
     // `localChanging` may only cover the SYNCHRONOUS docHandle.change() of the
@@ -470,7 +528,13 @@ class AutomergeSpaceHandle<T> implements SpaceHandle<T>, NamedRootsCapable {
     if (this.compactScheduler) this.compactScheduler.pushImmediate()
   }
 
+  /** Oeffentlicher `data`-Schreibpfad — die benannten Wurzeln bleiben verborgen. */
   transact(fn: (doc: T) => void, options?: TransactOptions): void {
+    this._transactRaw(((doc: T) => fn(hideNamedRoots(doc))) as (doc: T) => void, options)
+  }
+
+  /** Interner Schreibpfad OHNE die Wurzel-Huelle — nur fuer applyRootOps. */
+  private _transactRaw(fn: (doc: T) => void, options?: TransactOptions): void {
     if (this.closed) throw new Error('Handle is closed')
     this.localChanging = true
     try {

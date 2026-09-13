@@ -600,9 +600,20 @@ function collectRootOps<R extends Record<string, unknown>>(
     ownKeys() {
       return keys()
     },
+    // Accessor statt Daten-Deskriptor: Object.keys() prueft nur `enumerable`
+    // und darf deshalb keinen Wert projizieren — sonst laesst ein einziger
+    // unprojizierbarer Fremdwert schon das blosse Aufzaehlen (und damit ein
+    // `delete` ueber alle Schluessel) werfen.
     getOwnPropertyDescriptor(_t, prop: string | symbol) {
       if (typeof prop !== 'string' || !has(prop)) return undefined
-      return { configurable: true, enumerable: true, writable: true, value: read(prop) }
+      const key = prop
+      return { configurable: true, enumerable: true, get: () => read(key) }
+    },
+    defineProperty() {
+      // Der Wurzel-Vertrag kennt nur Zuweisung und delete. Ein Deskriptor
+      // wuerde nur das Proxy-Ziel treffen und einen Schreibvorgang vortaeuschen,
+      // der nie im CRDT landet — deshalb laut ablehnen.
+      throw new TypeError('named root drafts only support assignment and delete, not Object.defineProperty')
     },
   }) as R
 
