@@ -148,6 +148,23 @@ describe('Automerge — benannte Wurzel-Maps je Space-Doc (NamedRootsCapable)', 
       handle.close()
     })
 
+    it('auch ein Array- oder Funktions-Initial-Doc mit dem Praefix wird abgelehnt', async () => {
+      // Object.assign uebernimmt die eigenen aufzaehlbaren Schluessel JEDES
+      // Objekts — auch die eines Arrays oder einer Funktion. Die Pruefung darf
+      // deshalb keinen Objekttyp ueberspringen.
+      const arrayish = Object.assign([] as unknown[], { [RESERVED]: { text: 'application value' } })
+      expect(() => aliceAdapter.createSpace('shared', arrayish)).toThrow(/__root:/)
+
+      const fnish = Object.assign(() => {}, { [RESERVED]: { text: 'application value' } })
+      expect(() => aliceAdapter.createSpace('shared', fnish)).toThrow(/__root:/)
+
+      // Ein gewoehnliches Array bleibt erlaubt — Indizes tragen den Praefix nie.
+      const space = await aliceAdapter.createSpace<Record<string, unknown>>('shared', { list: [1, 2, 3] }, { name: 'Arr' })
+      const handle = await aliceAdapter.openSpace<Record<string, unknown>>(space.id)
+      expect(handle.getDoc().list).toEqual([1, 2, 3])
+      handle.close()
+    })
+
     it('verschachtelt ist der Praefix erlaubt — dort hat er keine Bedeutung', async () => {
       const space = await aliceAdapter.createSpace<Record<string, unknown>>(
         'shared', { nested: { [RESERVED]: 'harmlos' } }, { name: 'Nested' },

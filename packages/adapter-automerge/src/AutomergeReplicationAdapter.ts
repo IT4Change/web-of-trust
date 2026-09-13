@@ -231,7 +231,11 @@ const NAMED_ROOT_PREFIX = '__root:'
  * ablehnen als still umdeuten (Loop-Review web-of-trust#370).
  */
 function assertNoReservedRootKeys(doc: unknown, where: string): void {
-  if (!doc || typeof doc !== 'object' || Array.isArray(doc)) return
+  // Kein Objekttyp darf uebersprungen werden: `Object.assign` uebernimmt die
+  // eigenen aufzaehlbaren String-Schluessel JEDES Objekts — auch die eines
+  // Arrays oder einer Funktion. `Object.keys` liefert genau diese Menge, bei
+  // einem gewoehnlichen Array also nur Indizes.
+  if (doc === null || (typeof doc !== 'object' && typeof doc !== 'function')) return
   const offending = Object.keys(doc as Record<string, unknown>).filter((key) => key.startsWith(NAMED_ROOT_PREFIX))
   if (offending.length === 0) return
   throw new TypeError(

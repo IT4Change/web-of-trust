@@ -137,9 +137,11 @@ export interface SecureSelfLeaveCapable {
  * innerhalb von `data` gar keinen Namensraum, mit dem sie kollidieren koennte.
  * Der Automerge-Adapter hat keine benannten Wurzeltypen und legt Wurzeln als
  * praefixierte Schluessel im Doc-Root ab; dort ist der Praefix reserviert und
- * wird auf JEDEM `data`-Schreibpfad (createSpace-Initial-Doc, transact,
- * transactDurable) synchron abgelehnt, bevor etwas geschrieben wird — lieber
- * laut ablehnen als App-Daten annehmen und danach verstecken.
+ * wird auf JEDEM `data`-Schreibpfad abgelehnt, BEVOR etwas geschrieben wird —
+ * lieber laut ablehnen als App-Daten annehmen und danach verstecken. Die
+ * synchronen Eingaenge (`createSpace`, `openOrCreateDeterministicPrivateSpace`,
+ * `transact`) werfen synchron; die durablen (`transactDurable`) melden denselben
+ * Fehler als Promise-Rejection, da ihr Callback erst im Append-Pfad laeuft.
  *
  * BEKANNTE GRENZE: ein Doc, das ein FREMDES Geraet mit so einem Schluessel
  * schon traegt (nur aus Altsoftware moeglich), wird beim Automerge-Adapter in
