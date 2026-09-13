@@ -2,7 +2,7 @@ import { Repo, parseAutomergeUrl, type DocumentId, type AutomergeUrl, type PeerI
 import type { StorageAdapterInterface } from '@automerge/automerge-repo'
 import type { DocHandle } from '@automerge/automerge-repo'
 import * as Automerge from '@automerge/automerge'
-import type { ReplicationAdapter, SpaceHandle, TransactOptions, Subscribable, MessagingAdapter, MessageIdHistoryPort, SpaceMetadataStorage, KeyManagementPort, MemberUpdatePendingStore, WireMessage, DocLogStore, PendingRemoval } from '@web_of_trust/core/ports'
+import type { ReplicationAdapter, SpaceHandle, TransactOptions, NamedRootsCapable, Subscribable, MessagingAdapter, MessageIdHistoryPort, SpaceMetadataStorage, KeyManagementPort, MemberUpdatePendingStore, WireMessage, DocLogStore, PendingRemoval } from '@web_of_trust/core/ports'
 import type { IdentitySession, SpaceInfo, SpaceAdmission, SpaceMemberChange, IncomingSpaceInvite, ReplicationState, MessageEnvelope } from '@web_of_trust/core/types'
 import {
   createSpaceKey, createDeterministicSpaceKey, rotateSpaceKey, importKey, processMemberUpdate,
@@ -10,7 +10,7 @@ import {
   buildSpaceInviteBody, applySpaceInviteBody, buildKeyRotationBody, applyKeyRotationBody,
   deliverInboxMessage, receiveInboxMessage,
   runTwoPhaseRemoval, recoverPendingRemovals, pendingRemovalWriteExpectation,
-  openLifecycleLease, isSameAdmission,
+  openLifecycleLease, isSameAdmission, assertValidNamedRootName,
 } from '@web_of_trust/core/application'
 import type { LocalImpact, SecureRemovalDeps, LifecycleLease } from '@web_of_trust/core/application'
 import type {
@@ -217,7 +217,77 @@ export interface AutomergeReplicationAdapterConfig {
   onSecurityError?: (error: Error) => void
 }
 
-class AutomergeSpaceHandle<T> implements SpaceHandle<T> {
+/** Wire-Praefix der benannten Wurzeln im Automerge-Doc-Root: `__root:<name>:<key>`. */
+const NAMED_ROOT_PREFIX = '__root:'
+
+/** Schluesselpraefix EINER Wurzel. `name` erfuellt `^[a-z][A-Za-z0-9]*$`, traegt also nie ein `:`. */
+function rootKeyPrefix(name: string): string {
+  return `${NAMED_ROOT_PREFIX}${name}:`
+}
+
+/**
+ * Kanonische JSON-Kopie eines Wurzel-Werts. Wirft bei allem, was nicht
+ * JSON-serialisierbar ist — die Pruefung laeuft VOR dem Schreiben, damit eine
+ * Wurzel nie einen Wert traegt, an dem ein anderes Geraet beim Projizieren
+ * scheitert. Gleichzeitig loest sie den Automerge-Proxy in reines JSON auf.
+ */
+function jsonClone(value: unknown, key: string): unknown {
+  if (value === null || value === undefined) return value ?? null
+  if (typeof value === 'function' || typeof value === 'symbol' || typeof value === 'bigint') {
+    throw new TypeError(`named root value for "${key}" is not JSON-serializable`)
+  }
+  if (typeof value === 'number' && !Number.isFinite(value)) {
+    throw new TypeError(`named root value for "${key}" is not JSON-serializable (non-finite number)`)
+  }
+  if (typeof value !== 'object') return value
+  let json: string | undefined
+  try {
+    json = JSON.stringify(value)
+  } catch (err) {
+    throw new TypeError(`named root value for "${key}" is not JSON-serializable: ${err instanceof Error ? err.message : String(err)}`)
+  }
+  if (json === undefined) throw new TypeError(`named root value for "${key}" is not JSON-serializable`)
+  return JSON.parse(json)
+}
+
+/**
+ * FLACHER Schreib-Proxy auf eine benannte Wurzel ueber dem Automerge-Draft:
+ * jeder Wurzelschluessel wird auf `__root:<name>:<key>` im Doc-Root abgebildet.
+ */
+function createRootProxy<R extends Record<string, unknown>>(doc: Record<string, unknown>, name: string): R {
+  const prefix = rootKeyPrefix(name)
+  return new Proxy({} as Record<string, unknown>, {
+    get(_t, prop: string | symbol) {
+      if (typeof prop !== 'string') return undefined
+      return jsonClone(doc[prefix + prop], prefix + prop)
+    },
+    set(_t, prop: string | symbol, value: unknown) {
+      if (typeof prop !== 'string') throw new TypeError('named root keys must be strings')
+      if (value === undefined) { delete doc[prefix + prop]; return true }
+      // Clone BEFORE the write so a non-JSON value aborts without a partial patch.
+      doc[prefix + prop] = jsonClone(value, prefix + prop)
+      return true
+    },
+    deleteProperty(_t, prop: string | symbol) {
+      if (typeof prop === 'string') delete doc[prefix + prop]
+      return true
+    },
+    has(_t, prop: string | symbol) {
+      return typeof prop === 'string' && Object.prototype.hasOwnProperty.call(doc, prefix + prop)
+    },
+    ownKeys() {
+      return Object.keys(doc).filter((k) => k.startsWith(prefix)).map((k) => k.slice(prefix.length))
+    },
+    getOwnPropertyDescriptor(_t, prop: string | symbol) {
+      if (typeof prop === 'string' && Object.prototype.hasOwnProperty.call(doc, prefix + prop)) {
+        return { configurable: true, enumerable: true, writable: true, value: jsonClone(doc[prefix + prop], prefix + prop) }
+      }
+      return undefined
+    },
+  }) as R
+}
+
+class AutomergeSpaceHandle<T> implements SpaceHandle<T>, NamedRootsCapable {
   readonly id: string
   private spaceState: SpaceState
   private docHandle: DocHandle<T>
@@ -250,7 +320,62 @@ class AutomergeSpaceHandle<T> implements SpaceHandle<T> {
   }
 
   getDoc(): T {
-    return this.docHandle.doc() as T
+    const doc = this.docHandle.doc() as Record<string, unknown>
+    // Benannte Wurzeln liegen als flache, praefixierte Wurzelschluessel im
+    // Automerge-Doc und gehoeren bewusst NICHT zu `T`. Die Kopie entsteht nur,
+    // wenn es ueberhaupt Wurzelschluessel gibt — Spaces ohne Wurzeln bekommen
+    // unveraendert das Doc-Objekt selbst.
+    if (!doc || typeof doc !== 'object') return doc as T
+    let filtered: Record<string, unknown> | null = null
+    for (const key of Object.keys(doc)) {
+      if (!key.startsWith(NAMED_ROOT_PREFIX)) continue
+      filtered ??= { ...doc }
+      delete filtered[key]
+    }
+    return (filtered ?? doc) as T
+  }
+
+  /**
+   * Benannte Wurzel-Maps (NamedRootsCapable). Automerge hat keine benannten
+   * Wurzeltypen; die Wurzel des Docs ist aber IMMER vorhanden, und verschiedene
+   * Wurzelschluessel mergen konfliktfrei. Deshalb liegt jeder Wurzeleintrag als
+   * EIGENER Wurzelschluessel `__root:<name>:<key>` im Doc. Eine gemeinsame Map
+   * je Wurzel waere wieder eine nebenlaeufige Erstanlage — und genau die
+   * verliert bei Automerge (getConflicts waehlt einen Gewinner) wie bei Yjs
+   * einen Unterbaum (rls#353).
+   */
+  getRoot<R extends Record<string, unknown> = Record<string, unknown>>(name: string): R {
+    assertValidNamedRootName(name)
+    const prefix = rootKeyPrefix(name)
+    const doc = this.docHandle.doc() as Record<string, unknown> | undefined
+    const out: Record<string, unknown> = {}
+    if (!doc) return out as R
+    for (const key of Object.keys(doc)) {
+      if (!key.startsWith(prefix)) continue
+      out[key.slice(prefix.length)] = jsonClone(doc[key], key)
+    }
+    return out as R
+  }
+
+  transactRoot<R extends Record<string, unknown> = Record<string, unknown>>(
+    name: string,
+    fn: (root: R) => void,
+    options?: TransactOptions,
+  ): void {
+    assertValidNamedRootName(name)
+    this.transact(((doc: Record<string, unknown>) => {
+      fn(createRootProxy<R>(doc, name))
+    }) as unknown as (doc: T) => void, options)
+  }
+
+  async transactRootDurable<R extends Record<string, unknown> = Record<string, unknown>>(
+    name: string,
+    fn: (root: R) => void,
+  ): Promise<void> {
+    assertValidNamedRootName(name)
+    await this.transactDurable(((doc: Record<string, unknown>) => {
+      fn(createRootProxy<R>(doc, name))
+    }) as unknown as (doc: T) => void)
   }
 
   getMeta(): import('@web_of_trust/core').SpaceDocMeta {
