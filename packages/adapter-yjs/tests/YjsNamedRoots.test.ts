@@ -183,7 +183,8 @@ describe('Yjs — benannte Wurzel-Maps je Space-Doc (NamedRootsCapable)', () => 
     for (const bad of ['data', '_meta', '_members', 'Profiles', '1x', 'a-b', '']) {
       expect(() => handle.getRoot(bad)).toThrow()
       expect(() => handle.transactRoot(bad, () => {})).toThrow()
-      await expect(handle.transactRootDurable(bad, () => {})).rejects.toThrow()
+      // synchron, damit ein try/catch um den Aufruf greift — nicht als Rejection
+      expect(() => handle.transactRootDurable(bad, () => {})).toThrow()
     }
     handle.close()
   })
@@ -237,6 +238,81 @@ describe('Yjs — benannte Wurzel-Maps je Space-Doc (NamedRootsCapable)', () => 
       ;(root as Record<string, unknown>).fn = () => {}
     })).toThrow()
     expect(handle.getRoot('profiles')).toEqual({})
+    handle.close()
+  })
+
+  it('eine geworfene Zuweisung laesst KEINEN Teil-Patch zurueck (Atomaritaet)', async () => {
+    const spaceId = await createSharedSpace()
+    const handle = await aliceAdapter.openSpace<TestDoc>(spaceId) as RootsHandle<TestDoc>
+    expect(() => handle.transactRoot('profiles', (root) => {
+      ;(root as Record<string, unknown>).good = 1
+      ;(root as Record<string, unknown>).bad = () => {}
+    })).toThrow()
+    expect(handle.getRoot('profiles')).toEqual({})
+
+    expect(() => handle.transactRootDurable('profiles', (root) => {
+      ;(root as Record<string, unknown>).good = 1
+      ;(root as Record<string, unknown>).bad = () => {}
+    })).toThrow()
+    expect(handle.getRoot('profiles')).toEqual({})
+    handle.close()
+  })
+
+  it('Nicht-JSON in der TIEFE wirft ebenfalls, statt still zu verschwinden', async () => {
+    const spaceId = await createSharedSpace()
+    const handle = await aliceAdapter.openSpace<TestDoc>(spaceId) as RootsHandle<TestDoc>
+    for (const bad of [{ deep: { fn: () => {} } }, { deep: { n: Infinity } }, { deep: [1, undefined] }, { m: new Map() }]) {
+      expect(() => handle.transactRoot('profiles', (root) => {
+        ;(root as Record<string, unknown>).a = bad
+      })).toThrow()
+    }
+    expect(handle.getRoot('profiles')).toEqual({})
+    handle.close()
+  })
+
+  it('__proto__ bleibt ein eigener Wurzel-Schluessel', async () => {
+    const spaceId = await createSharedSpace()
+    const handle = await aliceAdapter.openSpace<TestDoc>(spaceId) as RootsHandle<TestDoc>
+    handle.transactRoot('profiles', (root) => {
+      ;(root as Record<string, unknown>)['__proto__'] = { hidden: 7 }
+    })
+    const snap = handle.getRoot('profiles') as Record<string, unknown>
+    expect(Object.keys(snap)).toEqual(['__proto__'])
+    expect((snap as { hidden?: unknown }).hidden).toBeUndefined()
+    expect(({} as { hidden?: unknown }).hidden).toBeUndefined()
+    handle.close()
+  })
+
+  it('ein festgehaltener Entwurf kann nach der Transaktion nicht mehr schreiben', async () => {
+    const spaceId = await createSharedSpace()
+    const handle = await aliceAdapter.openSpace<TestDoc>(spaceId) as RootsHandle<TestDoc>
+    let escaped: Record<string, unknown> | undefined
+    handle.transactRoot('profiles', (root) => {
+      escaped = root as Record<string, unknown>
+      ;(root as Record<string, unknown>).a = 1
+    })
+    expect(() => { escaped!.b = 2 }).toThrow()
+    expect(() => { delete escaped!.a }).toThrow()
+    expect(handle.getRoot('profiles')).toEqual({ a: 1 })
+    handle.close()
+  })
+
+  it('im Entwurf ist der eigene Zwischenstand lesbar', async () => {
+    const spaceId = await createSharedSpace()
+    const handle = await aliceAdapter.openSpace<TestDoc>(spaceId) as RootsHandle<TestDoc>
+    handle.transactRoot('profiles', (root) => { (root as Record<string, unknown>).a = { n: 1 } })
+    handle.transactRoot('profiles', (root) => {
+      const r = root as Record<string, unknown>
+      expect(r.a).toEqual({ n: 1 })
+      expect(Object.keys(r)).toEqual(['a'])
+      r.b = 2
+      expect(r.b).toBe(2)
+      expect(Object.keys(r).sort()).toEqual(['a', 'b'])
+      delete r.a
+      expect(r.a).toBeUndefined()
+      expect(Object.keys(r)).toEqual(['b'])
+    })
+    expect(handle.getRoot('profiles')).toEqual({ b: 2 })
     handle.close()
   })
 
@@ -332,7 +408,11 @@ describe('Yjs — benannte Wurzel-Maps je Space-Doc (NamedRootsCapable)', () => 
     const restartLog = new InMemoryDocLogStore()
     await restartLog.init()
     await restartLog.setDeviceId(ALICE_DEVICE)
-    const restarted = await makeAdapter(alice, aliceMessaging, ALICE_DEVICE, {
+    // Isolation: ein FRISCHER (leerer) Broker — so kann der Log-Catch-up die
+    // Wurzel nicht liefern, der Compact-Store ist die einzige Quelle.
+    const isolatedMessaging = new InMemoryMessagingAdapter({ broker: new InProcessLogBroker(), socketId: 'alice-restart' })
+    await isolatedMessaging.connect(alice.getDid())
+    const restarted = await makeAdapter(alice, isolatedMessaging, ALICE_DEVICE, {
       metadataStorage: aliceMeta, compactStore: aliceCompact, keyManagement: aliceKeys, docLogStore: restartLog,
     })
     await restarted.start()
@@ -351,7 +431,9 @@ describe('Yjs — benannte Wurzel-Maps je Space-Doc (NamedRootsCapable)', () => 
     const vaultLog = new InMemoryDocLogStore()
     await vaultLog.init()
     await vaultLog.setDeviceId(ALICE_DEVICE)
-    const writer = await makeAdapter(alice, aliceMessaging, ALICE_DEVICE, {
+    const writerMessaging = new InMemoryMessagingAdapter({ broker: new InProcessLogBroker(), socketId: 'alice-vault-writer' })
+    await writerMessaging.connect(alice.getDid())
+    const writer = await makeAdapter(alice, writerMessaging, ALICE_DEVICE, {
       metadataStorage: vaultMeta, compactStore: new InMemoryCompactStore(), keyManagement: vaultKeys,
       docLogStore: vaultLog, vault,
     })
@@ -368,7 +450,11 @@ describe('Yjs — benannte Wurzel-Maps je Space-Doc (NamedRootsCapable)', () => 
     const readerLog = new InMemoryDocLogStore()
     await readerLog.init()
     await readerLog.setDeviceId('cccccccc-cccc-4ccc-8ccc-cccccccccccc')
-    const reader = await makeAdapter(alice, aliceMessaging, 'cccccccc-cccc-4ccc-8ccc-cccccccccccc', {
+    // Isolation: frischer (leerer) Broker + leerer Compact-Store — der Vault ist
+    // die einzig moegliche Quelle der Wurzel.
+    const readerMessaging = new InMemoryMessagingAdapter({ broker: new InProcessLogBroker(), socketId: 'alice-vault-reader' })
+    await readerMessaging.connect(alice.getDid())
+    const reader = await makeAdapter(alice, readerMessaging, 'cccccccc-cccc-4ccc-8ccc-cccccccccccc', {
       metadataStorage: vaultMeta, compactStore: new InMemoryCompactStore(), keyManagement: vaultKeys,
       docLogStore: readerLog, vault,
     })

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { hasNamedRoots, assertValidNamedRootName, isValidNamedRootName } from '../src/application/spaces/replication-capabilities'
+import { hasNamedRoots, assertValidNamedRootName, isValidNamedRootName, toJsonValue, defineRootKey } from '../src/application/spaces/replication-capabilities'
 import * as ports from '../src/ports'
 import type { SpaceHandle } from '../src/ports/ReplicationAdapter'
 
@@ -70,5 +70,56 @@ describe('NamedRootsCapable', () => {
   it('ships the guard from the published ports subpath', () => {
     expect(typeof (ports as Record<string, unknown>).hasNamedRoots).toBe('function')
     expect(typeof (ports as Record<string, unknown>).assertValidNamedRootName).toBe('function')
+    expect(typeof (ports as Record<string, unknown>).toJsonValue).toBe('function')
+  })
+})
+
+describe('toJsonValue — Wertvertrag benannter Wurzeln', () => {
+  it('kopiert JSON-Werte tief', () => {
+    const source = { a: [1, 'x', true, null], b: { c: { d: 2 } } }
+    const clone = toJsonValue(source, 'root') as typeof source
+    expect(clone).toEqual(source)
+    expect(clone.b.c).not.toBe(source.b.c)
+    expect(clone.a).not.toBe(source.a)
+  })
+
+  it('wirft auf JEDER Ebene bei Nicht-JSON — nicht nur oben', () => {
+    expect(() => toJsonValue({ bad: () => {} }, 'root')).toThrow(/root\.bad/)
+    expect(() => toJsonValue({ deep: { num: Infinity } }, 'root')).toThrow(/root\.deep\.num/)
+    expect(() => toJsonValue({ deep: [1, Symbol('s')] }, 'root')).toThrow(/root\.deep\[1\]/)
+    expect(() => toJsonValue({ big: 1n }, 'root')).toThrow(/root\.big/)
+    expect(() => toJsonValue({ m: new Map() }, 'root')).toThrow(/root\.m/)
+    expect(() => toJsonValue({ s: new Set() }, 'root')).toThrow(/root\.s/)
+    expect(() => toJsonValue([undefined], 'root')).toThrow(/root\[0\]/)
+  })
+
+  it('wirft bei Zyklen statt in eine Endlosschleife zu laufen', () => {
+    const cyclic: Record<string, unknown> = { a: 1 }
+    cyclic.self = cyclic
+    expect(() => toJsonValue(cyclic, 'root')).toThrow(/circular/)
+  })
+
+  it('folgt JSON-Semantik bei undefined-Properties und toJSON', () => {
+    expect(toJsonValue({ a: 1, b: undefined }, 'root')).toEqual({ a: 1 })
+    expect(toJsonValue({ at: new Date('2026-09-13T00:00:00.000Z') }, 'root'))
+      .toEqual({ at: '2026-09-13T00:00:00.000Z' })
+  })
+
+  it('meldet fremde (CRDT-)Typen ueber isForeign', () => {
+    class Foreign { constructor(readonly x = 1) {} }
+    const foreign = new Foreign()
+    expect(() => toJsonValue({ y: foreign }, 'root', (c) => c instanceof Foreign)).toThrow(/CRDT/)
+  })
+
+  it('__proto__ bleibt ein eigener Schluessel und vergiftet keinen Prototyp', () => {
+    const clone = toJsonValue({ ['__proto__']: { hidden: 7 } }, 'root') as Record<string, unknown>
+    expect(Object.keys(clone)).toEqual(['__proto__'])
+    expect((clone as { hidden?: unknown }).hidden).toBeUndefined()
+    expect(({} as { hidden?: unknown }).hidden).toBeUndefined()
+
+    const projection: Record<string, unknown> = {}
+    defineRootKey(projection, '__proto__', { hidden: 7 })
+    expect(Object.keys(projection)).toEqual(['__proto__'])
+    expect((projection as { hidden?: unknown }).hidden).toBeUndefined()
   })
 })

@@ -75,3 +75,96 @@ export function hasNamedRoots(handle: unknown): handle is NamedRootsCapable {
     && typeof h?.transactRoot === 'function'
     && typeof h?.transactRootDurable === 'function'
 }
+
+/**
+ * Definiert `key` als EIGENE, aufzaehlbare Daten-Property auf `target`. Eine
+ * einfache Zuweisung wuerde bei `__proto__` den Prototyp setzen statt einen
+ * Schluessel anzulegen — der Eintrag waere in der Projektion unsichtbar und
+ * seine Felder wuerden stattdessen geerbt.
+ */
+function defineOwn(target: Record<string, unknown>, key: string, value: unknown): void {
+  Object.defineProperty(target, key, { value, enumerable: true, writable: true, configurable: true })
+}
+
+/**
+ * Kanonische, TIEFE JSON-Kopie eines Wurzel-Werts — und zugleich die
+ * Validierung des Wertvertrags benannter Wurzeln.
+ *
+ * Wirft auf JEDER Ebene bei allem, was kein JSON-Wert ist: Funktionen, Symbole,
+ * BigInt, nicht-endliche Zahlen, Zyklen, Klassen-Instanzen ohne `toJSON`
+ * (Map, Set, TypedArray …) und CRDT-Typen (ueber `isForeign` vom jeweiligen
+ * Adapter gemeldet). Bewusst NICHT `JSON.stringify`: das verschluckt Funktionen
+ * stillschweigend und macht aus `Infinity` ein `null` — der Wert waere dann
+ * anders im Doc, als der Aufrufer geschrieben hat.
+ *
+ * JSON-Semantik dort, wo sie eindeutig ist: `undefined` als Objekt-Property
+ * entfaellt (wie bei `JSON.stringify`), `undefined` als Array-Element wirft
+ * (JSON wuerde daraus stillschweigend `null` machen), und `toJSON` wird
+ * respektiert (Date → ISO-String).
+ */
+export function toJsonValue(
+  value: unknown,
+  path: string,
+  isForeign?: (candidate: object) => boolean,
+  seen: Set<object> = new Set(),
+): unknown {
+  if (value === null) return null
+  const type = typeof value
+  if (type === 'string' || type === 'boolean') return value
+  if (type === 'number') {
+    if (!Number.isFinite(value)) {
+      throw new TypeError(`named root value at "${path}" is not JSON-serializable (non-finite number)`)
+    }
+    return value
+  }
+  if (type !== 'object') {
+    throw new TypeError(`named root value at "${path}" is not JSON-serializable (${type})`)
+  }
+
+  const obj = value as object
+  if (isForeign?.(obj)) {
+    throw new TypeError(`named root value at "${path}" must be plain JSON, not a CRDT type`)
+  }
+  if (seen.has(obj)) {
+    throw new TypeError(`named root value at "${path}" is not JSON-serializable (circular reference)`)
+  }
+
+  const toJson = (obj as { toJSON?: unknown }).toJSON
+  if (typeof toJson === 'function') {
+    return toJsonValue((toJson as () => unknown).call(obj), path, isForeign, seen)
+  }
+
+  seen.add(obj)
+  try {
+    if (Array.isArray(obj)) {
+      return obj.map((entry, index) => {
+        if (entry === undefined) {
+          throw new TypeError(`named root value at "${path}[${index}]" is not JSON-serializable (undefined)`)
+        }
+        return toJsonValue(entry, `${path}[${index}]`, isForeign, seen)
+      })
+    }
+    const proto = Object.getPrototypeOf(obj)
+    if (proto !== null && proto !== Object.prototype) {
+      throw new TypeError(`named root value at "${path}" is not a plain JSON object`)
+    }
+    const out: Record<string, unknown> = {}
+    for (const key of Object.keys(obj as Record<string, unknown>)) {
+      const entry = (obj as Record<string, unknown>)[key]
+      if (entry === undefined) continue // JSON.stringify drops these too
+      defineOwn(out, key, toJsonValue(entry, `${path}.${key}`, isForeign, seen))
+    }
+    return out
+  } finally {
+    seen.delete(obj)
+  }
+}
+
+/**
+ * Traegt einen bereits geklonten Wurzelwert prototyp-sicher in eine Projektion
+ * ein. `__proto__` ist ein zulaessiger Wurzel-SCHLUESSEL (die Namensregel gilt
+ * fuer den Wurzelnamen, nicht fuer die Schluessel darunter).
+ */
+export function defineRootKey(target: Record<string, unknown>, key: string, value: unknown): void {
+  defineOwn(target, key, value)
+}

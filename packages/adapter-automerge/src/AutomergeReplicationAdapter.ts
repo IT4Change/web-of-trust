@@ -10,7 +10,7 @@ import {
   buildSpaceInviteBody, applySpaceInviteBody, buildKeyRotationBody, applyKeyRotationBody,
   deliverInboxMessage, receiveInboxMessage,
   runTwoPhaseRemoval, recoverPendingRemovals, pendingRemovalWriteExpectation,
-  openLifecycleLease, isSameAdmission, assertValidNamedRootName,
+  openLifecycleLease, isSameAdmission, assertValidNamedRootName, toJsonValue, defineRootKey,
 } from '@web_of_trust/core/application'
 import type { LocalImpact, SecureRemovalDeps, LifecycleLease } from '@web_of_trust/core/application'
 import type {
@@ -225,66 +225,98 @@ function rootKeyPrefix(name: string): string {
   return `${NAMED_ROOT_PREFIX}${name}:`
 }
 
+/** Eine gesammelte Wurzel-Mutation: Wert setzen oder Schluessel loeschen. */
+type RootOp = { key: string; value: unknown } | { key: string; delete: true }
+
 /**
- * Kanonische JSON-Kopie eines Wurzel-Werts. Wirft bei allem, was nicht
- * JSON-serialisierbar ist — die Pruefung laeuft VOR dem Schreiben, damit eine
- * Wurzel nie einen Wert traegt, an dem ein anderes Geraet beim Projizieren
- * scheitert. Gleichzeitig loest sie den Automerge-Proxy in reines JSON auf.
+ * Kanonische, tiefe JSON-Kopie eines Wurzel-Werts (validiert auf jeder Ebene)
+ * — loest zugleich Automerge-Proxies in reines JSON auf.
  */
-function jsonClone(value: unknown, key: string): unknown {
-  if (value === null || value === undefined) return value ?? null
-  if (typeof value === 'function' || typeof value === 'symbol' || typeof value === 'bigint') {
-    throw new TypeError(`named root value for "${key}" is not JSON-serializable`)
-  }
-  if (typeof value === 'number' && !Number.isFinite(value)) {
-    throw new TypeError(`named root value for "${key}" is not JSON-serializable (non-finite number)`)
-  }
-  if (typeof value !== 'object') return value
-  let json: string | undefined
-  try {
-    json = JSON.stringify(value)
-  } catch (err) {
-    throw new TypeError(`named root value for "${key}" is not JSON-serializable: ${err instanceof Error ? err.message : String(err)}`)
-  }
-  if (json === undefined) throw new TypeError(`named root value for "${key}" is not JSON-serializable`)
-  return JSON.parse(json)
+function rootJsonValue(value: unknown, path: string): unknown {
+  return value === undefined ? undefined : toJsonValue(value, path)
 }
 
 /**
- * FLACHER Schreib-Proxy auf eine benannte Wurzel ueber dem Automerge-Draft:
- * jeder Wurzelschluessel wird auf `__root:<name>:<key>` im Doc-Root abgebildet.
+ * Fuehrt `fn` auf einem FLACHEN Entwurf der Wurzel aus und gibt die gesammelten
+ * Mutationen zurueck. Sammeln statt Direktschreiben aus zwei Gruenden:
+ * Atomaritaet (ein ungueltiger Wert wirft, BEVOR etwas im Doc steht) und ein
+ * Entwurf, der nach dem Callback tot ist — ein festgehaltener Proxy kann das
+ * Doc spaeter nicht an Validierung und Persistenz-Planung vorbei veraendern.
  */
-function createRootProxy<R extends Record<string, unknown>>(doc: Record<string, unknown>, name: string): R {
+function collectRootOps<R extends Record<string, unknown>>(
+  doc: Record<string, unknown> | undefined,
+  name: string,
+  fn: (root: R) => void,
+): RootOp[] {
   const prefix = rootKeyPrefix(name)
-  return new Proxy({} as Record<string, unknown>, {
+  const ops = new Map<string, RootOp>()
+  let active = true
+  const has = (key: string) => !!doc && Object.prototype.hasOwnProperty.call(doc, prefix + key)
+  const read = (key: string): unknown => {
+    const pending = ops.get(key)
+    if (pending) return 'delete' in pending ? undefined : pending.value
+    if (!has(key)) return undefined
+    return rootJsonValue(doc![prefix + key], `${name}.${key}`)
+  }
+  const keys = (): string[] => {
+    const all = new Set<string>(
+      doc ? Object.keys(doc).filter((k) => k.startsWith(prefix)).map((k) => k.slice(prefix.length)) : [],
+    )
+    for (const [key, op] of ops) {
+      if ('delete' in op) all.delete(key)
+      else all.add(key)
+    }
+    return Array.from(all)
+  }
+  const guard = () => {
+    if (!active) throw new Error('named root draft is no longer writable — it is only valid inside transactRoot')
+  }
+  const draft = new Proxy({} as Record<string, unknown>, {
     get(_t, prop: string | symbol) {
       if (typeof prop !== 'string') return undefined
-      return jsonClone(doc[prefix + prop], prefix + prop)
+      return read(prop)
     },
     set(_t, prop: string | symbol, value: unknown) {
+      guard()
       if (typeof prop !== 'string') throw new TypeError('named root keys must be strings')
-      if (value === undefined) { delete doc[prefix + prop]; return true }
-      // Clone BEFORE the write so a non-JSON value aborts without a partial patch.
-      doc[prefix + prop] = jsonClone(value, prefix + prop)
+      if (value === undefined) { ops.set(prop, { key: prop, delete: true }); return true }
+      ops.set(prop, { key: prop, value: toJsonValue(value, `${name}.${prop}`) })
       return true
     },
     deleteProperty(_t, prop: string | symbol) {
-      if (typeof prop === 'string') delete doc[prefix + prop]
+      guard()
+      if (typeof prop === 'string') ops.set(prop, { key: prop, delete: true })
       return true
     },
     has(_t, prop: string | symbol) {
-      return typeof prop === 'string' && Object.prototype.hasOwnProperty.call(doc, prefix + prop)
+      return typeof prop === 'string' && read(prop) !== undefined
     },
     ownKeys() {
-      return Object.keys(doc).filter((k) => k.startsWith(prefix)).map((k) => k.slice(prefix.length))
+      return keys()
     },
     getOwnPropertyDescriptor(_t, prop: string | symbol) {
-      if (typeof prop === 'string' && Object.prototype.hasOwnProperty.call(doc, prefix + prop)) {
-        return { configurable: true, enumerable: true, writable: true, value: jsonClone(doc[prefix + prop], prefix + prop) }
-      }
-      return undefined
+      if (typeof prop !== 'string') return undefined
+      const value = read(prop)
+      if (value === undefined) return undefined
+      return { configurable: true, enumerable: true, writable: true, value }
     },
   }) as R
+
+  try {
+    fn(draft)
+  } finally {
+    active = false
+  }
+  return Array.from(ops.values())
+}
+
+/** Schreibt die gesammelten Mutationen in den Automerge-Draft. */
+function applyRootOps(doc: Record<string, unknown>, name: string, ops: RootOp[]): void {
+  const prefix = rootKeyPrefix(name)
+  for (const op of ops) {
+    if ('delete' in op) delete doc[prefix + op.key]
+    else doc[prefix + op.key] = op.value
+  }
 }
 
 class AutomergeSpaceHandle<T> implements SpaceHandle<T>, NamedRootsCapable {
@@ -352,7 +384,8 @@ class AutomergeSpaceHandle<T> implements SpaceHandle<T>, NamedRootsCapable {
     if (!doc) return out as R
     for (const key of Object.keys(doc)) {
       if (!key.startsWith(prefix)) continue
-      out[key.slice(prefix.length)] = jsonClone(doc[key], key)
+      // defineRootKey: `__proto__` ist ein zulaessiger Wurzel-SCHLUESSEL.
+      defineRootKey(out, key.slice(prefix.length), toJsonValue(doc[key], key))
     }
     return out as R
   }
@@ -363,19 +396,25 @@ class AutomergeSpaceHandle<T> implements SpaceHandle<T>, NamedRootsCapable {
     options?: TransactOptions,
   ): void {
     assertValidNamedRootName(name)
-    this.transact(((doc: Record<string, unknown>) => {
-      fn(createRootProxy<R>(doc, name))
-    }) as unknown as (doc: T) => void, options)
+    if (this.closed) throw new Error('Handle is closed')
+    const ops = collectRootOps<R>(this.docHandle.doc() as Record<string, unknown> | undefined, name, fn)
+    if (ops.length === 0) return
+    this.transact(((doc: Record<string, unknown>) => applyRootOps(doc, name, ops)) as unknown as (doc: T) => void, options)
   }
 
-  async transactRootDurable<R extends Record<string, unknown> = Record<string, unknown>>(
+  /**
+   * Bewusst NICHT `async`: Namensregel und Wertvertrag muessen synchron werfen,
+   * damit ein `try`/`catch` um den Aufruf greift. Erst der durable Append ist
+   * asynchron.
+   */
+  transactRootDurable<R extends Record<string, unknown> = Record<string, unknown>>(
     name: string,
     fn: (root: R) => void,
   ): Promise<void> {
     assertValidNamedRootName(name)
-    await this.transactDurable(((doc: Record<string, unknown>) => {
-      fn(createRootProxy<R>(doc, name))
-    }) as unknown as (doc: T) => void)
+    if (this.closed) throw new Error('Handle is closed')
+    const ops = collectRootOps<R>(this.docHandle.doc() as Record<string, unknown> | undefined, name, fn)
+    return this.transactDurable(((doc: Record<string, unknown>) => applyRootOps(doc, name, ops)) as unknown as (doc: T) => void)
   }
 
   getMeta(): import('@web_of_trust/core').SpaceDocMeta {

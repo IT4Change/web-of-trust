@@ -70,7 +70,7 @@ export type {
   ProfileSummary,
 } from './ports/DiscoveryAdapter'
 export type { ReplicationAdapter, SpaceHandle, TransactOptions, SecureSelfLeaveCapable, NamedRootsCapable } from './ports/ReplicationAdapter'
-export { hasSecureSelfLeave, hasNamedRoots, isValidNamedRootName, assertValidNamedRootName } from './application/spaces/replication-capabilities'
+export { hasSecureSelfLeave, hasNamedRoots, isValidNamedRootName, assertValidNamedRootName, toJsonValue, defineRootKey } from './application/spaces/replication-capabilities'
 export type { PublishStateStore, PublishStateField } from './ports/PublishStateStore'
 export type { GraphCacheStore, GraphCacheSnapshot, CachedGraphEntry } from './ports/GraphCacheStore'
 export type { OutboxStore, OutboxEntry } from './ports/OutboxStore'
