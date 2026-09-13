@@ -340,12 +340,12 @@ class YjsSpaceHandle<T> implements SpaceHandle<T>, NamedRootsCapable {
    * verlieren — anders als eine verschachtelte Map unter `data`, die ein
    * Register ist (rls#353).
    */
-  getRoot<R extends Record<string, unknown> = Record<string, unknown>>(name: string): R {
+  getRoot<R extends object = Record<string, unknown>>(name: string): R {
     assertValidNamedRootName(name)
     return projectRoot(this.spaceState.doc.getMap(name), name) as R
   }
 
-  transactRoot<R extends Record<string, unknown> = Record<string, unknown>>(
+  transactRoot<R extends object = Record<string, unknown>>(
     name: string,
     fn: (root: R) => void,
     options?: TransactOptions,
@@ -376,7 +376,7 @@ class YjsSpaceHandle<T> implements SpaceHandle<T>, NamedRootsCapable {
    * damit ein `try`/`catch` um den Aufruf greift — genau wie bei transactRoot.
    * Erst der durable Append ist asynchron.
    */
-  transactRootDurable<R extends Record<string, unknown> = Record<string, unknown>>(
+  transactRootDurable<R extends object = Record<string, unknown>>(
     name: string,
     fn: (root: R) => void,
   ): Promise<void> {
@@ -535,7 +535,7 @@ function projectRoot(ymap: Y.Map<any>, rootName: string): Record<string, unknown
  * sind genau das Konstrukt, dessen nebenlaeufige Erstanlage einen Unterbaum
  * verliert.
  */
-function collectRootOps<R extends Record<string, unknown>>(
+function collectRootOps<R extends object>(
   ymap: Y.Map<any>,
   rootName: string,
   fn: (root: R) => void,

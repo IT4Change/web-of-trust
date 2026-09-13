@@ -243,7 +243,7 @@ function rootJsonValue(value: unknown, path: string): unknown {
  * Entwurf, der nach dem Callback tot ist — ein festgehaltener Proxy kann das
  * Doc spaeter nicht an Validierung und Persistenz-Planung vorbei veraendern.
  */
-function collectRootOps<R extends Record<string, unknown>>(
+function collectRootOps<R extends object>(
   doc: Record<string, unknown> | undefined,
   name: string,
   fn: (root: R) => void,
@@ -442,7 +442,7 @@ class AutomergeSpaceHandle<T> implements SpaceHandle<T>, NamedRootsCapable {
    * verliert bei Automerge (getConflicts waehlt einen Gewinner) wie bei Yjs
    * einen Unterbaum (rls#353).
    */
-  getRoot<R extends Record<string, unknown> = Record<string, unknown>>(name: string): R {
+  getRoot<R extends object = Record<string, unknown>>(name: string): R {
     assertValidNamedRootName(name)
     const prefix = rootKeyPrefix(name)
     const doc = this.docHandle.doc() as Record<string, unknown> | undefined
@@ -466,7 +466,7 @@ class AutomergeSpaceHandle<T> implements SpaceHandle<T>, NamedRootsCapable {
     return out as R
   }
 
-  transactRoot<R extends Record<string, unknown> = Record<string, unknown>>(
+  transactRoot<R extends object = Record<string, unknown>>(
     name: string,
     fn: (root: R) => void,
     options?: TransactOptions,
@@ -483,7 +483,7 @@ class AutomergeSpaceHandle<T> implements SpaceHandle<T>, NamedRootsCapable {
    * damit ein `try`/`catch` um den Aufruf greift. Erst der durable Append ist
    * asynchron.
    */
-  transactRootDurable<R extends Record<string, unknown> = Record<string, unknown>>(
+  transactRootDurable<R extends object = Record<string, unknown>>(
     name: string,
     fn: (root: R) => void,
   ): Promise<void> {

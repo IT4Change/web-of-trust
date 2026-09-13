@@ -131,18 +131,25 @@ export interface SecureSelfLeaveCapable {
  *
  * `getDoc()` bleibt unveraendert (nur `data`) — Wurzeln liegen bewusst
  * ausserhalb von `T`. Konsumenten feature-detecten ueber hasNamedRoots.
+ *
+ * `R extends object` und NICHT `R extends Record<string, unknown>`: ein
+ * TypeScript-`interface` hat keine implizite Index-Signatur und erfuellt die
+ * Record-Schranke deshalb nicht — die Capability waere mit genau den Typen
+ * unbenutzbar, fuer die sie gedacht ist. Die Laufzeit-Invariante (Schluessel
+ * sind Strings, Werte reines JSON) traegt weiterhin die Adapter-Validierung,
+ * nicht die Typschranke.
  */
 export interface NamedRootsCapable {
   /** Lesbarer Schnappschuss (tiefe Kopie) der Wurzel; leer, wenn nie geschrieben. */
-  getRoot<R extends Record<string, unknown> = Record<string, unknown>>(name: string): R
+  getRoot<R extends object = Record<string, unknown>>(name: string): R
   /** Schreiben: Zuweisung ersetzt den Wert atomar, `delete` entfernt den Schluessel. */
-  transactRoot<R extends Record<string, unknown> = Record<string, unknown>>(
+  transactRoot<R extends object = Record<string, unknown>>(
     name: string,
     fn: (root: R) => void,
     options?: TransactOptions,
   ): void
   /** Wie transactRoot, mit der Durabilitaetsgarantie von transactDurable. */
-  transactRootDurable<R extends Record<string, unknown> = Record<string, unknown>>(
+  transactRootDurable<R extends object = Record<string, unknown>>(
     name: string,
     fn: (root: R) => void,
   ): Promise<void>

@@ -30,6 +30,20 @@ export function hasDeterministicPrivateSpace(value: unknown): value is Determini
   return typeof (value as DeterministicPrivateSpaceCapable | null)?.openOrCreateDeterministicPrivateSpace === 'function'
 }
 
+// --- Typprobe: NamedRootsCapable muss ein `interface` als R akzeptieren ---
+// Nur Typen, erzeugt keinen Code. rls#352 uebergibt ein `interface`; ein
+// interface hat KEINE implizite Index-Signatur und erfuellt
+// `Record<string, unknown>` deshalb nicht. Wird die Schranke in
+// NamedRootsCapable wieder darauf verengt, schlaegt `tsc --noEmit` HIER fehl —
+// nicht erst beim Verbraucher in einem anderen Repo.
+interface NamedRootsInterfaceProbe {
+  name: string
+  tags: string[]
+}
+declare const namedRootsProbe: NamedRootsCapable
+/** @internal Compile-Time-Zusage: `getRoot<SomeInterface>()` typisiert sauber. */
+export type NamedRootsAcceptsInterface = ReturnType<typeof namedRootsProbe.getRoot<NamedRootsInterfaceProbe>>
+
 /** Der `data`-Wurzeltyp des Space-Docs — nie als benannte Wurzel adressierbar. */
 const DATA_ROOT_NAME = 'data'
 

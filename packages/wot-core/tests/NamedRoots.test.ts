@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { hasNamedRoots, assertValidNamedRootName, isValidNamedRootName, toJsonValue, defineRootKey, freezeDeep } from '../src/application/spaces/replication-capabilities'
 import * as ports from '../src/ports'
-import type { SpaceHandle } from '../src/ports/ReplicationAdapter'
+import type { SpaceHandle, NamedRootsCapable } from '../src/ports/ReplicationAdapter'
 
 function stubHandle(extra: Record<string, unknown> = {}): SpaceHandle<unknown> {
   return {
@@ -74,6 +74,59 @@ describe('NamedRootsCapable', () => {
     expect(typeof (ports as Record<string, unknown>).hasNamedRoots).toBe('function')
     expect((ports as Record<string, unknown>).toJsonValue).toBeUndefined()
     expect((ports as Record<string, unknown>).assertValidNamedRootName).toBeUndefined()
+  })
+})
+
+// rls#352 uebergibt ein `interface`, kein `type`. Ein interface hat KEINE
+// implizite Index-Signatur und erfuellt `Record<string, unknown>` deshalb
+// nicht — die Schranke ist bewusst `object`. Der Test ist ein Typtest: er
+// schlaegt beim `tsc --noEmit`/Vitest-Transform fehl, wenn die Schranke
+// wieder enger wird.
+interface ProfileEntry {
+  name: string
+  tags: string[]
+}
+interface ProfilesRoot {
+  [did: `did:key:${string}`]: ProfileEntry
+}
+
+describe('NamedRootsCapable — Typschranke', () => {
+  it('akzeptiert einen interface-Typ als R', () => {
+    const calls: string[] = []
+    const handle = stubHandle({
+      getRoot: (name: string) => { calls.push(`get:${name}`); return {} },
+      transactRoot: (name: string, fn: (root: never) => void) => {
+        calls.push(`tx:${name}`)
+        fn({} as never)
+      },
+      transactRootDurable: async (name: string, fn: (root: never) => void) => {
+        calls.push(`durable:${name}`)
+        fn({} as never)
+      },
+    }) as SpaceHandle<unknown> & NamedRootsCapable
+
+    // Ein interface OHNE Index-Signatur …
+    const entry: ProfileEntry = handle.getRoot<ProfileEntry>('profiles')
+    expect(entry).toEqual({})
+    handle.transactRoot<ProfileEntry>('profiles', (root) => { root.name = 'x' })
+    // … und eines MIT gemusterter Index-Signatur.
+    const all: ProfilesRoot = handle.getRoot<ProfilesRoot>('profiles')
+    expect(all).toEqual({})
+    handle.transactRoot<ProfilesRoot>('profiles', (root) => {
+      root['did:key:zAlice'] = { name: 'Alice', tags: [] }
+    })
+    expect(calls).toEqual(['get:profiles', 'tx:profiles', 'get:profiles', 'tx:profiles'])
+  })
+
+  it('akzeptiert weiterhin Record und nutzt es als Default', async () => {
+    const handle = stubHandle({
+      getRoot: () => ({ a: 1 }),
+      transactRoot: (_name: string, fn: (root: never) => void) => fn({} as never),
+      transactRootDurable: async (_name: string, fn: (root: never) => void) => fn({} as never),
+    }) as SpaceHandle<unknown> & NamedRootsCapable
+    const bare: Record<string, unknown> = handle.getRoot('profiles')
+    expect(bare).toEqual({ a: 1 })
+    await handle.transactRootDurable<ProfileEntry>('profiles', (root) => { root.name = 'y' })
   })
 })
 
