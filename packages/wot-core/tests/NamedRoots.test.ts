@@ -68,9 +68,12 @@ describe('NamedRootsCapable', () => {
   })
 
   it('ships the guard from the published ports subpath', () => {
+    // Nur der Capability-Guard gehoert neben die drei bestehenden Guards in
+    // `ports`. Die Wurzel-Helfer sind Anwendungsschicht und werden bewusst NICHT
+    // ueber `ports` veroeffentlicht (siehe Kommentar in ports/index.ts).
     expect(typeof (ports as Record<string, unknown>).hasNamedRoots).toBe('function')
-    expect(typeof (ports as Record<string, unknown>).assertValidNamedRootName).toBe('function')
-    expect(typeof (ports as Record<string, unknown>).toJsonValue).toBe('function')
+    expect((ports as Record<string, unknown>).toJsonValue).toBeUndefined()
+    expect((ports as Record<string, unknown>).assertValidNamedRootName).toBeUndefined()
   })
 })
 

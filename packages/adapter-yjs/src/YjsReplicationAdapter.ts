@@ -38,7 +38,7 @@ import {
 } from '@web_of_trust/core/application'
 import type { LocalImpact, SecureRemovalDeps, LifecycleLease } from '@web_of_trust/core/application'
 import type { MembershipActivityCapable, SecureSelfLeaveCapable, NamedRootsCapable } from '@web_of_trust/core/ports'
-import { assertValidNamedRootName, assertValidNamedRootKey, toJsonValue, defineRootKey, freezeDeep } from '@web_of_trust/core/ports'
+import { assertValidNamedRootName, assertValidNamedRootKey, toJsonValue, defineRootKey, freezeDeep } from '@web_of_trust/core/application'
 import type {
   ProtocolCryptoAdapter, MemberUpdateSignal, SeenMemberUpdateSignal, SpaceInviteBody, KeyRotationBody,
   DidResolver, DidcommPlaintextMessage, InboxAckLocalOutcome, InboxMessageKind,
