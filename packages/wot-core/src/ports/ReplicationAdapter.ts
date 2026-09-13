@@ -116,6 +116,39 @@ export interface SecureSelfLeaveCapable {
 }
 
 /**
+ * Optional capability: benannte Wurzel-Maps neben `data`. Eine Wurzel wird vom
+ * CRDT selbst bereitgestellt, nie von einem Geraet angelegt: nebenlaeufige
+ * Erstschreibvorgaenge mehrerer Geraete kollidieren deshalb nie (in `data` ist
+ * jede verschachtelte Map ein Register, das bei nebenlaeufiger Erstanlage einen
+ * Unterbaum verliert). Werte je Schluessel sind reine JSON-Werte und werden als
+ * Ganzes ersetzt; Verschachtelung in CRDT-Typen gibt es in Wurzeln NICHT.
+ * Verschiedene Schluessel mergen konfliktfrei, denselben Schluessel darf nur ein
+ * Schreiber fuehren (LWW).
+ *
+ * `name` MUSS `^[a-z][A-Za-z0-9]*$` erfuellen und darf nicht `data` sein; Namen
+ * mit `_` sind dem Adapter vorbehalten (`_meta`, `_members`, …). Ein Verstoss
+ * wirft synchron (siehe assertValidNamedRootName).
+ *
+ * `getDoc()` bleibt unveraendert (nur `data`) — Wurzeln liegen bewusst
+ * ausserhalb von `T`. Konsumenten feature-detecten ueber hasNamedRoots.
+ */
+export interface NamedRootsCapable {
+  /** Lesbarer Schnappschuss (tiefe Kopie) der Wurzel; leer, wenn nie geschrieben. */
+  getRoot<R extends Record<string, unknown> = Record<string, unknown>>(name: string): R
+  /** Schreiben: Zuweisung ersetzt den Wert atomar, `delete` entfernt den Schluessel. */
+  transactRoot<R extends Record<string, unknown> = Record<string, unknown>>(
+    name: string,
+    fn: (root: R) => void,
+    options?: TransactOptions,
+  ): void
+  /** Wie transactRoot, mit der Durabilitaetsgarantie von transactDurable. */
+  transactRootDurable<R extends Record<string, unknown> = Record<string, unknown>>(
+    name: string,
+    fn: (root: R) => void,
+  ): Promise<void>
+}
+
+/**
  * Optional capability: open-or-create the private space whose genesis (id +
  * generation-0 keys) is deterministically derived from the identity (Sync 001).
  * Idempotent across devices / recovery / restart — no random-id discovery race.
@@ -125,5 +158,5 @@ export interface DeterministicPrivateSpaceCapable {
 }
 
 // The runtime guards for these capabilities (hasMembershipActivity,
-// hasSecureSelfLeave, hasDeterministicPrivateSpace) live in
+// hasSecureSelfLeave, hasDeterministicPrivateSpace, hasNamedRoots) live in
 // application/spaces/replication-capabilities.ts — ports stay type-only.
