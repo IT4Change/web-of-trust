@@ -37,7 +37,8 @@ import {
   openLifecycleLease, isSameAdmission,
 } from '@web_of_trust/core/application'
 import type { LocalImpact, SecureRemovalDeps, LifecycleLease } from '@web_of_trust/core/application'
-import type { MembershipActivityCapable, SecureSelfLeaveCapable } from '@web_of_trust/core/ports'
+import type { MembershipActivityCapable, SecureSelfLeaveCapable, NamedRootsCapable } from '@web_of_trust/core/ports'
+import { assertValidNamedRootName } from '@web_of_trust/core/ports'
 import type {
   ProtocolCryptoAdapter, MemberUpdateSignal, SeenMemberUpdateSignal, SpaceInviteBody, KeyRotationBody,
   DidResolver, DidcommPlaintextMessage, InboxAckLocalOutcome, InboxMessageKind,
@@ -253,7 +254,7 @@ interface YjsReplicationConfig {
 
 // --- YjsSpaceHandle ---
 
-class YjsSpaceHandle<T> implements SpaceHandle<T> {
+class YjsSpaceHandle<T> implements SpaceHandle<T>, NamedRootsCapable {
   readonly id: string
   private closed = false
   private remoteUpdateCallbacks = new Set<() => void>()
@@ -327,6 +328,52 @@ class YjsSpaceHandle<T> implements SpaceHandle<T> {
     await this.adapter._transactDurable(this.spaceState, () => {
       const proxy = createDataProxy<T>(this.spaceState.doc.getMap('data'))
       fn(proxy)
+    })
+    this.adapter._scheduleCompactImmediate(this.spaceState)
+    this.adapter._scheduleVaultImmediate(this.spaceState)
+  }
+
+  /**
+   * Benannte Wurzel-Maps (NamedRootsCapable). Eine Wurzel ist ein Yjs-Root-Type
+   * (`doc.getMap(name)`): sie existiert auf JEDEM Geraet ohne Erstanlage, also
+   * kann nebenlaeufiges erstes Schreiben zweier Geraete keinen Unterbaum
+   * verlieren — anders als eine verschachtelte Map unter `data`, die ein
+   * Register ist (rls#353).
+   */
+  getRoot<R extends Record<string, unknown> = Record<string, unknown>>(name: string): R {
+    assertValidNamedRootName(name)
+    return ymapToPlainJson(this.spaceState.doc.getMap(name)) as R
+  }
+
+  transactRoot<R extends Record<string, unknown> = Record<string, unknown>>(
+    name: string,
+    fn: (root: R) => void,
+    options?: TransactOptions,
+  ): void {
+    assertValidNamedRootName(name)
+    if (this.closed) return
+
+    this.spaceState.doc.transact(() => {
+      fn(createRootProxy<R>(this.spaceState.doc.getMap(name), name))
+    }, 'local')
+
+    if (options?.stream) {
+      this.adapter._scheduleCompactDebounced(this.spaceState)
+      this.adapter._scheduleVaultDebounced(this.spaceState)
+    } else {
+      this.adapter._scheduleCompactImmediate(this.spaceState)
+      this.adapter._scheduleVaultImmediate(this.spaceState)
+    }
+  }
+
+  async transactRootDurable<R extends Record<string, unknown> = Record<string, unknown>>(
+    name: string,
+    fn: (root: R) => void,
+  ): Promise<void> {
+    assertValidNamedRootName(name)
+    if (this.closed) throw new Error('SpaceHandle is closed')
+    await this.adapter._transactDurable(this.spaceState, () => {
+      fn(createRootProxy<R>(this.spaceState.doc.getMap(name), name))
     })
     this.adapter._scheduleCompactImmediate(this.spaceState)
     this.adapter._scheduleVaultImmediate(this.spaceState)
@@ -415,6 +462,89 @@ function ymapToPlain(ymap: Y.Map<any>): Record<string, any> {
     }
   })
   return obj
+}
+
+/**
+ * Plain-JSON-Projektion einer benannten Wurzel. Anders als {@link ymapToPlain}
+ * liefert sie eine TIEFE KOPIE: Werte in Wurzeln sind reine JSON-Werte, und
+ * `map.get()` gibt bei einem lokal geschriebenen Objekt dieselbe Referenz
+ * zurueck — eine Mutation der Rueckgabe wuerde sonst am CRDT vorbei wirken.
+ */
+function ymapToPlainJson(ymap: Y.Map<any>): Record<string, any> {
+  const obj: Record<string, any> = {}
+  ymap.forEach((value, key) => {
+    obj[key] = jsonClone(value, key)
+  })
+  return obj
+}
+
+/**
+ * Kanonische JSON-Kopie eines Wurzel-Werts. Wirft bei allem, was nicht
+ * JSON-serialisierbar ist (Funktionen, Symbole, BigInt, Zyklen) — die Pruefung
+ * laeuft VOR dem `set`, damit eine Wurzel nie einen Wert traegt, an dem ein
+ * anderes Geraet beim Projizieren scheitert (gleiche Regel wie appData).
+ */
+function jsonClone(value: unknown, key: string): any {
+  if (value === null) return null
+  if (typeof value !== 'object') {
+    if (typeof value === 'function' || typeof value === 'symbol' || typeof value === 'bigint') {
+      throw new TypeError(`named root value for "${key}" is not JSON-serializable`)
+    }
+    if (typeof value === 'number' && !Number.isFinite(value)) {
+      throw new TypeError(`named root value for "${key}" is not JSON-serializable (non-finite number)`)
+    }
+    return value
+  }
+  // A Y type must never end up inside a root — roots hold plain JSON only.
+  if (value instanceof Y.Map || value instanceof Y.Array || value instanceof Y.Text) {
+    throw new TypeError(`named root value for "${key}" must be plain JSON, not a CRDT type`)
+  }
+  let json: string | undefined
+  try {
+    json = JSON.stringify(value)
+  } catch (err) {
+    throw new TypeError(`named root value for "${key}" is not JSON-serializable: ${err instanceof Error ? err.message : String(err)}`)
+  }
+  if (json === undefined) throw new TypeError(`named root value for "${key}" is not JSON-serializable`)
+  return JSON.parse(json)
+}
+
+/**
+ * FLACHER Schreib-Proxy auf eine benannte Wurzel: jeder Schluessel ist ein
+ * eigenes Register mit einem reinen JSON-Wert. Bewusst KEIN Nachbau von
+ * {@link createDataProxy} — Kind-Y.Maps sind genau das Konstrukt, dessen
+ * nebenlaeufige Erstanlage einen Unterbaum verliert.
+ */
+function createRootProxy<R extends Record<string, unknown>>(ymap: Y.Map<any>, rootName: string): R {
+  return new Proxy({} as any, {
+    get(_target, prop: string | symbol) {
+      if (typeof prop !== 'string') return undefined
+      return jsonClone(ymap.get(prop), `${rootName}.${prop}`)
+    },
+    set(_target, prop: string | symbol, value: any) {
+      if (typeof prop !== 'string') throw new TypeError('named root keys must be strings')
+      if (value === undefined) { ymap.delete(prop); return true }
+      // Clone BEFORE the write so a non-JSON value aborts without a partial patch.
+      ymap.set(prop, jsonClone(value, `${rootName}.${prop}`))
+      return true
+    },
+    deleteProperty(_target, prop: string | symbol) {
+      if (typeof prop === 'string') ymap.delete(prop)
+      return true
+    },
+    has(_target, prop: string | symbol) {
+      return typeof prop === 'string' && ymap.has(prop)
+    },
+    ownKeys() {
+      return Array.from(ymap.keys())
+    },
+    getOwnPropertyDescriptor(_target, prop: string | symbol) {
+      if (typeof prop === 'string' && ymap.has(prop)) {
+        return { configurable: true, enumerable: true, writable: true, value: jsonClone(ymap.get(prop), `${rootName}.${prop}`) }
+      }
+      return undefined
+    },
+  }) as R
 }
 
 function createDataProxy<T>(ymap: Y.Map<any>): T {
