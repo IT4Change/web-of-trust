@@ -8,7 +8,7 @@ import {
   InMemoryKeyManagementAdapter,
   InMemoryDocLogStore,
 } from '@web_of_trust/core/adapters'
-import { hasNamedRoots } from '@web_of_trust/core/ports'
+import { hasNamedRoots } from '@web_of_trust/core/application'
 import type { NamedRootsCapable, SpaceHandle } from '@web_of_trust/core'
 import type { AppendLocalEntryParams } from '@web_of_trust/core/ports'
 import { AutomergeReplicationAdapter } from '../src/AutomergeReplicationAdapter'
