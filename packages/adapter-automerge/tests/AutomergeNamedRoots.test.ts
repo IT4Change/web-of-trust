@@ -278,6 +278,29 @@ describe('Automerge — benannte Wurzel-Maps je Space-Doc (NamedRootsCapable)', 
     handle.close()
   })
 
+  it('die Huelle laesst den data-Pfad unveraendert — auch Arrays und der durable Pfad', async () => {
+    const spaceId = await createSharedSpace()
+    const handle = await aliceAdapter.openSpace<TestDoc>(spaceId) as RootsHandle<TestDoc>
+    handle.transactRoot('profiles', (root) => { (root as Record<string, unknown>)['alice'] = { n: 'A' } })
+
+    // Verschachtelte Mutation und Array-Operationen durch die Huelle hindurch.
+    handle.transact((doc) => { doc.items['a'] = { title: 'one' } })
+    handle.transact((doc) => { doc.items['a'].title = 'two' })
+    handle.transact((doc) => { (doc as unknown as { list?: string[] }).list = ['x'] })
+    handle.transact((doc) => { (doc as unknown as { list: string[] }).list.push('y') })
+    handle.transact((doc) => { (doc as unknown as { list: string[] }).list.splice(0, 1) })
+    // Und derselbe Weg ueber den oeffentlichen durablen Pfad, mit vorhandener Wurzel.
+    await handle.transactDurable((doc) => { doc.items['b'] = { title: 'durable' } })
+
+    const doc = handle.getDoc() as TestDoc & { list: string[] }
+    expect(doc.items['a'].title).toBe('two')
+    expect(doc.items['b'].title).toBe('durable')
+    expect(doc.list).toEqual(['y'])
+    expect(Object.keys(doc).some((k) => k.startsWith('__root:'))).toBe(false)
+    expect(handle.getRoot('profiles')).toEqual({ alice: { n: 'A' } })
+    handle.close()
+  })
+
   // Fall 2: der eigentliche Fehlerfall (rls#353)
   it('nebenlaeufige Erstanlage: beide Geraete behalten BEIDE Schluessel', async () => {
     const spaceId = await createSharedSpace()
