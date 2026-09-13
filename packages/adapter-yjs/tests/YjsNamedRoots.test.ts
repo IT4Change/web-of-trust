@@ -270,16 +270,64 @@ describe('Yjs — benannte Wurzel-Maps je Space-Doc (NamedRootsCapable)', () => 
     handle.close()
   })
 
-  it('__proto__ bleibt ein eigener Wurzel-Schluessel', async () => {
+  it('prototyp-vergiftende Schluessel werden abgelehnt — auch verschachtelt', async () => {
+    // Weder Yjs noch Automerge tragen eine eigene __proto__-Property durch
+    // ihren Binaer-Codec. Ein Schluessel, der den Sync nicht ueberlebt, wird
+    // laut abgelehnt statt still verloren.
     const spaceId = await createSharedSpace()
     const handle = await aliceAdapter.openSpace<TestDoc>(spaceId) as RootsHandle<TestDoc>
-    handle.transactRoot('profiles', (root) => {
+    expect(() => handle.transactRoot('profiles', (root) => {
       ;(root as Record<string, unknown>)['__proto__'] = { hidden: 7 }
-    })
-    const snap = handle.getRoot('profiles') as Record<string, unknown>
-    expect(Object.keys(snap)).toEqual(['__proto__'])
-    expect((snap as { hidden?: unknown }).hidden).toBeUndefined()
+    })).toThrow(/__proto__/)
+    expect(() => handle.transactRoot('profiles', (root) => {
+      ;(root as Record<string, unknown>).a = JSON.parse('{"__proto__":{"hidden":7},"n":1}')
+    })).toThrow(/__proto__/)
+    expect(handle.getRoot('profiles')).toEqual({})
     expect(({} as { hidden?: unknown }).hidden).toBeUndefined()
+    handle.close()
+  })
+
+  it('ein aus dem Entwurf entkommener Wert kann das Doc nicht nachtraeglich veraendern', async () => {
+    const spaceId = await createSharedSpace()
+    const handle = await aliceAdapter.openSpace<TestDoc>(spaceId) as RootsHandle<TestDoc>
+
+    let leaked: Record<string, unknown> | undefined
+    handle.transactRoot('profiles', (root) => {
+      const r = root as Record<string, unknown>
+      r.a = { n: 1 }
+      leaked = r.a as Record<string, unknown>
+      // Ein Umweg ueber den gelesenen Wert darf die JSON-Pruefung nicht umgehen.
+      expect(() => { (r.a as Record<string, unknown>).bad = () => {} }).toThrow()
+    })
+    expect(() => { leaked!.n = 2 }).toThrow()
+    expect(handle.getRoot('profiles')).toEqual({ a: { n: 1 } })
+
+    // Auch ueber den Deskriptor-Pfad entkommt kein lebender Verweis.
+    handle.transactRoot('profiles', (root) => {
+      const descriptor = Object.getOwnPropertyDescriptor(root, 'a')!
+      expect(() => { (descriptor.value as Record<string, unknown>).n = 99 }).toThrow()
+    })
+    expect(handle.getRoot('profiles')).toEqual({ a: { n: 1 } })
+    handle.close()
+  })
+
+  it('getRoot liefert eine MUTIERBARE Kopie (der Entwurf bleibt eingefroren)', async () => {
+    const spaceId = await createSharedSpace()
+    const handle = await aliceAdapter.openSpace<TestDoc>(spaceId) as RootsHandle<TestDoc>
+    handle.transactRoot('profiles', (root) => { (root as Record<string, unknown>).a = { n: 1 } })
+    const snap = handle.getRoot<{ a: { n: number } }>('profiles')
+    snap.a.n = 99
+    expect(handle.getRoot<{ a: { n: number } }>('profiles').a.n).toBe(1)
+    handle.close()
+  })
+
+  it('sparse Arrays werden abgelehnt, statt als undefined zurueckzukommen', async () => {
+    const spaceId = await createSharedSpace()
+    const handle = await aliceAdapter.openSpace<TestDoc>(spaceId) as RootsHandle<TestDoc>
+    expect(() => handle.transactRoot('profiles', (root) => {
+      ;(root as Record<string, unknown>).a = Array(1)
+    })).toThrow()
+    expect(handle.getRoot('profiles')).toEqual({})
     handle.close()
   })
 

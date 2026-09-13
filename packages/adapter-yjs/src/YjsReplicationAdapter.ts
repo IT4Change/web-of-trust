@@ -38,7 +38,7 @@ import {
 } from '@web_of_trust/core/application'
 import type { LocalImpact, SecureRemovalDeps, LifecycleLease } from '@web_of_trust/core/application'
 import type { MembershipActivityCapable, SecureSelfLeaveCapable, NamedRootsCapable } from '@web_of_trust/core/ports'
-import { assertValidNamedRootName, toJsonValue, defineRootKey } from '@web_of_trust/core/ports'
+import { assertValidNamedRootName, assertValidNamedRootKey, toJsonValue, defineRootKey, freezeDeep } from '@web_of_trust/core/ports'
 import type {
   ProtocolCryptoAdapter, MemberUpdateSignal, SeenMemberUpdateSignal, SpaceInviteBody, KeyRotationBody,
   DidResolver, DidcommPlaintextMessage, InboxAckLocalOutcome, InboxMessageKind,
@@ -487,9 +487,14 @@ function isYType(candidate: object): boolean {
   return candidate instanceof Y.AbstractType
 }
 
-/** Kanonische, tiefe JSON-Kopie eines Wurzel-Werts (validiert auf jeder Ebene). */
+/**
+ * Kanonische, tiefe JSON-Kopie eines Wurzel-Werts (validiert auf jeder Ebene),
+ * TIEF EINGEFROREN. Nur so kann ein Wert den Entwurf verlassen, ohne dass eine
+ * spaetere Mutation an Validierung und Persistenz-Planung vorbei ins Doc
+ * durchschlaegt.
+ */
 function rootJsonValue(value: unknown, path: string): unknown {
-  return toJsonValue(value, path, isYType)
+  return freezeDeep(toJsonValue(value, path, isYType))
 }
 
 /**
@@ -501,7 +506,17 @@ function rootJsonValue(value: unknown, path: string): unknown {
 function projectRoot(ymap: Y.Map<any>, rootName: string): Record<string, unknown> {
   const obj: Record<string, unknown> = {}
   ymap.forEach((value, key) => {
-    defineRootKey(obj, key, rootJsonValue(value, `${rootName}.${key}`))
+    // Die Schreibseite deckt UNSERE Schreibvorgaenge ab — ein fremdes Geraet
+    // kann trotzdem etwas Unprojizierbares ins Doc legen. Solche Schluessel
+    // ueberspringen, statt die ganze Projektion (und damit die App) zu werfen.
+    let projected: unknown
+    try {
+      projected = toJsonValue(value, `${rootName}.${key}`, isYType)
+    } catch (err) {
+      console.warn(`[YjsReplication] named root "${rootName}": skipping unprojectable key "${key}":`, err instanceof Error ? err.message : err)
+      return
+    }
+    defineRootKey(obj, key, projected)
   })
   return obj
 }
@@ -526,12 +541,27 @@ function collectRootOps<R extends Record<string, unknown>>(
   fn: (root: R) => void,
 ): RootOp[] {
   const ops = new Map<string, RootOp>()
+  // Der CRDT-Zustand kann sich waehrend des Callbacks nicht aendern (ein Tick,
+  // ein Thread) — einmal geklonte Bestandswerte sind also stabil. Der Cache
+  // haelt Object.keys()/Deskriptor-Zugriffe davon ab, grosse Werte mehrfach
+  // tief zu kopieren.
+  const readCache = new Map<string, unknown>()
   let active = true
+  const has = (key: string): boolean => {
+    const pending = ops.get(key)
+    if (pending) return !('delete' in pending)
+    return ymap.has(key)
+  }
   const read = (key: string): unknown => {
     const pending = ops.get(key)
+    // Der Op-Wert ist bereits geklont UND eingefroren — er darf hier direkt
+    // heraus, ohne dass der Aufrufer ihn nachtraeglich veraendern koennte.
     if (pending) return 'delete' in pending ? undefined : pending.value
+    if (readCache.has(key)) return readCache.get(key)
     if (!ymap.has(key)) return undefined
-    return rootJsonValue(ymap.get(key), `${rootName}.${key}`)
+    const value = rootJsonValue(ymap.get(key), `${rootName}.${key}`)
+    readCache.set(key, value)
+    return value
   }
   const keys = (): string[] => {
     const all = new Set<string>(ymap.keys())
@@ -541,6 +571,7 @@ function collectRootOps<R extends Record<string, unknown>>(
     }
     return Array.from(all)
   }
+
   const guard = () => {
     if (!active) throw new Error('named root draft is no longer writable — it is only valid inside transactRoot')
   }
@@ -552,6 +583,7 @@ function collectRootOps<R extends Record<string, unknown>>(
     set(_t, prop: string | symbol, value: unknown) {
       guard()
       if (typeof prop !== 'string') throw new TypeError('named root keys must be strings')
+      assertValidNamedRootKey(prop, rootName)
       if (value === undefined) { ops.set(prop, { key: prop, delete: true }); return true }
       // Validate + clone BEFORE anything is recorded: a throw leaves no partial patch.
       ops.set(prop, { key: prop, value: rootJsonValue(value, `${rootName}.${prop}`) })
@@ -563,16 +595,14 @@ function collectRootOps<R extends Record<string, unknown>>(
       return true
     },
     has(_t, prop: string | symbol) {
-      return typeof prop === 'string' && read(prop) !== undefined
+      return typeof prop === 'string' && has(prop)
     },
     ownKeys() {
       return keys()
     },
     getOwnPropertyDescriptor(_t, prop: string | symbol) {
-      if (typeof prop !== 'string') return undefined
-      const value = read(prop)
-      if (value === undefined) return undefined
-      return { configurable: true, enumerable: true, writable: true, value }
+      if (typeof prop !== 'string' || !has(prop)) return undefined
+      return { configurable: true, enumerable: true, writable: true, value: read(prop) }
     },
   }) as R
 

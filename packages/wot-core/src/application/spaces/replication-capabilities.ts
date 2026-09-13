@@ -87,6 +87,32 @@ function defineOwn(target: Record<string, unknown>, key: string, value: unknown)
 }
 
 /**
+ * Schluessel, die eine Projektion am Prototyp statt am Objekt landen lassen
+ * wuerden. Dieselbe Liste wie bei appData — und zusaetzlich unvermeidbar:
+ * WEDER Yjs NOCH Automerge tragen eine eigene `__proto__`-Property durch ihren
+ * Binaer-Codec (Automerge verliert sie schon beim Schreiben, Yjs nach
+ * encodeStateAsUpdate/applyUpdate). Ein Schluessel, der den Sync nicht
+ * ueberlebt, darf gar nicht erst geschrieben werden — lieber laut ablehnen als
+ * still verlieren.
+ */
+const FORBIDDEN_ROOT_KEYS = new Set(['__proto__', 'constructor', 'prototype'])
+
+/** Wirft, wenn `key` als Schluessel in einer benannten Wurzel unzulaessig ist. */
+export function assertValidNamedRootKey(key: string, path: string): void {
+  if (FORBIDDEN_ROOT_KEYS.has(key)) {
+    throw new TypeError(`named root key "${key}" at "${path}" is not allowed (it does not survive the CRDT codec)`)
+  }
+}
+
+/** Friert einen bereits geklonten JSON-Wert tief ein — er verlaesst den Entwurf nur so. */
+export function freezeDeep<V>(value: V): V {
+  if (value === null || typeof value !== 'object') return value
+  Object.freeze(value)
+  for (const entry of Object.values(value as Record<string, unknown>)) freezeDeep(entry)
+  return value
+}
+
+/**
  * Kanonische, TIEFE JSON-Kopie eines Wurzel-Werts — und zugleich die
  * Validierung des Wertvertrags benannter Wurzeln.
  *
@@ -137,12 +163,18 @@ export function toJsonValue(
   seen.add(obj)
   try {
     if (Array.isArray(obj)) {
-      return obj.map((entry, index) => {
+      // Bewusst nicht `map`: das ueberspringt Loecher in sparse Arrays, und ein
+      // Loch waere nach dem Binaer-Roundtrip ein `undefined` — also genau der
+      // Wert, den die Regel eine Zeile weiter ablehnt.
+      const out: unknown[] = []
+      for (let index = 0; index < obj.length; index++) {
+        const entry = obj[index]
         if (entry === undefined) {
-          throw new TypeError(`named root value at "${path}[${index}]" is not JSON-serializable (undefined)`)
+          throw new TypeError(`named root value at "${path}[${index}]" is not JSON-serializable (undefined or a hole)`)
         }
-        return toJsonValue(entry, `${path}[${index}]`, isForeign, seen)
-      })
+        out.push(toJsonValue(entry, `${path}[${index}]`, isForeign, seen))
+      }
+      return out
     }
     const proto = Object.getPrototypeOf(obj)
     if (proto !== null && proto !== Object.prototype) {
@@ -150,6 +182,7 @@ export function toJsonValue(
     }
     const out: Record<string, unknown> = {}
     for (const key of Object.keys(obj as Record<string, unknown>)) {
+      assertValidNamedRootKey(key, path)
       const entry = (obj as Record<string, unknown>)[key]
       if (entry === undefined) continue // JSON.stringify drops these too
       defineOwn(out, key, toJsonValue(entry, `${path}.${key}`, isForeign, seen))

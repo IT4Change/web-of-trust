@@ -5,6 +5,7 @@ import { InMemoryMessagingAdapter, InMemorySpaceMetadataStorage, InMemoryKeyMana
 import { VaultClient, base64ToUint8 } from '@web_of_trust/core/adapters'
 import { createCapability } from '@web_of_trust/core/application'
 import { createResourceRef } from '@web_of_trust/core/types'
+import type { NamedRootsCapable, SpaceHandle } from '@web_of_trust/core'
 import { AutomergeReplicationAdapter } from '../src/AutomergeReplicationAdapter'
 
 // Simple doc schema for testing
@@ -343,6 +344,57 @@ describe('Vault Integration', () => {
       expect(doc.items).toEqual(['from-device-a'])
 
       handle.close()
+      await adapterB.stop()
+    })
+
+    // rls#353: eine benannte Wurzel liegt als flache `__root:`-Schluessel im
+    // Doc-Root. Der Vault-Pfad serialisiert das ganze Doc (und die Kompaktierung
+    // macht einen JSON-Roundtrip) — beides muss die Wurzel mittragen.
+    it('restores a named root from the vault on a new device', async () => {
+      vi.setConfig({ testTimeout: 15_000 })
+      const messagingA = new InMemoryMessagingAdapter()
+      await messagingA.connect(alice.getDid())
+      const keyManagementA = new InMemoryKeyManagementAdapter()
+      const metadataA = new InMemorySpaceMetadataStorage()
+      const adapterA = new AutomergeReplicationAdapter({
+        identity: alice,
+        messaging: messagingA,
+        keyManagement: keyManagementA,
+        metadataStorage: metadataA,
+        vaultUrl: 'https://test-vault.local',
+      })
+      await adapterA.start()
+      const space = await adapterA.createSpace<TestDoc>('shared', { counter: 1, items: [] })
+      const handleA = await adapterA.openSpace<TestDoc>(space.id) as SpaceHandle<TestDoc> & NamedRootsCapable
+      handleA.transactRoot('profiles', (root) => {
+        ;(root as Record<string, unknown>)['alice'] = { n: 'A', deep: { list: [1, 2] } }
+      })
+      await new Promise(r => setTimeout(r, 300))
+      const savedMeta = await metadataA.loadAllSpaceMetadata()
+      const savedKeys = await metadataA.loadGroupKeys(space.id)
+      handleA.close()
+      await adapterA.stop()
+
+      // Frisches Geraet: nur Metadaten + Keys, kein lokaler Doc-Zustand.
+      const messagingB = new InMemoryMessagingAdapter()
+      await messagingB.connect(alice.getDid())
+      const metadataB = new InMemorySpaceMetadataStorage()
+      for (const meta of savedMeta) await metadataB.saveSpaceMetadata(meta)
+      for (const key of savedKeys) await metadataB.saveGroupKey(key)
+      const adapterB = new AutomergeReplicationAdapter({
+        identity: alice,
+        messaging: messagingB,
+        keyManagement: new InMemoryKeyManagementAdapter(),
+        metadataStorage: metadataB,
+        vaultUrl: 'https://test-vault.local',
+      })
+      await adapterB.start()
+
+      const handleB = await adapterB.openSpace<TestDoc>(space.id) as SpaceHandle<TestDoc> & NamedRootsCapable
+      expect(handleB.getRoot('profiles')).toEqual({ alice: { n: 'A', deep: { list: [1, 2] } } })
+      // Die Wurzel gehoert weiterhin NICHT zu T.
+      expect(Object.keys(handleB.getDoc() as Record<string, unknown>).some((k) => k.startsWith('__root:'))).toBe(false)
+      handleB.close()
       await adapterB.stop()
     })
 

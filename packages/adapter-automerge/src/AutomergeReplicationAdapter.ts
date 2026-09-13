@@ -10,7 +10,7 @@ import {
   buildSpaceInviteBody, applySpaceInviteBody, buildKeyRotationBody, applyKeyRotationBody,
   deliverInboxMessage, receiveInboxMessage,
   runTwoPhaseRemoval, recoverPendingRemovals, pendingRemovalWriteExpectation,
-  openLifecycleLease, isSameAdmission, assertValidNamedRootName, toJsonValue, defineRootKey,
+  openLifecycleLease, isSameAdmission, assertValidNamedRootName, assertValidNamedRootKey, toJsonValue, defineRootKey, freezeDeep,
 } from '@web_of_trust/core/application'
 import type { LocalImpact, SecureRemovalDeps, LifecycleLease } from '@web_of_trust/core/application'
 import type {
@@ -233,7 +233,7 @@ type RootOp = { key: string; value: unknown } | { key: string; delete: true }
  * — loest zugleich Automerge-Proxies in reines JSON auf.
  */
 function rootJsonValue(value: unknown, path: string): unknown {
-  return value === undefined ? undefined : toJsonValue(value, path)
+  return value === undefined ? undefined : freezeDeep(toJsonValue(value, path))
 }
 
 /**
@@ -250,13 +250,27 @@ function collectRootOps<R extends Record<string, unknown>>(
 ): RootOp[] {
   const prefix = rootKeyPrefix(name)
   const ops = new Map<string, RootOp>()
+  // Waehrend des Callbacks aendert sich das Doc nicht — einmal geklonte
+  // Bestandswerte sind stabil und werden gecacht, damit Object.keys() und
+  // Deskriptor-Zugriffe grosse Werte nicht mehrfach tief kopieren.
+  const readCache = new Map<string, unknown>()
   let active = true
-  const has = (key: string) => !!doc && Object.prototype.hasOwnProperty.call(doc, prefix + key)
+  const stored = (key: string) => !!doc && Object.prototype.hasOwnProperty.call(doc, prefix + key)
+  const has = (key: string): boolean => {
+    const pending = ops.get(key)
+    if (pending) return !('delete' in pending)
+    return stored(key)
+  }
   const read = (key: string): unknown => {
     const pending = ops.get(key)
+    // Op-Werte sind bereits geklont UND eingefroren — eine spaetere Mutation
+    // des herausgegebenen Werts kann nicht mehr ins Doc durchschlagen.
     if (pending) return 'delete' in pending ? undefined : pending.value
-    if (!has(key)) return undefined
-    return rootJsonValue(doc![prefix + key], `${name}.${key}`)
+    if (readCache.has(key)) return readCache.get(key)
+    if (!stored(key)) return undefined
+    const value = rootJsonValue(doc![prefix + key], `${name}.${key}`)
+    readCache.set(key, value)
+    return value
   }
   const keys = (): string[] => {
     const all = new Set<string>(
@@ -279,8 +293,9 @@ function collectRootOps<R extends Record<string, unknown>>(
     set(_t, prop: string | symbol, value: unknown) {
       guard()
       if (typeof prop !== 'string') throw new TypeError('named root keys must be strings')
+      assertValidNamedRootKey(prop, name)
       if (value === undefined) { ops.set(prop, { key: prop, delete: true }); return true }
-      ops.set(prop, { key: prop, value: toJsonValue(value, `${name}.${prop}`) })
+      ops.set(prop, { key: prop, value: rootJsonValue(value, `${name}.${prop}`) })
       return true
     },
     deleteProperty(_t, prop: string | symbol) {
@@ -289,16 +304,14 @@ function collectRootOps<R extends Record<string, unknown>>(
       return true
     },
     has(_t, prop: string | symbol) {
-      return typeof prop === 'string' && read(prop) !== undefined
+      return typeof prop === 'string' && has(prop)
     },
     ownKeys() {
       return keys()
     },
     getOwnPropertyDescriptor(_t, prop: string | symbol) {
-      if (typeof prop !== 'string') return undefined
-      const value = read(prop)
-      if (value === undefined) return undefined
-      return { configurable: true, enumerable: true, writable: true, value }
+      if (typeof prop !== 'string' || !has(prop)) return undefined
+      return { configurable: true, enumerable: true, writable: true, value: read(prop) }
     },
   }) as R
 
@@ -384,8 +397,18 @@ class AutomergeSpaceHandle<T> implements SpaceHandle<T>, NamedRootsCapable {
     if (!doc) return out as R
     for (const key of Object.keys(doc)) {
       if (!key.startsWith(prefix)) continue
-      // defineRootKey: `__proto__` ist ein zulaessiger Wurzel-SCHLUESSEL.
-      defineRootKey(out, key.slice(prefix.length), toJsonValue(doc[key], key))
+      // Die Schreibseite deckt UNSERE Schreibvorgaenge ab — ein fremdes Geraet
+      // kann trotzdem etwas Unprojizierbares ins Doc legen. Solche Schluessel
+      // ueberspringen, statt die ganze Projektion zu werfen. defineRootKey
+      // haelt einen feindlichen Schluessel zudem vom Prototyp fern.
+      let projected: unknown
+      try {
+        projected = toJsonValue(doc[key], key)
+      } catch (err) {
+        console.warn(`[AutomergeReplication] named root "${name}": skipping unprojectable key "${key}":`, err instanceof Error ? err.message : err)
+        continue
+      }
+      defineRootKey(out, key.slice(prefix.length), projected)
     }
     return out as R
   }

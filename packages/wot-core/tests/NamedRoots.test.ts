@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { hasNamedRoots, assertValidNamedRootName, isValidNamedRootName, toJsonValue, defineRootKey } from '../src/application/spaces/replication-capabilities'
+import { hasNamedRoots, assertValidNamedRootName, isValidNamedRootName, toJsonValue, defineRootKey, freezeDeep } from '../src/application/spaces/replication-capabilities'
 import * as ports from '../src/ports'
 import type { SpaceHandle } from '../src/ports/ReplicationAdapter'
 
@@ -111,15 +111,33 @@ describe('toJsonValue — Wertvertrag benannter Wurzeln', () => {
     expect(() => toJsonValue({ y: foreign }, 'root', (c) => c instanceof Foreign)).toThrow(/CRDT/)
   })
 
-  it('__proto__ bleibt ein eigener Schluessel und vergiftet keinen Prototyp', () => {
-    const clone = toJsonValue({ ['__proto__']: { hidden: 7 } }, 'root') as Record<string, unknown>
-    expect(Object.keys(clone)).toEqual(['__proto__'])
-    expect((clone as { hidden?: unknown }).hidden).toBeUndefined()
-    expect(({} as { hidden?: unknown }).hidden).toBeUndefined()
+  it('lehnt prototyp-vergiftende Schluessel auf jeder Ebene ab', () => {
+    // Weder Yjs noch Automerge tragen eine eigene __proto__-Property durch
+    // ihren Binaer-Codec — also laut ablehnen statt still verlieren.
+    expect(() => toJsonValue({ a: JSON.parse('{"__proto__":{"hidden":7}}') }, 'root')).toThrow(/__proto__/)
+    expect(() => toJsonValue(JSON.parse('{"constructor":1}'), 'root')).toThrow(/constructor/)
+    expect(() => toJsonValue({ deep: { list: [JSON.parse('{"prototype":1}')] } }, 'root')).toThrow(/prototype/)
+  })
 
+  it('defineRootKey schuetzt die Projektion, falls ein fremdes Geraet so einen Schluessel schreibt', () => {
     const projection: Record<string, unknown> = {}
     defineRootKey(projection, '__proto__', { hidden: 7 })
     expect(Object.keys(projection)).toEqual(['__proto__'])
     expect((projection as { hidden?: unknown }).hidden).toBeUndefined()
+    expect(({} as { hidden?: unknown }).hidden).toBeUndefined()
+  })
+
+  it('lehnt Loecher in sparse Arrays ab', () => {
+    expect(() => toJsonValue({ a: Array(1) }, 'root')).toThrow(/root\.a\[0\]/)
+    const holed = [1, 2, 3]
+    delete holed[1]
+    expect(() => toJsonValue({ a: holed }, 'root')).toThrow(/root\.a\[1\]/)
+  })
+
+  it('freezeDeep macht einen Klon auf allen Ebenen unveraenderlich', () => {
+    const frozen = freezeDeep(toJsonValue({ a: { b: [1, { c: 2 }] } }, 'root')) as Record<string, never>
+    expect(() => { (frozen as Record<string, unknown>).x = 1 }).toThrow()
+    expect(Object.isFrozen(frozen.a)).toBe(true)
+    expect(Object.isFrozen((frozen.a as Record<string, unknown>).b)).toBe(true)
   })
 })
