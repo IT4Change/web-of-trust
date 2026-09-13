@@ -220,6 +220,25 @@ export interface AutomergeReplicationAdapterConfig {
 /** Wire-Praefix der benannten Wurzeln im Automerge-Doc-Root: `__root:<name>:<key>`. */
 const NAMED_ROOT_PREFIX = '__root:'
 
+/**
+ * Wirft, wenn ein App-Doc auf seiner WURZELEBENE einen Schluessel mit dem
+ * reservierten Praefix traegt. Nur dort hat der Praefix Bedeutung — tiefer im
+ * Doc ist `__root:…` ein gewoehnlicher Schluessel und bleibt erlaubt.
+ *
+ * Der Grund ist die Zusage, dass `getDoc()` unveraendert bleibt: `getDoc()`
+ * blendet Wurzelschluessel aus, also darf kein Schreibpfad App-Daten unter
+ * diesem Praefix ANNEHMEN und sie unmittelbar danach verstecken. Lieber laut
+ * ablehnen als still umdeuten (Loop-Review web-of-trust#370).
+ */
+function assertNoReservedRootKeys(doc: unknown, where: string): void {
+  if (!doc || typeof doc !== 'object' || Array.isArray(doc)) return
+  const offending = Object.keys(doc as Record<string, unknown>).filter((key) => key.startsWith(NAMED_ROOT_PREFIX))
+  if (offending.length === 0) return
+  throw new TypeError(
+    `${where}: key${offending.length > 1 ? 's' : ''} ${offending.map((k) => `"${k}"`).join(', ')} use${offending.length > 1 ? '' : 's'} the reserved named-root prefix "${NAMED_ROOT_PREFIX}" — use transactRoot instead`,
+  )
+}
+
 /** Schluesselpraefix EINER Wurzel. `name` erfuellt `^[a-z][A-Za-z0-9]*$`, traegt also nie ein `:`. */
 function rootKeyPrefix(name: string): string {
   return `${NAMED_ROOT_PREFIX}${name}:`
@@ -1281,7 +1300,10 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
     return this.state
   }
 
-  async createSpace<T>(type: 'personal' | 'shared', initialDoc: T, meta?: { name?: string; description?: string; appTag?: string; modules?: string[] }): Promise<SpaceInfo> {
+  createSpace<T>(type: 'personal' | 'shared', initialDoc: T, meta?: { name?: string; description?: string; appTag?: string; modules?: string[] }): Promise<SpaceInfo> {
+    // Bewusst NICHT `async`: die Praefix-Pruefung wirft synchron, bevor
+    // irgendetwas angelegt oder geschrieben wird — wie bei transactRoot.
+    assertNoReservedRootKeys(initialDoc, 'createSpace initial doc')
     // The lease MUST be opened synchronously at the public entry point — before
     // any await — so a flight parked in an early await cannot re-issue itself a
     // lease from a later session (see openOrCreateDeterministicPrivateSpace).
@@ -1306,6 +1328,7 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
    * being reported as complete. Concurrent calls share one flight.
    */
   openOrCreateDeterministicPrivateSpace<T>(initialDoc: T, meta?: { name?: string; description?: string; appTag?: string; modules?: string[] }): Promise<SpaceInfo> {
+    assertNoReservedRootKeys(initialDoc, 'openOrCreateDeterministicPrivateSpace initial doc')
     if (this.deterministicPrivateSpaceFlight) return this.deterministicPrivateSpaceFlight
     // The lease is issued SYNCHRONOUSLY here, before the first await of the flight.
     // Opening it any later (inside createSpaceWithId) let a flight parked in the
@@ -1373,6 +1396,10 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
     // Set initial app doc + shared metadata in the doc's _meta object. appTag
     // included: invited members must inherit cross-app isolation (the invite
     // carries no plaintext spaceInfo).
+    // Zweite Linie direkt am Schreibvorgang: die oeffentlichen Eingaenge pruefen
+    // bereits, aber jeder kuenftige interne Aufrufer von createSpaceWithId soll
+    // hier auflaufen, statt den Praefix still ins Doc zu tragen.
+    assertNoReservedRootKeys(initialDoc, 'createSpace initial doc')
     docHandle?.change((d: any) => {
       Object.assign(d, initialDoc)
       d._meta = d._meta ?? {}

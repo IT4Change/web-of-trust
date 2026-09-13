@@ -105,6 +105,68 @@ describe('Automerge — benannte Wurzel-Maps je Space-Doc (NamedRootsCapable)', 
     return space.id
   }
 
+  // Loop-Review web-of-trust#370: der reservierte Praefix darf NICHT still
+  // App-Daten schlucken. Die Gegenprobe des Reviews: ein neu angelegtes Doc mit
+  // `__root:profiles:legacy` kam aus getDoc() als `undefined` zurueck.
+  describe('reservierter Praefix im data-Pfad', () => {
+    const RESERVED = '__root:profiles:legacy'
+
+    it('createSpace lehnt einen reservierten Wurzelschluessel im Initial-Doc synchron ab', async () => {
+      const before = (await aliceAdapter.getSpaces()).length
+      expect(() => aliceAdapter.createSpace('shared', { [RESERVED]: { text: 'existing application value' } }, { name: 'Legacy' }))
+        .toThrow(/__root:/)
+      await wait(150)
+      expect((await aliceAdapter.getSpaces()).length).toBe(before)
+      expect((await aliceAdapter.getSpaces()).some((s) => s.name === 'Legacy')).toBe(false)
+    })
+
+    it('openOrCreateDeterministicPrivateSpace lehnt ihn ebenfalls ab', async () => {
+      expect(() => aliceAdapter.openOrCreateDeterministicPrivateSpace({ [RESERVED]: 1 }))
+        .toThrow(/__root:/)
+    })
+
+    it('transact und transactDurable lehnen ihn ab und lassen das Doc unveraendert', async () => {
+      const spaceId = await createSharedSpace()
+      const handle = await aliceAdapter.openSpace<TestDoc>(spaceId)
+      handle.transact((doc) => { doc.items['keep'] = { title: 'keep' } })
+
+      expect(() => handle.transact((doc) => {
+        ;(doc as unknown as Record<string, unknown>)[RESERVED] = { text: 'x' }
+      })).toThrow(/named root/)
+      // Auch der bequeme Weg ueber Object.assign geht durch dieselbe Falle.
+      expect(() => handle.transact((doc) => {
+        Object.assign(doc as unknown as Record<string, unknown>, { [RESERVED]: { text: 'x' } })
+      })).toThrow(/named root/)
+      await expect(handle.transactDurable((doc) => {
+        ;(doc as unknown as Record<string, unknown>)[RESERVED] = { text: 'x' }
+      })).rejects.toThrow(/named root/)
+
+      const doc = handle.getDoc() as TestDoc & Record<string, unknown>
+      expect(doc.items['keep']?.title).toBe('keep')
+      expect(doc[RESERVED]).toBeUndefined()
+      expect(handle.getRoot('profiles')).toEqual({})
+      handle.close()
+    })
+
+    it('verschachtelt ist der Praefix erlaubt — dort hat er keine Bedeutung', async () => {
+      const space = await aliceAdapter.createSpace<Record<string, unknown>>(
+        'shared', { nested: { [RESERVED]: 'harmlos' } }, { name: 'Nested' },
+      )
+      const handle = await aliceAdapter.openSpace<Record<string, unknown>>(space.id)
+      expect((handle.getDoc().nested as Record<string, unknown>)[RESERVED]).toBe('harmlos')
+      handle.transact((doc) => { (doc.nested as Record<string, unknown>)[RESERVED] = 'auch hier' })
+      expect((handle.getDoc().nested as Record<string, unknown>)[RESERVED]).toBe('auch hier')
+      handle.close()
+    })
+
+    it('ein gueltiges Initial-Doc laeuft unveraendert durch', async () => {
+      const space = await aliceAdapter.createSpace<TestDoc>('shared', { items: { a: { title: 'ok' } } }, { name: 'Fine' })
+      const handle = await aliceAdapter.openSpace<TestDoc>(space.id)
+      expect(handle.getDoc().items['a'].title).toBe('ok')
+      handle.close()
+    })
+  })
+
   it('das Space-Handle bietet die Capability an', async () => {
     const spaceId = await createSharedSpace()
     const handle = await aliceAdapter.openSpace<TestDoc>(spaceId)

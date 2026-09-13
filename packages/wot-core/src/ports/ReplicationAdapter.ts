@@ -132,6 +132,20 @@ export interface SecureSelfLeaveCapable {
  * `getDoc()` bleibt unveraendert (nur `data`) — Wurzeln liegen bewusst
  * ausserhalb von `T`. Konsumenten feature-detecten ueber hasNamedRoots.
  *
+ * Namensraum: der Yjs-Adapter braucht in `data` KEIN reserviertes Muster —
+ * eine Wurzel ist dort ein eigener Y-Root-Type neben `data`, also gibt es
+ * innerhalb von `data` gar keinen Namensraum, mit dem sie kollidieren koennte.
+ * Der Automerge-Adapter hat keine benannten Wurzeltypen und legt Wurzeln als
+ * praefixierte Schluessel im Doc-Root ab; dort ist der Praefix reserviert und
+ * wird auf JEDEM `data`-Schreibpfad (createSpace-Initial-Doc, transact,
+ * transactDurable) synchron abgelehnt, bevor etwas geschrieben wird — lieber
+ * laut ablehnen als App-Daten annehmen und danach verstecken.
+ *
+ * BEKANNTE GRENZE: ein Doc, das ein FREMDES Geraet mit so einem Schluessel
+ * schon traegt (nur aus Altsoftware moeglich), wird beim Automerge-Adapter in
+ * `getDoc()` weiterhin ausgeblendet. Das bleibt bewusst so: den Schluessel beim
+ * Import stillschweigend umzuschreiben waere eine Aenderung an fremden Daten.
+ *
  * `R extends object` und NICHT `R extends Record<string, unknown>`: ein
  * TypeScript-`interface` hat keine implizite Index-Signatur und erfuellt die
  * Record-Schranke deshalb nicht — die Capability waere mit genau den Typen
