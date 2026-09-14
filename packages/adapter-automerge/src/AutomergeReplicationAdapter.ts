@@ -243,6 +243,35 @@ function assertNoReservedRootKeys(doc: unknown, where: string): void {
   )
 }
 
+/** Formatmarke eines Wurzel-Umschlags. */
+const NAMED_ROOT_ENVELOPE_MARKER = '__namedRoot'
+const NAMED_ROOT_ENVELOPE_VERSION = 1
+
+/**
+ * Ein Wurzeleintrag liegt NICHT als nackter Wert im Doc, sondern als Umschlag
+ * `{ __namedRoot: 1, value: <json> }`. Der Praefix allein reicht als Kennung
+ * nicht: ein Doc aus einer frueheren Version kann einen APP-Schluessel unter
+ * demselben Praefix tragen. Ein Speicherplatz gilt nur dann als Wurzeleintrag,
+ * wenn Praefix UND Umschlag-Form stimmen — alles andere ist Altbestand und
+ * bleibt App-Daten (Loop-Review web-of-trust#370).
+ */
+function isNamedRootEnvelope(stored: unknown): boolean {
+  if (stored === null || typeof stored !== 'object' || Array.isArray(stored)) return false
+  const keys = Object.keys(stored as Record<string, unknown>)
+  if (keys.length !== 2 || !keys.includes(NAMED_ROOT_ENVELOPE_MARKER) || !keys.includes('value')) return false
+  return (stored as Record<string, unknown>)[NAMED_ROOT_ENVELOPE_MARKER] === NAMED_ROOT_ENVELOPE_VERSION
+}
+
+/** Packt einen bereits validierten JSON-Wert in den Umschlag. */
+function wrapNamedRootValue(value: unknown): Record<string, unknown> {
+  return { [NAMED_ROOT_ENVELOPE_MARKER]: NAMED_ROOT_ENVELOPE_VERSION, value }
+}
+
+/** Der Nutzwert eines Umschlags. Nur auf einem Umschlag aufrufen. */
+function unwrapNamedRootValue(stored: unknown): unknown {
+  return (stored as Record<string, unknown>).value
+}
+
 /** Schluesselpraefix EINER Wurzel. `name` erfuellt `^[a-z][A-Za-z0-9]*$`, traegt also nie ein `:`. */
 function rootKeyPrefix(name: string): string {
   return `${NAMED_ROOT_PREFIX}${name}:`
@@ -278,7 +307,21 @@ function collectRootOps<R extends object>(
   // Deskriptor-Zugriffe grosse Werte nicht mehrfach tief kopieren.
   const readCache = new Map<string, unknown>()
   let active = true
-  const stored = (key: string) => !!doc && Object.prototype.hasOwnProperty.call(doc, prefix + key)
+  const slot = (key: string): unknown => (doc ? doc[prefix + key] : undefined)
+  const occupied = (key: string) => !!doc && Object.prototype.hasOwnProperty.call(doc, prefix + key)
+  /** Nur ein Umschlag ist ein Wurzeleintrag — ein Altbestandswert nicht. */
+  const stored = (key: string) => occupied(key) && isNamedRootEnvelope(slot(key))
+  /**
+   * Ein Speicherplatz, den ein App-Schluessel aus einer frueheren Version
+   * belegt, darf NICHT still ueberschrieben werden. Der Wurf kommt vor jedem
+   * Schreibvorgang und nennt den Ausweg.
+   */
+  const assertSlotFree = (key: string) => {
+    if (!occupied(key) || isNamedRootEnvelope(slot(key))) return
+    throw new TypeError(
+      `named root "${name}": the doc key "${prefix}${key}" already holds a legacy application value written before named roots existed — remove it with transact() first, then write the root`,
+    )
+  }
   const has = (key: string): boolean => {
     const pending = ops.get(key)
     if (pending) return !('delete' in pending)
@@ -291,13 +334,17 @@ function collectRootOps<R extends object>(
     if (pending) return 'delete' in pending ? undefined : pending.value
     if (readCache.has(key)) return readCache.get(key)
     if (!stored(key)) return undefined
-    const value = rootJsonValue(doc![prefix + key], `${name}.${key}`)
+    const value = rootJsonValue(unwrapNamedRootValue(slot(key)), `${name}.${key}`)
     readCache.set(key, value)
     return value
   }
   const keys = (): string[] => {
     const all = new Set<string>(
-      doc ? Object.keys(doc).filter((k) => k.startsWith(prefix)).map((k) => k.slice(prefix.length)) : [],
+      doc
+        ? Object.keys(doc)
+            .filter((k) => k.startsWith(prefix) && isNamedRootEnvelope(doc[k]))
+            .map((k) => k.slice(prefix.length))
+        : [],
     )
     for (const [key, op] of ops) {
       if ('delete' in op) all.delete(key)
@@ -317,13 +364,17 @@ function collectRootOps<R extends object>(
       guard()
       if (typeof prop !== 'string') throw new TypeError('named root keys must be strings')
       assertValidNamedRootKey(prop, name)
+      assertSlotFree(prop)
       if (value === undefined) { ops.set(prop, { key: prop, delete: true }); return true }
       ops.set(prop, { key: prop, value: rootJsonValue(value, `${name}.${prop}`) })
       return true
     },
     deleteProperty(_t, prop: string | symbol) {
       guard()
-      if (typeof prop === 'string') ops.set(prop, { key: prop, delete: true })
+      if (typeof prop === 'string') {
+        assertSlotFree(prop)
+        ops.set(prop, { key: prop, delete: true })
+      }
       return true
     },
     has(_t, prop: string | symbol) {
@@ -362,47 +413,74 @@ function applyRootOps(doc: Record<string, unknown>, name: string, ops: RootOp[])
   const prefix = rootKeyPrefix(name)
   for (const op of ops) {
     if ('delete' in op) delete doc[prefix + op.key]
-    else doc[prefix + op.key] = op.value
+    else doc[prefix + op.key] = wrapNamedRootValue(op.value)
   }
 }
 
 /**
- * Blendet die benannten Wurzeln aus dem oeffentlichen `transact`-Entwurf aus.
- * `getDoc()` filtert `__root:`-Schluessel heraus; sahe `transact` sie weiterhin,
+ * Blendet die ECHTEN Wurzeleintraege aus dem oeffentlichen `transact`-Entwurf
+ * aus. `getDoc()` versteckt sie ebenfalls; saehe `transact` sie weiterhin,
  * wuerde eine gewoehnliche Abgleich-Schleife ("loesche alles, was nicht im
  * Soll-Zustand steht") Wurzeln mitloeschen — und ein Schreibzugriff koennte
- * ausserdem die Wurzel-Validierung umgehen. Der Entwurf fuer die Wurzeln selbst
- * (applyRootOps) laeuft bewusst NICHT durch diese Huelle.
+ * ausserdem die Wurzel-Validierung umgehen.
+ *
+ * Ein Altbestands-Schluessel unter demselben Praefix (App-Daten aus einer
+ * frueheren Version, erkennbar am FEHLENDEN Umschlag) bleibt dagegen voll
+ * sichtbar, aenderbar und loeschbar — er gehoert der App, nicht den Wurzeln.
+ * Neu anlegen laesst sich ein praefixierter Schluessel hier aber nicht.
+ *
+ * Der Entwurf fuer die Wurzeln selbst (applyRootOps) laeuft bewusst NICHT durch
+ * diese Huelle.
  */
 function hideNamedRoots<T>(doc: T): T {
   const target = doc as unknown as Record<string, unknown>
   if (!target || typeof target !== 'object') return doc
-  const isRootKey = (prop: string | symbol) => typeof prop === 'string' && prop.startsWith(NAMED_ROOT_PREFIX)
+  const isPrefixed = (prop: string | symbol): prop is string =>
+    typeof prop === 'string' && prop.startsWith(NAMED_ROOT_PREFIX)
+  /** Nur ein Umschlag ist ein echter Wurzeleintrag und wird verborgen. */
+  const isRootSlot = (prop: string | symbol) =>
+    isPrefixed(prop) && Object.prototype.hasOwnProperty.call(target, prop) && isNamedRootEnvelope(target[prop])
   return new Proxy(target, {
     get(t, prop, receiver) {
-      if (isRootKey(prop)) return undefined
+      if (isRootSlot(prop)) return undefined
       return Reflect.get(t, prop, receiver)
     },
     set(t, prop, value, receiver) {
-      if (isRootKey(prop)) {
+      if (isRootSlot(prop)) {
         throw new TypeError(`"${String(prop)}" is a named root and can only be written through transactRoot`)
+      }
+      if (isPrefixed(prop)) {
+        // Einen praefixierten Schluessel NEU anzulegen bleibt verboten (sonst
+        // wuerde `getDoc()` ihn gleich darauf verstecken). Einen vorhandenen
+        // Altbestands-Schluessel darf die App aendern — aber nicht in
+        // Umschlag-Form, sonst waere er anschliessend ein Wurzeleintrag.
+        if (!Object.prototype.hasOwnProperty.call(t, prop)) {
+          throw new TypeError(
+            `"${String(prop)}" uses the reserved named-root prefix "${NAMED_ROOT_PREFIX}" — use transactRoot instead`,
+          )
+        }
+        if (isNamedRootEnvelope(value)) {
+          throw new TypeError(
+            `"${String(prop)}" would take the named-root envelope shape — use transactRoot instead`,
+          )
+        }
       }
       return Reflect.set(t, prop, value, receiver)
     },
     deleteProperty(t, prop) {
-      if (isRootKey(prop)) {
+      if (isRootSlot(prop)) {
         throw new TypeError(`"${String(prop)}" is a named root and can only be removed through transactRoot`)
       }
       return Reflect.deleteProperty(t, prop)
     },
     has(t, prop) {
-      return isRootKey(prop) ? false : Reflect.has(t, prop)
+      return isRootSlot(prop) ? false : Reflect.has(t, prop)
     },
     ownKeys(t) {
-      return Reflect.ownKeys(t).filter((key) => !isRootKey(key))
+      return Reflect.ownKeys(t).filter((key) => !isRootSlot(key))
     },
     getOwnPropertyDescriptor(t, prop) {
-      if (isRootKey(prop)) return undefined
+      if (isRootSlot(prop)) return undefined
       return Reflect.getOwnPropertyDescriptor(t, prop)
     },
   }) as unknown as T
@@ -449,7 +527,10 @@ class AutomergeSpaceHandle<T> implements SpaceHandle<T>, NamedRootsCapable {
     if (!doc || typeof doc !== 'object') return doc as T
     let filtered: Record<string, unknown> | null = null
     for (const key of Object.keys(doc)) {
-      if (!key.startsWith(NAMED_ROOT_PREFIX)) continue
+      // Nur ECHTE Wurzeleintraege (Praefix + Umschlag) verschwinden. Ein
+      // Altbestands-Schluessel aus einer frueheren Version bleibt App-Daten und
+      // damit sichtbar.
+      if (!key.startsWith(NAMED_ROOT_PREFIX) || !isNamedRootEnvelope(doc[key])) continue
       filtered ??= { ...doc }
       delete filtered[key]
     }
@@ -472,14 +553,16 @@ class AutomergeSpaceHandle<T> implements SpaceHandle<T>, NamedRootsCapable {
     const out: Record<string, unknown> = {}
     if (!doc) return out as R
     for (const key of Object.keys(doc)) {
-      if (!key.startsWith(prefix)) continue
+      // Praefix UND Umschlag muessen stimmen — ein Altbestands-Schluessel
+      // gehoert der App und wird hier ignoriert, nicht umgedeutet.
+      if (!key.startsWith(prefix) || !isNamedRootEnvelope(doc[key])) continue
       // Die Schreibseite deckt UNSERE Schreibvorgaenge ab — ein fremdes Geraet
       // kann trotzdem etwas Unprojizierbares ins Doc legen. Solche Schluessel
       // ueberspringen, statt die ganze Projektion zu werfen. defineRootKey
       // haelt einen feindlichen Schluessel zudem vom Prototyp fern.
       let projected: unknown
       try {
-        projected = toJsonValue(doc[key], key)
+        projected = toJsonValue(unwrapNamedRootValue(doc[key]), key)
       } catch (err) {
         console.warn(`[AutomergeReplication] named root "${name}": skipping unprojectable key "${key}":`, err instanceof Error ? err.message : err)
         continue

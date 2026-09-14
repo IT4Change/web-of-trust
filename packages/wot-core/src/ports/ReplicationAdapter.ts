@@ -135,18 +135,26 @@ export interface SecureSelfLeaveCapable {
  * Namensraum: der Yjs-Adapter braucht in `data` KEIN reserviertes Muster —
  * eine Wurzel ist dort ein eigener Y-Root-Type neben `data`, also gibt es
  * innerhalb von `data` gar keinen Namensraum, mit dem sie kollidieren koennte.
- * Der Automerge-Adapter hat keine benannten Wurzeltypen und legt Wurzeln als
- * praefixierte Schluessel im Doc-Root ab; dort ist der Praefix reserviert und
- * wird auf JEDEM `data`-Schreibpfad abgelehnt, BEVOR etwas geschrieben wird —
- * lieber laut ablehnen als App-Daten annehmen und danach verstecken. Die
- * synchronen Eingaenge (`createSpace`, `openOrCreateDeterministicPrivateSpace`,
- * `transact`) werfen synchron; die durablen (`transactDurable`) melden denselben
- * Fehler als Promise-Rejection, da ihr Callback erst im Append-Pfad laeuft.
  *
- * BEKANNTE GRENZE: ein Doc, das ein FREMDES Geraet mit so einem Schluessel
- * schon traegt (nur aus Altsoftware moeglich), wird beim Automerge-Adapter in
- * `getDoc()` weiterhin ausgeblendet. Das bleibt bewusst so: den Schluessel beim
- * Import stillschweigend umzuschreiben waere eine Aenderung an fremden Daten.
+ * Der Automerge-Adapter hat keine benannten Wurzeltypen und legt Wurzeln als
+ * praefixierte Schluessel im Doc-Root ab. Damit ein App-Schluessel aus einer
+ * frueheren Version dort nicht als Wurzel umgedeutet wird, traegt ein
+ * Wurzeleintrag eine FORMATMARKE: gespeichert wird nicht der nackte Wert,
+ * sondern `{ __namedRoot: 1, value: <json> }`. Ein Speicherplatz gilt nur dann
+ * als Wurzeleintrag, wenn Praefix UND Umschlag-Form stimmen.
+ *
+ * Daraus folgt das Verhalten fuer Altbestand (Praefix ohne Umschlag): solche
+ * Schluessel bleiben App-Daten — in `getDoc()` sichtbar und ueber `transact`
+ * les-, aender- und loeschbar. `getRoot()` ignoriert sie, und ein
+ * Wurzel-Schreibvorgang auf denselben Speicherplatz wirft, bevor etwas
+ * geschrieben wird (der Fehlertext nennt den Ausweg: den App-Schluessel erst
+ * ueber `transact` entfernen). Still ueberschrieben wird nichts.
+ *
+ * Einen praefixierten Schluessel NEU anzulegen bleibt auf jedem `data`-Pfad
+ * verboten (createSpace-Initial-Doc, `transact`, `transactDurable`) — er waere
+ * sonst sofort danach in `getDoc()` unsichtbar. Die synchronen Eingaenge werfen
+ * synchron; `transactDurable` meldet denselben Fehler als Promise-Rejection,
+ * da sein Callback erst im Append-Pfad laeuft.
  *
  * `R extends object` und NICHT `R extends Record<string, unknown>`: ein
  * TypeScript-`interface` hat keine implizite Index-Signatur und erfuellt die

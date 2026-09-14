@@ -13,6 +13,7 @@ import type { NamedRootsCapable, SpaceHandle } from '@web_of_trust/core'
 import type { AppendLocalEntryParams } from '@web_of_trust/core/ports'
 import { AutomergeReplicationAdapter } from '../src/AutomergeReplicationAdapter'
 import { InMemoryRepoStorageAdapter } from '../src/InMemoryRepoStorageAdapter'
+import { spaceIdToDocumentId } from '../src/automerge-doc-id'
 
 const wait = (ms = 150) => new Promise((r) => setTimeout(r, ms))
 const BROKER_URLS = ['wss://broker.example.com']
@@ -132,14 +133,14 @@ describe('Automerge — benannte Wurzel-Maps je Space-Doc (NamedRootsCapable)', 
 
       expect(() => handle.transact((doc) => {
         ;(doc as unknown as Record<string, unknown>)[RESERVED] = { text: 'x' }
-      })).toThrow(/named root/)
+      })).toThrow(/named.root/)
       // Auch der bequeme Weg ueber Object.assign geht durch dieselbe Falle.
       expect(() => handle.transact((doc) => {
         Object.assign(doc as unknown as Record<string, unknown>, { [RESERVED]: { text: 'x' } })
-      })).toThrow(/named root/)
+      })).toThrow(/named.root/)
       await expect(handle.transactDurable((doc) => {
         ;(doc as unknown as Record<string, unknown>)[RESERVED] = { text: 'x' }
-      })).rejects.toThrow(/named root/)
+      })).rejects.toThrow(/named.root/)
 
       const doc = handle.getDoc() as TestDoc & Record<string, unknown>
       expect(doc.items['keep']?.title).toBe('keep')
@@ -349,10 +350,10 @@ describe('Automerge — benannte Wurzel-Maps je Space-Doc (NamedRootsCapable)', 
     // Direkte Zugriffe auf einen Wurzelschluessel werden laut abgelehnt.
     expect(() => handle.transact((doc) => {
       delete (doc as unknown as Record<string, unknown>)['__root:profiles:alice']
-    })).toThrow(/named root/)
+    })).toThrow(/named.root/)
     expect(() => handle.transact((doc) => {
       ;(doc as unknown as Record<string, unknown>)['__root:profiles:alice'] = { n: 'X' }
-    })).toThrow(/named root/)
+    })).toThrow(/named.root/)
     expect(handle.getRoot('profiles')).toEqual({ alice: { n: 'A' } })
     handle.close()
   })
@@ -378,6 +379,133 @@ describe('Automerge — benannte Wurzel-Maps je Space-Doc (NamedRootsCapable)', 
     expect(Object.keys(doc).some((k) => k.startsWith('__root:'))).toBe(false)
     expect(handle.getRoot('profiles')).toEqual({ alice: { n: 'A' } })
     handle.close()
+  })
+
+  // Loop-Review web-of-trust#370, zweiter Teil: ein Doc aus einer FRUEHEREN
+  // Version kann einen App-Schluessel unter dem Praefix tragen. Solche
+  // Speicherplaetze duerfen nicht als Wurzeleintraege umgedeutet werden.
+  // Unterschieden wird ueber die Formatmarke: ein Wurzeleintrag ist
+  // `{ __namedRoot: 1, value: <json> }`, alles andere ist Altbestand.
+  describe('Altbestand-Schluessel unter dem Praefix', () => {
+    const LEGACY_KEY = '__root:profiles:legacy'
+
+    /** Schleust einen Wert direkt ins Doc ein — am Handle und seinen Guards vorbei. */
+    function injectRaw(spaceId: string, key: string, value: unknown): void {
+      const repo = (aliceAdapter as unknown as { repo: { handles: Record<string, { change(fn: (d: never) => void): void }> } }).repo
+      repo.handles[spaceIdToDocumentId(spaceId)].change(((d: Record<string, unknown>) => { d[key] = value }) as never)
+    }
+
+    /** Der roh gespeicherte Wert eines Doc-Schluessels. */
+    function readRaw(spaceId: string, key: string): unknown {
+      const repo = (aliceAdapter as unknown as { repo: { handles: Record<string, { doc(): Record<string, unknown> }> } }).repo
+      return repo.handles[spaceIdToDocumentId(spaceId)].doc()[key]
+    }
+
+    it('bleibt in getDoc() sichtbar und wird von getRoot() ignoriert', async () => {
+      const spaceId = await createSharedSpace()
+      injectRaw(spaceId, LEGACY_KEY, { text: 'existing application value' })
+      const handle = await aliceAdapter.openSpace<TestDoc>(spaceId) as RootsHandle<TestDoc>
+
+      expect((handle.getDoc() as Record<string, unknown>)[LEGACY_KEY]).toEqual({ text: 'existing application value' })
+      expect(handle.getRoot('profiles')).toEqual({})
+      handle.close()
+    })
+
+    it('ein Root-Schreibvorgang auf denselben Speicherplatz wirft und aendert nichts', async () => {
+      const spaceId = await createSharedSpace()
+      injectRaw(spaceId, LEGACY_KEY, { text: 'existing application value' })
+      const handle = await aliceAdapter.openSpace<TestDoc>(spaceId) as RootsHandle<TestDoc>
+
+      expect(() => handle.transactRoot('profiles', (root) => {
+        ;(root as Record<string, unknown>).legacy = { n: 1 }
+      })).toThrow(/transact/)
+      expect(() => handle.transactRootDurable('profiles', (root) => {
+        ;(root as Record<string, unknown>).legacy = { n: 1 }
+      })).toThrow(/transact/)
+      // Auch ein Loeschen ueber die Wurzel fasst den Altbestand nicht an.
+      expect(() => handle.transactRoot('profiles', (root) => {
+        delete (root as Record<string, unknown>).legacy
+      })).toThrow(/transact/)
+
+      expect(readRaw(spaceId, LEGACY_KEY)).toEqual({ text: 'existing application value' })
+      expect((handle.getDoc() as Record<string, unknown>)[LEGACY_KEY]).toEqual({ text: 'existing application value' })
+      handle.close()
+    })
+
+    it('transact kann ihn lesen, aendern und loeschen — danach ist die Wurzel frei', async () => {
+      const spaceId = await createSharedSpace()
+      injectRaw(spaceId, LEGACY_KEY, { text: 'existing application value' })
+      const handle = await aliceAdapter.openSpace<TestDoc>(spaceId) as RootsHandle<TestDoc>
+
+      handle.transact((doc) => {
+        const d = doc as unknown as Record<string, unknown>
+        expect(d[LEGACY_KEY]).toBeTruthy()
+        expect(Object.keys(d)).toContain(LEGACY_KEY)
+        ;(d[LEGACY_KEY] as Record<string, unknown>).text = 'updated'
+      })
+      expect((handle.getDoc() as Record<string, unknown>)[LEGACY_KEY]).toEqual({ text: 'updated' })
+
+      handle.transact((doc) => { delete (doc as unknown as Record<string, unknown>)[LEGACY_KEY] })
+      expect((handle.getDoc() as Record<string, unknown>)[LEGACY_KEY]).toBeUndefined()
+
+      // Der Speicherplatz ist jetzt frei — der Wurzel-Schreibvorgang geht durch.
+      handle.transactRoot('profiles', (root) => { (root as Record<string, unknown>).legacy = { n: 1 } })
+      expect(handle.getRoot('profiles')).toEqual({ legacy: { n: 1 } })
+      expect((handle.getDoc() as Record<string, unknown>)[LEGACY_KEY]).toBeUndefined()
+      handle.close()
+    })
+
+    it('transact darf einen Altbestand-Schluessel nicht in Umschlag-Form umschreiben', async () => {
+      const spaceId = await createSharedSpace()
+      injectRaw(spaceId, LEGACY_KEY, { text: 'existing application value' })
+      const handle = await aliceAdapter.openSpace<TestDoc>(spaceId) as RootsHandle<TestDoc>
+      expect(() => handle.transact((doc) => {
+        ;(doc as unknown as Record<string, unknown>)[LEGACY_KEY] = { __namedRoot: 1, value: { n: 1 } }
+      })).toThrow(/named.root/)
+      expect(readRaw(spaceId, LEGACY_KEY)).toEqual({ text: 'existing application value' })
+      handle.close()
+    })
+
+    it('ein echter Wurzeleintrag liegt als Umschlag im Doc und bleibt in getDoc() unsichtbar', async () => {
+      const spaceId = await createSharedSpace()
+      const handle = await aliceAdapter.openSpace<TestDoc>(spaceId) as RootsHandle<TestDoc>
+      handle.transactRoot('profiles', (root) => { (root as Record<string, unknown>).alice = { n: 'A' } })
+
+      expect(readRaw(spaceId, '__root:profiles:alice')).toEqual({ __namedRoot: 1, value: { n: 'A' } })
+      expect(Object.keys(handle.getDoc() as Record<string, unknown>).some((k) => k.startsWith('__root:'))).toBe(false)
+      expect(handle.getRoot('profiles')).toEqual({ alice: { n: 'A' } })
+      handle.close()
+    })
+
+    it('Umschlag-aehnliche Fremdwerte gelten als Altbestand (Gegenprobe)', async () => {
+      const spaceId = await createSharedSpace()
+      injectRaw(spaceId, '__root:profiles:noValue', { __namedRoot: 1 })
+      injectRaw(spaceId, '__root:profiles:extra', { __namedRoot: 1, value: 1, extra: 2 })
+      injectRaw(spaceId, '__root:profiles:wrongVersion', { __namedRoot: 2, value: 1 })
+      injectRaw(spaceId, '__root:profiles:plain', 'nackter Wert')
+      const handle = await aliceAdapter.openSpace<TestDoc>(spaceId) as RootsHandle<TestDoc>
+
+      expect(handle.getRoot('profiles')).toEqual({})
+      const doc = handle.getDoc() as Record<string, unknown>
+      expect(doc['__root:profiles:noValue']).toEqual({ __namedRoot: 1 })
+      expect(doc['__root:profiles:extra']).toEqual({ __namedRoot: 1, value: 1, extra: 2 })
+      expect(doc['__root:profiles:wrongVersion']).toEqual({ __namedRoot: 2, value: 1 })
+      expect(doc['__root:profiles:plain']).toBe('nackter Wert')
+      handle.close()
+    })
+
+    it('Altbestand und echte Wurzel koennen nebeneinander liegen', async () => {
+      const spaceId = await createSharedSpace()
+      injectRaw(spaceId, LEGACY_KEY, { text: 'existing application value' })
+      const handle = await aliceAdapter.openSpace<TestDoc>(spaceId) as RootsHandle<TestDoc>
+      handle.transactRoot('profiles', (root) => { (root as Record<string, unknown>).alice = { n: 'A' } })
+
+      expect(handle.getRoot('profiles')).toEqual({ alice: { n: 'A' } })
+      const doc = handle.getDoc() as Record<string, unknown>
+      expect(doc[LEGACY_KEY]).toEqual({ text: 'existing application value' })
+      expect(doc['__root:profiles:alice']).toBeUndefined()
+      handle.close()
+    })
   })
 
   // Fall 2: der eigentliche Fehlerfall (rls#353)
