@@ -60,8 +60,9 @@ export function isValidNamedRootName(name: string): boolean {
 }
 
 /**
- * Wirft synchron, wenn `name` keine zulaessige benannte Wurzel benennt. Beide
- * Adapter pruefen ueber diese eine Stelle, damit die Regel nicht driftet.
+ * Wirft synchron, wenn `name` keine zulaessige benannte Wurzel benennt. Jeder
+ * Adapter, der die Capability anbietet, prueft ueber diese eine Stelle, damit
+ * die Regel nicht driftet.
  */
 export function assertValidNamedRootName(name: string): void {
   if (typeof name !== 'string' || name.length === 0) {
