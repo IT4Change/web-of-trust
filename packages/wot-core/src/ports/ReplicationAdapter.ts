@@ -154,7 +154,21 @@ export interface SecureSelfLeaveCapable {
  * verboten (createSpace-Initial-Doc, `transact`, `transactDurable`) — er waere
  * sonst sofort danach in `getDoc()` unsichtbar. Die synchronen Eingaenge werfen
  * synchron; `transactDurable` meldet denselben Fehler als Promise-Rejection,
- * da sein Callback erst im Append-Pfad laeuft.
+ * da sein Callback erst im Append-Pfad laeuft. Ein `data`-Callback darf die
+ * Zuordnung eines Speicherplatzes auch VERSCHACHTELT nicht aendern (etwa
+ * `delete doc[key].extra`, was einem Altbestandswert die Umschlag-Form gaebe);
+ * die Pruefung laeuft am Ende des Callbacks innerhalb der CRDT-Transaktion,
+ * die Ablehnung ist also atomar.
+ *
+ * OFFENER RESTFALL (Automerge, Entscheidung steht aus): die Formatmarke ist
+ * eine FORM, kein Herkunftsnachweis. Ein App-Wert, der schon vor dieser
+ * Adapter-Version unter einem `__root:`-Schluessel lag und zufaellig exakt die
+ * Umschlag-Form hat, gilt als Wurzeleintrag. Dasselbe kann ein MERGE
+ * herstellen: zwei Geraete loeschen nebenlaeufig je ein anderes Zusatzfeld
+ * eines solchen Werts, und erst das Merge-Ergebnis hat die Umschlag-Form —
+ * das faengt keine lokale Pruefung ab. Wer das ausschliessen will, braucht die
+ * Zuordnung unabhaengig von der Nutzdatenform, etwa einen eigenen
+ * Markierungsschluessel je Speicherplatz.
  *
  * `R extends object` und NICHT `R extends Record<string, unknown>`: ein
  * TypeScript-`interface` hat keine implizite Index-Signatur und erfuellt die

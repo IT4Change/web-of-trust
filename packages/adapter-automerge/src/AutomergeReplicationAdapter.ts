@@ -319,7 +319,7 @@ function collectRootOps<R extends object>(
   const assertSlotFree = (key: string) => {
     if (!occupied(key) || isNamedRootEnvelope(slot(key))) return
     throw new TypeError(
-      `named root "${name}": the doc key "${prefix}${key}" already holds a legacy application value written before named roots existed — remove it with transact() first, then write the root`,
+      `named root "${name}": the doc key "${prefix}${key}" holds a value that is not a named-root entry (it carries no named-root envelope), so it counts as application data — remove it with transact() first, then write the root`,
     )
   }
   const has = (key: string): boolean => {
@@ -486,6 +486,55 @@ function hideNamedRoots<T>(doc: T): T {
   }) as unknown as T
 }
 
+/**
+ * Klassifikation aller praefixierten Doc-Wurzelschluessel: Schluessel →
+ * "ist Umschlag?". Vor und nach einem `data`-Callback erhoben, um eine
+ * Umklassifizierung zu erkennen.
+ */
+function classifyNamedRootSlots(doc: unknown): Map<string, boolean> {
+  const out = new Map<string, boolean>()
+  if (!doc || typeof doc !== 'object') return out
+  const target = doc as Record<string, unknown>
+  for (const key of Object.keys(target)) {
+    if (!key.startsWith(NAMED_ROOT_PREFIX)) continue
+    out.set(key, isNamedRootEnvelope(target[key]))
+  }
+  return out
+}
+
+/**
+ * Wirft, wenn ein `data`-Callback die Zuordnung eines praefixierten
+ * Speicherplatzes veraendert hat. Die Huelle faengt nur die Zuweisung des
+ * GANZEN Slots ab; eine verschachtelte Aenderung (`delete d[key].extra`)
+ * koennte einem Altbestandswert sonst die Umschlag-Form geben — er waere
+ * danach aus der App-Sicht verschwunden und ueber die Wurzel ueberschreibbar.
+ * Die Pruefung laeuft INNERHALB von `docHandle.change`: ein Wurf dort verwirft
+ * die ganze Aenderung, die Ablehnung ist also atomar.
+ */
+function assertNamedRootClassificationUnchanged(doc: unknown, before: Map<string, boolean>): void {
+  const after = classifyNamedRootSlots(doc)
+  for (const [key, isEnvelope] of after) {
+    const wasEnvelope = before.get(key)
+    if (wasEnvelope === undefined) {
+      throw new TypeError(
+        `"${key}" uses the reserved named-root prefix "${NAMED_ROOT_PREFIX}" — use transactRoot instead`,
+      )
+    }
+    if (wasEnvelope !== isEnvelope) {
+      throw new TypeError(
+        isEnvelope
+          ? `"${key}" would take the named-root envelope shape and disappear from getDoc() — use transactRoot instead`
+          : `"${key}" is a named root and would lose its named-root envelope — use transactRoot instead`,
+      )
+    }
+  }
+  for (const [key, wasEnvelope] of before) {
+    if (wasEnvelope && !after.has(key)) {
+      throw new TypeError(`"${key}" is a named root and can only be removed through transactRoot`)
+    }
+  }
+}
+
 class AutomergeSpaceHandle<T> implements SpaceHandle<T>, NamedRootsCapable {
   readonly id: string
   private spaceState: SpaceState
@@ -611,7 +660,11 @@ class AutomergeSpaceHandle<T> implements SpaceHandle<T>, NamedRootsCapable {
    * write). A no-op transaction resolves immediately.
    */
   transactDurable(fn: (doc: T) => void): Promise<void> {
-    return this._transactDurableRaw(((doc: T) => fn(hideNamedRoots(doc))) as (doc: T) => void)
+    return this._transactDurableRaw(((doc: T) => {
+      const before = classifyNamedRootSlots(doc)
+      fn(hideNamedRoots(doc))
+      assertNamedRootClassificationUnchanged(doc, before)
+    }) as (doc: T) => void)
   }
 
   /** Interner durabler Schreibpfad OHNE die Wurzel-Huelle — nur fuer applyRootOps. */
@@ -636,7 +689,11 @@ class AutomergeSpaceHandle<T> implements SpaceHandle<T>, NamedRootsCapable {
 
   /** Oeffentlicher `data`-Schreibpfad — die benannten Wurzeln bleiben verborgen. */
   transact(fn: (doc: T) => void, options?: TransactOptions): void {
-    this._transactRaw(((doc: T) => fn(hideNamedRoots(doc))) as (doc: T) => void, options)
+    this._transactRaw(((doc: T) => {
+      const before = classifyNamedRootSlots(doc)
+      fn(hideNamedRoots(doc))
+      assertNamedRootClassificationUnchanged(doc, before)
+    }) as (doc: T) => void, options)
   }
 
   /** Interner Schreibpfad OHNE die Wurzel-Huelle — nur fuer applyRootOps. */

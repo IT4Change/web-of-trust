@@ -466,6 +466,54 @@ describe('Automerge — benannte Wurzel-Maps je Space-Doc (NamedRootsCapable)', 
       handle.close()
     })
 
+    it('eine VERSCHACHTELTE Aenderung darf einen Altbestand-Slot nicht zum Wurzeleintrag machen', async () => {
+      const spaceId = await createSharedSpace()
+      // Ein Altbestandswert, dem nur ein Zusatzfeld die Umschlag-Form nimmt.
+      injectRaw(spaceId, LEGACY_KEY, { __namedRoot: 1, value: { n: 1 }, extra: 2 })
+      const handle = await aliceAdapter.openSpace<TestDoc>(spaceId) as RootsHandle<TestDoc>
+      expect(handle.getRoot('profiles')).toEqual({})
+
+      // Loeschen des Zusatzfelds wuerde die Umschlag-Form herstellen.
+      expect(() => handle.transact((doc) => {
+        delete ((doc as unknown as Record<string, unknown>)[LEGACY_KEY] as Record<string, unknown>).extra
+      })).toThrow(/named.root/)
+      // Und umgekehrt: die Marke verschachtelt ergaenzen.
+      injectRaw(spaceId, '__root:profiles:other', { value: 1 })
+      expect(() => handle.transact((doc) => {
+        ;((doc as unknown as Record<string, unknown>)['__root:profiles:other'] as Record<string, unknown>).__namedRoot = 1
+      })).toThrow(/named.root/)
+
+      // Nichts davon ist im Doc gelandet, und die Wurzel bleibt leer.
+      expect(readRaw(spaceId, LEGACY_KEY)).toEqual({ __namedRoot: 1, value: { n: 1 }, extra: 2 })
+      expect(readRaw(spaceId, '__root:profiles:other')).toEqual({ value: 1 })
+      expect(handle.getRoot('profiles')).toEqual({})
+      handle.close()
+    })
+
+    it('dieselbe Umklassifizierung ueber transactDurable wird ebenfalls abgelehnt', async () => {
+      const spaceId = await createSharedSpace()
+      injectRaw(spaceId, LEGACY_KEY, { __namedRoot: 1, value: { n: 1 }, extra: 2 })
+      const handle = await aliceAdapter.openSpace<TestDoc>(spaceId) as RootsHandle<TestDoc>
+      await expect(handle.transactDurable((doc) => {
+        delete ((doc as unknown as Record<string, unknown>)[LEGACY_KEY] as Record<string, unknown>).extra
+      })).rejects.toThrow(/named.root/)
+      expect(readRaw(spaceId, LEGACY_KEY)).toEqual({ __namedRoot: 1, value: { n: 1 }, extra: 2 })
+      handle.close()
+    })
+
+    it('ein echter Wurzeleintrag darf von einer transact-Schleife nicht entklassifiziert werden', async () => {
+      const spaceId = await createSharedSpace()
+      const handle = await aliceAdapter.openSpace<TestDoc>(spaceId) as RootsHandle<TestDoc>
+      handle.transactRoot('profiles', (root) => { (root as Record<string, unknown>).alice = { n: 'A' } })
+      // Der Slot ist in der Huelle unsichtbar; ein direkter Zugriff wirft.
+      expect(() => handle.transact((doc) => {
+        ;((doc as unknown as Record<string, unknown>)['__root:profiles:alice'] as Record<string, unknown>).extra = 1
+      })).toThrow()
+      expect(readRaw(spaceId, '__root:profiles:alice')).toEqual({ __namedRoot: 1, value: { n: 'A' } })
+      expect(handle.getRoot('profiles')).toEqual({ alice: { n: 'A' } })
+      handle.close()
+    })
+
     it('ein echter Wurzeleintrag liegt als Umschlag im Doc und bleibt in getDoc() unsichtbar', async () => {
       const spaceId = await createSharedSpace()
       const handle = await aliceAdapter.openSpace<TestDoc>(spaceId) as RootsHandle<TestDoc>
