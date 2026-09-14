@@ -271,9 +271,9 @@ describe('Yjs — benannte Wurzel-Maps je Space-Doc (NamedRootsCapable)', () => 
   })
 
   it('prototyp-vergiftende Schluessel werden abgelehnt — auch verschachtelt', async () => {
-    // Weder Yjs noch Automerge tragen eine eigene __proto__-Property durch
-    // ihren Binaer-Codec. Ein Schluessel, der den Sync nicht ueberlebt, wird
-    // laut abgelehnt statt still verloren.
+    // Yjs traegt eine eigene __proto__-Property nicht durch seinen Binaer-Codec.
+    // Ein Schluessel, der den Sync nicht ueberlebt, wird laut abgelehnt statt
+    // still verloren.
     const spaceId = await createSharedSpace()
     const handle = await aliceAdapter.openSpace<TestDoc>(spaceId) as RootsHandle<TestDoc>
     expect(() => handle.transactRoot('profiles', (root) => {

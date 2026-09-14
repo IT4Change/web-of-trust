@@ -2,7 +2,7 @@ import { Repo, parseAutomergeUrl, type DocumentId, type AutomergeUrl, type PeerI
 import type { StorageAdapterInterface } from '@automerge/automerge-repo'
 import type { DocHandle } from '@automerge/automerge-repo'
 import * as Automerge from '@automerge/automerge'
-import type { ReplicationAdapter, SpaceHandle, TransactOptions, NamedRootsCapable, Subscribable, MessagingAdapter, MessageIdHistoryPort, SpaceMetadataStorage, KeyManagementPort, MemberUpdatePendingStore, WireMessage, DocLogStore, PendingRemoval } from '@web_of_trust/core/ports'
+import type { ReplicationAdapter, SpaceHandle, TransactOptions, Subscribable, MessagingAdapter, MessageIdHistoryPort, SpaceMetadataStorage, KeyManagementPort, MemberUpdatePendingStore, WireMessage, DocLogStore, PendingRemoval } from '@web_of_trust/core/ports'
 import type { IdentitySession, SpaceInfo, SpaceAdmission, SpaceMemberChange, IncomingSpaceInvite, ReplicationState, MessageEnvelope } from '@web_of_trust/core/types'
 import {
   createSpaceKey, createDeterministicSpaceKey, rotateSpaceKey, importKey, processMemberUpdate,
@@ -10,7 +10,7 @@ import {
   buildSpaceInviteBody, applySpaceInviteBody, buildKeyRotationBody, applyKeyRotationBody,
   deliverInboxMessage, receiveInboxMessage,
   runTwoPhaseRemoval, recoverPendingRemovals, pendingRemovalWriteExpectation,
-  openLifecycleLease, isSameAdmission, assertValidNamedRootName, assertValidNamedRootKey, toJsonValue, defineRootKey, freezeDeep,
+  openLifecycleLease, isSameAdmission,
 } from '@web_of_trust/core/application'
 import type { LocalImpact, SecureRemovalDeps, LifecycleLease } from '@web_of_trust/core/application'
 import type {
@@ -217,325 +217,7 @@ export interface AutomergeReplicationAdapterConfig {
   onSecurityError?: (error: Error) => void
 }
 
-/** Wire-Praefix der benannten Wurzeln im Automerge-Doc-Root: `__root:<name>:<key>`. */
-const NAMED_ROOT_PREFIX = '__root:'
-
-/**
- * Wirft, wenn ein App-Doc auf seiner WURZELEBENE einen Schluessel mit dem
- * reservierten Praefix traegt. Nur dort hat der Praefix Bedeutung — tiefer im
- * Doc ist `__root:…` ein gewoehnlicher Schluessel und bleibt erlaubt.
- *
- * Der Grund ist die Zusage, dass `getDoc()` unveraendert bleibt: `getDoc()`
- * blendet Wurzelschluessel aus, also darf kein Schreibpfad App-Daten unter
- * diesem Praefix ANNEHMEN und sie unmittelbar danach verstecken. Lieber laut
- * ablehnen als still umdeuten (Loop-Review web-of-trust#370).
- */
-function assertNoReservedRootKeys(doc: unknown, where: string): void {
-  // Kein Objekttyp darf uebersprungen werden: `Object.assign` uebernimmt die
-  // eigenen aufzaehlbaren String-Schluessel JEDES Objekts — auch die eines
-  // Arrays oder einer Funktion. `Object.keys` liefert genau diese Menge, bei
-  // einem gewoehnlichen Array also nur Indizes.
-  if (doc === null || (typeof doc !== 'object' && typeof doc !== 'function')) return
-  const offending = Object.keys(doc as Record<string, unknown>).filter((key) => key.startsWith(NAMED_ROOT_PREFIX))
-  if (offending.length === 0) return
-  throw new TypeError(
-    `${where}: key${offending.length > 1 ? 's' : ''} ${offending.map((k) => `"${k}"`).join(', ')} use${offending.length > 1 ? '' : 's'} the reserved named-root prefix "${NAMED_ROOT_PREFIX}" — use transactRoot instead`,
-  )
-}
-
-/** Formatmarke eines Wurzel-Umschlags. */
-const NAMED_ROOT_ENVELOPE_MARKER = '__namedRoot'
-const NAMED_ROOT_ENVELOPE_VERSION = 1
-
-/**
- * Ein Wurzeleintrag liegt NICHT als nackter Wert im Doc, sondern als Umschlag
- * `{ __namedRoot: 1, value: <json> }`. Der Praefix allein reicht als Kennung
- * nicht: ein Doc aus einer frueheren Version kann einen APP-Schluessel unter
- * demselben Praefix tragen. Ein Speicherplatz gilt nur dann als Wurzeleintrag,
- * wenn Praefix UND Umschlag-Form stimmen — alles andere ist Altbestand und
- * bleibt App-Daten (Loop-Review web-of-trust#370).
- */
-function isNamedRootEnvelope(stored: unknown): boolean {
-  if (stored === null || typeof stored !== 'object' || Array.isArray(stored)) return false
-  const keys = Object.keys(stored as Record<string, unknown>)
-  if (keys.length !== 2 || !keys.includes(NAMED_ROOT_ENVELOPE_MARKER) || !keys.includes('value')) return false
-  return (stored as Record<string, unknown>)[NAMED_ROOT_ENVELOPE_MARKER] === NAMED_ROOT_ENVELOPE_VERSION
-}
-
-/** Packt einen bereits validierten JSON-Wert in den Umschlag. */
-function wrapNamedRootValue(value: unknown): Record<string, unknown> {
-  return { [NAMED_ROOT_ENVELOPE_MARKER]: NAMED_ROOT_ENVELOPE_VERSION, value }
-}
-
-/** Der Nutzwert eines Umschlags. Nur auf einem Umschlag aufrufen. */
-function unwrapNamedRootValue(stored: unknown): unknown {
-  return (stored as Record<string, unknown>).value
-}
-
-/** Schluesselpraefix EINER Wurzel. `name` erfuellt `^[a-z][A-Za-z0-9]*$`, traegt also nie ein `:`. */
-function rootKeyPrefix(name: string): string {
-  return `${NAMED_ROOT_PREFIX}${name}:`
-}
-
-/** Eine gesammelte Wurzel-Mutation: Wert setzen oder Schluessel loeschen. */
-type RootOp = { key: string; value: unknown } | { key: string; delete: true }
-
-/**
- * Kanonische, tiefe JSON-Kopie eines Wurzel-Werts (validiert auf jeder Ebene)
- * — loest zugleich Automerge-Proxies in reines JSON auf.
- */
-function rootJsonValue(value: unknown, path: string): unknown {
-  return value === undefined ? undefined : freezeDeep(toJsonValue(value, path))
-}
-
-/**
- * Fuehrt `fn` auf einem FLACHEN Entwurf der Wurzel aus und gibt die gesammelten
- * Mutationen zurueck. Sammeln statt Direktschreiben aus zwei Gruenden:
- * Atomaritaet (ein ungueltiger Wert wirft, BEVOR etwas im Doc steht) und ein
- * Entwurf, der nach dem Callback tot ist — ein festgehaltener Proxy kann das
- * Doc spaeter nicht an Validierung und Persistenz-Planung vorbei veraendern.
- */
-function collectRootOps<R extends object>(
-  doc: Record<string, unknown> | undefined,
-  name: string,
-  fn: (root: R) => void,
-): RootOp[] {
-  const prefix = rootKeyPrefix(name)
-  const ops = new Map<string, RootOp>()
-  // Waehrend des Callbacks aendert sich das Doc nicht — einmal geklonte
-  // Bestandswerte sind stabil und werden gecacht, damit Object.keys() und
-  // Deskriptor-Zugriffe grosse Werte nicht mehrfach tief kopieren.
-  const readCache = new Map<string, unknown>()
-  let active = true
-  const slot = (key: string): unknown => (doc ? doc[prefix + key] : undefined)
-  const occupied = (key: string) => !!doc && Object.prototype.hasOwnProperty.call(doc, prefix + key)
-  /** Nur ein Umschlag ist ein Wurzeleintrag — ein Altbestandswert nicht. */
-  const stored = (key: string) => occupied(key) && isNamedRootEnvelope(slot(key))
-  /**
-   * Ein Speicherplatz, den ein App-Schluessel aus einer frueheren Version
-   * belegt, darf NICHT still ueberschrieben werden. Der Wurf kommt vor jedem
-   * Schreibvorgang und nennt den Ausweg.
-   */
-  const assertSlotFree = (key: string) => {
-    if (!occupied(key) || isNamedRootEnvelope(slot(key))) return
-    throw new TypeError(
-      `named root "${name}": the doc key "${prefix}${key}" holds a value that is not a named-root entry (it carries no named-root envelope), so it counts as application data — remove it with transact() first, then write the root`,
-    )
-  }
-  const has = (key: string): boolean => {
-    const pending = ops.get(key)
-    if (pending) return !('delete' in pending)
-    return stored(key)
-  }
-  const read = (key: string): unknown => {
-    const pending = ops.get(key)
-    // Op-Werte sind bereits geklont UND eingefroren — eine spaetere Mutation
-    // des herausgegebenen Werts kann nicht mehr ins Doc durchschlagen.
-    if (pending) return 'delete' in pending ? undefined : pending.value
-    if (readCache.has(key)) return readCache.get(key)
-    if (!stored(key)) return undefined
-    const value = rootJsonValue(unwrapNamedRootValue(slot(key)), `${name}.${key}`)
-    readCache.set(key, value)
-    return value
-  }
-  const keys = (): string[] => {
-    const all = new Set<string>(
-      doc
-        ? Object.keys(doc)
-            .filter((k) => k.startsWith(prefix) && isNamedRootEnvelope(doc[k]))
-            .map((k) => k.slice(prefix.length))
-        : [],
-    )
-    for (const [key, op] of ops) {
-      if ('delete' in op) all.delete(key)
-      else all.add(key)
-    }
-    return Array.from(all)
-  }
-  const guard = () => {
-    if (!active) throw new Error('named root draft is no longer writable — it is only valid inside transactRoot')
-  }
-  const draft = new Proxy({} as Record<string, unknown>, {
-    get(_t, prop: string | symbol) {
-      if (typeof prop !== 'string') return undefined
-      return read(prop)
-    },
-    set(_t, prop: string | symbol, value: unknown) {
-      guard()
-      if (typeof prop !== 'string') throw new TypeError('named root keys must be strings')
-      assertValidNamedRootKey(prop, name)
-      assertSlotFree(prop)
-      if (value === undefined) { ops.set(prop, { key: prop, delete: true }); return true }
-      ops.set(prop, { key: prop, value: rootJsonValue(value, `${name}.${prop}`) })
-      return true
-    },
-    deleteProperty(_t, prop: string | symbol) {
-      guard()
-      if (typeof prop === 'string') {
-        assertSlotFree(prop)
-        ops.set(prop, { key: prop, delete: true })
-      }
-      return true
-    },
-    has(_t, prop: string | symbol) {
-      return typeof prop === 'string' && has(prop)
-    },
-    ownKeys() {
-      return keys()
-    },
-    // Accessor statt Daten-Deskriptor: Object.keys() prueft nur `enumerable`
-    // und darf deshalb keinen Wert projizieren — sonst laesst ein einziger
-    // unprojizierbarer Fremdwert schon das blosse Aufzaehlen (und damit ein
-    // `delete` ueber alle Schluessel) werfen.
-    getOwnPropertyDescriptor(_t, prop: string | symbol) {
-      if (typeof prop !== 'string' || !has(prop)) return undefined
-      const key = prop
-      return { configurable: true, enumerable: true, get: () => read(key) }
-    },
-    defineProperty() {
-      // Der Wurzel-Vertrag kennt nur Zuweisung und delete. Ein Deskriptor
-      // wuerde nur das Proxy-Ziel treffen und einen Schreibvorgang vortaeuschen,
-      // der nie im CRDT landet — deshalb laut ablehnen.
-      throw new TypeError('named root drafts only support assignment and delete, not Object.defineProperty')
-    },
-  }) as R
-
-  try {
-    fn(draft)
-  } finally {
-    active = false
-  }
-  return Array.from(ops.values())
-}
-
-/** Schreibt die gesammelten Mutationen in den Automerge-Draft. */
-function applyRootOps(doc: Record<string, unknown>, name: string, ops: RootOp[]): void {
-  const prefix = rootKeyPrefix(name)
-  for (const op of ops) {
-    if ('delete' in op) delete doc[prefix + op.key]
-    else doc[prefix + op.key] = wrapNamedRootValue(op.value)
-  }
-}
-
-/**
- * Blendet die ECHTEN Wurzeleintraege aus dem oeffentlichen `transact`-Entwurf
- * aus. `getDoc()` versteckt sie ebenfalls; saehe `transact` sie weiterhin,
- * wuerde eine gewoehnliche Abgleich-Schleife ("loesche alles, was nicht im
- * Soll-Zustand steht") Wurzeln mitloeschen — und ein Schreibzugriff koennte
- * ausserdem die Wurzel-Validierung umgehen.
- *
- * Ein Altbestands-Schluessel unter demselben Praefix (App-Daten aus einer
- * frueheren Version, erkennbar am FEHLENDEN Umschlag) bleibt dagegen voll
- * sichtbar, aenderbar und loeschbar — er gehoert der App, nicht den Wurzeln.
- * Neu anlegen laesst sich ein praefixierter Schluessel hier aber nicht.
- *
- * Der Entwurf fuer die Wurzeln selbst (applyRootOps) laeuft bewusst NICHT durch
- * diese Huelle.
- */
-function hideNamedRoots<T>(doc: T): T {
-  const target = doc as unknown as Record<string, unknown>
-  if (!target || typeof target !== 'object') return doc
-  const isPrefixed = (prop: string | symbol): prop is string =>
-    typeof prop === 'string' && prop.startsWith(NAMED_ROOT_PREFIX)
-  /** Nur ein Umschlag ist ein echter Wurzeleintrag und wird verborgen. */
-  const isRootSlot = (prop: string | symbol) =>
-    isPrefixed(prop) && Object.prototype.hasOwnProperty.call(target, prop) && isNamedRootEnvelope(target[prop])
-  return new Proxy(target, {
-    get(t, prop, receiver) {
-      if (isRootSlot(prop)) return undefined
-      return Reflect.get(t, prop, receiver)
-    },
-    set(t, prop, value, receiver) {
-      if (isRootSlot(prop)) {
-        throw new TypeError(`"${String(prop)}" is a named root and can only be written through transactRoot`)
-      }
-      if (isPrefixed(prop)) {
-        // Einen praefixierten Schluessel NEU anzulegen bleibt verboten (sonst
-        // wuerde `getDoc()` ihn gleich darauf verstecken). Einen vorhandenen
-        // Altbestands-Schluessel darf die App aendern — aber nicht in
-        // Umschlag-Form, sonst waere er anschliessend ein Wurzeleintrag.
-        if (!Object.prototype.hasOwnProperty.call(t, prop)) {
-          throw new TypeError(
-            `"${String(prop)}" uses the reserved named-root prefix "${NAMED_ROOT_PREFIX}" — use transactRoot instead`,
-          )
-        }
-        if (isNamedRootEnvelope(value)) {
-          throw new TypeError(
-            `"${String(prop)}" would take the named-root envelope shape — use transactRoot instead`,
-          )
-        }
-      }
-      return Reflect.set(t, prop, value, receiver)
-    },
-    deleteProperty(t, prop) {
-      if (isRootSlot(prop)) {
-        throw new TypeError(`"${String(prop)}" is a named root and can only be removed through transactRoot`)
-      }
-      return Reflect.deleteProperty(t, prop)
-    },
-    has(t, prop) {
-      return isRootSlot(prop) ? false : Reflect.has(t, prop)
-    },
-    ownKeys(t) {
-      return Reflect.ownKeys(t).filter((key) => !isRootSlot(key))
-    },
-    getOwnPropertyDescriptor(t, prop) {
-      if (isRootSlot(prop)) return undefined
-      return Reflect.getOwnPropertyDescriptor(t, prop)
-    },
-  }) as unknown as T
-}
-
-/**
- * Klassifikation aller praefixierten Doc-Wurzelschluessel: Schluessel →
- * "ist Umschlag?". Vor und nach einem `data`-Callback erhoben, um eine
- * Umklassifizierung zu erkennen.
- */
-function classifyNamedRootSlots(doc: unknown): Map<string, boolean> {
-  const out = new Map<string, boolean>()
-  if (!doc || typeof doc !== 'object') return out
-  const target = doc as Record<string, unknown>
-  for (const key of Object.keys(target)) {
-    if (!key.startsWith(NAMED_ROOT_PREFIX)) continue
-    out.set(key, isNamedRootEnvelope(target[key]))
-  }
-  return out
-}
-
-/**
- * Wirft, wenn ein `data`-Callback die Zuordnung eines praefixierten
- * Speicherplatzes veraendert hat. Die Huelle faengt nur die Zuweisung des
- * GANZEN Slots ab; eine verschachtelte Aenderung (`delete d[key].extra`)
- * koennte einem Altbestandswert sonst die Umschlag-Form geben — er waere
- * danach aus der App-Sicht verschwunden und ueber die Wurzel ueberschreibbar.
- * Die Pruefung laeuft INNERHALB von `docHandle.change`: ein Wurf dort verwirft
- * die ganze Aenderung, die Ablehnung ist also atomar.
- */
-function assertNamedRootClassificationUnchanged(doc: unknown, before: Map<string, boolean>): void {
-  const after = classifyNamedRootSlots(doc)
-  for (const [key, isEnvelope] of after) {
-    const wasEnvelope = before.get(key)
-    if (wasEnvelope === undefined) {
-      throw new TypeError(
-        `"${key}" uses the reserved named-root prefix "${NAMED_ROOT_PREFIX}" — use transactRoot instead`,
-      )
-    }
-    if (wasEnvelope !== isEnvelope) {
-      throw new TypeError(
-        isEnvelope
-          ? `"${key}" would take the named-root envelope shape and disappear from getDoc() — use transactRoot instead`
-          : `"${key}" is a named root and would lose its named-root envelope — use transactRoot instead`,
-      )
-    }
-  }
-  for (const [key, wasEnvelope] of before) {
-    if (wasEnvelope && !after.has(key)) {
-      throw new TypeError(`"${key}" is a named root and can only be removed through transactRoot`)
-    }
-  }
-}
-
-class AutomergeSpaceHandle<T> implements SpaceHandle<T>, NamedRootsCapable {
+class AutomergeSpaceHandle<T> implements SpaceHandle<T> {
   readonly id: string
   private spaceState: SpaceState
   private docHandle: DocHandle<T>
@@ -568,84 +250,7 @@ class AutomergeSpaceHandle<T> implements SpaceHandle<T>, NamedRootsCapable {
   }
 
   getDoc(): T {
-    const doc = this.docHandle.doc() as Record<string, unknown>
-    // Benannte Wurzeln liegen als flache, praefixierte Wurzelschluessel im
-    // Automerge-Doc und gehoeren bewusst NICHT zu `T`. Die Kopie entsteht nur,
-    // wenn es ueberhaupt Wurzelschluessel gibt — Spaces ohne Wurzeln bekommen
-    // unveraendert das Doc-Objekt selbst.
-    if (!doc || typeof doc !== 'object') return doc as T
-    let filtered: Record<string, unknown> | null = null
-    for (const key of Object.keys(doc)) {
-      // Nur ECHTE Wurzeleintraege (Praefix + Umschlag) verschwinden. Ein
-      // Altbestands-Schluessel aus einer frueheren Version bleibt App-Daten und
-      // damit sichtbar.
-      if (!key.startsWith(NAMED_ROOT_PREFIX) || !isNamedRootEnvelope(doc[key])) continue
-      filtered ??= { ...doc }
-      delete filtered[key]
-    }
-    return (filtered ?? doc) as T
-  }
-
-  /**
-   * Benannte Wurzel-Maps (NamedRootsCapable). Automerge hat keine benannten
-   * Wurzeltypen; die Wurzel des Docs ist aber IMMER vorhanden, und verschiedene
-   * Wurzelschluessel mergen konfliktfrei. Deshalb liegt jeder Wurzeleintrag als
-   * EIGENER Wurzelschluessel `__root:<name>:<key>` im Doc. Eine gemeinsame Map
-   * je Wurzel waere wieder eine nebenlaeufige Erstanlage — und genau die
-   * verliert bei Automerge (getConflicts waehlt einen Gewinner) wie bei Yjs
-   * einen Unterbaum (rls#353).
-   */
-  getRoot<R extends object = Record<string, unknown>>(name: string): R {
-    assertValidNamedRootName(name)
-    const prefix = rootKeyPrefix(name)
-    const doc = this.docHandle.doc() as Record<string, unknown> | undefined
-    const out: Record<string, unknown> = {}
-    if (!doc) return out as R
-    for (const key of Object.keys(doc)) {
-      // Praefix UND Umschlag muessen stimmen — ein Altbestands-Schluessel
-      // gehoert der App und wird hier ignoriert, nicht umgedeutet.
-      if (!key.startsWith(prefix) || !isNamedRootEnvelope(doc[key])) continue
-      // Die Schreibseite deckt UNSERE Schreibvorgaenge ab — ein fremdes Geraet
-      // kann trotzdem etwas Unprojizierbares ins Doc legen. Solche Schluessel
-      // ueberspringen, statt die ganze Projektion zu werfen. defineRootKey
-      // haelt einen feindlichen Schluessel zudem vom Prototyp fern.
-      let projected: unknown
-      try {
-        projected = toJsonValue(unwrapNamedRootValue(doc[key]), key)
-      } catch (err) {
-        console.warn(`[AutomergeReplication] named root "${name}": skipping unprojectable key "${key}":`, err instanceof Error ? err.message : err)
-        continue
-      }
-      defineRootKey(out, key.slice(prefix.length), projected)
-    }
-    return out as R
-  }
-
-  transactRoot<R extends object = Record<string, unknown>>(
-    name: string,
-    fn: (root: R) => void,
-    options?: TransactOptions,
-  ): void {
-    assertValidNamedRootName(name)
-    if (this.closed) throw new Error('Handle is closed')
-    const ops = collectRootOps<R>(this.docHandle.doc() as Record<string, unknown> | undefined, name, fn)
-    if (ops.length === 0) return
-    this._transactRaw(((doc: Record<string, unknown>) => applyRootOps(doc, name, ops)) as unknown as (doc: T) => void, options)
-  }
-
-  /**
-   * Bewusst NICHT `async`: Namensregel und Wertvertrag muessen synchron werfen,
-   * damit ein `try`/`catch` um den Aufruf greift. Erst der durable Append ist
-   * asynchron.
-   */
-  transactRootDurable<R extends object = Record<string, unknown>>(
-    name: string,
-    fn: (root: R) => void,
-  ): Promise<void> {
-    assertValidNamedRootName(name)
-    if (this.closed) throw new Error('Handle is closed')
-    const ops = collectRootOps<R>(this.docHandle.doc() as Record<string, unknown> | undefined, name, fn)
-    return this._transactDurableRaw(((doc: Record<string, unknown>) => applyRootOps(doc, name, ops)) as unknown as (doc: T) => void)
+    return this.docHandle.doc() as T
   }
 
   getMeta(): import('@web_of_trust/core').SpaceDocMeta {
@@ -659,16 +264,7 @@ class AutomergeSpaceHandle<T> implements SpaceHandle<T>, NamedRootsCapable {
    * secure-removal commit (suppressed observer + explicit awaited coordinator
    * write). A no-op transaction resolves immediately.
    */
-  transactDurable(fn: (doc: T) => void): Promise<void> {
-    return this._transactDurableRaw(((doc: T) => {
-      const before = classifyNamedRootSlots(doc)
-      fn(hideNamedRoots(doc))
-      assertNamedRootClassificationUnchanged(doc, before)
-    }) as (doc: T) => void)
-  }
-
-  /** Interner durabler Schreibpfad OHNE die Wurzel-Huelle — nur fuer applyRootOps. */
-  private async _transactDurableRaw(fn: (doc: T) => void): Promise<void> {
+  async transactDurable(fn: (doc: T) => void): Promise<void> {
     if (this.closed) throw new Error('Handle is closed')
     if (!this.durableWriter) throw new Error('transactDurable requires the log-sync configuration (no durable log path)')
     // `localChanging` may only cover the SYNCHRONOUS docHandle.change() of the
@@ -687,17 +283,7 @@ class AutomergeSpaceHandle<T> implements SpaceHandle<T>, NamedRootsCapable {
     if (this.compactScheduler) this.compactScheduler.pushImmediate()
   }
 
-  /** Oeffentlicher `data`-Schreibpfad — die benannten Wurzeln bleiben verborgen. */
   transact(fn: (doc: T) => void, options?: TransactOptions): void {
-    this._transactRaw(((doc: T) => {
-      const before = classifyNamedRootSlots(doc)
-      fn(hideNamedRoots(doc))
-      assertNamedRootClassificationUnchanged(doc, before)
-    }) as (doc: T) => void, options)
-  }
-
-  /** Interner Schreibpfad OHNE die Wurzel-Huelle — nur fuer applyRootOps. */
-  private _transactRaw(fn: (doc: T) => void, options?: TransactOptions): void {
     if (this.closed) throw new Error('Handle is closed')
     this.localChanging = true
     try {
@@ -1444,10 +1030,7 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
     return this.state
   }
 
-  createSpace<T>(type: 'personal' | 'shared', initialDoc: T, meta?: { name?: string; description?: string; appTag?: string; modules?: string[] }): Promise<SpaceInfo> {
-    // Bewusst NICHT `async`: die Praefix-Pruefung wirft synchron, bevor
-    // irgendetwas angelegt oder geschrieben wird — wie bei transactRoot.
-    assertNoReservedRootKeys(initialDoc, 'createSpace initial doc')
+  async createSpace<T>(type: 'personal' | 'shared', initialDoc: T, meta?: { name?: string; description?: string; appTag?: string; modules?: string[] }): Promise<SpaceInfo> {
     // The lease MUST be opened synchronously at the public entry point — before
     // any await — so a flight parked in an early await cannot re-issue itself a
     // lease from a later session (see openOrCreateDeterministicPrivateSpace).
@@ -1472,7 +1055,6 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
    * being reported as complete. Concurrent calls share one flight.
    */
   openOrCreateDeterministicPrivateSpace<T>(initialDoc: T, meta?: { name?: string; description?: string; appTag?: string; modules?: string[] }): Promise<SpaceInfo> {
-    assertNoReservedRootKeys(initialDoc, 'openOrCreateDeterministicPrivateSpace initial doc')
     if (this.deterministicPrivateSpaceFlight) return this.deterministicPrivateSpaceFlight
     // The lease is issued SYNCHRONOUSLY here, before the first await of the flight.
     // Opening it any later (inside createSpaceWithId) let a flight parked in the
@@ -1540,10 +1122,6 @@ export class AutomergeReplicationAdapter implements ReplicationAdapter {
     // Set initial app doc + shared metadata in the doc's _meta object. appTag
     // included: invited members must inherit cross-app isolation (the invite
     // carries no plaintext spaceInfo).
-    // Zweite Linie direkt am Schreibvorgang: die oeffentlichen Eingaenge pruefen
-    // bereits, aber jeder kuenftige interne Aufrufer von createSpaceWithId soll
-    // hier auflaufen, statt den Praefix still ins Doc zu tragen.
-    assertNoReservedRootKeys(initialDoc, 'createSpace initial doc')
     docHandle?.change((d: any) => {
       Object.assign(d, initialDoc)
       d._meta = d._meta ?? {}

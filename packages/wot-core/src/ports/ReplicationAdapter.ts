@@ -132,43 +132,22 @@ export interface SecureSelfLeaveCapable {
  * `getDoc()` bleibt unveraendert (nur `data`) — Wurzeln liegen bewusst
  * ausserhalb von `T`. Konsumenten feature-detecten ueber hasNamedRoots.
  *
- * Namensraum: der Yjs-Adapter braucht in `data` KEIN reserviertes Muster —
- * eine Wurzel ist dort ein eigener Y-Root-Type neben `data`, also gibt es
- * innerhalb von `data` gar keinen Namensraum, mit dem sie kollidieren koennte.
+ * Wer bietet die Capability an: der **Yjs-Adapter**. Eine Wurzel ist dort ein
+ * eigener Y-Root-Type NEBEN `data` — `doc.getMap(name)` liefert auf jedem
+ * Geraet dieselbe Identitaet, ohne dass ein Geraet sie anlegt, und innerhalb
+ * von `data` entsteht kein Namensraum, mit dem sie kollidieren koennte.
  *
- * Der Automerge-Adapter hat keine benannten Wurzeltypen und legt Wurzeln als
- * praefixierte Schluessel im Doc-Root ab. Damit ein App-Schluessel aus einer
- * frueheren Version dort nicht als Wurzel umgedeutet wird, traegt ein
- * Wurzeleintrag eine FORMATMARKE: gespeichert wird nicht der nackte Wert,
- * sondern `{ __namedRoot: 1, value: <json> }`. Ein Speicherplatz gilt nur dann
- * als Wurzeleintrag, wenn Praefix UND Umschlag-Form stimmen.
+ * Der **Automerge-Adapter bietet sie bewusst NICHT an** (fail-closed,
+ * `hasNamedRoots` ist dort false). Automerge kennt keinen benannten Wurzeltyp
+ * neben `data`: die Doc-Wurzel IST `data`. Wurzeln muessten sich also einen
+ * Namensraum mit den App-Feldern teilen, und ob ein Speicherplatz dann zur App
+ * oder zu einer Wurzel gehoert, liesse sich nur noch am Zuschnitt der
+ * Nutzdaten raten — eine Heuristik, die ein Merge zweier Geraete aushebeln
+ * kann. Lieber keine Capability als eine, die App-Daten umdeuten kann.
  *
- * Daraus folgt das Verhalten fuer Altbestand (Praefix ohne Umschlag): solche
- * Schluessel bleiben App-Daten — in `getDoc()` sichtbar und ueber `transact`
- * les-, aender- und loeschbar. `getRoot()` ignoriert sie, und ein
- * Wurzel-Schreibvorgang auf denselben Speicherplatz wirft, bevor etwas
- * geschrieben wird (der Fehlertext nennt den Ausweg: den App-Schluessel erst
- * ueber `transact` entfernen). Still ueberschrieben wird nichts.
- *
- * Einen praefixierten Schluessel NEU anzulegen bleibt auf jedem `data`-Pfad
- * verboten (createSpace-Initial-Doc, `transact`, `transactDurable`) — er waere
- * sonst sofort danach in `getDoc()` unsichtbar. Die synchronen Eingaenge werfen
- * synchron; `transactDurable` meldet denselben Fehler als Promise-Rejection,
- * da sein Callback erst im Append-Pfad laeuft. Ein `data`-Callback darf die
- * Zuordnung eines Speicherplatzes auch VERSCHACHTELT nicht aendern (etwa
- * `delete doc[key].extra`, was einem Altbestandswert die Umschlag-Form gaebe);
- * die Pruefung laeuft am Ende des Callbacks innerhalb der CRDT-Transaktion,
- * die Ablehnung ist also atomar.
- *
- * OFFENER RESTFALL (Automerge, Entscheidung steht aus): die Formatmarke ist
- * eine FORM, kein Herkunftsnachweis. Ein App-Wert, der schon vor dieser
- * Adapter-Version unter einem `__root:`-Schluessel lag und zufaellig exakt die
- * Umschlag-Form hat, gilt als Wurzeleintrag. Dasselbe kann ein MERGE
- * herstellen: zwei Geraete loeschen nebenlaeufig je ein anderes Zusatzfeld
- * eines solchen Werts, und erst das Merge-Ergebnis hat die Umschlag-Form —
- * das faengt keine lokale Pruefung ab. Wer das ausschliessen will, braucht die
- * Zuordnung unabhaengig von der Nutzdatenform, etwa einen eigenen
- * Markierungsschluessel je Speicherplatz.
+ * Fuer Aufrufer heisst das: IMMER ueber `hasNamedRoots` feature-detecten und
+ * ohne die Capability fail-closed bleiben — kein Ersatzweg ueber `data`, denn
+ * genau dessen Erstanlage-Verlust ist der Grund fuer die Wurzeln.
  *
  * `R extends object` und NICHT `R extends Record<string, unknown>`: ein
  * TypeScript-`interface` hat keine implizite Index-Signatur und erfuellt die

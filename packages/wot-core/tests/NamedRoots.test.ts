@@ -168,8 +168,8 @@ describe('toJsonValue — Wertvertrag benannter Wurzeln', () => {
   })
 
   it('lehnt prototyp-vergiftende Schluessel auf jeder Ebene ab', () => {
-    // Weder Yjs noch Automerge tragen eine eigene __proto__-Property durch
-    // ihren Binaer-Codec — also laut ablehnen statt still verlieren.
+    // Yjs traegt eine eigene __proto__-Property nicht durch seinen Binaer-Codec
+    // — also laut ablehnen statt still verlieren.
     expect(() => toJsonValue({ a: JSON.parse('{"__proto__":{"hidden":7}}') }, 'root')).toThrow(/__proto__/)
     expect(() => toJsonValue(JSON.parse('{"constructor":1}'), 'root')).toThrow(/constructor/)
     expect(() => toJsonValue({ deep: { list: [JSON.parse('{"prototype":1}')] } }, 'root')).toThrow(/prototype/)

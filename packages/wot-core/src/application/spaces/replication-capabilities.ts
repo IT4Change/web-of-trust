@@ -102,12 +102,11 @@ function defineOwn(target: Record<string, unknown>, key: string, value: unknown)
 
 /**
  * Schluessel, die eine Projektion am Prototyp statt am Objekt landen lassen
- * wuerden. Dieselbe Liste wie bei appData — und zusaetzlich unvermeidbar:
- * WEDER Yjs NOCH Automerge tragen eine eigene `__proto__`-Property durch ihren
- * Binaer-Codec (Automerge verliert sie schon beim Schreiben, Yjs nach
- * encodeStateAsUpdate/applyUpdate). Ein Schluessel, der den Sync nicht
- * ueberlebt, darf gar nicht erst geschrieben werden — lieber laut ablehnen als
- * still verlieren.
+ * wuerden. Dieselbe Liste wie bei appData — und zusaetzlich unvermeidbar: Yjs
+ * traegt eine eigene `__proto__`-Property nicht durch seinen Binaer-Codec (sie
+ * ist nach encodeStateAsUpdate/applyUpdate weg). Ein Schluessel, der den Sync
+ * nicht ueberlebt, darf gar nicht erst geschrieben werden — lieber laut
+ * ablehnen als still verlieren.
  */
 const FORBIDDEN_ROOT_KEYS = new Set(['__proto__', 'constructor', 'prototype'])
 
