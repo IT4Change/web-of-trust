@@ -37,7 +37,8 @@ import {
   openLifecycleLease, isSameAdmission,
 } from '@web_of_trust/core/application'
 import type { LocalImpact, SecureRemovalDeps, LifecycleLease } from '@web_of_trust/core/application'
-import type { MembershipActivityCapable, SecureSelfLeaveCapable } from '@web_of_trust/core/ports'
+import type { MembershipActivityCapable, SecureSelfLeaveCapable, NamedRootsCapable } from '@web_of_trust/core/ports'
+import { assertValidNamedRootName, assertValidNamedRootKey, toJsonValue, defineRootKey, freezeDeep } from '@web_of_trust/core/application'
 import type {
   ProtocolCryptoAdapter, MemberUpdateSignal, SeenMemberUpdateSignal, SpaceInviteBody, KeyRotationBody,
   DidResolver, DidcommPlaintextMessage, InboxAckLocalOutcome, InboxMessageKind,
@@ -253,7 +254,7 @@ interface YjsReplicationConfig {
 
 // --- YjsSpaceHandle ---
 
-class YjsSpaceHandle<T> implements SpaceHandle<T> {
+class YjsSpaceHandle<T> implements SpaceHandle<T>, NamedRootsCapable {
   readonly id: string
   private closed = false
   private remoteUpdateCallbacks = new Set<() => void>()
@@ -327,6 +328,67 @@ class YjsSpaceHandle<T> implements SpaceHandle<T> {
     await this.adapter._transactDurable(this.spaceState, () => {
       const proxy = createDataProxy<T>(this.spaceState.doc.getMap('data'))
       fn(proxy)
+    })
+    this.adapter._scheduleCompactImmediate(this.spaceState)
+    this.adapter._scheduleVaultImmediate(this.spaceState)
+  }
+
+  /**
+   * Benannte Wurzel-Maps (NamedRootsCapable). Eine Wurzel ist ein Yjs-Root-Type
+   * (`doc.getMap(name)`): sie existiert auf JEDEM Geraet ohne Erstanlage, also
+   * kann nebenlaeufiges erstes Schreiben zweier Geraete keinen Unterbaum
+   * verlieren — anders als eine verschachtelte Map unter `data`, die ein
+   * Register ist (rls#353).
+   */
+  getRoot<R extends object = Record<string, unknown>>(name: string): R {
+    assertValidNamedRootName(name)
+    return projectRoot(this.spaceState.doc.getMap(name), name) as R
+  }
+
+  transactRoot<R extends object = Record<string, unknown>>(
+    name: string,
+    fn: (root: R) => void,
+    options?: TransactOptions,
+  ): void {
+    assertValidNamedRootName(name)
+    if (this.closed) return
+
+    // Erst sammeln + validieren, dann schreiben: wirft eine Zuweisung im
+    // Callback, hat die Transaktion noch NICHTS im Doc veraendert.
+    const ops = collectRootOps<R>(this.spaceState.doc.getMap(name), name, fn)
+    if (ops.length === 0) return
+
+    this.spaceState.doc.transact(() => {
+      applyRootOps(this.spaceState.doc.getMap(name), ops)
+    }, 'local')
+
+    if (options?.stream) {
+      this.adapter._scheduleCompactDebounced(this.spaceState)
+      this.adapter._scheduleVaultDebounced(this.spaceState)
+    } else {
+      this.adapter._scheduleCompactImmediate(this.spaceState)
+      this.adapter._scheduleVaultImmediate(this.spaceState)
+    }
+  }
+
+  /**
+   * Bewusst NICHT `async`: Namensregel und Wertvertrag muessen synchron werfen,
+   * damit ein `try`/`catch` um den Aufruf greift — genau wie bei transactRoot.
+   * Erst der durable Append ist asynchron.
+   */
+  transactRootDurable<R extends object = Record<string, unknown>>(
+    name: string,
+    fn: (root: R) => void,
+  ): Promise<void> {
+    assertValidNamedRootName(name)
+    if (this.closed) throw new Error('SpaceHandle is closed')
+    const ops = collectRootOps<R>(this.spaceState.doc.getMap(name), name, fn)
+    return this._commitRootOpsDurable(name, ops)
+  }
+
+  private async _commitRootOpsDurable(name: string, ops: RootOp[]): Promise<void> {
+    await this.adapter._transactDurable(this.spaceState, () => {
+      applyRootOps(this.spaceState.doc.getMap(name), ops)
     })
     this.adapter._scheduleCompactImmediate(this.spaceState)
     this.adapter._scheduleVaultImmediate(this.spaceState)
@@ -415,6 +477,160 @@ function ymapToPlain(ymap: Y.Map<any>): Record<string, any> {
     }
   })
   return obj
+}
+
+/** Eine gesammelte Wurzel-Mutation: Wert setzen oder Schluessel loeschen. */
+type RootOp = { key: string; value: unknown } | { key: string; delete: true }
+
+/** CRDT-Typen duerfen nie als Wert IN einer Wurzel landen — Wurzeln tragen reines JSON. */
+function isYType(candidate: object): boolean {
+  return candidate instanceof Y.AbstractType
+}
+
+/**
+ * Kanonische, tiefe JSON-Kopie eines Wurzel-Werts (validiert auf jeder Ebene),
+ * TIEF EINGEFROREN. Nur so kann ein Wert den Entwurf verlassen, ohne dass eine
+ * spaetere Mutation an Validierung und Persistenz-Planung vorbei ins Doc
+ * durchschlaegt.
+ */
+function rootJsonValue(value: unknown, path: string): unknown {
+  return freezeDeep(toJsonValue(value, path, isYType))
+}
+
+/**
+ * Plain-JSON-Projektion einer benannten Wurzel. Anders als {@link ymapToPlain}
+ * liefert sie eine TIEFE KOPIE: `map.get()` gibt bei einem lokal geschriebenen
+ * Objekt dieselbe Referenz zurueck — eine Mutation der Rueckgabe wuerde sonst
+ * am CRDT vorbei wirken. `__proto__` bleibt dabei ein eigener Schluessel.
+ */
+function projectRoot(ymap: Y.Map<any>, rootName: string): Record<string, unknown> {
+  const obj: Record<string, unknown> = {}
+  ymap.forEach((value, key) => {
+    // Die Schreibseite deckt UNSERE Schreibvorgaenge ab — ein fremdes Geraet
+    // kann trotzdem etwas Unprojizierbares ins Doc legen. Solche Schluessel
+    // ueberspringen, statt die ganze Projektion (und damit die App) zu werfen.
+    let projected: unknown
+    try {
+      projected = toJsonValue(value, `${rootName}.${key}`, isYType)
+    } catch (err) {
+      console.warn(`[YjsReplication] named root "${rootName}": skipping unprojectable key "${key}":`, err instanceof Error ? err.message : err)
+      return
+    }
+    defineRootKey(obj, key, projected)
+  })
+  return obj
+}
+
+/**
+ * Fuehrt `fn` auf einem FLACHEN Entwurf der Wurzel aus und gibt die gesammelten
+ * Mutationen zurueck. Zwei Gruende fuer das Sammeln statt Direktschreiben:
+ *
+ * 1. Atomaritaet — ein ungueltiger Wert wirft, BEVOR irgendetwas im Doc steht;
+ *    sonst bliebe ein halb geschriebener Patch zurueck und wuerde gesendet.
+ * 2. Der Entwurf ist nach dem Callback tot. Ein festgehaltener Proxy kann das
+ *    Doc spaeter nicht mehr an Validierung und Persistenz-Planung vorbei
+ *    veraendern.
+ *
+ * Bewusst KEIN Nachbau von {@link createDataProxy} mit Kind-Y.Maps — Kind-Maps
+ * sind genau das Konstrukt, dessen nebenlaeufige Erstanlage einen Unterbaum
+ * verliert.
+ */
+function collectRootOps<R extends object>(
+  ymap: Y.Map<any>,
+  rootName: string,
+  fn: (root: R) => void,
+): RootOp[] {
+  const ops = new Map<string, RootOp>()
+  // Der CRDT-Zustand kann sich waehrend des Callbacks nicht aendern (ein Tick,
+  // ein Thread) — einmal geklonte Bestandswerte sind also stabil. Der Cache
+  // haelt Object.keys()/Deskriptor-Zugriffe davon ab, grosse Werte mehrfach
+  // tief zu kopieren.
+  const readCache = new Map<string, unknown>()
+  let active = true
+  const has = (key: string): boolean => {
+    const pending = ops.get(key)
+    if (pending) return !('delete' in pending)
+    return ymap.has(key)
+  }
+  const read = (key: string): unknown => {
+    const pending = ops.get(key)
+    // Der Op-Wert ist bereits geklont UND eingefroren — er darf hier direkt
+    // heraus, ohne dass der Aufrufer ihn nachtraeglich veraendern koennte.
+    if (pending) return 'delete' in pending ? undefined : pending.value
+    if (readCache.has(key)) return readCache.get(key)
+    if (!ymap.has(key)) return undefined
+    const value = rootJsonValue(ymap.get(key), `${rootName}.${key}`)
+    readCache.set(key, value)
+    return value
+  }
+  const keys = (): string[] => {
+    const all = new Set<string>(ymap.keys())
+    for (const [key, op] of ops) {
+      if ('delete' in op) all.delete(key)
+      else all.add(key)
+    }
+    return Array.from(all)
+  }
+
+  const guard = () => {
+    if (!active) throw new Error('named root draft is no longer writable — it is only valid inside transactRoot')
+  }
+  const draft = new Proxy({} as Record<string, unknown>, {
+    get(_t, prop: string | symbol) {
+      if (typeof prop !== 'string') return undefined
+      return read(prop)
+    },
+    set(_t, prop: string | symbol, value: unknown) {
+      guard()
+      if (typeof prop !== 'string') throw new TypeError('named root keys must be strings')
+      assertValidNamedRootKey(prop, rootName)
+      if (value === undefined) { ops.set(prop, { key: prop, delete: true }); return true }
+      // Validate + clone BEFORE anything is recorded: a throw leaves no partial patch.
+      ops.set(prop, { key: prop, value: rootJsonValue(value, `${rootName}.${prop}`) })
+      return true
+    },
+    deleteProperty(_t, prop: string | symbol) {
+      guard()
+      if (typeof prop === 'string') ops.set(prop, { key: prop, delete: true })
+      return true
+    },
+    has(_t, prop: string | symbol) {
+      return typeof prop === 'string' && has(prop)
+    },
+    ownKeys() {
+      return keys()
+    },
+    // Accessor statt Daten-Deskriptor: Object.keys() prueft nur `enumerable`
+    // und darf deshalb keinen Wert projizieren — sonst laesst ein einziger
+    // unprojizierbarer Fremdwert schon das blosse Aufzaehlen (und damit ein
+    // `delete` ueber alle Schluessel) werfen.
+    getOwnPropertyDescriptor(_t, prop: string | symbol) {
+      if (typeof prop !== 'string' || !has(prop)) return undefined
+      const key = prop
+      return { configurable: true, enumerable: true, get: () => read(key) }
+    },
+    defineProperty() {
+      // Der Wurzel-Vertrag kennt nur Zuweisung und delete. Ein Deskriptor
+      // wuerde nur das Proxy-Ziel treffen und einen Schreibvorgang vortaeuschen,
+      // der nie im CRDT landet — deshalb laut ablehnen.
+      throw new TypeError('named root drafts only support assignment and delete, not Object.defineProperty')
+    },
+  }) as R
+
+  try {
+    fn(draft)
+  } finally {
+    active = false
+  }
+  return Array.from(ops.values())
+}
+
+/** Schreibt die gesammelten Mutationen — laeuft IMMER innerhalb einer Doc-Transaktion. */
+function applyRootOps(ymap: Y.Map<any>, ops: RootOp[]): void {
+  for (const op of ops) {
+    if ('delete' in op) ymap.delete(op.key)
+    else ymap.set(op.key, op.value)
+  }
 }
 
 function createDataProxy<T>(ymap: Y.Map<any>): T {

@@ -116,6 +116,63 @@ export interface SecureSelfLeaveCapable {
 }
 
 /**
+ * Optional capability: benannte Wurzel-Maps neben `data`. Eine Wurzel wird vom
+ * CRDT selbst bereitgestellt, nie von einem Geraet angelegt: nebenlaeufige
+ * Erstschreibvorgaenge mehrerer Geraete kollidieren deshalb nie (in `data` ist
+ * jede verschachtelte Map ein Register, das bei nebenlaeufiger Erstanlage einen
+ * Unterbaum verliert). Werte je Schluessel sind reine JSON-Werte und werden als
+ * Ganzes ersetzt; Verschachtelung in CRDT-Typen gibt es in Wurzeln NICHT.
+ * Verschiedene Schluessel mergen konfliktfrei, denselben Schluessel darf nur ein
+ * Schreiber fuehren (LWW).
+ *
+ * `name` MUSS `^[a-z][A-Za-z0-9]*$` erfuellen und darf nicht `data` sein; Namen
+ * mit `_` sind dem Adapter vorbehalten (`_meta`, `_members`, …). Ein Verstoss
+ * wirft synchron (siehe assertValidNamedRootName).
+ *
+ * `getDoc()` bleibt unveraendert (nur `data`) — Wurzeln liegen bewusst
+ * ausserhalb von `T`. Konsumenten feature-detecten ueber hasNamedRoots.
+ *
+ * Wer bietet die Capability an: der **Yjs-Adapter**. Eine Wurzel ist dort ein
+ * eigener Y-Root-Type NEBEN `data` — `doc.getMap(name)` liefert auf jedem
+ * Geraet dieselbe Identitaet, ohne dass ein Geraet sie anlegt, und innerhalb
+ * von `data` entsteht kein Namensraum, mit dem sie kollidieren koennte.
+ *
+ * Der **Automerge-Adapter bietet sie bewusst NICHT an** (fail-closed,
+ * `hasNamedRoots` ist dort false). Automerge kennt keinen benannten Wurzeltyp
+ * neben `data`: die Doc-Wurzel IST `data`. Wurzeln muessten sich also einen
+ * Namensraum mit den App-Feldern teilen, und ob ein Speicherplatz dann zur App
+ * oder zu einer Wurzel gehoert, liesse sich nur noch am Zuschnitt der
+ * Nutzdaten raten — eine Heuristik, die ein Merge zweier Geraete aushebeln
+ * kann. Lieber keine Capability als eine, die App-Daten umdeuten kann.
+ *
+ * Fuer Aufrufer heisst das: IMMER ueber `hasNamedRoots` feature-detecten und
+ * ohne die Capability fail-closed bleiben — kein Ersatzweg ueber `data`, denn
+ * genau dessen Erstanlage-Verlust ist der Grund fuer die Wurzeln.
+ *
+ * `R extends object` und NICHT `R extends Record<string, unknown>`: ein
+ * TypeScript-`interface` hat keine implizite Index-Signatur und erfuellt die
+ * Record-Schranke deshalb nicht — die Capability waere mit genau den Typen
+ * unbenutzbar, fuer die sie gedacht ist. Die Laufzeit-Invariante (Schluessel
+ * sind Strings, Werte reines JSON) traegt weiterhin die Adapter-Validierung,
+ * nicht die Typschranke.
+ */
+export interface NamedRootsCapable {
+  /** Lesbarer Schnappschuss (tiefe Kopie) der Wurzel; leer, wenn nie geschrieben. */
+  getRoot<R extends object = Record<string, unknown>>(name: string): R
+  /** Schreiben: Zuweisung ersetzt den Wert atomar, `delete` entfernt den Schluessel. */
+  transactRoot<R extends object = Record<string, unknown>>(
+    name: string,
+    fn: (root: R) => void,
+    options?: TransactOptions,
+  ): void
+  /** Wie transactRoot, mit der Durabilitaetsgarantie von transactDurable. */
+  transactRootDurable<R extends object = Record<string, unknown>>(
+    name: string,
+    fn: (root: R) => void,
+  ): Promise<void>
+}
+
+/**
  * Optional capability: open-or-create the private space whose genesis (id +
  * generation-0 keys) is deterministically derived from the identity (Sync 001).
  * Idempotent across devices / recovery / restart — no random-id discovery race.
@@ -125,5 +182,5 @@ export interface DeterministicPrivateSpaceCapable {
 }
 
 // The runtime guards for these capabilities (hasMembershipActivity,
-// hasSecureSelfLeave, hasDeterministicPrivateSpace) live in
+// hasSecureSelfLeave, hasDeterministicPrivateSpace, hasNamedRoots) live in
 // application/spaces/replication-capabilities.ts — ports stay type-only.
