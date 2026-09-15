@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.2.9](https://github.com/real-life-org/web-of-trust/compare/adapter-automerge-v0.2.8...adapter-automerge-v0.2.9) (2026-09-15)
+
+
+### Features
+
+* **adapter-automerge:** benannte Wurzel-Maps je Space-Doc ([881de66](https://github.com/real-life-org/web-of-trust/commit/881de66d3cf008824277fe5a1a0643ca706a0d42))
+* **core,adapter-yjs,adapter-automerge:** benannte Wurzel-Maps je Space-Doc (NamedRootsCapable) ([bd26b95](https://github.com/real-life-org/web-of-trust/commit/bd26b9587e4780de61d23f025bde8a9d0688dbf8))
+
+
+### Bug Fixes
+
+* **adapter-automerge:** reservierten Wurzel-Praefix in data laut ablehnen (Loop-Review) ([1a623df](https://github.com/real-life-org/web-of-trust/commit/1a623dfddd5cd39c76dff99918b6ccdc8d8302c3))
+* **adapter-automerge:** Umklassifizierung eines Speicherplatzes auch verschachtelt ablehnen (Codex) ([b0e5085](https://github.com/real-life-org/web-of-trust/commit/b0e5085d44336ed16016e2712ead0d3fe492f1a4))
+* **adapter-automerge:** Wurzeleintraege mit Formatmarke vom Altbestand unterscheiden (Loop-Review) ([4c4b050](https://github.com/real-life-org/web-of-trust/commit/4c4b050781f3f9da8dc0a5aeba094e2b5cbc69b5))
+* **adapter-yjs,adapter-automerge:** hasNamedRoots im Test aus der Anwendungsschicht importieren ([6e9b2e6](https://github.com/real-life-org/web-of-trust/commit/6e9b2e6361a218feef92c0d5cbda832600362a46))
+* **adapter-yjs,adapter-automerge:** Wurzeln aus dem data-Pfad heraushalten (Codex-Runde 3) ([97d15da](https://github.com/real-life-org/web-of-trust/commit/97d15dac307a69421adb5a829cce09784983d288))
+* **core,adapter-yjs,adapter-automerge:** Wurzel-Entwurf abdichten (Codex-Runde 2) ([479a3d0](https://github.com/real-life-org/web-of-trust/commit/479a3d018ac80da7e2be8d8601df0789be096cdc))
+* **core,adapter-yjs,adapter-automerge:** Wurzel-Schreibvertrag haerten (Codex-Runde 1) ([bf29477](https://github.com/real-life-org/web-of-trust/commit/bf29477494716f3d1c7786f2c016da5b848a8037))
+* **core:** NamedRootsCapable akzeptiert Interface-Typen (R extends object) ([2b1ab67](https://github.com/real-life-org/web-of-trust/commit/2b1ab67b7d56da92b05892893f34d379bda8c4a4))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * devDependencies
+    * @web_of_trust/core bumped to 0.5.9
+  * peerDependencies
+    * @web_of_trust/core bumped to 0.5.9
+
 ## [0.2.8](https://github.com/real-life-org/web-of-trust/compare/adapter-automerge-v0.2.7...adapter-automerge-v0.2.8) (2026-09-11)
 
 
