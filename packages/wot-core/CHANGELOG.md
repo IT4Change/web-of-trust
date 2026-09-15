@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.9](https://github.com/real-life-org/web-of-trust/compare/core-v0.5.8...core-v0.5.9) (2026-09-15)
+
+
+### Features
+
+* **core:** Vertrag `NamedRootsCapable` für benannte Wurzel-Maps je Space-Doc (`getRoot`, `transactRoot`, `transactRootDurable`, Type Guard `hasNamedRoots`). Eine Wurzel wird vom CRDT bereitgestellt, nie von einem Gerät angelegt; nebenläufige Erstschreibvorgänge mehrerer Geräte kollidieren nicht. Werte je Schlüssel sind flache JSON-Werte. Aufrufer müssen die Capability per `hasNamedRoots` erkennen und ohne sie fail-closed bleiben. Angeboten von adapter-yjs; adapter-automerge bewusst nicht (siehe dort). Anlass: real-life-org/real-life-stack#353. ([#370](https://github.com/real-life-org/web-of-trust/pull/370))
+
 ## [0.5.8](https://github.com/real-life-org/web-of-trust/compare/core-v0.5.7...core-v0.5.8) (2026-09-11)
 
 

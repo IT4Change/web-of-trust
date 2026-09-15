@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.2.9](https://github.com/real-life-org/web-of-trust/compare/adapter-yjs-v0.2.8...adapter-yjs-v0.2.9) (2026-09-15)
+
+
+### Features
+
+* **adapter-yjs:** `NamedRootsCapable` umgesetzt: benannte Wurzel-Maps als eigene Y-Root-Types neben `data` (`doc.getMap(name)`), flacher Entwurf mit atomarem Anwenden, tiefe JSON-Validierung, Kopien beim Lesen. Wurzeln werden von Compact-Store, Vault, Log-Sync (Catch-up, Restore, Reconnect, Recovery) und Full-State mitgetragen; `onRemoteUpdate` feuert auch bei Wurzel-Änderungen. Zwei Geräte, die nebenläufig erstmals in dieselbe Wurzel schreiben, behalten beide Schlüssel. ([#370](https://github.com/real-life-org/web-of-trust/pull/370))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * devDependencies
+    * @web_of_trust/core bumped to 0.5.9
+  * peerDependencies
+    * @web_of_trust/core bumped to 0.5.9
+
 ## [0.2.8](https://github.com/real-life-org/web-of-trust/compare/adapter-yjs-v0.2.7...adapter-yjs-v0.2.8) (2026-09-11)
 
 

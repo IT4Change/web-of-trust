@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.2.9](https://github.com/real-life-org/web-of-trust/compare/adapter-automerge-v0.2.8...adapter-automerge-v0.2.9) (2026-09-15)
+
+
+### Hinweis
+
+* **adapter-automerge:** bietet `NamedRootsCapable` bewusst NICHT an (`hasNamedRoots(handle) === false`, keine der drei Methoden). Automerge kennt keinen benannten Wurzeltyp neben `data`; jede Unterscheidung im geteilten Namensraum wäre eine Heuristik über Nutzdaten. Der Quellcode des Adapters ist gegenüber 0.2.8 unverändert; ein Test belegt das fail-closed-Verhalten. ([#370](https://github.com/real-life-org/web-of-trust/pull/370))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * devDependencies
+    * @web_of_trust/core bumped to 0.5.9
+  * peerDependencies
+    * @web_of_trust/core bumped to 0.5.9
+
 ## [0.2.8](https://github.com/real-life-org/web-of-trust/compare/adapter-automerge-v0.2.7...adapter-automerge-v0.2.8) (2026-09-11)
 
 
