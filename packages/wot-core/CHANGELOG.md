@@ -5,18 +5,7 @@
 
 ### Features
 
-* **core,adapter-yjs,adapter-automerge:** benannte Wurzel-Maps je Space-Doc (NamedRootsCapable) ([bd26b95](https://github.com/real-life-org/web-of-trust/commit/bd26b9587e4780de61d23f025bde8a9d0688dbf8))
-* **core:** Vertrag fuer benannte Wurzel-Maps je Space-Doc ([dffaae4](https://github.com/real-life-org/web-of-trust/commit/dffaae41009cd427b4216f892de01c9c280fd2cd))
-
-
-### Bug Fixes
-
-* **adapter-automerge:** reservierten Wurzel-Praefix in data laut ablehnen (Loop-Review) ([1a623df](https://github.com/real-life-org/web-of-trust/commit/1a623dfddd5cd39c76dff99918b6ccdc8d8302c3))
-* **adapter-automerge:** Umklassifizierung eines Speicherplatzes auch verschachtelt ablehnen (Codex) ([b0e5085](https://github.com/real-life-org/web-of-trust/commit/b0e5085d44336ed16016e2712ead0d3fe492f1a4))
-* **adapter-automerge:** Wurzeleintraege mit Formatmarke vom Altbestand unterscheiden (Loop-Review) ([4c4b050](https://github.com/real-life-org/web-of-trust/commit/4c4b050781f3f9da8dc0a5aeba094e2b5cbc69b5))
-* **core,adapter-yjs,adapter-automerge:** Wurzel-Entwurf abdichten (Codex-Runde 2) ([479a3d0](https://github.com/real-life-org/web-of-trust/commit/479a3d018ac80da7e2be8d8601df0789be096cdc))
-* **core,adapter-yjs,adapter-automerge:** Wurzel-Schreibvertrag haerten (Codex-Runde 1) ([bf29477](https://github.com/real-life-org/web-of-trust/commit/bf29477494716f3d1c7786f2c016da5b848a8037))
-* **core:** NamedRootsCapable akzeptiert Interface-Typen (R extends object) ([2b1ab67](https://github.com/real-life-org/web-of-trust/commit/2b1ab67b7d56da92b05892893f34d379bda8c4a4))
+* **core:** Vertrag `NamedRootsCapable` für benannte Wurzel-Maps je Space-Doc (`getRoot`, `transactRoot`, `transactRootDurable`, Type Guard `hasNamedRoots`). Eine Wurzel wird vom CRDT bereitgestellt, nie von einem Gerät angelegt; nebenläufige Erstschreibvorgänge mehrerer Geräte kollidieren nicht. Werte je Schlüssel sind flache JSON-Werte. Aufrufer müssen die Capability per `hasNamedRoots` erkennen und ohne sie fail-closed bleiben. Angeboten von adapter-yjs; adapter-automerge bewusst nicht (siehe dort). Anlass: real-life-org/real-life-stack#353. ([#370](https://github.com/real-life-org/web-of-trust/pull/370))
 
 ## [0.5.8](https://github.com/real-life-org/web-of-trust/compare/core-v0.5.7...core-v0.5.8) (2026-09-11)
 
