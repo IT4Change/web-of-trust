@@ -11,7 +11,7 @@ import {
 } from '@web_of_trust/core/adapters'
 import { KEY_ROTATION_MESSAGE_TYPE, MEMBER_UPDATE_MESSAGE_TYPE, resolveDidKey, x25519PublicKeyToMultibase } from '@web_of_trust/core/protocol'
 import type { WireMessage, PendingRemoval } from '@web_of_trust/core/ports'
-import { stageRotateSpaceKey, createSpaceKey, rotateSpaceKey, buildKeyRotationBody, deliverInboxMessage } from '@web_of_trust/core/application'
+import { stageRotateSpaceKey, createSpaceKey, rotateSpaceKey, buildKeyRotationBody, deliverInboxMessage, runTwoPhaseRemoval } from '@web_of_trust/core/application'
 import { WebCryptoProtocolCryptoAdapter } from '@web_of_trust/core/protocol-adapters'
 import { YjsReplicationAdapter } from '../src/YjsReplicationAdapter'
 import { getYjsPersonalDoc, initYjsPersonalDoc, resetYjsPersonalDoc } from '../src/YjsPersonalDocManager'
@@ -79,6 +79,21 @@ function brokerEntryCount(broker: InProcessLogBroker, docId: string): number {
 
 function adapterGeneration(adapter: YjsReplicationAdapter, spaceId: string): Promise<number> {
   return (adapter as unknown as { keyManagement: InMemoryKeyManagementAdapter }).keyManagement.getCurrentGeneration(spaceId)
+}
+
+/** Status des kanonischen Membership-Gewinners fuer eine DID im geladenen Space. */
+function membershipWinnerStatus(adapter: YjsReplicationAdapter, spaceId: string, did: string): string | undefined {
+  const internals = adapter as unknown as {
+    spaces: Map<string, { doc: unknown }>
+    readMembershipEvents: (doc: unknown) => unknown[]
+    resolveWinner?: unknown
+  }
+  const state = internals.spaces.get(spaceId)
+  if (!state) return undefined
+  const events = internals.readMembershipEvents(state.doc) as { did: string; status: string; sinceGeneration: number }[]
+  const mine = events.filter(event => event.did === did)
+  if (mine.length === 0) return undefined
+  return mine.reduce((a, b) => (b.sinceGeneration > a.sinceGeneration ? b : a)).status
 }
 
 function pendingRemoval(adapter: YjsReplicationAdapter, spaceId: string, removedDid: string) {
@@ -337,6 +352,82 @@ describe('YjsReplicationAdapter — Slice SR secure removal (VE-C1 wiring)', () 
       generation: 1,
       byDid: bob.getDid(),
     })
+    await resetYjsPersonalDoc()
+  })
+
+
+  it('FELDFALL rls: removeMember(self) eines Nicht-Admins nimmt den Self-Leave-Pfad, stagt kein Removal und sendet keinen space-rotate', async () => {
+    // Der RLS-Connector ruft beim "Verlassen" zuerst removeMember(self) und danach
+    // leaveSpace. removeMember(self) lief bislang in die zweiphasige Maschinerie:
+    // ein Nicht-Admin stagte ein Removal und bat den Broker um einen space-rotate,
+    // den dieser nur admin-signiert akzeptiert. Der durable Staging-Record blieb
+    // liegen und vergiftete danach JEDEN leaveSpace-Versuch (securePending-Zweig).
+    const spaceId = await createSharedSpace()
+    await initYjsPersonalDoc(bob)
+    const sentMemberUpdates: WireMessage[] = []
+    const controlFrames: unknown[] = []
+    const baseSend = bobMessaging.send.bind(bobMessaging)
+    const baseControl = bobMessaging.sendControlFrame!.bind(bobMessaging)
+    ;(bobMessaging as unknown as { send: typeof bobMessaging.send }).send = async (message) => {
+      if ((message as { type?: unknown }).type === MEMBER_UPDATE_MESSAGE_TYPE) sentMemberUpdates.push(message)
+      return baseSend(message)
+    }
+    ;(bobMessaging as unknown as { sendControlFrame: NonNullable<typeof bobMessaging.sendControlFrame> }).sendControlFrame = async (frame) => {
+      controlFrames.push(frame)
+      // Ein echter Broker lehnt Bobs Rotate mit AUTH_INVALID ab; die Assertion
+      // unten beweist, dass dieser Pfad ihn gar nicht erst versucht.
+      if ((frame as { type?: unknown }).type === 'space-rotate') throw new Error('AUTH_INVALID: non-admin rotate')
+      return baseControl(frame)
+    }
+
+    await bobAdapter.removeMember(spaceId, bob.getDid())
+
+    expect(controlFrames.filter(frame => (frame as { type?: unknown }).type === 'space-rotate')).toHaveLength(0)
+    expect(await pendingRemoval(bobAdapter, spaceId, bob.getDid())).toBeNull()
+    // Die kanonische Selbst-Entfernung ist geschrieben und verteilt — genau das,
+    // was der dedizierte leaveSpace-Pfad eines Nicht-Admins auch tut.
+    expect(membershipWinnerStatus(bobAdapter, spaceId, bob.getDid())).toBe('removed')
+    expect(sentMemberUpdates).toHaveLength(2) // eigene DID (Geschwistergeraete) + verbleibender Admin
+    // removeMember raeumt NICHT lokal auf — das bleibt leaveSpace vorbehalten.
+    expect(await bobAdapter.getSpace(spaceId)).not.toBeNull()
+    await resetYjsPersonalDoc()
+  })
+
+  it('FELDFALL rls: ein bereits gestagtes Self-Removal eines Nicht-Admins blockiert leaveSpace nicht mehr', async () => {
+    // Recovery-Pfad fuer Clients, die den Bug oben schon ausgeloest haben: der
+    // durable Staging-Record liegt in ihrer IndexedDB und zieht leaveSpace in den
+    // securePending-Zweig, der den unmoeglichen Rotate ewig wiederholt.
+    const spaceId = await createSharedSpace()
+    await initYjsPersonalDoc(bob)
+    // Das vergiftete Staging exakt so erzeugen, wie es der alte Pfad hinterliess:
+    // die zweiphasige Maschinerie gegen einen Broker laufen lassen, der Bobs
+    // nicht-admin-signierten Rotate ablehnt.
+    const rejectRotate = () => {
+      const baseControl = bobMessaging.sendControlFrame!.bind(bobMessaging)
+      const frames: unknown[] = []
+      ;(bobMessaging as unknown as { sendControlFrame: NonNullable<typeof bobMessaging.sendControlFrame> }).sendControlFrame = async (frame) => {
+        frames.push(frame)
+        if ((frame as { type?: unknown }).type === 'space-rotate') throw new Error('AUTH_INVALID: non-admin rotate')
+        return baseControl(frame)
+      }
+      return frames
+    }
+    const bobState = (bobAdapter as unknown as { spaces: Map<string, unknown> }).spaces.get(spaceId)!
+    const deps = (bobAdapter as unknown as {
+      buildSecureRemovalDeps: (state: unknown, key: Uint8Array | undefined) => Parameters<typeof runTwoPhaseRemoval>[0]
+    }).buildSecureRemovalDeps(bobState, await bob.getEncryptionPublicKeyBytes())
+    // Der Broker lehnt Bobs nicht-admin-signierten Rotate mit AUTH_INVALID ab —
+    // die Staging-Zeile bleibt durable liegen. Exakt der Feldzustand.
+    await expect(runTwoPhaseRemoval(deps, bob.getDid(), {})).rejects.toThrow(/staged but NOT yet enforced/)
+    expect(await pendingRemoval(bobAdapter, spaceId, bob.getDid())).not.toBeNull()
+
+    const controlFrames = rejectRotate()
+
+    await bobAdapter.leaveSpace(spaceId)
+
+    expect(controlFrames.filter(frame => (frame as { type?: unknown }).type === 'space-rotate')).toHaveLength(0)
+    expect(await pendingRemoval(bobAdapter, spaceId, bob.getDid())).toBeNull()
+    expect(await bobAdapter.getSpace(spaceId)).toBeNull()
     await resetYjsPersonalDoc()
   })
 
