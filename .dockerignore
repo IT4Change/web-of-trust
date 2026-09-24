@@ -1,7 +1,8 @@
-# Build-Context-Hygiene fuer den Repo-Root-Build (packages/wot-vault/Dockerfile,
-# context: . in .github/workflows/docker.yml). Vault braucht nur tsconfig.base.json
-# + packages/wot-core + packages/wot-vault — alles Grosse/Irrelevante raus.
-# (Greift NICHT fuer relay/profiles, deren Context = ihr Package-Dir ist.)
+# Build-Context-Hygiene fuer die drei Service-Images (relay, profiles, vault).
+# Alle drei bauen mit `context: .` aus dem Repo-Root (siehe docker.yml) und
+# brauchen daraus nur die Manifeste, die Lockfile, tsconfig.base.json und ihr
+# eigenes Package plus packages/wot-core — alles Grosse/Irrelevante raus.
+# ACHTUNG: pnpm-lock.yaml gehoert NICHT hierher, die Images installieren damit.
 .git
 **/node_modules
 **/.turbo
