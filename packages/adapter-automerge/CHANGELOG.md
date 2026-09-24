@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.2.10](https://github.com/real-life-org/web-of-trust/compare/adapter-automerge-v0.2.9...adapter-automerge-v0.2.10) (2026-09-24)
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * devDependencies
+    * @web_of_trust/core bumped to 0.5.10
+  * peerDependencies
+    * @web_of_trust/core bumped to 0.5.10
+
 ## [0.2.9](https://github.com/real-life-org/web-of-trust/compare/adapter-automerge-v0.2.8...adapter-automerge-v0.2.9) (2026-09-15)
 
 

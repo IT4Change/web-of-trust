@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.3.8](https://github.com/real-life-org/web-of-trust/compare/app-v0.3.7...app-v0.3.8) (2026-09-24)
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * @web_of_trust/adapter-automerge bumped to 0.2.10
+    * @web_of_trust/adapter-yjs bumped to 0.2.10
+    * @web_of_trust/core bumped to 0.5.10
+
 ## [0.3.7](https://github.com/real-life-org/web-of-trust/compare/app-v0.3.6...app-v0.3.7) (2026-09-15)
 
 

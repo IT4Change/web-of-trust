@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.5.10](https://github.com/real-life-org/web-of-trust/compare/core-v0.5.9...core-v0.5.10) (2026-09-24)
+
+
+### Bug Fixes
+
+* **adapter-yjs:** Self-Leave eines Nicht-Admins stagt kein unerfuellbares Removal ([0a7aba6](https://github.com/real-life-org/web-of-trust/commit/0a7aba6f135e43390a48629faf1f340809f4e431))
+* **adapter-yjs:** Self-Leave eines Nicht-Admins stagt kein unerfuellbares Removal ([bedaffd](https://github.com/real-life-org/web-of-trust/commit/bedaffdf8c8f55f528a992bd728deb8c0f4b545c))
+
 ## [0.5.9](https://github.com/real-life-org/web-of-trust/compare/core-v0.5.8...core-v0.5.9) (2026-09-15)
 
 
