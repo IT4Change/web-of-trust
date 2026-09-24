@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.2.10](https://github.com/IT4Change/web-of-trust/compare/profiles-v0.2.9...profiles-v0.2.10) (2026-09-24)
+
+
+### Bug Fixes
+
+* **docker:** Service-Images bauen mit der Lockfile des Repos ([bab8f8d](https://github.com/IT4Change/web-of-trust/commit/bab8f8d3c1be120587027e4918063f3d4e939ac2))
+* **docker:** Service-Images bauen mit der Lockfile des Repos ([ce324eb](https://github.com/IT4Change/web-of-trust/commit/ce324ebd20e793c9f028a513e8ca387dee736bc7))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * @web_of_trust/core bumped to 0.6.0
+
 ## [0.2.9](https://github.com/real-life-org/web-of-trust/compare/profiles-v0.2.8...profiles-v0.2.9) (2026-09-24)
 
 
