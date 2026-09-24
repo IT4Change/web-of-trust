@@ -15,7 +15,7 @@ import {
   type ControlFrameReceipt,
 } from '../../protocol/sync/control-frame-transport'
 import { parsePresentCapabilityControlFrame, PRESENT_CAPABILITY_CONTROL_FRAME_TYPE } from '../../protocol/sync/present-capability-control-frame'
-import { parseSpaceRegisterMessage, SPACE_REGISTER_MESSAGE_TYPE, SPACE_ROTATE_MESSAGE_TYPE, parseSpaceRotateMessage, ADMIN_REMOVE_MESSAGE_TYPE, parseAdminRemoveMessage, verifyAdminRemoveMessage } from '../../protocol/sync/broker-admin-messages'
+import { parseSpaceRegisterMessage, SPACE_REGISTER_MESSAGE_TYPE, SPACE_ROTATE_MESSAGE_TYPE, parseSpaceRotateMessage, verifySpaceRotateMessage, ADMIN_REMOVE_MESSAGE_TYPE, parseAdminRemoveMessage, verifyAdminRemoveMessage } from '../../protocol/sync/broker-admin-messages'
 import { didKeyToPublicKeyBytes, didOrKidToDid } from '../../protocol/identity/did-key'
 import { controlFrameDocId } from '../../protocol/sync/control-frame-doc-id'
 import { WebCryptoProtocolCryptoAdapter } from '../protocol-crypto'
@@ -244,6 +244,27 @@ export class InProcessLogBroker implements InProcessLogBrokerControls {
     const parsed = parseSpaceRotateMessage(frame)
     const docId = parsed.payload.spaceId
     const log = this.ensureDoc(docId)
+    // Sync 003: nur ein registrierter Admin darf rotieren. Der echte Relay prueft
+    // das; dieses Harness tat es lange NICHT und hat deshalb eine ganze Klasse von
+    // Fehlern durchgelassen — ein Nicht-Admin, dessen Rotate hier akzeptiert wurde,
+    // scheiterte im Feld mit AUTH_INVALID (Jonathans haengender Austritt).
+    if (log.registered) {
+      const signerDid = didOrKidToDid(String(parsed.header.kid ?? ''))
+      if (!log.registrationAdminDids.includes(signerDid)) {
+        throw new ControlFrameRejectedError({
+          code: 'AUTH_INVALID',
+          message: 'space-rotate signer is not a registered admin of this space',
+        })
+      }
+      let publicKey: Uint8Array
+      try { publicKey = didKeyToPublicKeyBytes(signerDid) } catch {
+        throw new ControlFrameRejectedError({ code: 'AUTH_INVALID', message: 'space-rotate signer DID is unresolvable' })
+      }
+      const verified = await verifySpaceRotateMessage({ frame, adminDid: signerDid, adminPublicKey: publicKey, crypto: this.crypto })
+      if (verified.disposition === 'rejected') {
+        throw new ControlFrameRejectedError({ code: verified.errorCode, message: 'space-rotate signature verification failed' })
+      }
+    }
     if (parsed.payload.newGeneration === log.generation) {
       if (parsed.payload.newSpaceCapabilityVerificationKey === log.verificationKey) return this.receipt(docId)
       throw new ControlFrameRejectedError({

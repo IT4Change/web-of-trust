@@ -1629,6 +1629,16 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
     // → commit). The legacy content path (enableLogSync=false) keeps the original
     // single-phase rotate-and-distribute below, UNCHANGED.
     if (this.logSyncEnabled) {
+      // Ein Nicht-Admin, der SICH SELBST entfernt, darf hier NICHT in die
+      // zweiphasige Maschinerie laufen: er kann keinen admin-signierten
+      // space-rotate erzeugen, der Broker lehnt ihn mit AUTH_INVALID ab, und das
+      // durable Staging bleibt liegen und blockiert danach jeden leaveSpace
+      // (securePending-Zweig). Die Autoritaetsregel des Self-Leave gilt auf
+      // BEIDEN Wegen, nicht nur im dedizierten User-Flow.
+      if (memberDid === myDid && !this.spaceAdminDids(state).includes(myDid)) {
+        await this.commitNonAdminSelfRemoval(state, activityEntry)
+        return true
+      }
       await this.removeMemberSecure(state, memberDid, activityEntry)
       return true
     }
@@ -2753,10 +2763,40 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
     const members = activeMembers.length > 0 ? activeMembers : (state.info.members ?? [])
     const existingSelf = resolveMembershipWinner(this.readMembershipEvents(state.doc), selfDid)
 
-    // A broker-enforced admin self-removal can have its durable membership append
-    // fail after rotation. Complete that exact staged transaction before the generic
-    // "already removed" retry path decides authority from active members.
-    if (securePending) {
+    // Ein Staging, das NICHTS bewirkt hat (phase 'staged', kein bestaetigter
+    // Broker) und einem Nicht-Admin gehoert, ist UNERFUELLBAR: dessen
+    // space-rotate wird nie bestaetigt, eine Wiederaufnahme wiederholt nur den
+    // Fehlschlag und sperrt den Austritt dauerhaft. Es wird abgeraeumt statt
+    // wiederaufgenommen. Jeder Fortschritt (bestaetigter Broker, spaetere Phase)
+    // gehoert dagegen zu einer echten, laufenden Entfernung. Ein legitim
+    // austretender Admin ist hier noch aktiver Admin — sein removed-Ereignis
+    // entsteht erst beim Commit — und faellt deshalb nie in diesen Zweig.
+    if (securePending
+      && securePending.phase === 'staged'
+      && securePending.confirmedBrokerUrls.length === 0
+      && !this.spaceAdminDids(state).includes(selfDid)) {
+      // Gebunden abraeumen (#366), danach laeuft der regulaere Self-Leave unten.
+      const outcome = await pendingStore!.deletePendingRemoval(
+        spaceId, selfDid, pendingRemovalWriteExpectation(securePending),
+      )
+      if (outcome === 'mismatch') {
+        // Zwischen Lesen und Delete hat ein zweiter Beobachter unter demselben
+        // Schluessel ein NEUES Removal gestagt. Der Delete nimmt es zu Recht
+        // nicht mit — dann darf der Austritt aber auch nicht weiterlaufen: er
+        // endet in cleanupSpaceLocally, und ohne geladenen Space steigt
+        // recoverPendingRemovalsOnce aus, der fremde Auftrag waere fuer immer
+        // unbearbeitbar. Abbrechen statt aufraeumen; der naechste Versuch liest
+        // den neuen Record frisch und entscheidet ueber ihn.
+        throw new Error(
+          `leaveSpace aborted for space ${spaceId}: the pending removal of ${selfDid} changed its ` +
+            'staging identity meanwhile (a concurrent staging or migration); not discarding it and ' +
+            'not cleaning up the space it still needs. Retry the leave.',
+        )
+      }
+    } else if (securePending) {
+      // A broker-enforced admin self-removal can have its durable membership append
+      // fail after rotation. Complete that exact staged transaction before the generic
+      // "already removed" retry path decides authority from active members.
       const selfEncryptionKey = await this.identity.getEncryptionPublicKeyBytes()
       await runTwoPhaseRemoval(
         this.buildSecureRemovalDeps(state, selfEncryptionKey, securePending.kind),
@@ -2827,22 +2867,7 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
     // the broker for a space-rotate. An active admin keeps the existing enforced
     // secure-removal flow below.
     if (!this.spaceAdminDids(state).includes(selfDid)) {
-      const generation = (await this.keyManagement.getCurrentGeneration(spaceId)) + 1
-      const selfEncryptionKey = await this.identity.getEncryptionPublicKeyBytes()
-      await this.commitMembershipEventDurable(state, {
-        did: selfDid,
-        status: 'removed',
-        sinceGeneration: generation,
-      })
-      // No key rotation: this is the self-signed pending signal which lets own
-      // devices and remaining members resolve the canonical removal independently.
-      await this.distributeMemberRemovedUpdate(state, selfDid, generation, selfEncryptionKey)
-      await this.saveSpaceMetadata(state)
-      this._scheduleVaultImmediate(state)
-      for (const cb of this.memberChangeListeners) {
-        cb({ spaceId, did: selfDid, action: 'removed' })
-      }
-      this.notifySpaceListeners()
+      await this.commitNonAdminSelfRemoval(state)
     } else {
       // Existing admin self-leave: stage -> broker enforcement -> commit + key
       // rotation. The departing admin never retains the next-generation material.
@@ -2859,6 +2884,40 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
       receivedAt: new Date().toISOString(),
     })
     await this.cleanupSpaceLocally(spaceId)
+  }
+
+  /**
+   * Die kanonische Selbst-Entfernung eines NICHT-Admins: eigenes removed-Ereignis
+   * in den regulaeren Log schreiben und die member-updates verteilen. KEINE
+   * Rotation, KEIN Staging, KEIN space-rotate — ein Nicht-Admin besitzt die
+   * Autoritaet dafuer nicht (Sync 005 Z.229-234), und der Broker wuerde seine
+   * Frame mit AUTH_INVALID ablehnen. Die angekuendigte Rotation zieht ein
+   * beobachtender Admin nach (#298, enforceCanonicalSelfRemovalRotation).
+   *
+   * Gemeinsam genutzt vom dedizierten User-Flow (leaveSpace) und vom
+   * symmetrischen CRDT-Pfad (removeMember(self)) — beide Wege muessen dieselbe
+   * Autoritaetsregel anwenden, sonst legt der eine ein Staging an, das den
+   * anderen blockiert. Raeumt bewusst NICHT lokal auf: das bleibt leaveSpace.
+   */
+  private async commitNonAdminSelfRemoval(state: YjsSpaceState, activityEntry?: Record<string, unknown>): Promise<void> {
+    const spaceId = state.info.id
+    const selfDid = this.identity.getDid()
+    const generation = (await this.keyManagement.getCurrentGeneration(spaceId)) + 1
+    const selfEncryptionKey = await this.identity.getEncryptionPublicKeyBytes()
+    await this.commitMembershipEventDurable(state, {
+      did: selfDid,
+      status: 'removed',
+      sinceGeneration: generation,
+    }, activityEntry)
+    // No key rotation: this is the self-signed pending signal which lets own
+    // devices and remaining members resolve the canonical removal independently.
+    await this.distributeMemberRemovedUpdate(state, selfDid, generation, selfEncryptionKey)
+    await this.saveSpaceMetadata(state)
+    this._scheduleVaultImmediate(state)
+    for (const cb of this.memberChangeListeners) {
+      cb({ spaceId, did: selfDid, action: 'removed' })
+    }
+    this.notifySpaceListeners()
   }
 
   /** Public local-only disposal for reseed ghosts and callers that intentionally abandon a space. */
