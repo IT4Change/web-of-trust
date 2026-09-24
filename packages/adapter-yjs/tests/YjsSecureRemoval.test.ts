@@ -431,6 +431,45 @@ describe('YjsReplicationAdapter — Slice SR secure removal (VE-C1 wiring)', () 
     await resetYjsPersonalDoc()
   })
 
+  it('FELDFALL rls: ein zwischenzeitlich ERSETZTES Staging wird nicht abgeraeumt — und der Space bleibt lokal bestehen', async () => {
+    // CAS-Mismatch (#366): zwischen dem Lesen des unerfuellbaren Stagings und
+    // dem gebundenen Delete hat ein zweiter Beobachter unter demselben Schluessel
+    // ein NEUES Removal gestagt. Der Delete nimmt es zu Recht nicht mit — dann
+    // darf leaveSpace aber auch nicht weiterlaufen und lokal aufraeumen: der
+    // fremde Auftrag braucht den geladenen Space, sonst ist er fuer immer
+    // unbearbeitbar (recoverPendingRemovalsOnce steigt ohne Space aus).
+    const spaceId = await createSharedSpace()
+    await initYjsPersonalDoc(bob)
+    const bobState = (bobAdapter as unknown as { spaces: Map<string, unknown> }).spaces.get(spaceId)!
+    const deps = (bobAdapter as unknown as {
+      buildSecureRemovalDeps: (state: unknown, key: Uint8Array | undefined) => Parameters<typeof runTwoPhaseRemoval>[0]
+    }).buildSecureRemovalDeps(bobState, await bob.getEncryptionPublicKeyBytes())
+    await expect(runTwoPhaseRemoval(deps, bob.getDid(), {})).rejects.toThrow(/staged but NOT yet enforced/)
+
+    // Den Ersatzauftrag simulieren: der gespeicherte Record traegt jetzt eine
+    // andere Staging-Identitaet als der, den leaveSpace gleich lesen wird.
+    const store = (bobAdapter as unknown as { docLogStore: InMemoryDocLogStore }).docLogStore
+    const baseDelete = store.deletePendingRemoval.bind(store)
+    let replaced = false
+    store.deletePendingRemoval = async (sid, did, expectation) => {
+      if (!replaced) {
+        replaced = true
+        const current = (await store.getPendingRemoval(sid, did))!
+        await store.putPendingRemoval({ ...current, stagingId: 'ein-fremdes-staging' })
+      }
+      return baseDelete(sid, did, expectation)
+    }
+
+    await expect(bobAdapter.leaveSpace(spaceId)).rejects.toThrow(/changed its staging identity/)
+
+    // Der fremde Auftrag steht noch — und sein Space auch.
+    const survivor = await pendingRemoval(bobAdapter, spaceId, bob.getDid())
+    expect(survivor?.stagingId).toBe('ein-fremdes-staging')
+    expect(await bobAdapter.getSpace(spaceId)).not.toBeNull()
+    store.deletePendingRemoval = baseDelete
+    await resetYjsPersonalDoc()
+  })
+
   it('B1: non-admin self-leave retries an applied-but-unlogged removal before cleanup', async () => {
     const spaceId = await createSharedSpace()
     await initYjsPersonalDoc(bob)

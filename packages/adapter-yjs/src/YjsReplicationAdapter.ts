@@ -2780,9 +2780,17 @@ export class YjsReplicationAdapter implements ReplicationAdapter, MembershipActi
         spaceId, selfDid, pendingRemovalWriteExpectation(securePending),
       )
       if (outcome === 'mismatch') {
-        console.warn(
-          `[YjsReplication] keeping the pending removal of ${selfDid} in space ${spaceId}: ` +
-            'its staging identity changed meanwhile, not to the unenforceable non-admin one.',
+        // Zwischen Lesen und Delete hat ein zweiter Beobachter unter demselben
+        // Schluessel ein NEUES Removal gestagt. Der Delete nimmt es zu Recht
+        // nicht mit — dann darf der Austritt aber auch nicht weiterlaufen: er
+        // endet in cleanupSpaceLocally, und ohne geladenen Space steigt
+        // recoverPendingRemovalsOnce aus, der fremde Auftrag waere fuer immer
+        // unbearbeitbar. Abbrechen statt aufraeumen; der naechste Versuch liest
+        // den neuen Record frisch und entscheidet ueber ihn.
+        throw new Error(
+          `leaveSpace aborted for space ${spaceId}: the pending removal of ${selfDid} changed its ` +
+            'staging identity meanwhile (a concurrent staging or migration); not discarding it and ' +
+            'not cleaning up the space it still needs. Retry the leave.',
         )
       }
     } else if (securePending) {
