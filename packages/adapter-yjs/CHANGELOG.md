@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.2.10](https://github.com/real-life-org/web-of-trust/compare/adapter-yjs-v0.2.9...adapter-yjs-v0.2.10) (2026-09-24)
+
+
+### Bug Fixes
+
+* **adapter-yjs:** CAS-Mismatch bricht den Austritt ab, statt den Space zu loeschen ([0670d0f](https://github.com/real-life-org/web-of-trust/commit/0670d0f3edbeca1e553ddd4ba73716395e207766))
+* **adapter-yjs:** Self-Leave eines Nicht-Admins stagt kein unerfuellbares Removal ([0a7aba6](https://github.com/real-life-org/web-of-trust/commit/0a7aba6f135e43390a48629faf1f340809f4e431))
+* **adapter-yjs:** Self-Leave eines Nicht-Admins stagt kein unerfuellbares Removal ([bedaffd](https://github.com/real-life-org/web-of-trust/commit/bedaffdf8c8f55f528a992bd728deb8c0f4b545c))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * devDependencies
+    * @web_of_trust/core bumped to 0.5.10
+  * peerDependencies
+    * @web_of_trust/core bumped to 0.5.10
+
 ## [0.2.9](https://github.com/real-life-org/web-of-trust/compare/adapter-yjs-v0.2.8...adapter-yjs-v0.2.9) (2026-09-15)
 
 
