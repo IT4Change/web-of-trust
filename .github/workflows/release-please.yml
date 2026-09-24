@@ -30,6 +30,13 @@ jobs:
       # Tags triggern keine Workflows, s.u.) — deshalb der Dispatch-Job unten.
       app_released: ${{ steps.release.outputs['apps/demo--release_created'] }}
       app_tag: ${{ steps.release.outputs['apps/demo--tag_name'] }}
+      # Die drei Dienste gehen nur als Docker-Image raus, nie ueber publish.yml.
+      # Der Dispatcher unten braucht sie trotzdem: ohne sie sieht ein
+      # Service-only-Release wie "gar nichts released" aus und der
+      # Schema-Drift-Waechter schlaegt faelschlich an (#378).
+      relay_released: ${{ steps.release.outputs['packages/wot-relay--release_created'] }}
+      vault_released: ${{ steps.release.outputs['packages/wot-vault--release_created'] }}
+      profiles_released: ${{ steps.release.outputs['packages/wot-profiles--release_created'] }}
     steps:
       - uses: googleapis/release-please-action@v4
         id: release
@@ -58,6 +65,8 @@ jobs:
     permissions:
       actions: write
     steps:
+      - uses: actions/checkout@v4
+
       - name: Publish je erzeugtem Release anstossen
         env:
           GH_TOKEN: ${{ github.token }}
@@ -67,55 +76,17 @@ jobs:
           YJS_TAG: ${{ needs.release-please.outputs.adapter_yjs_tag }}
           AUTOMERGE_RELEASED: ${{ needs.release-please.outputs['adapter-automerge_released'] }}
           AUTOMERGE_TAG: ${{ needs.release-please.outputs.adapter_automerge_tag }}
-          # Fuer den started=0-Fall: nur ein NACHGEWIESENES App-Release erklaert,
-          # dass kein Paket dabei war.
+          # Fuer den started=0-Fall: nur ein NACHGEWIESENES Release von App oder
+          # Dienst erklaert, dass kein npm-Paket dabei war.
           APP_RELEASED: ${{ needs.release-please.outputs.app_released }}
-        run: |
-          set -euo pipefail
-          started=0
-          missing=0
-
-          dispatch() {
-            released=$1; tag=$2; label=$3
-            # Der Guard muss PRO PAKET greifen. Nur zu pruefen, ob am Ende
-            # ueberhaupt ein Tag dabei war, uebersieht den Fall "core wurde
-            # released, aber sein Tag-Output fehlt" — dann wuerde core still
-            # nicht publiziert, waehrend die anderen beiden durchlaufen und der
-            # Job gruen bleibt.
-            if [ "$released" = "true" ] && [ -z "$tag" ]; then
-              echo "ABBRUCH-Kandidat: $label als released gemeldet, aber kein Tag-Output." >&2
-              missing=1
-              return
-            fi
-            [ -n "$tag" ] || return
-            echo "starte publish.yml für $tag"
-            gh workflow run publish.yml --repo "$GITHUB_REPOSITORY" -f tag="$tag"
-            started=$((started + 1))
-          }
-
-          dispatch "$CORE_RELEASED"      "$CORE_TAG"      "wot-core"
-          dispatch "$YJS_RELEASED"       "$YJS_TAG"       "adapter-yjs"
-          dispatch "$AUTOMERGE_RELEASED" "$AUTOMERGE_TAG" "adapter-automerge"
-
-          if [ "$missing" -eq 1 ]; then
-            echo "ABBRUCH: mindestens ein released-Paket ohne Tag-Output." >&2
-            echo "Vermutlich hat sich das Output-Schema von release-please geaendert." >&2
-            exit 1
-          fi
-          # started=0 ist seit dem App-Release-Umbau ein REGULAERER Fall — aber NUR,
-          # wenn nachweislich die App released wurde (eigene Komponente, Tag
-          # app-v*). Frueher implizierte jedes Release ein Paket, und der alte
-          # pauschale Abbruch hat den ersten App-only-Release rot gemacht. Ihn
-          # ersatzlos zu streichen waere aber zu viel des Guten: dann bliebe auch
-          # echte Output-/Schema-Drift (alle *_released leer, weil release-please
-          # seine Output-Namen aendert) still gruen — und kein Paket wuerde je
-          # publiziert, ohne dass es jemand merkt.
-          if [ "$started" -eq 0 ] && [ "$APP_RELEASED" != "true" ]; then
-            echo "ABBRUCH: releases_created=true, aber weder ein Paket- noch ein App-Release erkannt." >&2
-            echo "Vermutlich hat sich das Output-Schema von release-please geaendert." >&2
-            exit 1
-          fi
-          echo "$started Publish-Lauf/Laeufe angestossen"
+          RELAY_RELEASED: ${{ needs.release-please.outputs.relay_released }}
+          VAULT_RELEASED: ${{ needs.release-please.outputs.vault_released }}
+          PROFILES_RELEASED: ${{ needs.release-please.outputs.profiles_released }}
+        # Die Logik liegt als Skript im Repo, nicht inline: so laesst sich jeder
+        # Release-Zuschnitt trocken testen (scripts/release/test-dispatch-publish.mjs,
+        # in der CI). Inline war sie erst im Ernstfall pruefbar — genau deshalb
+        # blieb #378 unentdeckt.
+        run: ./scripts/release/dispatch-publish.sh
 
   # Wurde die APP released (Tag app-vX.Y.Z), den nativen Build anstossen. Gleiche
   # Logik wie oben bei publish.yml: ein GITHUB_TOKEN-Tag triggert build-on-tag

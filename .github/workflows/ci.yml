@@ -34,6 +34,9 @@ jobs:
       - name: Waechter-Selbsttest (Negativfaelle)
         run: node scripts/release/test-release-cascade.selftest.mjs
 
+      - name: Publish-Dispatcher — alle Release-Zuschnitte
+        run: node scripts/release/test-dispatch-publish.mjs
+
   test:
     runs-on: ubuntu-latest
     steps:
