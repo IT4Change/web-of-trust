@@ -6,6 +6,7 @@ import type { MessageEnvelope } from '../src/types/messaging'
 import type { MessagingAdapter, WireMessage } from '../src/ports/MessagingAdapter'
 import { INBOX_MESSAGE_TYPE } from '../src/protocol/messaging/inbox-message'
 import { createDidcommTestMessage } from './helpers/didcomm-wire'
+import { getTraceLog } from '../src/storage/TraceLog'
 
 const ALICE_DID = 'did:key:z6MkAlice1234567890abcdefghijklmnopqrstuvwxyz'
 const BOB_DID = 'did:key:z6MkBob1234567890abcdefghijklmnopqrstuvwxyzab'
@@ -246,6 +247,29 @@ describe('OutboxMessagingAdapter', () => {
       const pending = await outbox.getPending()
       expect(pending).toHaveLength(1)
       expect(pending[0].retryCount).toBe(1)
+    })
+
+    // wot#381 (5): a message given up after maxRetries used to vanish with a
+    // console.warn only — the sender kept believing it was on its way. The drop
+    // must land in the trace as a failure naming type, recipient and retries.
+    it('traces a message it gives up on after maxRetries as a failed outbox delete', async () => {
+      getTraceLog().clear()
+      const limited = new OutboxMessagingAdapter(inner, outbox, { sendTimeoutMs: 500, maxRetries: 2 })
+      const envelope = createTestEnvelope({ type: 'space-invite' })
+      await limited.send(envelope)
+      await inner.connect(ALICE_DID)
+      await outbox.incrementRetry(envelope.id)
+      await outbox.incrementRetry(envelope.id)
+
+      await limited.flushOutbox()
+
+      expect(await outbox.getPending()).toHaveLength(0)
+      const drop = getTraceLog().getAll({ store: 'outbox', operation: 'delete' }).at(-1)
+      expect(drop?.success).toBe(false)
+      expect(drop?.error).toBe('max-retries-exceeded')
+      expect(drop?.label).toBe(`drop space-invite → ${BOB_DID.slice(0, 24)}… after 2 retries`)
+      expect(drop?.meta).toMatchObject({ id: envelope.id, type: 'space-invite', retryCount: 2, maxRetries: 2 })
+      getTraceLog().clear()
     })
 
     it('should stop flushing if connection drops mid-flush', async () => {

@@ -8,6 +8,23 @@ import { SPACE_SYNC_REQUEST_MESSAGE_TYPE } from '../../types/messaging'
 import type { ControlFrame, ControlFrameReceipt } from '../../protocol/sync/control-frame-transport'
 import { LOG_ENTRY_MESSAGE_TYPE } from '../../protocol/sync/log-entry'
 import { SYNC_REQUEST_MESSAGE_TYPE } from '../../protocol/sync/sync-messages'
+import { wireMessageRecipient } from '../../ports/MessagingAdapter'
+import { getTraceLog } from '../../storage/TraceLog'
+
+function traceOutboxDrop(envelope: WireMessage, retryCount: number, maxRetries: number): void {
+  try {
+    const to = wireMessageRecipient(envelope)
+    getTraceLog().log({
+      store: 'outbox',
+      operation: 'delete',
+      label: `drop ${envelope.type} → ${to ? `${to.slice(0, 24)}…` : 'unknown'} after ${retryCount} retries`,
+      durationMs: 0,
+      success: false,
+      error: 'max-retries-exceeded',
+      meta: { id: (envelope as { id?: unknown }).id, type: envelope.type, to, retryCount, maxRetries },
+    })
+  } catch { /* tracing must never break the flush */ }
+}
 
 /**
  * #236 (I-AUTH / I-NQ): protocol-constant NEVER-QUEUE set — NOT a per-site option
@@ -228,10 +245,13 @@ export class OutboxMessagingAdapter implements MessagingAdapter {
           continue
         }
 
-        // Drop messages that exceeded max retries
+        // Drop messages that exceeded max retries. wot#381 (5): the drop is a
+        // failure the sender never sees otherwise — it must land in the trace,
+        // not only on the console.
         if (entry.retryCount >= this.maxRetries) {
           console.warn('[Outbox] Dropping message after', entry.retryCount, 'retries:', entry.envelope.type, entry.envelope.id)
           await this.outbox.dequeue(entry.envelope.id)
+          traceOutboxDrop(entry.envelope, entry.retryCount, this.maxRetries)
           continue
         }
 
