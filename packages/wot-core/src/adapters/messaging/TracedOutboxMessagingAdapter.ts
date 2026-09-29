@@ -17,7 +17,15 @@ import type {
 import type { OutboxStore } from '../../ports/OutboxStore'
 import type { OutboxMessagingAdapter } from './OutboxMessagingAdapter'
 import type { ControlFrame, ControlFrameReceipt } from '../../protocol/sync/control-frame-transport'
+import { ControlFrameRejectedError } from '../../protocol/sync/control-frame-transport'
+import { controlFrameDocId } from '../../protocol/sync/control-frame-doc-id'
 import { getTraceLog } from '../../storage/TraceLog'
+import type { TraceEntry } from '../../storage/TraceLog'
+
+/** Tracing must never change the outcome of the operation it observes. */
+function safeTrace(entry: Omit<TraceEntry, 'id' | 'timestamp'>): void {
+  try { getTraceLog().log(entry) } catch { /* ignore */ }
+}
 
 /** Extract envelope header fields (no payload/body content) for tracing — both families (VE-8). */
 function envelopeHeaders(envelope: WireMessage): Record<string, unknown> {
@@ -113,10 +121,53 @@ export class TracedOutboxMessagingAdapter implements MessagingAdapter {
 
   constructor(private inner: OutboxMessagingAdapter) {
     if (typeof this.inner.sendControlFrame === 'function') {
-      this.sendControlFrame = (frame) => this.inner.sendControlFrame!(frame)
+      this.sendControlFrame = (frame) => this.tracedControlFrame(frame)
     }
     if (typeof this.inner.rebindDeviceId === 'function') {
       this.rebindDeviceId = (newDeviceId) => this.inner.rebindDeviceId!(newDeviceId)
+    }
+  }
+
+  /**
+   * wot#383: a relay error correlated to an in-flight control frame (e.g.
+   * CAPABILITY_EXPIRED on present-capability) settles the frame's own promise
+   * and never reaches the message callbacks — so the receive trace cannot see
+   * it. Trace the control frame where it passes through here instead: once per
+   * frame, success or failure, with the docId and the broker code. The promise
+   * result is returned/rethrown unchanged.
+   */
+  private async tracedControlFrame(frame: ControlFrame): Promise<ControlFrameReceipt> {
+    const start = performance.now()
+    const docId = controlFrameDocId(frame)
+    const target = docId ? `${docId.slice(0, 8)}…` : 'unknown'
+    try {
+      const receipt = await this.inner.sendControlFrame!(frame)
+      safeTrace({
+        store: 'relay',
+        operation: 'send',
+        label: `control ${frame.type} ${target} delivered`,
+        durationMs: Math.round(performance.now() - start),
+        success: true,
+        meta: { frameType: frame.type, docId },
+      })
+      return receipt
+    } catch (err) {
+      const code = err instanceof ControlFrameRejectedError ? err.code : undefined
+      const meta: Record<string, unknown> = { frameType: frame.type, docId }
+      if (code !== undefined) meta.code = code
+      if (err instanceof ControlFrameRejectedError && err.currentGeneration !== undefined) {
+        meta.currentGeneration = err.currentGeneration
+      }
+      safeTrace({
+        store: 'relay',
+        operation: 'send',
+        label: code ? `control ${frame.type} ${target} rejected ${code}` : `control ${frame.type} ${target} failed`,
+        durationMs: Math.round(performance.now() - start),
+        success: false,
+        error: err instanceof Error ? err.message : String(err),
+        meta,
+      })
+      throw err
     }
   }
 
